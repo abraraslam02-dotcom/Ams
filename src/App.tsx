@@ -27,6 +27,9 @@ import {
 import { StaffAndDeliveryWorkspaceView } from './components/staff/StaffAndDeliveryWorkspaceView';
 import { CashBookModuleView } from './components/accounting/CashBookModuleView';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { LoginScreen } from './components/auth/LoginScreen';
+import { UserManagementView } from './components/admin/UserManagementView';
+import { MoreOptionsView } from './components/views/MoreOptionsView';
 import { api } from './services/api';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
@@ -49,7 +52,6 @@ import {
 function AppContent() {
   const {
     isAuthenticated,
-    isInitialized,
     loading: authLoading,
     user,
     hasPermission,
@@ -59,15 +61,38 @@ function AppContent() {
   } = useAuth();
 
   const [activeTab, setActiveTab] = useState<NavTabId>('dashboard');
+  const [previousTab, setPreviousTab] = useState<NavTabId>('dashboard');
   const [hasVisitedSales, setHasVisitedSales] = useState<boolean>(false);
   const [hasVisitedPurchases, setHasVisitedPurchases] = useState<boolean>(false);
   const [resumeInvoiceId, setResumeInvoiceId] = useState<number | null>(null);
   const [hasUnsavedInvoiceItems, setHasUnsavedInvoiceItems] = useState<boolean>(false);
   const [quickShortcut, setQuickShortcut] = useState<QuickShortcutAction | null>(null);
 
-
-  const isSalesInvoiceTab = activeTab === 'sales-new' || activeTab === 'sales-pos';
+  const isSalesInvoiceTab =
+    activeTab === 'sales-new' || activeTab === 'sales-pos' || activeTab === 'sales';
   const isPurchaseInvoiceTab = activeTab === 'purchases' || activeTab === 'purchases-bill';
+  const isFullScreenInvoice = isSalesInvoiceTab || isPurchaseInvoiceTab;
+
+  const handleSelectTab = useCallback(
+    (nextTab: NavTabId) => {
+      if (
+        !['sales-new', 'sales-pos', 'sales', 'purchases', 'purchases-bill'].includes(activeTab)
+      ) {
+        setPreviousTab(activeTab);
+      }
+      setActiveTab(nextTab);
+    },
+    [activeTab]
+  );
+
+  const handleCloseFullScreenInvoice = useCallback(() => {
+    const target =
+      previousTab &&
+      !['sales-new', 'sales-pos', 'sales', 'purchases', 'purchases-bill'].includes(previousTab)
+        ? previousTab
+        : 'dashboard';
+    setActiveTab(target);
+  }, [previousTab]);
 
   useEffect(() => {
     if (isSalesInvoiceTab) {
@@ -85,14 +110,78 @@ function AppContent() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Direct access for all tabs (no auth gate required)
-  const canAccessTab = useCallback((_tab: NavTabId): boolean => true, []);
+  // Enforce Super Admin and Individual User RBAC Permissions
+  const canAccessTab = useCallback(
+    (tab: NavTabId): boolean => {
+      if (isSuperAdmin) return true;
+      if (tab === 'users' || tab === 'users-manage' || tab === 'more-options') {
+        return false; // Only Super Admin has access to User Management and More Options
+      }
+      if (tab === 'dashboard') return hasPermission('dashboard');
+      if (
+        tab === 'items' ||
+        tab === 'items-master' ||
+        tab === 'item-categories' ||
+        tab === 'item-groups' ||
+        tab === 'item-search' ||
+        tab === 'item-offers' ||
+        tab === 'item-import-export' ||
+        tab === 'item-claims' ||
+        tab.startsWith('inv-') ||
+        tab.startsWith('stock-') ||
+        tab === 'inventory' ||
+        tab === 'batch-expiry'
+      ) {
+        return hasPermission('items');
+      }
+      if (
+        tab.startsWith('party-') ||
+        tab.startsWith('accounts') ||
+        tab.startsWith('voucher-') ||
+        tab.startsWith('payment-') ||
+        tab.startsWith('fin-') ||
+        tab.startsWith('ledger-') ||
+        tab.startsWith('aging-') ||
+        tab === 'recovery-sheet' ||
+        tab === 'supplier-payments'
+      ) {
+        return hasPermission('accounts');
+      }
+      if (tab === 'sales' || tab === 'sales-new' || tab === 'sales-pos' || tab === 'sales-register') {
+        return hasPermission('sales');
+      }
+      if (tab === 'sales-return' || tab === 'sale-returns') {
+        return hasPermission('sale_returns');
+      }
+      if (tab === 'purchases' || tab === 'purchases-bill' || tab === 'purchase-history') {
+        return hasPermission('purchases');
+      }
+      if (tab === 'purchase-returns' || tab === 'purchases-return') {
+        return hasPermission('purchase_returns');
+      }
+      if (tab === 'cash-book' || tab === 'ledger-cash') {
+        return hasPermission('cashbook');
+      }
+      if (tab.includes('expense')) {
+        return hasPermission('expenses');
+      }
+      if (tab.includes('report') || tab.startsWith('report-') || tab.startsWith('sales-')) {
+        return hasPermission('reports') || hasPermission('sales');
+      }
+      if (tab === 'backup-restore') {
+        return hasPermission('backup');
+      }
+      if (tab === 'system-settings' || tab === 'company-settings' || tab === 'printer-setup') {
+        return hasPermission('settings');
+      }
+      return true;
+    },
+    [isSuperAdmin, hasPermission]
+  );
 
-  // Clear any legacy browser cached drafts or tokens on mount
+  // Clear stale cached draft references on fresh start (preserving session token)
   useEffect(() => {
     try {
-      localStorage.removeItem('ams_session_token');
-      localStorage.removeItem('ams_cached_session');
       localStorage.removeItem('ams_sales_invoice_active_draft');
       localStorage.removeItem('ams_active_purchase_draft');
     } catch {
@@ -153,8 +242,12 @@ function AppContent() {
     );
   }
 
-  // Direct Access: Render Full Medical Store ERP Workspace
-  // 4. Authenticated: Render Full Medical Store ERP Workspace
+  // 2. Unauthenticated: Render Clean & Professional Login Screen
+  if (!isAuthenticated) {
+    return <LoginScreen />;
+  }
+
+  // 3. Authenticated: Render Full Medical Store ERP Workspace
   const handleResumeFromRegister = (id: number) => {
     setResumeInvoiceId(id);
     setActiveTab('sales-pos');
@@ -396,7 +489,17 @@ function AppContent() {
       case 'report-sales-return':
         return { title: 'Sales Return Report — Returned Items & Credit Analysis', crumbs: ['Reports & Analytics', 'Sales Return Report'] };
 
-      // H. SYSTEM & SETTINGS
+      case 'more-options':
+        return {
+          title: 'Sales Invoice More Options — Headings, Footers & Field Visibility',
+          crumbs: ['System & Settings', 'More Options'],
+        };
+      case 'users':
+      case 'users-manage':
+        return {
+          title: 'User Management & Individual Role Permissions — Super Admin Portal',
+          crumbs: ['System & Settings', 'User Management'],
+        };
       case 'company-settings':
       case 'system-settings':
         return { title: 'Company Settings — Store Profile & Localization', crumbs: ['System & Settings', 'Company Settings'] };
@@ -455,28 +558,34 @@ function AppContent() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-800 font-sans antialiased print:h-auto print:w-auto print:overflow-visible print:bg-white">
-      {/* Expandable / Collapsible Left Sidebar */}
-      <Sidebar
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        roleName={user?.role}
-        databaseConnected={diagnostics?.connected ?? false}
-        totalTables={tables.length}
-        hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
-      />
+      {/* Expandable / Collapsible Left Sidebar (Hidden when Sales or Purchase Invoice is in Full-Screen Mode) */}
+      {!isFullScreenInvoice && (
+        <Sidebar
+          activeTab={activeTab}
+          onSelectTab={handleSelectTab}
+          roleName={user?.role}
+          databaseConnected={diagnostics?.connected ?? false}
+          totalTables={tables.length}
+          hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
+        />
+      )}
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0 print:h-auto print:overflow-visible print:block">
-        <TopHeader
-          currentViewTitle={headerInfo.title}
-          breadcrumbs={headerInfo.crumbs}
-          diagnostics={diagnostics}
-          loading={loading}
-          onRefresh={fetchSystemData}
-          onNavigateToAudit={() => setActiveTab('audit-logs')}
-          onNavigateToClearDemoData={() => setActiveTab('database')}
-          compact={isSalesInvoiceTab || isPurchaseInvoiceTab}
-        />
+      <div className="flex-1 flex flex-col h-screen w-full overflow-hidden min-w-0 print:h-auto print:overflow-visible print:block">
+        {!isFullScreenInvoice && (
+          <TopHeader
+            currentViewTitle={headerInfo.title}
+            breadcrumbs={headerInfo.crumbs}
+            diagnostics={diagnostics}
+            loading={loading}
+            onRefresh={fetchSystemData}
+            onNavigateToUsers={() => handleSelectTab('users')}
+            onNavigateToMoreOptions={() => handleSelectTab('more-options')}
+            onNavigateToAudit={() => handleSelectTab('audit-logs')}
+            onNavigateToClearDemoData={() => handleSelectTab('database')}
+            compact={false}
+          />
+        )}
 
         {/* Non-Destructive Quick Account & Voucher Shortcuts Bar */}
         {!isSalesInvoiceTab &&
@@ -559,8 +668,8 @@ function AppContent() {
 
         <main
           className={`flex-1 min-h-0 ${
-            isSalesInvoiceTab || isPurchaseInvoiceTab
-              ? 'p-0.5 overflow-hidden flex flex-col'
+            isFullScreenInvoice
+              ? 'p-0 m-0 w-full h-full overflow-hidden flex flex-col bg-slate-100'
               : 'overflow-y-auto p-4 lg:p-5'
           }`}
         >
@@ -595,7 +704,7 @@ function AppContent() {
               </p>
               <button
                 type="button"
-                onClick={() => setActiveTab('dashboard')}
+                onClick={() => handleSelectTab('dashboard')}
                 className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <LayoutDashboard className="w-3.5 h-3.5" />
@@ -605,21 +714,23 @@ function AppContent() {
           ) : (
             <>
               {/* EXECUTIVE DASHBOARD */}
-              {activeTab === 'dashboard' && <DashboardView onSelectTab={setActiveTab} />}
+              {activeTab === 'dashboard' && <DashboardView onSelectTab={handleSelectTab} />}
 
               {/* H. SYSTEM & SETTINGS — LOGS */}
               {activeTab === 'audit-logs' && (
-                <SecurityAuditView onNavigateToClearDemoData={() => setActiveTab('database')} />
+                <SecurityAuditView onNavigateToClearDemoData={() => handleSelectTab('database')} />
               )}
 
               {/* C. SALES MANAGEMENT (Kept mounted once visited to preserve active draft lines) */}
               {hasPermission('sales') && hasVisitedSales && (
-                <div className={isSalesInvoiceTab ? 'flex-1 h-full flex flex-col min-h-0 overflow-hidden' : 'hidden'}>
+                <div className={isSalesInvoiceTab ? 'flex-1 w-full h-full flex flex-col min-h-0 overflow-hidden' : 'hidden'}>
                   <SalesInvoiceDatasheet
                     resumeInvoiceId={resumeInvoiceId}
                     onClearResume={() => setResumeInvoiceId(null)}
                     onDraftItemsStateChange={setHasUnsavedInvoiceItems}
-                    onNavigateToSalesReturn={() => setActiveTab('sales-return')}
+                    onNavigateToSalesReturn={() => handleSelectTab('sales-return')}
+                    onNavigateToSalesHistory={() => handleSelectTab('sales-register')}
+                    onBackToDashboard={handleCloseFullScreenInvoice}
                   />
                 </div>
               )}
@@ -807,23 +918,40 @@ function AppContent() {
               )}
 
               {hasPermission('purchases') && hasVisitedPurchases && (
-                <div className={isPurchaseInvoiceTab ? 'flex-1 h-full flex flex-col min-h-0 overflow-hidden' : 'hidden'}>
-                  <PurchasesWorkspaceView initialSubTab="new-invoice" />
+                <div className={isPurchaseInvoiceTab ? 'flex-1 w-full h-full flex flex-col min-h-0 overflow-hidden' : 'hidden'}>
+                  <PurchasesWorkspaceView
+                    initialSubTab="new-invoice"
+                    onBackToDashboard={handleCloseFullScreenInvoice}
+                  />
                 </div>
               )}
               {(activeTab === 'purchase-returns' || activeTab === 'purchases-return') && (
-                <PurchasesWorkspaceView initialSubTab="purchase-return" />
+                <PurchasesWorkspaceView
+                  initialSubTab="purchase-return"
+                  onBackToDashboard={handleCloseFullScreenInvoice}
+                />
               )}
               {activeTab === 'purchase-history' && (
-                <PurchasesWorkspaceView initialSubTab="register" />
+                <PurchasesWorkspaceView
+                  initialSubTab="register"
+                  onBackToDashboard={handleCloseFullScreenInvoice}
+                />
               )}
               {(activeTab === 'purchase-reports' ||
                 activeTab === 'purchase-supplier-report' ||
                 activeTab === 'report-item-purchases' ||
                 activeTab === 'report-purchase-analysis') && (
-                <PurchasesWorkspaceView initialSubTab="reports" />
+                <PurchasesWorkspaceView
+                  initialSubTab="reports"
+                  onBackToDashboard={handleCloseFullScreenInvoice}
+                />
               )}
-              {activeTab === 'inventory' && <PurchasesWorkspaceView initialSubTab="batch-stock" />}
+              {activeTab === 'inventory' && (
+                <PurchasesWorkspaceView
+                  initialSubTab="batch-stock"
+                  onBackToDashboard={handleCloseFullScreenInvoice}
+                />
+              )}
 
               {/* F. INVENTORY & WAREHOUSE */}
               {mappedInventorySubTab && (
@@ -864,6 +992,14 @@ function AppContent() {
                   onSettingsUpdated={(updated) => setSettings(updated)}
                   onNavigateToAuditLogs={() => setActiveTab('audit-logs')}
                 />
+              )}
+
+              {/* SUPER ADMIN: MORE OPTIONS */}
+              {activeTab === 'more-options' && isSuperAdmin && <MoreOptionsView />}
+
+              {/* SUPER ADMIN: USER MANAGEMENT */}
+              {(activeTab === 'users' || activeTab === 'users-manage') && isSuperAdmin && (
+                <UserManagementView />
               )}
             </>
           )}

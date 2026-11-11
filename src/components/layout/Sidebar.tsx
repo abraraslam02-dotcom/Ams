@@ -152,11 +152,14 @@ export type NavTabId =
   // H. SYSTEM & SETTINGS
   | 'company-settings'
   | 'system-settings'
+  | 'more-options'
   | 'printer-setup'
   | 'backup-restore'
   | 'data-import-export'
   | 'database'
   | 'audit-logs'
+  | 'users'
+  | 'users-manage'
   | 'system-info'
   | 'system-admin';
 
@@ -354,11 +357,14 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'sales-discount-report': 'percent',
   'sales-return-report': 'refresh',
   'company-settings': 'settings',
+  'more-options': 'settings',
   'printer-setup': 'printer',
   'backup-restore': 'database',
   'data-import-export': 'swap',
   database: 'database',
   'audit-logs': 'doc',
+  users: 'users',
+  'users-manage': 'users',
   'system-info': 'info',
 };
 
@@ -538,11 +544,13 @@ const MENU: MenuNode[] = [
     icon: 'settings',
     children: [
       { id: 'company-settings', label: 'Company Settings', canSee: (_p, _isAdmin) => true },
+      { id: 'more-options', label: 'More Options', badge: 'Sales', canSee: (_p, isAdmin) => isAdmin },
       { id: 'printer-setup', label: 'Printer Settings', canSee: (_p, _isAdmin) => true },
       { id: 'backup-restore', label: 'Backup & Restore', canSee: (_p, _isAdmin) => true },
       { id: 'data-import-export', label: 'Data Import / Export', canSee: (_p, _isAdmin) => true },
       { id: 'database', label: 'Database Status', canSee: (_p, _isAdmin) => true },
-      { id: 'audit-logs', label: 'System Logs', canSee: (_p, _isAdmin) => true },
+      { id: 'audit-logs', label: 'System Logs', canSee: (_p, isAdmin) => isAdmin },
+      { id: 'users', label: 'User Management', badge: 'Admin', canSee: (_p, isAdmin) => isAdmin },
       { id: 'system-info', label: 'System Info', canSee: (_p, _isAdmin) => true },
     ],
   },

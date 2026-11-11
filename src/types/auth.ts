@@ -32,6 +32,7 @@ export interface User {
   pending_device_requested_at?: string | null;
   created_at: string;
   updated_at: string;
+  permissions?: Record<string, ModulePermission>;
 }
 
 export interface ModulePermission {
@@ -40,6 +41,7 @@ export interface ModulePermission {
   can_create: boolean;
   can_edit: boolean;
   can_delete: boolean;
+  can_print: boolean;
   can_export: boolean;
 }
 

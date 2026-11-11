@@ -16,7 +16,8 @@ import { syncRouter } from './server/routes/sync.ts';
 import { cashBookRouter } from './server/routes/cashBook.ts';
 import { authenticateToken, enforceModulePermissions } from './server/middleware/authMiddleware.ts';
 import { runMigrations } from './server/db/migrations.ts';
-import { checkDatabaseConnection } from './server/db/connection.ts';
+import { checkDatabaseConnection, getDatabase } from './server/db/connection.ts';
+import { ensureAuthTables } from './server/services/authService.ts';
 import { ensureDailyAutomaticBackup } from './server/services/backupService.ts';
 import {
   initCloudPersistence,
@@ -44,6 +45,7 @@ async function startServer() {
   try {
     const migration = runMigrations();
     console.log(`[AMS DB] ${migration.message}`);
+    ensureAuthTables(getDatabase());
 
     const connectionTest = checkDatabaseConnection();
     console.log(`[AMS DB] Connection verification: ${connectionTest.connected ? 'SUCCESS' : 'FAILED'}`);

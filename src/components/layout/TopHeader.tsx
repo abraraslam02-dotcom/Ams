@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   RefreshCw, ChevronRight, Home, Wifi, WifiOff, Clock, ChevronDown,
-  Users2, ShieldCheck, Trash2, LogOut, CheckCircle2, AlertTriangle, CloudUpload, Download, Database,
+  Users2, ShieldCheck, Trash2, LogOut, CheckCircle2, AlertTriangle, CloudUpload, Download, Database, SlidersHorizontal,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { DatabaseDiagnostics } from '../../types/database';
@@ -13,6 +13,8 @@ interface TopHeaderProps {
   diagnostics: DatabaseDiagnostics | null;
   loading: boolean;
   onRefresh: () => void;
+  onNavigateToUsers?: () => void;
+  onNavigateToMoreOptions?: () => void;
   onNavigateToAudit: () => void;
   onNavigateToClearDemoData: () => void;
   compact?: boolean;
@@ -20,7 +22,7 @@ interface TopHeaderProps {
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   currentViewTitle, breadcrumbs, diagnostics, loading, onRefresh,
-  onNavigateToAudit, onNavigateToClearDemoData, compact = false,
+  onNavigateToUsers, onNavigateToMoreOptions, onNavigateToAudit, onNavigateToClearDemoData, compact = false,
 }) => {
   const { user, isSuperAdmin, logout } = useAuth();
   const [now, setNow] = useState(new Date());
@@ -277,22 +279,37 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         <RefreshCw className={`w-4 h-4 ${loading || syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
       </button>
 
-      {/* System menu */}
+      {/* User & System menu */}
       <div className="relative" ref={menuRef}>
         <button
           type="button"
           onClick={() => setMenuOpen((o) => !o)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer transition-colors"
+          className="flex items-center gap-2 pl-1.5 pr-2.5 py-1 rounded-full border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer transition-colors"
         >
-          <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-          <span>System</span>
+          <span className="w-7 h-7 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold flex items-center justify-center text-xs uppercase shadow-xs">
+            {name.charAt(0)}
+          </span>
+          <div className="hidden sm:block text-left leading-tight">
+            <span className="block text-xs font-bold text-slate-800">{name}</span>
+            <span className="block text-[10px] text-slate-400 font-medium">{user?.role || 'Staff'}</span>
+          </div>
           <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-full mt-2 w-52 bg-white rounded-xl border border-slate-200 shadow-xl p-1.5 z-50">
-            {item(<ShieldCheck className="w-4 h-4" />, 'System logs', onNavigateToAudit)}
-            {item(<Trash2 className="w-4 h-4" />, 'System diagnostics', onNavigateToClearDemoData)}
+          <div className="absolute right-0 top-full mt-2 w-60 bg-white rounded-xl border border-slate-200 shadow-xl p-1.5 z-50 animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-3 py-2 border-b border-slate-100 mb-1">
+              <div className="text-xs font-bold text-slate-900">{name}</div>
+              <div className="text-[11px] text-slate-500 font-mono">@{user?.username} • {user?.role}</div>
+            </div>
+
+            {isSuperAdmin && onNavigateToUsers && item(<Users2 className="w-4 h-4 text-purple-600" />, 'User Management', onNavigateToUsers)}
+            {isSuperAdmin && onNavigateToMoreOptions && item(<SlidersHorizontal className="w-4 h-4 text-emerald-600" />, 'Sales Invoice More Options', onNavigateToMoreOptions)}
+            {item(<ShieldCheck className="w-4 h-4 text-slate-600" />, 'System Logs', onNavigateToAudit)}
+            {item(<Database className="w-4 h-4 text-slate-600" />, 'Database Status', onNavigateToClearDemoData)}
+            
+            <div className="my-1 border-t border-slate-100" />
+            {item(<LogOut className="w-4 h-4 text-rose-600" />, 'Log Out', () => { logout(); }, true)}
           </div>
         )}
       </div>

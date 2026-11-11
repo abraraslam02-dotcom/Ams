@@ -5,7 +5,7 @@ import type { Request, Response } from 'express';
 import { checkDatabaseConnection, getDatabase } from '../db/connection.ts';
 import { MODULE_CATALOG } from '../db/schema.ts';
 import { config } from '../config.ts';
-import { authenticateToken } from '../middleware/authMiddleware.ts';
+import { authenticateToken, requireRole } from '../middleware/authMiddleware.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
 import {
   getBackupDirectory,
@@ -468,6 +468,237 @@ systemRouter.put('/settings', authenticateToken, (req: Request, res: Response) =
     });
   }
 });
+
+const DEFAULT_SALES_INVOICE_MORE_OPTIONS = {
+  store_name: 'ABRAR MEDICAL STORE',
+  invoice_title: 'TAX / COMMERCIAL INVOICE',
+  invoice_subtitle: 'Retail & Wholesale Pharmacy Solutions',
+  address: 'Main Bazar, Mandi Ahmad Abad',
+  phone: '0300-1234567',
+  ntn_strn: '1234567-8',
+  custom_heading: '',
+  footer_note: 'Thank you for choosing Abrar Medical Store! Medicines once sold will not be taken back without receipt.',
+  custom_terms: '1. Expired/damaged items will be claimed as per company policy.\n2. Please check your medicines and change before leaving counter.',
+  thank_you_message: 'Get Well Soon & Thank You For Your Visit!',
+  visibility: {
+    entry: {
+      customer_address: true,
+      customer_phone: true,
+      item_company: true,
+      item_code: true,
+      barcode: true,
+      batch_number: true,
+      expiry_date: true,
+      discount: true,
+      tax: true,
+      bonus_quantity: true,
+      loose_quantity: true,
+      packing_details: true,
+      previous_balance: true,
+      paid_amount: true,
+      remaining_balance: true,
+      remarks: true,
+      footer_note: true,
+    },
+    preview: {
+      customer_address: true,
+      customer_phone: true,
+      item_company: true,
+      item_code: true,
+      barcode: true,
+      batch_number: true,
+      expiry_date: true,
+      discount: true,
+      tax: true,
+      bonus_quantity: true,
+      loose_quantity: true,
+      packing_details: true,
+      previous_balance: true,
+      paid_amount: true,
+      remaining_balance: true,
+      remarks: true,
+      footer_note: true,
+    },
+    a4: {
+      customer_address: true,
+      customer_phone: true,
+      item_company: true,
+      item_code: true,
+      barcode: true,
+      batch_number: true,
+      expiry_date: true,
+      discount: true,
+      tax: true,
+      bonus_quantity: true,
+      loose_quantity: true,
+      packing_details: true,
+      previous_balance: true,
+      paid_amount: true,
+      remaining_balance: true,
+      remarks: true,
+      footer_note: true,
+    },
+    thermal: {
+      customer_address: false,
+      customer_phone: false,
+      item_company: false,
+      item_code: false,
+      barcode: false,
+      batch_number: true,
+      expiry_date: true,
+      discount: true,
+      tax: true,
+      bonus_quantity: false,
+      loose_quantity: false,
+      packing_details: false,
+      previous_balance: true,
+      paid_amount: true,
+      remaining_balance: true,
+      remarks: false,
+      footer_note: true,
+    },
+  },
+};
+
+/**
+ * GET /api/system/sales-invoice-more-options
+ * Fetches dedicated Sales Invoice headings, footer notes, and 4-scope field visibility
+ */
+systemRouter.get('/sales-invoice-more-options', authenticateToken, (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const row = db.prepare('SELECT * FROM company_settings LIMIT 1').get() as Record<string, any> | undefined;
+
+    let parsedOptions: any = {};
+    if (row?.sales_invoice_more_options_json) {
+      try {
+        parsedOptions = JSON.parse(row.sales_invoice_more_options_json);
+      } catch {
+        parsedOptions = {};
+      }
+    }
+
+    const merged = {
+      ...DEFAULT_SALES_INVOICE_MORE_OPTIONS,
+      ...parsedOptions,
+      store_name: parsedOptions.store_name || row?.store_name || DEFAULT_SALES_INVOICE_MORE_OPTIONS.store_name,
+      invoice_title: parsedOptions.invoice_title || row?.invoice_heading || DEFAULT_SALES_INVOICE_MORE_OPTIONS.invoice_title,
+      invoice_subtitle: parsedOptions.invoice_subtitle || row?.invoice_subtitle || DEFAULT_SALES_INVOICE_MORE_OPTIONS.invoice_subtitle,
+      address: parsedOptions.address || row?.address || DEFAULT_SALES_INVOICE_MORE_OPTIONS.address,
+      phone: parsedOptions.phone || row?.phone || DEFAULT_SALES_INVOICE_MORE_OPTIONS.phone,
+      ntn_strn: parsedOptions.ntn_strn || row?.ntn_tax_number || DEFAULT_SALES_INVOICE_MORE_OPTIONS.ntn_strn,
+      custom_heading: parsedOptions.custom_heading || row?.custom_invoice_heading || '',
+      footer_note: parsedOptions.footer_note || row?.invoice_footer_note || DEFAULT_SALES_INVOICE_MORE_OPTIONS.footer_note,
+      custom_terms: parsedOptions.custom_terms || DEFAULT_SALES_INVOICE_MORE_OPTIONS.custom_terms,
+      thank_you_message: parsedOptions.thank_you_message || DEFAULT_SALES_INVOICE_MORE_OPTIONS.thank_you_message,
+      visibility: {
+        entry: { ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.entry, ...(parsedOptions.visibility?.entry || {}) },
+        preview: { ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.preview, ...(parsedOptions.visibility?.preview || {}) },
+        a4: { ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.a4, ...(parsedOptions.visibility?.a4 || {}) },
+        thermal: { ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.thermal, ...(parsedOptions.visibility?.thermal || {}) },
+      },
+    };
+
+    return res.json({
+      success: true,
+      data: merged,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: `Failed to load Sales Invoice More Options: ${errorMsg}` });
+  }
+});
+
+/**
+ * PUT /api/system/sales-invoice-more-options
+ * Super Admin only: Permanently save Sales Invoice headings, footer notes, and field visibility
+ */
+systemRouter.put(
+  '/sales-invoice-more-options',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const db = getDatabase();
+      const body = req.body || {};
+
+      const currentJson = db
+        .prepare('SELECT sales_invoice_more_options_json FROM company_settings LIMIT 1')
+        .get() as { sales_invoice_more_options_json?: string } | undefined;
+
+      let currentParsed: any = {};
+      if (currentJson?.sales_invoice_more_options_json) {
+        try {
+          currentParsed = JSON.parse(currentJson.sales_invoice_more_options_json);
+        } catch {
+          currentParsed = {};
+        }
+      }
+
+      const merged = {
+        ...DEFAULT_SALES_INVOICE_MORE_OPTIONS,
+        ...currentParsed,
+        ...body,
+        visibility: {
+          entry: {
+            ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.entry,
+            ...(currentParsed.visibility?.entry || {}),
+            ...(body.visibility?.entry || {}),
+          },
+          preview: {
+            ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.preview,
+            ...(currentParsed.visibility?.preview || {}),
+            ...(body.visibility?.preview || {}),
+          },
+          a4: {
+            ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.a4,
+            ...(currentParsed.visibility?.a4 || {}),
+            ...(body.visibility?.a4 || {}),
+          },
+          thermal: {
+            ...DEFAULT_SALES_INVOICE_MORE_OPTIONS.visibility.thermal,
+            ...(currentParsed.visibility?.thermal || {}),
+            ...(body.visibility?.thermal || {}),
+          },
+        },
+      };
+
+      const jsonStr = JSON.stringify(merged);
+
+      // Persist to company_settings
+      db.prepare(`
+        UPDATE company_settings
+        SET sales_invoice_more_options_json = ?,
+            invoice_heading = COALESCE(?, invoice_heading),
+            invoice_subtitle = COALESCE(?, invoice_subtitle),
+            custom_invoice_heading = COALESCE(?, custom_invoice_heading),
+            invoice_footer_note = COALESCE(?, invoice_footer_note),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = (SELECT id FROM company_settings LIMIT 1)
+      `).run(
+        jsonStr,
+        merged.invoice_title,
+        merged.invoice_subtitle,
+        merged.custom_heading,
+        merged.footer_note
+      );
+
+      db.prepare(`
+        INSERT INTO auth_audit_logs (user_id, username, action, status, ip_address, details)
+        VALUES (?, ?, 'MORE_OPTIONS_UPDATED', 'SUCCESS', ?, 'Updated Sales Invoice headings, footer notes, and field visibility')
+      `).run(req.user?.id || null, req.user?.username || 'Super Admin', req.ip || '');
+
+      return res.json({
+        success: true,
+        message: 'Sales Invoice More Options saved successfully and applied immediately.',
+        data: merged,
+      });
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      return res.status(500).json({ success: false, error: `Failed to save Sales Invoice More Options: ${errorMsg}` });
+    }
+  }
+);
 
 /**
  * PATCH /api/system/batch-settings

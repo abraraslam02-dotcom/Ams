@@ -5,7 +5,7 @@ import { DecodedIdToken } from 'firebase-admin/auth';
 import { getOrCreateUser } from '../db/users.ts';
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken;
+  user?: any;
 }
 
 export const requireAuth = async (

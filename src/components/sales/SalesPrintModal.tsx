@@ -70,6 +70,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   const [showPrinterGuide, setShowPrinterGuide] = useState<boolean>(false);
   const [savingDefaults, setSavingDefaults] = useState<boolean>(false);
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
+  const [moreOptions, setMoreOptions] = useState<any>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -92,6 +93,15 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
       .catch(() => {
         // Fallback to local defaults if offline
       });
+
+    api
+      .getSalesInvoiceMoreOptions()
+      .then((res) => {
+        if (!mounted || !res?.data) return;
+        setMoreOptions(res.data);
+      })
+      .catch(() => {});
+
     return () => {
       mounted = false;
     };
@@ -134,19 +144,52 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
   const isCancelled = String(docRecord.status || '').toLowerCase() === 'cancelled';
 
-  const storeName = settings?.store_name || 'ABRAR MEDICAL STORE';
-  const storeAddress = settings?.address || 'Main Commercial Market, Lahore, Punjab, Pakistan';
-  const storePhone = settings?.phone || '+92 42 35789000';
+  const isThermal = format === '80mm' || format === '58mm';
+  const isA4 = format === 'a4';
+
+  // Active visibility configuration based on current print / preview scope:
+  const activeVisibility = isThermal
+    ? moreOptions?.visibility?.thermal
+    : isA4
+    ? moreOptions?.visibility?.a4
+    : moreOptions?.visibility?.preview;
+
+  // 17 Optional Field Visibility switches
+  const showCustAddress = activeVisibility ? activeVisibility.customer_address !== false : true;
+  const showCustPhone = activeVisibility ? activeVisibility.customer_phone !== false : true;
+  const showItemCompany = activeVisibility ? activeVisibility.item_company !== false : fields.showCompany;
+  const showItemCode = activeVisibility ? activeVisibility.item_code !== false : fields.showItemCode;
+  const showBarcode = activeVisibility ? activeVisibility.barcode !== false : true;
+  const showBatch = activeVisibility ? activeVisibility.batch_number !== false : fields.showBatchExpiry;
+  const showExpiry = activeVisibility ? activeVisibility.expiry_date !== false : fields.showBatchExpiry;
+  const showDiscount = activeVisibility ? activeVisibility.discount !== false : fields.showDiscount;
+  const showTax = activeVisibility ? activeVisibility.tax !== false : fields.showTax;
+  const showBonus = activeVisibility ? activeVisibility.bonus_quantity !== false : true;
+  const showLoose = activeVisibility ? activeVisibility.loose_quantity !== false : true;
+  const showPacking = activeVisibility ? activeVisibility.packing_details !== false : fields.showPacking;
+  const showPrevBalance = activeVisibility ? activeVisibility.previous_balance !== false : fields.showPreviousBalance;
+  const showPaid = activeVisibility ? activeVisibility.paid_amount !== false : true;
+  const showRemaining = activeVisibility ? activeVisibility.remaining_balance !== false : true;
+  const showRemarks = activeVisibility ? activeVisibility.remarks !== false : true;
+  const showFooterNote = activeVisibility ? activeVisibility.footer_note !== false : fields.showFooter;
+
+  const storeName = moreOptions?.store_name || settings?.store_name || 'ABRAR MEDICAL STORE';
+  const storeAddress = moreOptions?.address || settings?.address || 'Main Commercial Market, Lahore, Punjab, Pakistan';
+  const storePhone = moreOptions?.phone || settings?.phone || '+92 42 35789000';
   const storeMobile = settings?.mobile || '';
   const drugLicense = settings?.drug_license_number || 'DL-PK-LHR-2026-0891';
-  const ntnNumber = settings?.ntn_tax_number || 'NTN-PK-9812450-7';
+  const ntnNumber = moreOptions?.ntn_strn || settings?.ntn_tax_number || 'NTN-PK-9812450-7';
   const logoDataUrl = settings?.logo_data_url || '';
   const invoiceHeading = isReturn
     ? 'SALES RETURN / CREDIT NOTE'
-    : settings?.invoice_heading || 'TAX / COMMERCIAL INVOICE';
+    : moreOptions?.custom_heading || moreOptions?.invoice_title || settings?.invoice_heading || 'TAX / COMMERCIAL INVOICE';
+  const invoiceSubtitle = moreOptions?.invoice_subtitle || '';
   const footerMessage =
+    moreOptions?.footer_note ||
     settings?.invoice_footer_note ||
     'Medicines once sold will only be replaced or returned within 3 days with original bill. Loose & cold-chain items are non-returnable.';
+  const customTerms = moreOptions?.custom_terms || '';
+  const thankYouMessage = moreOptions?.thank_you_message || 'Thank You — Get Well Soon!';
 
   const fmtMoney = (val: unknown) =>
     Number(val || 0).toLocaleString('en-PK', {
@@ -593,6 +636,9 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     <h1 className="text-2xl font-black tracking-tight text-slate-950 uppercase">
                       {storeName}
                     </h1>
+                    {invoiceSubtitle && (
+                      <p className="text-[11px] font-semibold text-slate-700 tracking-wide">{invoiceSubtitle}</p>
+                    )}
                     <p className="text-xs font-semibold text-slate-700 mt-0.5">{storeAddress}</p>
                     <p className="text-[11px] text-slate-600 mt-0.5">
                       Phone: <span className="font-semibold">{storePhone}</span>
@@ -646,10 +692,11 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                       {docRecord.customer_filer_status || 'Filer'}
                     </span>
                   </div>
-                  {(docRecord.customer_phone || docRecord.customer_address) && (
+                  {((showCustPhone && docRecord.customer_phone) || (showCustAddress && docRecord.customer_address)) && (
                     <div className="text-[11px] text-slate-600 mt-0.5">
-                      {docRecord.customer_phone ? `Contact: ${docRecord.customer_phone}` : ''}
-                      {docRecord.customer_address ? ` · ${docRecord.customer_address}` : ''}
+                      {showCustPhone && docRecord.customer_phone ? `Contact: ${docRecord.customer_phone}` : ''}
+                      {showCustPhone && docRecord.customer_phone && showCustAddress && docRecord.customer_address ? ' · ' : ''}
+                      {showCustAddress && docRecord.customer_address ? `Address: ${docRecord.customer_address}` : ''}
                     </div>
                   )}
                 </div>
@@ -809,19 +856,36 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               {/* Totals, Previous Balance, Paid & Remaining Summary */}
               <div className="grid grid-cols-12 gap-6 items-start ams-avoid-break">
                 <div className="col-span-7 space-y-2">
-                  {docRecord.remarks && (
+                  {showRemarks && docRecord.remarks && (
                     <div className="p-2.5 rounded bg-slate-50 border border-slate-200 text-[11px]">
                       <span className="font-bold text-slate-700">Remarks: </span>
                       <span className="text-slate-600">{docRecord.remarks}</span>
                     </div>
                   )}
 
-                  {fields.showFooter && footerMessage && (
-                    <div className="p-2.5 rounded border border-slate-200 text-[10px] text-slate-600 space-y-1">
-                      <div className="font-bold text-slate-800 uppercase">
-                        Terms & Store Policy:
-                      </div>
-                      <p>{footerMessage}</p>
+                  {showFooterNote && (footerMessage || customTerms || thankYouMessage) && (
+                    <div className="p-2.5 rounded border border-slate-200 text-[10px] text-slate-600 space-y-1.5">
+                      {footerMessage && (
+                        <div>
+                          <div className="font-bold text-slate-800 uppercase text-[9.5px]">
+                            Terms & Store Policy:
+                          </div>
+                          <p className="whitespace-pre-line text-slate-600">{footerMessage}</p>
+                        </div>
+                      )}
+                      {customTerms && (
+                        <div className="pt-1 border-t border-slate-200">
+                          <div className="font-bold text-slate-800 uppercase text-[9.5px]">
+                            Custom Terms & Conditions:
+                          </div>
+                          <p className="whitespace-pre-line text-slate-600">{customTerms}</p>
+                        </div>
+                      )}
+                      {thankYouMessage && (
+                        <div className="pt-1 text-emerald-800 font-bold text-[10px]">
+                          {thankYouMessage}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -897,7 +961,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     <span className="font-mono">Rs. {fmtMoney(savedNetTotal)}</span>
                   </div>
 
-                  {!isReturn && fields.showPreviousBalance && (
+                  {!isReturn && showPrevBalance && (
                     <>
                       <div className="flex justify-between text-slate-600 pt-1 border-t border-slate-200">
                         <span>Previous Customer Balance:</span>
@@ -912,16 +976,18 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     </>
                   )}
 
-                  <div className="flex justify-between text-emerald-700 font-bold pt-1 border-t border-slate-200">
-                    <span>
-                      {isReturn
-                        ? `Refunded (${paymentMethodLabel}):`
-                        : `Paid Amount (${paymentMethodLabel}):`}
-                    </span>
-                    <span className="font-mono">Rs. {fmtMoney(savedPaidAmount)}</span>
-                  </div>
+                  {showPaid && (
+                    <div className="flex justify-between text-emerald-700 font-bold pt-1 border-t border-slate-200">
+                      <span>
+                        {isReturn
+                          ? `Refunded (${paymentMethodLabel}):`
+                          : `Paid Amount (${paymentMethodLabel}):`}
+                      </span>
+                      <span className="font-mono">Rs. {fmtMoney(savedPaidAmount)}</span>
+                    </div>
+                  )}
 
-                  {!isReturn && (
+                  {!isReturn && showRemaining && (
                     <div className="flex justify-between border-t border-slate-300 pt-1 font-black text-slate-900">
                       <span>Remaining Balance:</span>
                       <span className="font-mono">Rs. {fmtMoney(savedRemainingBalance)}</span>
@@ -1036,10 +1102,16 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     {docRecord.customer_name || 'Walk-in Cash'}
                   </span>
                 </div>
-                {docRecord.customer_phone && (
+                {showCustPhone && docRecord.customer_phone && (
                   <div className="flex justify-between">
                     <span>Contact:</span>
                     <span>{docRecord.customer_phone}</span>
+                  </div>
+                )}
+                {showCustAddress && docRecord.customer_address && (
+                  <div className="flex justify-between text-[9px] text-slate-700">
+                    <span>Address:</span>
+                    <span className="truncate max-w-[140px]">{docRecord.customer_address}</span>
                   </div>
                 )}
                 <div className="flex justify-between">
@@ -1056,6 +1128,12 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   <div className="flex justify-between">
                     <span>Deliveryman:</span>
                     <span className="truncate max-w-[140px]">{docRecord.deliveryman_name}</span>
+                  </div>
+                )}
+                {showRemarks && docRecord.remarks && (
+                  <div className="flex justify-between text-[9px] text-slate-700 border-t border-slate-300 pt-0.5 mt-0.5">
+                    <span>Remarks:</span>
+                    <span className="truncate max-w-[140px]">{docRecord.remarks}</span>
                   </div>
                 )}
               </div>
@@ -1083,22 +1161,29 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     return (
                       <div key={line.id || idx} className="leading-tight">
                         <div className="font-bold text-slate-950">
-                          {idx + 1}. {fields.showItemCode ? `[${line.item_code}] ` : ''}
+                          {idx + 1}. {showItemCode ? `[${line.item_code}] ` : ''}
                           {line.item_name}
+                          {showItemCompany && line.company_name ? ` (${line.company_name})` : ''}
                         </div>
                         <div className="grid grid-cols-12 text-[9.5px] text-slate-700">
                           <span className="col-span-6">
-                            {fields.showPacking && line.packing ? `${line.packing} ` : ''}
+                            {showPacking && line.packing ? `${line.packing} ` : ''}
+                            {(showBatch && line.batch_number) || (showExpiry && line.expiry_date) ? (
+                              <span className="block text-[8.5px] text-slate-500">
+                                {showBatch && line.batch_number ? `B:${line.batch_number} ` : ''}
+                                {showExpiry && line.expiry_date ? `Exp:${line.expiry_date}` : ''}
+                              </span>
+                            ) : null}
                             @{Number(line.unit_price || 0).toFixed(0)}
-                            {fields.showDiscount && discAmt > 0
+                            {showDiscount && discAmt > 0
                               ? ` (-${discAmt.toFixed(0)})`
                               : ''}
-                            {fields.showTax && taxAmt > 0 ? ` (+T:${taxAmt.toFixed(0)})` : ''}
+                            {showTax && taxAmt > 0 ? ` (+T:${taxAmt.toFixed(0)})` : ''}
                           </span>
                           <span className="col-span-2 text-right">
                             {packQty > 0 ? `${packQty}P` : ''}
-                            {!isReturn && Number(line.bonus_quantity || 0) > 0 ? ` +${line.bonus_quantity}B` : ''}
-                            {looseQty > 0 ? ` ${looseQty}L` : ''}
+                            {!isReturn && showBonus && Number(line.bonus_quantity || 0) > 0 ? ` +${line.bonus_quantity}B` : ''}
+                            {showLoose && looseQty > 0 ? ` ${looseQty}L` : ''}
                           </span>
                           <span className="col-span-4 text-right font-bold text-slate-950">
                             {fmtMoney(line.line_total)}
@@ -1116,13 +1201,13 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   <span>Gross Total:</span>
                   <span>{fmtMoney(savedGross)}</span>
                 </div>
-                {fields.showDiscount && savedTotalDisc > 0 && (
+                {showDiscount && savedTotalDisc > 0 && (
                   <div className="flex justify-between">
                     <span>Discount:</span>
                     <span>- {fmtMoney(savedTotalDisc)}</span>
                   </div>
                 )}
-                {fields.showTax && savedTotalTax > 0 && (
+                {showTax && savedTotalTax > 0 && (
                   <div className="flex justify-between">
                     <span>Tax (GST/Adv):</span>
                     <span>+ {fmtMoney(savedTotalTax)}</span>
@@ -1132,17 +1217,19 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   <span>{isReturn ? 'NET RETURN:' : 'NET TOTAL:'}</span>
                   <span>Rs. {fmtMoney(savedNetTotal)}</span>
                 </div>
-                {!isReturn && fields.showPreviousBalance && savedPrevBalance > 0 && (
+                {!isReturn && showPrevBalance && savedPrevBalance > 0 && (
                   <div className="flex justify-between">
                     <span>Prev Balance:</span>
                     <span>{fmtMoney(savedPrevBalance)}</span>
                   </div>
                 )}
-                <div className="flex justify-between font-bold">
-                  <span>{isReturn ? 'Refunded:' : 'Paid:'}</span>
-                  <span>Rs. {fmtMoney(savedPaidAmount)}</span>
-                </div>
-                {!isReturn && (
+                {showPaid && (
+                  <div className="flex justify-between font-bold">
+                    <span>{isReturn ? 'Refunded:' : 'Paid:'}</span>
+                    <span>Rs. {fmtMoney(savedPaidAmount)}</span>
+                  </div>
+                )}
+                {!isReturn && showRemaining && (
                   <div className="flex justify-between font-bold">
                     <span>Balance Due:</span>
                     <span>Rs. {fmtMoney(savedRemainingBalance)}</span>
@@ -1159,10 +1246,11 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                 </div>
               )}
 
-              {fields.showFooter && (
-                <div className="text-center text-[9px] leading-snug text-slate-700 mt-1">
-                  <p>{footerMessage}</p>
-                  <p className="font-bold mt-1">Thank You — Get Well Soon!</p>
+              {showFooterNote && (
+                <div className="text-center text-[9px] leading-snug text-slate-700 mt-1 space-y-1">
+                  {footerMessage && <p className="whitespace-pre-line">{footerMessage}</p>}
+                  {customTerms && <p className="whitespace-pre-line text-[8px] text-slate-600">{customTerms}</p>}
+                  {thankYouMessage && <p className="font-bold mt-1 text-slate-900">{thankYouMessage}</p>}
                 </div>
               )}
             </div>

@@ -2094,6 +2094,7 @@ export const api = {
     endDate?: string;
     page?: number;
     pageSize?: number;
+    exportAll?: boolean;
   }) {
     const query = new URLSearchParams();
     if (params?.q) query.append('q', params.q);
@@ -2106,6 +2107,7 @@ export const api = {
     if (params?.endDate) query.append('endDate', params.endDate);
     if (params?.page) query.append('page', String(params.page));
     if (params?.pageSize) query.append('pageSize', String(params.pageSize));
+    if (params?.exportAll) query.append('exportAll', 'true');
 
     try {
       const res = await authFetch(`/api/sales?${query.toString()}`);
@@ -2752,13 +2754,119 @@ export const api = {
   /**
    * Authentication - Forgot Password Help
    */
-  async forgotPassword(username: string): Promise<any> {
+  async forgotPassword(username: string): Promise<{ success: boolean; message: string; maskedEmail: string; code?: string; error?: string }> {
     const res = await authFetch('/api/auth/forgot-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username }),
     });
-    return res.json();
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || data.error || 'Failed to request password recovery');
+    }
+    return data;
+  },
+
+  /**
+   * Authentication - Verify Super Admin code & reset password
+   */
+  async resetPassword(payload: {
+    username: string;
+    code: string;
+    new_password: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const res = await authFetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || data.error || 'Failed to reset password');
+    }
+    return data;
+  },
+
+  /**
+   * User Management - Delete user (Super Admin only)
+   */
+  async deleteUser(id: number): Promise<{ success: boolean; message: string }> {
+    const res = await authFetch(`/api/auth/users/${id}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to delete user');
+    }
+    return data;
+  },
+
+  /**
+   * User Management - Fetch permission modules metadata
+   */
+  async getPermissionModules(): Promise<{ success: boolean; modules: Array<{ key: string; label: string; description: string }> }> {
+    const res = await authFetch('/api/auth/permissions/modules');
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to fetch permission modules');
+    }
+    return data;
+  },
+
+  /**
+   * User Management - Get Super Admin recovery email
+   */
+  async getSuperAdminRecoveryEmail(): Promise<{ success: boolean; email: string }> {
+    const res = await authFetch('/api/auth/recovery-email');
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to fetch recovery email');
+    }
+    return data;
+  },
+
+  /**
+   * User Management - Update Super Admin recovery email
+   */
+  async updateSuperAdminRecoveryEmail(email: string): Promise<{ success: boolean; message: string; email: string }> {
+    const res = await authFetch('/api/auth/recovery-email', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update recovery email');
+    }
+    return data;
+  },
+
+  /**
+   * More Options - Fetch Sales Invoice headings, footer notes & 4-scope visibility
+   */
+  async getSalesInvoiceMoreOptions(): Promise<{ success: boolean; data: any }> {
+    const res = await authFetch('/api/system/sales-invoice-more-options');
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to fetch Sales Invoice More Options');
+    }
+    return data;
+  },
+
+  /**
+   * More Options - Save Sales Invoice headings, footer notes & 4-scope visibility (Super Admin only)
+   */
+  async updateSalesInvoiceMoreOptions(options: any): Promise<{ success: boolean; message: string; data: any }> {
+    const res = await authFetch('/api/system/sales-invoice-more-options', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to save Sales Invoice More Options');
+    }
+    return data;
   },
 
   /**

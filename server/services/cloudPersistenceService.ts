@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import pg from 'pg';
 import type { Request, Response, NextFunction } from 'express';
 import { getDatabase, syncRuntimeToSeedDatabase } from '../db/connection.ts';
+import { ensureAuthTables } from './authService.ts';
 
 const { Pool } = pg;
 
@@ -14,6 +15,11 @@ const PERSISTED_TABLES = [
   'advance_tax_settings',
   'advance_tax_history',
   'accounting_periods',
+  'users',
+  'user_permissions',
+  'role_permissions',
+  'password_recovery_codes',
+  'auth_audit_logs',
   'items',
   'accounts',
   'account_sequences',
@@ -512,12 +518,16 @@ function restoreSnapshotIntoLocalSqlite(tables: Record<string, any[]>): number {
 
   const orderedTables = getOrderedExportTables(db);
   const existingTables = new Set(orderedTables);
+  const remoteHasUsers = Array.isArray(tables.users) && tables.users.length > 0;
 
   const restoreTx = db.transaction(() => {
     db.pragma('foreign_keys = OFF');
 
     for (const table of [...orderedTables].reverse()) {
       if (!existingTables.has(table)) continue;
+      if ((table === 'users' || table === 'user_permissions') && !remoteHasUsers) {
+        continue;
+      }
       if (Array.isArray(tables[table])) {
         db.prepare(`DELETE FROM "${table}"`).run();
       }
@@ -553,6 +563,7 @@ function restoreSnapshotIntoLocalSqlite(tables: Record<string, any[]>): number {
   restoreTx();
 
   try {
+    ensureAuthTables(db);
     db.exec('REINDEX;');
     syncRuntimeToSeedDatabase();
   } catch {

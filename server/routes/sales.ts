@@ -447,9 +447,12 @@ salesRouter.get('/', (req: Request, res: Response) => {
       `)
       .get(...params) as Record<string, number>;
 
+    const isExportAll = req.query.exportAll === 'true' || req.query.all === 'true';
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
-    const limitNum = Math.min(200, Math.max(10, parseInt(String(pageSize), 10) || 50));
-    const offset = (pageNum - 1) * limitNum;
+    const limitNum = isExportAll
+      ? 10000
+      : Math.min(500, Math.max(10, parseInt(String(pageSize), 10) || 50));
+    const offset = isExportAll ? 0 : (pageNum - 1) * limitNum;
 
     const rows = db
       .prepare(`
@@ -469,6 +472,37 @@ salesRouter.get('/', (req: Request, res: Response) => {
         LIMIT ? OFFSET ?
       `)
       .all(...params, limitNum, offset) as Array<Record<string, unknown>>;
+
+    if (rows.length > 0) {
+      const saleIds = rows.map((r) => Number(r.id));
+      const placeholders = saleIds.map(() => '?').join(',');
+      const allSaleItems = db
+        .prepare(`
+          SELECT
+            si.*,
+            COALESCE(NULLIF(TRIM(si.company_name), ''), i.company_name, '') as company_name,
+            COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
+            COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code
+          FROM sale_items si
+          LEFT JOIN items i ON si.item_id = i.id
+          WHERE si.sale_id IN (${placeholders})
+          ORDER BY si.sale_id DESC, si.id ASC
+        `)
+        .all(...saleIds) as Array<Record<string, unknown>>;
+
+      const itemsBySaleId = new Map<number, Array<Record<string, unknown>>>();
+      for (const item of allSaleItems) {
+        const sid = Number(item.sale_id);
+        if (!itemsBySaleId.has(sid)) {
+          itemsBySaleId.set(sid, []);
+        }
+        itemsBySaleId.get(sid)!.push(item);
+      }
+
+      for (const row of rows) {
+        row.items = itemsBySaleId.get(Number(row.id)) || [];
+      }
+    }
 
     res.json({
       success: true,

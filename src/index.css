@@ -158,14 +158,14 @@
    ======================================================== */
 @media screen {
   .ams-readable-invoice-scope {
-    font-size: 17px !important;
-    line-height: 1.4 !important;
+    font-size: 16px !important;
+    line-height: 1.35 !important;
   }
 
   /* Page Headings */
   .ams-readable-invoice-scope h1:not(.print-modal-container *),
   .ams-readable-invoice-scope .ams-page-heading:not(.print-modal-container *) {
-    font-size: 25px !important;
+    font-size: 22px !important;
     line-height: 1.25 !important;
   }
 
@@ -173,71 +173,71 @@
   .ams-readable-invoice-scope h2:not(.print-modal-container *),
   .ams-readable-invoice-scope h3:not(.print-modal-container *),
   .ams-readable-invoice-scope .ams-section-heading:not(.print-modal-container *) {
-    font-size: 20px !important;
+    font-size: 18px !important;
     line-height: 1.3 !important;
   }
 
   /* Form Labels */
   .ams-readable-invoice-scope label:not(.print-modal-container *) {
-    font-size: 16px !important;
-    line-height: 1.35 !important;
+    font-size: 15px !important;
+    line-height: 1.3 !important;
   }
 
   /* Input Fields & Selects */
   .ams-readable-invoice-scope input:not([type="checkbox"]):not([type="radio"]):not(.print-modal-container *),
   .ams-readable-invoice-scope select:not(.print-modal-container *),
   .ams-readable-invoice-scope textarea:not(.print-modal-container *) {
-    font-size: 18px !important;
-    min-height: 36px !important;
+    font-size: 16px !important;
+    min-height: 32px !important;
     height: auto !important;
-    padding-top: 4px !important;
-    padding-bottom: 4px !important;
+    padding-top: 3px !important;
+    padding-bottom: 3px !important;
   }
 
-  /* Compact table inputs inside invoice rows still stay crisp at 16px-18px */
+  /* Crisp, readable table inputs inside invoice rows */
   .ams-readable-invoice-scope table:not(.print-modal-container *) tbody td input:not([type="checkbox"]):not([type="radio"]),
   .ams-readable-invoice-scope table:not(.print-modal-container *) tbody td select {
     font-size: 16px !important;
-    min-height: 34px !important;
-    height: 34px !important;
+    min-height: 32px !important;
+    height: 32px !important;
   }
 
   /* Dropdown Options & Item Search Results */
   .ams-readable-invoice-scope option:not(.print-modal-container *) {
-    font-size: 16px !important;
+    font-size: 15px !important;
   }
 
   /* Invoice Table Headers & Rows */
   .ams-readable-invoice-scope table:not(.print-modal-container *) thead th {
-    font-size: 16px !important;
-    padding-top: 8px !important;
-    padding-bottom: 8px !important;
-    min-height: 38px !important;
+    font-size: 15px !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+    min-height: 34px !important;
     height: auto !important;
   }
 
   .ams-readable-invoice-scope table:not(.print-modal-container *) tbody tr {
-    min-height: 38px !important;
+    min-height: 34px !important;
     height: auto !important;
   }
 
   .ams-readable-invoice-scope table:not(.print-modal-container *) tbody td {
     font-size: 16px !important;
-    padding-top: 5px !important;
-    padding-bottom: 5px !important;
+    padding-top: 3px !important;
+    padding-bottom: 3px !important;
     height: auto !important;
   }
 
   /* Buttons */
   .ams-readable-invoice-scope button:not(.print-modal-container *) {
-    font-size: 16px !important;
-    min-height: 36px !important;
+    font-size: 15px !important;
+    min-height: 32px !important;
     height: auto !important;
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
   }
 
-  /* Override tiny Tailwind utility classes inside Sales & Purchase workspaces */
+  /* Override tiny Tailwind utility classes inside Sales & Purchase workspaces for high visibility */
   .ams-readable-invoice-scope .text-\[8px\]:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-\[8\.5px\]:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-\[9px\]:not(.print-modal-container *),
@@ -247,8 +247,8 @@
   .ams-readable-invoice-scope .text-\[11px\]:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-xs:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-sm:not(.print-modal-container *) {
-    font-size: 16px !important;
-    line-height: 1.35 !important;
+    font-size: 15px !important;
+    line-height: 1.3 !important;
   }
 
   /* Totals and Net Amount highlights */
@@ -258,7 +258,7 @@
   .ams-readable-invoice-scope .text-xl:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-2xl:not(.print-modal-container *) {
     font-size: 20px !important;
-    line-height: 1.3 !important;
+    line-height: 1.25 !important;
   }
 }
 

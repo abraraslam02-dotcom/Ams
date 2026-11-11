@@ -217,7 +217,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         title: `${displayStoreName} - DSR Report - ${displayInvoiceNumber} (80mm Thermal)`,
         paperSize: '80mm',
         orientation: 'portrait',
-        margin: 'minimum',
+        margin: 'none',
         fontSizeScale: 'normal',
         copies: 1,
       });
@@ -530,102 +530,192 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
               </div>
 
               {/* =========================================================================
-                 2. 80MM THERMAL RECEIPT DSR REPORT LAYOUT
+                 2. 80MM THERMAL RECEIPT DSR REPORT LAYOUT (COMPACT & PAGE-OPTIMIZED)
                  ========================================================================= */}
               <div
                 className={activeLayout === 'thermal' ? 'w-full flex justify-center' : 'hidden'}
               >
                 <div
                   ref={thermalPrintRef}
-                  className="bg-white border border-slate-300 shadow-xs w-full max-w-[76mm] p-2.5 text-slate-950 text-[11px] leading-snug print:border-0 print:shadow-none print:p-0 print:max-w-[74mm]"
+                  className="dsr-thermal-root bg-white border border-slate-300 shadow-xs w-full max-w-[76mm] px-1.5 py-1 text-slate-950 print:border-0 print:shadow-none print:px-0.5 print:py-0 print:max-w-[74mm]"
                 >
                   <style>{`
+                    .dsr-thermal-root {
+                      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                      font-size: 8.5px;
+                      line-height: 1.12;
+                      color: #000000;
+                    }
+                    .dsr-thermal-table {
+                      width: 100% !important;
+                      border-collapse: collapse !important;
+                      table-layout: fixed !important;
+                      margin: 0 !important;
+                    }
+                    .dsr-thermal-table th,
+                    .dsr-thermal-table td {
+                      padding-top: 1px !important;
+                      padding-bottom: 1px !important;
+                      vertical-align: top !important;
+                      box-sizing: border-box !important;
+                    }
+                    .dsr-thermal-company-row td {
+                      font-size: 8.5px !important;
+                      line-height: 1.12 !important;
+                      font-weight: 700 !important;
+                      padding: 1.5px 2px !important;
+                      background-color: #f1f5f9 !important;
+                      border-top: 1px solid #0f172a !important;
+                      border-bottom: 1px solid #334155 !important;
+                      word-break: normal !important;
+                      overflow-wrap: break-word !important;
+                    }
+                    .dsr-thermal-item-row td {
+                      font-size: 8px !important;
+                      line-height: 1.1 !important;
+                      padding-top: 1px !important;
+                      padding-bottom: 1px !important;
+                      border-bottom: 0.5px dotted #94a3b8 !important;
+                    }
+                    .dsr-thermal-item-name {
+                      font-size: 8px !important;
+                      line-height: 1.1 !important;
+                      font-weight: 600 !important;
+                      letter-spacing: -0.1px !important;
+                      word-break: normal !important;
+                      overflow-wrap: break-word !important;
+                      overflow: hidden !important;
+                    }
+                    .dsr-thermal-num {
+                      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+                      font-variant-numeric: tabular-nums !important;
+                      white-space: nowrap !important;
+                      overflow: hidden !important;
+                    }
                     @media print {
-                      .dsr-thermal-table {
-                        width: 100% !important;
-                        border-collapse: collapse !important;
-                        table-layout: fixed !important;
+                      @page {
+                        size: 80mm auto;
+                        margin: 0.5mm 1mm !important;
                       }
-                      .dsr-thermal-table th,
-                      .dsr-thermal-table td {
-                        word-break: break-word !important;
-                        overflow-wrap: anywhere !important;
+                      .dsr-thermal-root {
+                        width: 100% !important;
+                        max-width: 74mm !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        font-size: 8.5px !important;
+                        line-height: 1.1 !important;
+                      }
+                      .dsr-thermal-table {
+                        page-break-inside: auto !important;
+                        break-inside: auto !important;
+                      }
+                      .dsr-thermal-table thead {
+                        display: table-header-group !important;
+                      }
+                      .dsr-thermal-table tbody {
+                        page-break-inside: auto !important;
+                        break-inside: auto !important;
+                      }
+                      .dsr-thermal-company-row {
+                        page-break-before: auto !important;
+                        break-before: auto !important;
+                        page-break-after: avoid !important;
+                        break-after: avoid !important;
+                        page-break-inside: avoid !important;
+                        break-inside: avoid !important;
+                      }
+                      .dsr-thermal-item-row {
+                        page-break-before: auto !important;
+                        break-before: auto !important;
+                        page-break-after: auto !important;
+                        break-after: auto !important;
+                        page-break-inside: avoid !important;
+                        break-inside: avoid !important;
+                      }
+                      .dsr-thermal-totals {
+                        page-break-inside: avoid !important;
+                        break-inside: avoid !important;
                       }
                     }
                   `}</style>
 
-                  {/* Store Name & Report Title */}
-                  <div className="text-center border-b-2 border-dashed border-slate-900 pb-2 mb-2">
-                    <div className="text-sm font-black uppercase tracking-tight leading-tight">
+                  {/* Store Name & Report Title (Compact) */}
+                  <div className="text-center border-b border-dashed border-slate-900 pb-0.5 mb-0.5">
+                    <div className="text-[10.5px] font-black uppercase tracking-tight leading-none">
                       {displayStoreName}
                     </div>
-                    <div className="text-[11px] font-bold mt-0.5">
+                    <div className="text-[8.5px] font-bold leading-tight mt-[1px]">
                       DSR – Daily Stock Requisition
                     </div>
                   </div>
 
-                  {/* Compact Invoice Details */}
-                  <div className="border-b border-dashed border-slate-900 pb-2 mb-2 space-y-0.5 text-[10.5px]">
-                    <div className="flex justify-between gap-2">
-                      <span className="font-semibold text-slate-700 shrink-0">Invoice No:</span>
-                      <span className="font-mono font-bold text-right break-all">
-                        {displayInvoiceNumber}
+                  {/* Ultra-Compact Invoice Metadata */}
+                  <div className="border-b border-dashed border-slate-900 pb-0.5 mb-0.5 text-[8px] leading-tight">
+                    <div className="flex justify-between items-baseline gap-1">
+                      <span className=" truncate">
+                        <span className="font-semibold text-slate-700">Inv:</span>{' '}
+                        <span className="font-mono font-bold text-slate-950">
+                          {displayInvoiceNumber}
+                        </span>
+                      </span>
+                      <span className="shrink-0">
+                        <span className="font-semibold text-slate-700">Date:</span>{' '}
+                        <span className="font-mono font-bold text-slate-950">
+                          {displayInvoiceDate}
+                        </span>
                       </span>
                     </div>
-                    <div className="flex justify-between gap-2">
-                      <span className="font-semibold text-slate-700 shrink-0">Invoice Date:</span>
-                      <span className="font-mono font-bold text-right">{displayInvoiceDate}</span>
-                    </div>
-                    <div className="flex justify-between gap-2 items-start">
+                    <div className="flex justify-between items-baseline gap-1 mt-[1px]">
                       <span className="font-semibold text-slate-700 shrink-0">Customer:</span>
-                      <span className="font-bold text-right break-words">
+                      <span className="font-bold text-slate-950 text-right break-words leading-tight">
                         {displayCustomerName}
                       </span>
                     </div>
                   </div>
 
-                  {/* 80mm Thermal Table: S.No | Item Name | Qty | Bonus Qty | Loose Qty */}
-                  <table className="dsr-thermal-table w-full border-collapse table-fixed mb-2">
+                  {/* 80mm Thermal Table: S.No | Item Name | Qty | Bonus | Loose */}
+                  <table className="dsr-thermal-table w-full border-collapse table-fixed">
+                    <colgroup>
+                      <col style={{ width: '8.5%' }} />
+                      <col style={{ width: '53.5%' }} />
+                      <col style={{ width: '12%' }} />
+                      <col style={{ width: '13%' }} />
+                      <col style={{ width: '13%' }} />
+                    </colgroup>
                     <thead>
-                      <tr className="border-b-2 border-slate-900 text-[9.5px] font-black uppercase">
-                        <th className="py-1 pr-0.5 text-left w-[11%]">S.No</th>
-                        <th className="py-1 px-0.5 text-left w-[41%]">Item Name</th>
-                        <th className="py-1 px-0.5 text-right w-[15%]">Qty</th>
-                        <th className="py-1 px-0.5 text-right w-[17%]">Bonus Qty</th>
-                        <th className="py-1 pl-0.5 text-right w-[16%]">Loose Qty</th>
+                      <tr className="border-b border-slate-900 text-[8px] font-extrabold uppercase leading-none">
+                        <th className="pr-0.5 text-left whitespace-nowrap">S.No</th>
+                        <th className="px-0.5 text-left whitespace-nowrap">Item Name</th>
+                        <th className="px-0.5 text-right whitespace-nowrap">Qty</th>
+                        <th className="px-0.5 text-right whitespace-nowrap">Bonus</th>
+                        <th className="pl-0.5 text-right whitespace-nowrap">Loose</th>
                       </tr>
                     </thead>
                     <tbody>
                       {dsrData.groups.map((group) => (
                         <React.Fragment key={group.companyName}>
-                          {/* Company Group Heading */}
-                          <tr className="bg-slate-200 border-t border-b border-slate-900">
-                            <td
-                              colSpan={5}
-                              className="py-1 px-1 font-black text-[10.5px] text-slate-950 break-words"
-                            >
+                          {/* Compact Company Group Heading */}
+                          <tr className="dsr-thermal-company-row">
+                            <td colSpan={5} className="text-slate-950">
                               {group.companyName}
                             </td>
                           </tr>
-                          {/* Items inside Company Group */}
+                          {/* Compact Items inside Company Group */}
                           {group.items.map((item) => (
-                            <tr
-                              key={item.rowId}
-                              className="border-b border-dotted border-slate-400 text-[10px] align-top"
-                            >
-                              <td className="py-1 pr-0.5 font-mono tabular-nums text-left">
+                            <tr key={item.rowId} className="dsr-thermal-item-row">
+                              <td className="dsr-thermal-num pr-0.5 text-left text-slate-800">
                                 {item.sNo}
                               </td>
-                              <td className="py-1 px-0.5 font-semibold text-slate-950 break-words whitespace-normal leading-tight">
+                              <td className="dsr-thermal-item-name px-0.5 text-slate-950">
                                 {item.itemName}
                               </td>
-                              <td className="py-1 px-0.5 text-right font-mono tabular-nums font-bold">
+                              <td className="dsr-thermal-num px-0.5 text-right font-bold text-slate-950">
                                 {formatQtyValue(item.qty)}
                               </td>
-                              <td className="py-1 px-0.5 text-right font-mono tabular-nums font-bold">
+                              <td className="dsr-thermal-num px-0.5 text-right font-bold text-slate-950">
                                 {formatQtyValue(item.bonusQty)}
                               </td>
-                              <td className="py-1 pl-0.5 text-right font-mono tabular-nums font-bold">
+                              <td className="dsr-thermal-num pl-0.5 text-right font-bold text-slate-950">
                                 {formatQtyValue(item.looseQty)}
                               </td>
                             </tr>
@@ -635,29 +725,31 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     </tbody>
                   </table>
 
-                  {/* 80mm Thermal Final Totals */}
-                  <div className="border-t-2 border-b-2 border-dashed border-slate-900 py-2 space-y-1 text-[10.5px]">
-                    <div className="flex justify-between font-bold">
-                      <span>Total Items:</span>
-                      <span className="font-mono tabular-nums">{dsrData.totalItems}</span>
-                    </div>
-                    <div className="flex justify-between font-bold">
-                      <span>Total Qty:</span>
-                      <span className="font-mono tabular-nums">
-                        {formatQtyValue(dsrData.totalQty)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between font-bold">
-                      <span>Total Bonus Qty:</span>
-                      <span className="font-mono tabular-nums">
-                        {formatQtyValue(dsrData.totalBonusQty)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between font-bold">
-                      <span>Total Loose Qty:</span>
-                      <span className="font-mono tabular-nums">
-                        {formatQtyValue(dsrData.totalLooseQty)}
-                      </span>
+                  {/* 80mm Thermal Compact Final Totals (2x2 Grid) */}
+                  <div className="dsr-thermal-totals border-t border-b border-dashed border-slate-900 py-0.5 mt-0.5 text-[8px] leading-tight">
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-[1px]">
+                      <div className="flex justify-between font-bold">
+                        <span>Total Items:</span>
+                        <span className="dsr-thermal-num">{dsrData.totalItems}</span>
+                      </div>
+                      <div className="flex justify-between font-bold">
+                        <span>Total Qty:</span>
+                        <span className="dsr-thermal-num">
+                          {formatQtyValue(dsrData.totalQty)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between font-bold">
+                        <span>Bonus Qty:</span>
+                        <span className="dsr-thermal-num">
+                          {formatQtyValue(dsrData.totalBonusQty)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between font-bold">
+                        <span>Loose Qty:</span>
+                        <span className="dsr-thermal-num">
+                          {formatQtyValue(dsrData.totalLooseQty)}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -9,7 +9,6 @@ import {
   getUserCount,
   getUserByUsername,
   getUserById,
-  getRolePermissions,
   logAuditEvent,
 } from '../server/services/authService.js';
 

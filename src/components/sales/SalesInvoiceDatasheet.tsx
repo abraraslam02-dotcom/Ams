@@ -58,7 +58,13 @@ import {
   Minus,
   ClipboardList,
   Eye,
+  Download,
+  ArrowLeft,
+  MessageSquare,
 } from 'lucide-react';
+import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
+import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
+import { generateSalesInvoiceSmsText } from '../../utils/invoiceSms';
 
 const ACTIVE_DRAFT_STORAGE_KEY = 'ams_active_sales_invoice_draft_v2';
 
@@ -232,12 +238,16 @@ interface SalesInvoiceDatasheetProps {
   onClearResume?: () => void;
   onDraftItemsStateChange?: (hasItems: boolean) => void;
   onNavigateToSalesReturn?: () => void;
+  onNavigateToSalesHistory?: () => void;
+  onBackToDashboard?: () => void;
 }
 
 export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   resumeInvoiceId,
   onClearResume,
   onDraftItemsStateChange,
+  onNavigateToSalesHistory,
+  onBackToDashboard,
 }) => {
   // Header State
   const [editingSaleId, setEditingSaleId] = useState<number | null>(null);
@@ -394,10 +404,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [newCustAddress, setNewCustAddress] = useState<string>('');
   const [newCustFilerStatus, setNewCustFilerStatus] = useState<'Filer' | 'Non-Filer' | 'Exempt'>('Non-Filer');
 
-  // Printing & DSR Report State
+  // Printing, DSR Report & SMS State
   const [printInvoice, setPrintInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printFormat, setPrintFormat] = useState<'a4' | '80mm' | '58mm'>('a4');
   const [showDsrModal, setShowDsrModal] = useState<boolean>(false);
+  const [showSalesSmsModal, setShowSalesSmsModal] = useState<boolean>(false);
+  const [salesSmsPhone, setSalesSmsPhone] = useState<string>('');
+  const [salesSmsText, setSalesSmsText] = useState<string>('');
 
   // Feedback Banner
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -1604,6 +1617,40 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setShowDsrModal(true);
   };
 
+  // Open Send SMS modal for currently open Sales Invoice (auto-fetches customer mobile from Accounts)
+  const handleOpenSalesSms = async () => {
+    const activeInvoiceItems = rows.filter((r) => isSalesRowPopulated(r));
+    if (activeInvoiceItems.length === 0) {
+      setErrorMsg(
+        'No items in the current Sales Invoice. Please add at least one item before clicking Send SMS.'
+      );
+      return;
+    }
+    setErrorMsg(null);
+
+    let registeredPhone = String(
+      selectedCustomer?.phone || (selectedCustomer as any)?.mobile || ''
+    ).trim();
+
+    if (!registeredPhone && customerAccountId > 0) {
+      try {
+        const accRes = await api.getAccounts({ status: 'Active' });
+        const allAccs = Array.isArray(accRes?.data) ? accRes.data : [];
+        const matched = allAccs.find((a: any) => Number(a.id) === Number(customerAccountId));
+        if (matched) {
+          registeredPhone = String(matched.phone || matched.mobile || '').trim();
+        }
+      } catch {
+        // Use local selectedCustomer fallback
+      }
+    }
+
+    const preparedText = generateSalesInvoiceSmsText(rows);
+    setSalesSmsPhone(registeredPhone);
+    setSalesSmsText(preparedText);
+    setShowSalesSmsModal(true);
+  };
+
   // Open Print Preview for currently open Sales Invoice without saving or changing values
   const handleOpenCurrentInvoicePreview = (format: 'a4' | '80mm' | '58mm' = 'a4') => {
     const activeLines = rows.filter((r) => isSalesRowPopulated(r));
@@ -1694,6 +1741,105 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setPrintInvoice(previewRecord);
   };
 
+  // Export Active Sales Invoice (or Saved Sales Invoices) to Formatted Multi-Sheet Excel (.xlsx)
+  const [exportingExcel, setExportingExcel] = useState<boolean>(false);
+
+  const handleExportCurrentSaleToExcel = async () => {
+    try {
+      setExportingExcel(true);
+      setErrorMsg(null);
+      const activeLines = rows.filter((r) => r.item_id !== null);
+      if (activeLines.length > 0) {
+        const currentRecord = {
+          id: editingSaleId || 0,
+          invoice_number: invoiceNumber,
+          invoice_date: invoiceDate,
+          customer_account_id: customerAccountId,
+          customer_code: selectedCustomer?.account_code || 'CUS-1001',
+          customer_name: selectedCustomer?.account_name || 'Walk-in Cash Customer',
+          customer_filer_status: customerFilerStatus,
+          salesman: salesman || 'Counter Pharmacist',
+          invoice_type: invoiceType,
+          payment_mode: paymentMode,
+          gross_amount: grossAmount,
+          item_discount_total: itemDiscountTotal,
+          invoice_discount_percent: invoiceDiscountPercent,
+          invoice_discount_amount: computedInvoiceDiscAmt,
+          discount_amount: round2(itemDiscountTotal + computedInvoiceDiscAmt),
+          taxable_amount: taxableAmount,
+          advance_tax_rate: effectiveAdvTaxRate,
+          advance_tax_amount: advanceTaxAmount,
+          tax_amount: totalTax,
+          net_total: netInvoiceAmount,
+          paid_amount: paidAmount,
+          balance_amount: remainingBalance,
+          status: editingSaleId ? 'completed' : 'draft',
+          remarks: remarks || '',
+          items: activeLines.map((r, idx) => ({
+            id: idx + 1,
+            item_id: Number(r.item_id || 0),
+            item_code: r.item_code,
+            company_name: r.company_name,
+            item_name: r.item_name,
+            packing: r.packing,
+            batch_number: r.batch_number,
+            expiry_date: r.expiry_date,
+            quantity: r.quantity,
+            loose_quantity: r.loose_quantity,
+            bonus_quantity: Number(r.bonus_quantity || 0),
+            unit_price: r.unit_price,
+            loose_rate: r.loose_rate,
+            discount_percent: r.discount_percent,
+            discount_amount: r.discount_amount,
+            tax_percent: r.tax_percent,
+            tax_amount: r.tax_amount,
+            gross_amount: r.gross_amount,
+            line_total: r.line_total,
+          })),
+        };
+        exportSalesInvoicesToExcel(
+          [currentRecord],
+          `Sales_Invoice_${invoiceNumber.replace(/[^a-zA-Z0-9_-]/g, '_')}.xlsx`
+        );
+        setSuccessMsg(`Exported Sales Invoice ${invoiceNumber} (${activeLines.length} items) to Excel (.xlsx).`);
+        return;
+      }
+
+      // If current form has no items yet, export all saved completed sales invoices from the database
+      const res = await api.getSales({ status: 'completed', exportAll: true });
+      const savedSales = res.data || [];
+      if (savedSales.length === 0) {
+        setErrorMsg('No items in the current invoice and no saved sales invoices found to export.');
+        return;
+      }
+      exportSalesInvoicesToExcel(savedSales, `Sales_Invoices_${invoiceDate}.xlsx`);
+      setSuccessMsg(`Exported ${savedSales.length} saved Sales Invoice(s) with all line items to Excel (.xlsx).`);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleExportAllSalesToExcel = async () => {
+    try {
+      setExportingExcel(true);
+      setErrorMsg(null);
+      const res = await api.getSales({ status: 'completed', exportAll: true });
+      const savedSales = res.data || [];
+      if (savedSales.length === 0) {
+        setErrorMsg('No saved sales invoices found in the database to export.');
+        return;
+      }
+      exportSalesInvoicesToExcel(savedSales, `Sales_Invoices_All_${invoiceDate}.xlsx`);
+      setSuccessMsg(`Exported ${savedSales.length} saved Sales Invoice(s) with all line items to Excel (.xlsx).`);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
   // Open Customer Shortcut Drawer
   const openCustomerShortcut = async (
     mode: 'ledger' | 'receive_payment' | 'add_customer' | 'account_details'
@@ -1781,21 +1927,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
-  // Column Widths for Microsoft Access-Style Resizable Datasheet Grid
+  // Column Widths for Microsoft Access-Style Resizable Datasheet Grid (Wider Full-Screen Defaults)
   const [colWidths, setColWidths] = useState<Record<string, number>>({
-    selector: 36,
-    item_code: 105,
-    company: 130,
-    item_name: 230,
-    quantity: 76,
-    discount: 84,
-    loose_quantity: 90,
-    unit_price: 92,
-    bonus_quantity: 76,
-    loose_rate: 92,
-    gross_amount: 105,
-    amount: 110,
-    actions: 92,
+    selector: 42,
+    item_code: 120,
+    company: 160,
+    item_name: 330,
+    quantity: 95,
+    discount: 98,
+    loose_quantity: 112,
+    unit_price: 112,
+    bonus_quantity: 95,
+    loose_rate: 112,
+    gross_amount: 130,
+    amount: 140,
+    actions: 115,
   });
 
   const handleColResizeMouseDown = (colKey: string, e: React.MouseEvent) => {
@@ -2388,7 +2534,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   };
 
   return (
-    <div className="ams-readable-invoice-scope flex-1 min-h-0 flex flex-col gap-1 overflow-y-auto" style={{ zoom: 1 }}>
+    <div className="ams-readable-invoice-scope w-full h-full flex-1 min-h-0 flex flex-col gap-1 overflow-y-auto px-1.5 py-1 bg-slate-100" style={{ zoom: 1 }}>
       {/* Status Banners */}
       {errorMsg && (
         <div className="px-2.5 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 flex flex-wrap items-center justify-between gap-2 text-xs shadow-sm shrink-0 mb-1">
@@ -2452,44 +2598,86 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         </div>
       )}
 
-      {/* ================= TOP INTERFACE SELECTOR BAR (POS VIEW vs MS ACCESS VIEW) ================= */}
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white rounded-xl border border-slate-700/80 shadow-md shrink-0 px-3 py-1 mb-1">
-        <div className="flex items-center gap-2.5">
-          <span className="text-[10px] font-black uppercase tracking-wider text-slate-300">
-            Sales Invoice Interface:
+      {/* ================= TOP FULL-SCREEN HEADER & INTERFACE SELECTOR BAR ================= */}
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white rounded-lg border border-slate-700/80 shadow-md shrink-0 px-3 py-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          {onBackToDashboard && (
+            <button
+              type="button"
+              onClick={onBackToDashboard}
+              className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
+              title="Return to Previous Dashboard / Menu"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Back to Dashboard</span>
+            </button>
+          )}
+          <span className="text-xs font-black uppercase tracking-wider text-emerald-400">
+            FULL-SCREEN SALES INVOICE
           </span>
           <div className="inline-flex rounded-lg p-0.5 bg-slate-800 border border-slate-700">
             <button
               type="button"
               onClick={() => toggleInvoiceViewMode('pos')}
-              className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer ${
+              className={`px-2.5 py-0.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
                 invoiceViewMode === 'pos'
                   ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
                   : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
               }`}
               title="Switch to Traditional Desktop POS Billing Interface"
             >
-              <ShoppingCart className="w-3 h-3" />
+              <ShoppingCart className="w-3.5 h-3.5" />
               <span>1. POS View</span>
             </button>
             <button
               type="button"
               onClick={() => toggleInvoiceViewMode('access')}
-              className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer ${
+              className={`px-2.5 py-0.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
                 invoiceViewMode === 'access'
                   ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-400'
                   : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
               }`}
               title="Switch to Microsoft Access-Style Desktop Datasheet Form"
             >
-              <FileSpreadsheet className="w-3 h-3" />
+              <FileSpreadsheet className="w-3.5 h-3.5" />
               <span>2. MS Access View</span>
             </button>
           </div>
+          {onNavigateToSalesHistory && (
+            <button
+              type="button"
+              onClick={onNavigateToSalesHistory}
+              className="px-2.5 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+              title="Open Sales Invoice Register & History"
+            >
+              <History className="w-3.5 h-3.5 text-amber-400" />
+              <span>Sales History</span>
+            </button>
+          )}
         </div>
-        <div className="flex items-center gap-2.5 text-[10px] text-slate-400">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+          <button
+            type="button"
+            disabled={exportingExcel}
+            onClick={handleExportCurrentSaleToExcel}
+            className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
+            title="Export Current Sales Invoice (or Saved Invoices) to Excel (.xlsx)"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>{exportingExcel ? 'Exporting...' : 'Export to Excel (.xlsx)'}</span>
+          </button>
+          <button
+            type="button"
+            disabled={exportingExcel}
+            onClick={handleExportAllSalesToExcel}
+            className="px-2.5 py-1 rounded-lg bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
+            title="Export All Saved Sales Invoices with Line Items to Excel (.xlsx)"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Export All Sales (.xlsx)</span>
+          </button>
           <label
-            className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-[11px] font-bold cursor-pointer transition-colors ${
+            className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-xs font-bold cursor-pointer transition-colors ${
               allowNegativeStock
                 ? 'bg-amber-500/20 border-amber-400/60 text-amber-300'
                 : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
@@ -2502,33 +2690,50 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               onChange={(e) => handleToggleNegativeStock(e.target.checked)}
               className="rounded-lg text-amber-500 focus:ring-0 cursor-pointer"
             />
-            <ShieldAlert className="w-3 h-3 text-amber-400 shrink-0" />
-            <span>Allow Negative Stock</span>
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>Allow Neg Stock</span>
           </label>
           <button
             type="button"
             onClick={() => handleOpenCurrentInvoicePreview('a4')}
-            className="px-2.5 py-0.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
+            className="px-2.5 py-0.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
             title="Print Preview for Currently Open Sales Invoice (A4 & Thermal)"
           >
-            <Eye className="w-3 h-3" />
+            <Eye className="w-3.5 h-3.5" />
             <span>Print Preview</span>
           </button>
           <button
             type="button"
             onClick={handleOpenDsrReport}
-            className="px-2.5 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
+            className="px-2.5 py-0.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
             title="Open DSR – Daily Stock Requisition Report for Current Invoice"
           >
-            <ClipboardList className="w-3 h-3" />
+            <ClipboardList className="w-3.5 h-3.5" />
             <span>DSR</span>
           </button>
+          <button
+            type="button"
+            onClick={handleOpenSalesSms}
+            className="px-2.5 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
+            title="Send Customer SMS for Current Sales Invoice"
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            <span>Send SMS</span>
+          </button>
           <span className="bg-slate-800 px-2 py-0.5 rounded-lg text-emerald-400 font-mono font-bold">
-            {rows.filter((r) => r.item_id).length} Active Items
+            {rows.filter((r) => r.item_id).length} Items
           </span>
-          <span className="text-slate-400 hidden sm:inline">
-            (Switching views never clears entered items or calculations)
-          </span>
+          {onBackToDashboard && (
+            <button
+              type="button"
+              onClick={onBackToDashboard}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-200 hover:text-white border border-slate-600 text-xs font-black flex items-center gap-1 cursor-pointer"
+              title="Close Full-Screen Invoice and Return to Dashboard"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Close</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -2637,6 +2842,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 >
                   <ClipboardList className="w-3 h-3" />
                   <span>DSR</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenSalesSms}
+                  className="px-2.5 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
+                  title="Send Customer SMS for Current Sales Invoice"
+                >
+                  <MessageSquare className="w-3 h-3" />
+                  <span>Send SMS</span>
                 </button>
                 <button
                   type="button"
@@ -3510,166 +3724,105 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           </div>
 
-          {/* POS Bottom Payment Section — Positioned Immediately Below Sales Items Grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-1.5 shrink-0">
-            {/* Left 7 cols: Quick Cash Tender & Live Change / Remaining */}
-            <div className="lg:col-span-7 bg-white rounded-lg border border-slate-200 px-2.5 py-1.5 shadow-sm space-y-1">
-              <div className="flex flex-wrap items-center justify-between gap-1.5 pb-1 border-b border-slate-100">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1">
-                  <Banknote className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Payment Settlement & Cash Tender</span>
-                  <span className="text-[10px] font-mono text-slate-500 ml-1">
-                    (Mode: <strong className="text-slate-800">{paymentMode}</strong>)
+          {/* Full-Width POS Bottom Totals & Payment Action Bar (No Cramped Side-by-Side Split) */}
+          <div className="w-full bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 text-white rounded-xl border border-slate-700 px-3.5 py-2 shadow-lg shrink-0 space-y-2">
+            {/* Row 1: Full-Width Financial Totals & Quick Cash Tender */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-2">
+              <div className="flex flex-wrap items-center gap-4 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-semibold">Gross:</span>
+                  <span className="font-mono font-bold text-white">{formatPKR(grossAmount)}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-rose-400 font-semibold">Discounts:</span>
+                  <span className="font-mono font-bold text-rose-300">
+                    -{formatPKR(itemDiscountTotal + computedInvoiceDiscAmt)}
                   </span>
-                </span>
-
-                {/* Quick Cash Buttons Inline */}
-                <div className="flex flex-wrap items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={handleExactCash}
-                    className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-[10px] font-black cursor-pointer shadow-sm"
-                  >
-                    Exact Amount
-                  </button>
-                  {[100, 500, 1000, 5000].map((amt) => (
-                    <button
-                      key={amt}
-                      type="button"
-                      onClick={() => handleQuickCash(amt)}
-                      className="px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 font-mono text-[10px] font-bold text-slate-800 cursor-pointer"
-                    >
-                      Rs. {amt}
-                    </button>
-                  ))}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-semibold">Bill Disc %:</span>
+                  <NumericInput
+                    value={invoiceDiscountPercent}
+                    onChange={(e) => setInvoiceDiscountPercent(Math.max(0, Number(e.target.value || 0)))}
+                    className="w-16 px-1.5 py-0.5 rounded-lg bg-slate-800 border border-slate-600 font-mono text-xs text-white text-right"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-semibold">Prev Ledger ({prevBalanceType}):</span>
+                  <span className="font-mono font-bold text-amber-300">{formatPKR(prevCustomerBalance)}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-400 font-semibold">Tax / Deliv:</span>
+                  <span className="font-mono font-bold text-amber-300">
+                    +{formatPKR(advanceTaxAmount + deliveryCharges)}
+                  </span>
                 </div>
               </div>
 
-              {/* Amount Received Input & Live Balance */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center">
-                <div className="flex items-center gap-2">
-                  <label className="text-[11px] font-bold text-slate-700 whitespace-nowrap">
-                    Received (PKR):
-                  </label>
+              {/* Highlighted Net Total, Received & Balance */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="px-3 py-1 rounded-lg bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-2">
+                  <span className="text-xs font-black uppercase text-emerald-300">Net Total:</span>
+                  <span className="font-mono text-lg font-black text-emerald-300 ams-total-highlight">
+                    {formatPKR(netInvoiceAmount)}
+                  </span>
+                </div>
+                <div className="px-3 py-1 rounded-lg bg-sky-500/15 border border-sky-400/40 flex items-center gap-2">
+                  <span className="text-xs font-black uppercase text-sky-300">Receivable:</span>
+                  <span className="font-mono text-lg font-black text-sky-300 ams-total-highlight">
+                    {formatPKR(totalReceivable)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-lg border border-emerald-500">
+                  <span className="text-xs font-bold text-emerald-300 whitespace-nowrap">Paid:</span>
                   <NumericInput
                     value={paidAmountInput}
                     onChange={(e) => {
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
                     }}
-                    className="w-full px-2.5 py-1 rounded-lg border-2 border-emerald-500 text-sm font-mono font-black text-emerald-950 bg-emerald-50/20 text-right outline-none h-7"
+                    className="w-28 px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono font-black text-white text-right outline-none"
                   />
+                  <button
+                    type="button"
+                    onClick={handleExactCash}
+                    className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold cursor-pointer"
+                  >
+                    Exact
+                  </button>
                 </div>
-
-                {/* High Contrast Live Change / Remaining Banner */}
                 <div
-                  className={`px-2.5 py-1 rounded-lg border flex items-center justify-between ${
+                  className={`px-3 py-1 rounded-lg border flex items-center gap-2 ${
                     paidAmount >= totalReceivable
-                      ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
-                      : 'bg-amber-50 border-amber-300 text-amber-950'
+                      ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300'
+                      : 'bg-amber-950/80 border-amber-500/60 text-amber-300'
                   }`}
                 >
-                  <span className="text-[10px] font-bold uppercase tracking-wider">
-                    {paidAmount >= totalReceivable ? 'Change to Return:' : 'Remaining Balance:'}
+                  <span className="text-xs font-bold uppercase">
+                    {paidAmount >= totalReceivable ? 'Change:' : 'Balance:'}
                   </span>
-                  <span className="text-sm font-mono font-black">
+                  <span className="font-mono text-lg font-black ams-total-highlight">
                     {formatPKR(Math.abs(paidAmount - totalReceivable))}
                   </span>
                 </div>
               </div>
-
-              {/* Extra Discounts & Notes */}
-              <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-100 text-[11px]">
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] font-bold text-slate-600 uppercase whitespace-nowrap">
-                    Bill Disc %:
-                  </label>
-                  <NumericInput
-                    value={invoiceDiscountPercent}
-                    onChange={(e) => setInvoiceDiscountPercent(Math.max(0, Number(e.target.value || 0)))}
-                    className="w-full px-1.5 py-0.5 rounded-lg border border-slate-200 font-mono text-[11px] h-5 text-right"
-                  />
-                </div>
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] font-bold text-slate-600 uppercase whitespace-nowrap">
-                    Auth By:
-                  </label>
-                  <input
-                    type="text"
-                    value={discountOverrideBy}
-                    onChange={(e) => setDiscountOverrideBy(e.target.value)}
-                    placeholder="Pharmacist"
-                    className="w-full px-1.5 py-0.5 rounded-lg border border-slate-200 text-[11px] h-5"
-                  />
-                </div>
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] font-bold text-slate-600 uppercase whitespace-nowrap">
-                    Deliv Note:
-                  </label>
-                  <input
-                    type="text"
-                    value={deliveryNotes}
-                    onChange={(e) => setDeliveryNotes(e.target.value)}
-                    placeholder="Rider notes..."
-                    className="w-full px-1.5 py-0.5 rounded-lg border border-slate-200 text-[11px] h-5"
-                  />
-                </div>
-              </div>
             </div>
 
-            {/* Right 5 cols: Invoice Totals & Large Action Buttons */}
-            <div className="lg:col-span-5 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-800 text-white rounded-2xl px-4 py-2.5 shadow-lg ring-1 ring-white/5 flex flex-col justify-between gap-1.5">
-              <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-                <div className="flex justify-between text-slate-400">
-                  <span>Gross Subtotal:</span>
-                  <span className="font-mono font-bold text-slate-200">{formatPKR(grossAmount)}</span>
-                </div>
-                <div className="flex justify-between text-rose-400">
-                  <span>Total Discounts:</span>
-                  <span className="font-mono font-bold">-{formatPKR(itemDiscountTotal + computedInvoiceDiscAmt)}</span>
-                </div>
-                <div className="flex justify-between text-slate-300">
-                  <span>Prev Ledger ({prevBalanceType}):</span>
-                  <span className="font-mono font-semibold text-amber-300">
-                    {formatPKR(prevCustomerBalance)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-slate-300">
-                  <span>Adv Tax / Deliv:</span>
-                  <span className="font-mono font-bold text-amber-300">
-                    +{formatPKR(advanceTaxAmount + deliveryCharges)}
-                  </span>
-                </div>
-                <div className="flex justify-between border-t border-slate-800 pt-0.5 items-baseline">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                    Net Invoice:
-                  </span>
-                  <span className="text-lg font-mono font-black text-emerald-400">
-                    {formatPKR(netInvoiceAmount)}
-                  </span>
-                </div>
-                <div className="flex justify-between border-t border-slate-800 pt-0.5 items-baseline">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-sky-300">
-                    Total Receivable:
-                  </span>
-                  <span className="font-mono text-lg font-black text-sky-300">{formatPKR(totalReceivable)}</span>
-                </div>
-              </div>
-
-              {/* Clearly accessible Save and Print Actions */}
-              <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-1">
+            {/* Row 2: Full-Width Primary Action Buttons */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed')}
-                  className={`flex-1 py-2.5 px-3 rounded-xl ${
+                  className={`py-1.5 px-4 rounded-xl ${
                     editingSaleId
-                      ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 shadow-amber-900/30'
-                      : 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 shadow-emerald-900/30'
-                  } text-white font-black text-[13px] shadow-lg transition-all active:scale-[0.98] flex items-center justify-center gap-1 cursor-pointer shadow-xs`}
+                      ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500'
+                      : 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500'
+                  } text-white font-black text-sm shadow-md flex items-center gap-1.5 cursor-pointer`}
                   title={editingSaleId ? 'Update & Save Invoice (F2)' : 'Complete & Save Invoice (F2)'}
                 >
-                  <Save className="w-3.5 h-3.5" />
+                  <Save className="w-4 h-4" />
                   <span>{editingSaleId ? 'Update Invoice (F2)' : 'Save Invoice (F2)'}</span>
                 </button>
 
@@ -3677,21 +3830,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', 'a4')}
-                  className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer border border-slate-700"
+                  className="py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-slate-600"
                   title="Save & Print A4 Invoice (Ctrl+P)"
                 >
-                  <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Print A4</span>
+                  <Printer className="w-4 h-4 text-emerald-400" />
+                  <span>Save &amp; Print A4</span>
                 </button>
 
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', '80mm')}
-                  className="py-1.5 px-2 rounded-lg bg-teal-800 hover:bg-teal-700 text-teal-100 font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer"
-                  title="Print 80mm Thermal Receipt"
+                  className="py-1.5 px-2.5 rounded-lg bg-teal-800 hover:bg-teal-700 text-teal-100 font-bold text-xs flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3 h-3 text-teal-300" />
+                  <Printer className="w-3.5 h-3.5 text-teal-300" />
                   <span>80mm</span>
                 </button>
 
@@ -3699,29 +3851,37 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', '58mm')}
-                  className="py-1.5 px-2 rounded-lg bg-amber-800 hover:bg-amber-700 text-amber-100 font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer"
-                  title="Print 58mm Thermal Receipt"
+                  className="py-1.5 px-2.5 rounded-lg bg-amber-800 hover:bg-amber-700 text-amber-100 font-bold text-xs flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3 h-3 text-amber-300" />
+                  <Printer className="w-3.5 h-3.5 text-amber-300" />
                   <span>58mm</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={exportingExcel}
+                  onClick={handleExportCurrentSaleToExcel}
+                  className="py-1.5 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-emerald-500/60"
+                  title="Export Sales Invoice to Excel (.xlsx)"
+                >
+                  <Download className="w-4 h-4 text-emerald-200" />
+                  <span>Export to Excel</span>
                 </button>
 
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('held')}
-                  className="py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer border border-slate-700"
-                  title="Hold Bill (F3)"
+                  className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs flex items-center gap-1 cursor-pointer border border-slate-600"
                 >
-                  <PauseCircle className="w-3 h-3 text-amber-400" />
+                  <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
                   <span>Hold</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                  className="py-1.5 px-2.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer border border-sky-500/50"
-                  title="Print Preview for Current Sales Invoice (A4 & Thermal)"
+                  className="py-1.5 px-2.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-sky-500/50"
                 >
                   <Eye className="w-3.5 h-3.5 text-sky-200" />
                   <span>Print Preview</span>
@@ -3730,13 +3890,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 <button
                   type="button"
                   onClick={handleOpenDsrReport}
-                  className="py-1.5 px-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer border border-emerald-500/50"
-                  title="Open DSR – Daily Stock Requisition Report"
+                  className="py-1.5 px-2.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-emerald-500/50"
                 >
                   <ClipboardList className="w-3.5 h-3.5 text-emerald-200" />
                   <span>DSR</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handleOpenSalesSms}
+                  className="py-1.5 px-3 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-indigo-500/60"
+                  title="Send Customer SMS for Current Sales Invoice"
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-indigo-200" />
+                  <span>Send SMS</span>
+                </button>
               </div>
+
+              {onBackToDashboard && (
+                <button
+                  type="button"
+                  onClick={onBackToDashboard}
+                  className="py-1.5 px-3 rounded-lg bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back / Close</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -3852,6 +4032,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               >
                 <ClipboardList className="w-3 h-3 text-emerald-200" />
                 DSR
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenSalesSms}
+                className="px-2 py-0.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white border border-indigo-500 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                title="Send Customer SMS for Current Sales Invoice"
+              >
+                <MessageSquare className="w-3 h-3 text-indigo-200" />
+                Send SMS
               </button>
               <button
                 type="button"
@@ -4918,19 +5107,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           )}
 
-          {/* ================= 4. COMPACT DESKTOP CALCULATION & ACTION FOOTER ================= */}
-          <div className="p-1 bg-slate-200 grid grid-cols-12 gap-1 items-stretch text-[11px] shrink-0">
-            {/* Col 1 & 2: Financial Account, Notes, Override, Primary Actions */}
-            <div className="col-span-7 bg-slate-100 rounded-lg border border-slate-300 px-2 py-0.5 flex flex-col justify-between gap-0.5">
-              <div className="grid grid-cols-12 gap-1 items-center">
-                <div className="col-span-4 flex items-center gap-1">
-                  <label className="text-[9px] font-bold uppercase text-slate-600 whitespace-nowrap">
-                    A/C:
-                  </label>
+          {/* ================= 4. FULL-WIDTH DESKTOP CALCULATION & ACTION FOOTER (NO SIDE-BY-SIDE SPLIT) ================= */}
+          <div className="p-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1.5 shrink-0">
+            {/* Row 1: Full-Width Totals, Discounts, Paid Amount & Balance */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-1.5">
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">A/C:</span>
                   <select
                     value={paymentAccountId || ''}
                     onChange={(e) => setPaymentAccountId(Number(e.target.value))}
-                    className="w-full px-1 py-0 rounded-lg border border-slate-300 bg-white font-semibold text-[10px] h-5"
+                    className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-white font-semibold text-xs"
                   >
                     {financialAccounts.map((fa) => (
                       <option key={fa.id} value={fa.id}>
@@ -4939,204 +5126,184 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     ))}
                   </select>
                 </div>
-                <div className="col-span-3 flex items-center gap-1">
-                  <label className="text-[9px] font-bold uppercase text-slate-600 whitespace-nowrap">
-                    Auth:
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Override by..."
-                    value={discountOverrideBy}
-                    onChange={(e) => setDiscountOverrideBy(e.target.value)}
-                    className="w-full px-1 py-0 rounded-lg border border-slate-300 bg-white text-[10px] h-5"
-                  />
-                </div>
-                <div className="col-span-2 flex items-center gap-1">
-                  <label className="text-[9px] font-bold uppercase text-slate-600 whitespace-nowrap">
-                    Deliv:
-                  </label>
-                  <NumericInput
-                    value={deliveryCharges}
-                    onChange={(e) => setDeliveryCharges(Math.max(0, Number(e.target.value || 0)))}
-                    className="w-full px-1 py-0 rounded-lg border border-slate-300 font-mono bg-white text-[10px] h-5 text-right"
-                  />
-                </div>
-                <div className="col-span-3 flex items-center gap-1">
-                  <label className="text-[9px] font-bold uppercase text-slate-600 whitespace-nowrap">
-                    Notes:
-                  </label>
-                  <input
-                    type="text"
-                    value={remarks}
-                    onChange={(e) => setRemarks(e.target.value)}
-                    placeholder="Rx / Patient note..."
-                    className="w-full px-1 py-0 rounded-lg border border-slate-300 bg-white text-[10px] h-5"
-                  />
-                </div>
-              </div>
-
-              {/* Action Buttons Bar */}
-              <div className="pt-0.5 border-t border-slate-200 flex flex-wrap items-center gap-1">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed')}
-                  className={`px-2 py-0.5 rounded-lg ${
-                    editingSaleId ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-700 hover:bg-emerald-800'
-                  } text-white text-[10px] font-black flex items-center gap-1 cursor-pointer shadow-sm`}
-                  title={editingSaleId ? 'Update & Save Changes (F2)' : 'Save Invoice (F2)'}
-                >
-                  <Save className="w-3 h-3" />
-                  {editingSaleId ? 'Update (F2)' : 'Save (F2)'}
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed', 'a4')}
-                  className="px-2 py-0.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Save & Print A4 (Ctrl+P)"
-                >
-                  <Printer className="w-3 h-3 text-emerald-400" />
-                  A4 Print
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed', '80mm')}
-                  className="px-1.5 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Print 80mm"
-                >
-                  <Printer className="w-3 h-3 text-teal-400" />
-                  80mm
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed', '58mm')}
-                  className="px-1.5 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Print 58mm"
-                >
-                  <Printer className="w-3 h-3 text-amber-400" />
-                  58mm
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('held')}
-                  className="px-1.5 py-0.5 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <PauseCircle className="w-3 h-3 text-amber-700" />
-                  Hold (F3)
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('draft')}
-                  className="px-1.5 py-0.5 rounded-lg bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <Save className="w-3 h-3" />
-                  Draft
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                  className="px-2 py-0.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Print Preview for Current Sales Invoice (A4 & Thermal)"
-                >
-                  <Eye className="w-3 h-3 text-sky-200" />
-                  Print Preview
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenDsrReport}
-                  className="px-2 py-0.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Open DSR – Daily Stock Requisition Report"
-                >
-                  <ClipboardList className="w-3 h-3 text-emerald-200" />
-                  DSR
-                </button>
-                <button
-                  type="button"
-                  onClick={handleReprintLastInvoice}
-                  className="px-1.5 py-0.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <Printer className="w-3 h-3 text-blue-600" />
-                  Reprint
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowDiscardConfirm(true)}
-                  className="px-1.5 py-0.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[10px] font-bold flex items-center gap-1 cursor-pointer ml-auto"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  Discard
-                </button>
-              </div>
-            </div>
-
-            {/* Col 3 & 4: Ultra-Compact Bill Calculations & Ledger Summary */}
-            <div className="col-span-5 bg-slate-900 text-white rounded-lg px-2 py-0.5 shadow-sm text-[10px] flex flex-col justify-between gap-0.5">
-              {/* Top line: Gross, Disc %, Adv Tax, Net Invoice */}
-              <div className="grid grid-cols-2 gap-x-2 gap-y-0 items-center border-b border-slate-800 pb-0.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[9px]">Gross ({validRows.length}):</span>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Gross ({validRows.length}):</span>
                   <span className="font-mono font-bold text-white">{formatPKR(grossAmount)}</span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[9px]">Prev Ledger:</span>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Inv Disc:</span>
+                  <NumericInput
+                    value={invoiceDiscountPercent}
+                    onChange={(e) => {
+                      const pct = Math.max(0, Math.min(100, Number(e.target.value || 0)));
+                      setInvoiceDiscountPercent(pct);
+                      setInvoiceDiscountAmount(round2((subtotalAfterItemDisc * pct) / 100));
+                    }}
+                    className="w-14 px-1 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-xs text-right text-white"
+                    placeholder="%"
+                  />
+                  <NumericInput
+                    value={invoiceDiscountAmount}
+                    onChange={(e) => {
+                      setInvoiceDiscountPercent(0);
+                      setInvoiceDiscountAmount(Math.max(0, Number(e.target.value || 0)));
+                    }}
+                    className="w-20 px-1 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-xs text-right text-white"
+                    placeholder="PKR"
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Prev Ledger:</span>
                   <span className="font-mono font-semibold text-amber-300">{formatPKR(prevCustomerBalance)}</span>
-                </div>
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-slate-400 text-[9px]">Inv Disc:</span>
-                  <div className="flex items-center gap-1">
-                    <NumericInput
-                      value={invoiceDiscountPercent}
-                      onChange={(e) => {
-                        const pct = Math.max(0, Math.min(100, Number(e.target.value || 0)));
-                        setInvoiceDiscountPercent(pct);
-                        setInvoiceDiscountAmount(round2((subtotalAfterItemDisc * pct) / 100));
-                      }}
-                      className="w-10 px-1 py-0 rounded-lg bg-slate-800 border border-slate-700 font-mono text-[9px] text-right h-4"
-                      placeholder="%"
-                    />
-                    <NumericInput
-                      value={invoiceDiscountAmount}
-                      onChange={(e) => {
-                        setInvoiceDiscountPercent(0);
-                        setInvoiceDiscountAmount(Math.max(0, Number(e.target.value || 0)));
-                      }}
-                      className="w-14 px-1 py-0 rounded-lg bg-slate-800 border border-slate-700 font-mono text-[9px] text-right h-4"
-                      placeholder="PKR"
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 text-[9px]">Total Rec:</span>
-                  <span className="font-mono font-bold text-white">{formatPKR(totalReceivable)}</span>
                 </div>
               </div>
 
-              {/* Bottom line: Net Invoice, Amount Received & Remaining Balance */}
-              <div className="grid grid-cols-3 gap-1.5 items-center">
-                <div>
-                  <span className="text-[8px] uppercase font-bold text-emerald-400 block leading-none">Net Invoice</span>
-                  <span className="font-mono text-xs font-black text-emerald-300">{formatPKR(netInvoiceAmount)}</span>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="px-2.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1.5">
+                  <span className="text-xs uppercase font-bold text-emerald-300">Net Invoice:</span>
+                  <span className="font-mono text-base font-black text-emerald-300 ams-total-highlight">
+                    {formatPKR(netInvoiceAmount)}
+                  </span>
+                </div>
+                <div className="px-2.5 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1.5">
+                  <span className="text-xs uppercase font-bold text-sky-300">Total Rec:</span>
+                  <span className="font-mono text-base font-black text-sky-300 ams-total-highlight">
+                    {formatPKR(totalReceivable)}
+                  </span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-[8px] uppercase font-bold text-slate-300 whitespace-nowrap">Rec:</span>
+                  <span className="text-xs uppercase font-bold text-slate-300">Paid:</span>
                   <NumericInput
                     value={paidAmountInput}
                     onChange={(e) => {
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
                     }}
-                    className="w-full px-1 py-0 rounded-lg bg-slate-800 border border-emerald-500 text-right font-mono font-bold text-emerald-300 text-[11px] h-5"
+                    className="w-24 px-1.5 py-0.5 rounded bg-slate-800 border border-emerald-500 text-right font-mono font-bold text-emerald-300 text-xs"
                   />
                 </div>
-                <div className="text-right">
-                  <span className="text-[8px] uppercase font-bold text-amber-300 block leading-none">Remaining Bal</span>
-                  <span className="font-mono text-xs font-black text-amber-300">{formatPKR(remainingBalance)}</span>
+                <div className="px-2.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1.5">
+                  <span className="text-xs uppercase font-bold text-amber-300">Balance:</span>
+                  <span className="font-mono text-base font-black text-amber-300 ams-total-highlight">
+                    {formatPKR(remainingBalance)}
+                  </span>
                 </div>
+              </div>
+            </div>
+
+            {/* Row 2: Full-Width Action Buttons Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleSaveInvoice('completed')}
+                  className={`px-3.5 py-1 rounded-lg ${
+                    editingSaleId ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'
+                  } text-white text-xs font-black flex items-center gap-1 cursor-pointer shadow-sm`}
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {editingSaleId ? 'Update (F2)' : 'Save Invoice (F2)'}
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleSaveInvoice('completed', 'a4')}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                  A4 Print
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleSaveInvoice('completed', '80mm')}
+                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-teal-400" />
+                  80mm
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleSaveInvoice('completed', '58mm')}
+                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-amber-400" />
+                  58mm
+                </button>
+                <button
+                  type="button"
+                  disabled={exportingExcel}
+                  onClick={handleExportCurrentSaleToExcel}
+                  className="px-3 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  title="Export Sales Invoice to Excel (.xlsx)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Export Excel
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleSaveInvoice('held')}
+                  className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <PauseCircle className="w-3.5 h-3.5" />
+                  Hold (F3)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenCurrentInvoicePreview('a4')}
+                  className="px-2.5 py-1 rounded-lg bg-sky-700 hover:bg-sky-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Eye className="w-3.5 h-3.5 text-sky-200" />
+                  Print Preview
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenDsrReport}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <ClipboardList className="w-3.5 h-3.5 text-emerald-200" />
+                  DSR
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenSalesSms}
+                  className="px-2.5 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  title="Send Customer SMS for Current Sales Invoice"
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-indigo-200" />
+                  Send SMS
+                </button>
+                <button
+                  type="button"
+                  onClick={handleReprintLastInvoice}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Reprint
+                </button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowDiscardConfirm(true)}
+                  className="px-2.5 py-1 rounded-lg bg-rose-900/80 hover:bg-rose-800 text-rose-200 border border-rose-700 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Discard
+                </button>
+                {onBackToDashboard && (
+                  <button
+                    type="button"
+                    onClick={onBackToDashboard}
+                    className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    Back / Close
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -5807,6 +5974,24 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           isSavedInvoice={Boolean(editingSaleId)}
           rows={rows}
           catalogItems={catalogItems}
+        />
+      )}
+
+      {/* ================= MODAL 7: SEND CUSTOMER SMS ================= */}
+      {showSalesSmsModal && (
+        <InvoiceSmsModal
+          isOpen={showSalesSmsModal}
+          mode="sales"
+          title="Send SMS — Sales Invoice"
+          initialPhone={salesSmsPhone}
+          isPhoneFromAccounts={Boolean(salesSmsPhone)}
+          customerLabel={
+            customerAccountId > 0
+              ? selectedCustomer?.account_name || 'Walk-in Cash Customer'
+              : 'Walk-in Cash Customer'
+          }
+          initialMessage={salesSmsText}
+          onClose={() => setShowSalesSmsModal(false)}
         />
       )}
     </div>

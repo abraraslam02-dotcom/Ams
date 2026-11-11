@@ -6,8 +6,7 @@ import type { SafeUser, ModulePermission } from '../services/authService.ts';
 declare global {
   namespace Express {
     interface Request {
-      user?: any;
-      firebaseUser?: any;
+      user?: SafeUser;
       permissions?: Record<string, ModulePermission>;
       sessionToken?: string;
     }
@@ -35,60 +34,348 @@ function extractToken(req: Request): string | null {
   return null;
 }
 
-function extractDeviceId(req: Request): string | null {
-  const headerVal = req.headers['x-device-id'];
-  if (typeof headerVal === 'string' && headerVal.trim()) {
-    return headerVal.trim();
-  }
-  return null;
-}
-
 /**
- * Direct Access Middleware: No login or authentication required
+ * Express middleware requiring active, non-expired session
  */
-export function authenticateToken(req: AuthenticatedRequest, _res: Response, next: NextFunction) {
-  req.user = {
-    id: 1,
-    username: 'admin',
-    full_name: 'Store Operator',
-    role: 'Super Admin',
-  } as any;
-  req.permissions = {};
-  return next();
+export function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const token = extractToken(req);
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      error: 'Authentication required. Please log in to continue.',
+      code: 'UNAUTHORIZED',
+    });
+  }
+
+  try {
+    const db = getDatabase();
+    const result = validateSession(db, token);
+
+    if (!result.valid || !result.user) {
+      return res.status(401).json({
+        success: false,
+        error: result.reason || 'Session expired or invalid. Please log in again.',
+        code: result.code || 'SESSION_EXPIRED',
+      });
+    }
+
+    req.user = result.user;
+    req.permissions = result.permissions;
+    req.sessionToken = token;
+    return next();
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({
+      success: false,
+      error: `Authentication verification error: ${errorMsg}`,
+      code: 'AUTH_ERROR',
+    });
+  }
 }
 
 /**
- * Optional auth pass-through
+ * Optional authentication: attaches user if token valid, but does not block
  */
 export function optionalAuth(req: AuthenticatedRequest, _res: Response, next: NextFunction) {
-  req.user = { id: 1, username: 'admin', full_name: 'Store Operator', role: 'Super Admin' } as any;
+  const token = extractToken(req);
+  if (!token) {
+    return next();
+  }
+
+  try {
+    const db = getDatabase();
+    const result = validateSession(db, token);
+    if (result.valid && result.user) {
+      req.user = result.user;
+      req.permissions = result.permissions;
+      req.sessionToken = token;
+    }
+  } catch {
+    // Ignore in optional auth
+  }
   return next();
 }
 
 /**
- * Middleware requiring specific role(s) - direct pass-through
+ * Middleware requiring specific role(s) (e.g. ['Super Admin'])
  */
-export function requireRole(_allowedRoles: string[]) {
-  return (_req: AuthenticatedRequest, _res: Response, next: NextFunction) => next();
+export function requireRole(allowedRoles: string[]) {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'UNAUTHORIZED',
+      });
+    }
+
+    // Super Admin has unrestricted authority across the entire ERP
+    if (req.user.role === 'Super Admin') {
+      return next();
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      try {
+        const db = getDatabase();
+        logAuditEvent(db, {
+          userId: req.user.id,
+          username: req.user.username,
+          action: 'UNAUTHORIZED_ROLE_ACCESS_BLOCKED',
+          status: 'WARNING',
+          ipAddress: req.socket.remoteAddress || '127.0.0.1',
+          userAgent: (req.headers['user-agent'] as string) || 'Unknown',
+          details: `Role '${req.user.role}' blocked from ${req.method} ${req.originalUrl} (requires ${allowedRoles.join(', ')})`,
+        });
+      } catch {
+        // Ignore audit log failure
+      }
+
+      return res.status(403).json({
+        success: false,
+        error: `Access denied. Requires one of: ${allowedRoles.join(', ')}`,
+        code: 'FORBIDDEN',
+      });
+    }
+
+    return next();
+  };
 }
 
 /**
- * Middleware requiring specific module action permission - direct pass-through
+ * Middleware requiring specific individual module permission
  */
 export function requirePermission(
-  _moduleKey: string,
-  _action: 'view' | 'create' | 'edit' | 'delete' | 'export'
+  moduleKey: string,
+  action: 'view' | 'create' | 'edit' | 'delete' | 'print' | 'export'
 ) {
-  return (_req: AuthenticatedRequest, _res: Response, next: NextFunction) => next();
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'UNAUTHORIZED',
+      });
+    }
+
+    // Super Admin has unrestricted permissions
+    if (req.user.role === 'Super Admin') {
+      return next();
+    }
+
+    const perm = req.permissions?.[moduleKey];
+    const flagKey = `can_${action}` as keyof ModulePermission;
+
+    if (!perm || !perm[flagKey]) {
+      try {
+        const db = getDatabase();
+        logAuditEvent(db, {
+          userId: req.user.id,
+          username: req.user.username,
+          action: 'PERMISSION_DENIED',
+          status: 'WARNING',
+          ipAddress: req.socket.remoteAddress || '127.0.0.1',
+          userAgent: (req.headers['user-agent'] as string) || 'Unknown',
+          details: `User @${req.user.username} (${req.user.role}) denied '${action}' on '${moduleKey}' (${req.method} ${req.originalUrl})`,
+        });
+      } catch {
+        // Ignore
+      }
+
+      return res.status(403).json({
+        success: false,
+        error: `Permission denied: You do not have '${action}' permission on module '${moduleKey}'.`,
+        code: 'INSUFFICIENT_PERMISSIONS',
+      });
+    }
+
+    return next();
+  };
 }
 
 /**
- * Route-aware RBAC enforcement middleware - direct pass-through
+ * Helper to check permissions
  */
-export function enforceModulePermissions(
-  _domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting'
-) {
-  return (_req: AuthenticatedRequest, _res: Response, next: NextFunction) => next();
+function hasAnyPerm(
+  permissions: Record<string, ModulePermission> | undefined,
+  checks: Array<{ mod: string; action: 'view' | 'create' | 'edit' | 'delete' | 'print' | 'export' }>
+): boolean {
+  if (!permissions) return false;
+  return checks.some(({ mod, action }) => {
+    const p = permissions[mod];
+    if (!p) return false;
+    const key = `can_${action}` as keyof ModulePermission;
+    return Boolean(p[key]);
+  });
 }
 
+/**
+ * Route-aware RBAC enforcement for domain routers
+ */
+export function enforceModulePermissions(
+  domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting' | 'settings' | 'users'
+) {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+        code: 'UNAUTHORIZED',
+      });
+    }
 
+    // Super Admin always has full access
+    if (req.user.role === 'Super Admin') {
+      return next();
+    }
+
+    const method = req.method.toUpperCase();
+    const perms = req.permissions;
+
+    let allowed = false;
+    let requiredDesc = `${domain}`;
+
+    if (domain === 'users') {
+      // User management is strictly Super Admin only
+      allowed = req.user.role === 'Super Admin';
+      requiredDesc = 'users:manage';
+    } else if (domain === 'settings') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [{ mod: 'settings', action: 'view' }]);
+        requiredDesc = 'settings:view';
+      } else {
+        // Modifying settings requires Super Admin or settings:edit
+        allowed = req.user.role === 'Super Admin' || hasAnyPerm(perms, [{ mod: 'settings', action: 'edit' }]);
+        requiredDesc = 'settings:edit';
+      }
+    } else if (domain === 'items') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'items', action: 'view' },
+          { mod: 'sales', action: 'view' },
+          { mod: 'purchases', action: 'view' },
+        ]);
+        requiredDesc = 'items:view';
+      } else if (method === 'POST') {
+        allowed = hasAnyPerm(perms, [{ mod: 'items', action: 'create' }]);
+        requiredDesc = 'items:create';
+      } else if (method === 'PUT' || method === 'PATCH') {
+        allowed = hasAnyPerm(perms, [{ mod: 'items', action: 'edit' }]);
+        requiredDesc = 'items:edit';
+      } else if (method === 'DELETE') {
+        allowed = hasAnyPerm(perms, [{ mod: 'items', action: 'delete' }]);
+        requiredDesc = 'items:delete';
+      }
+    } else if (domain === 'accounts') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'accounts', action: 'view' },
+          { mod: 'sales', action: 'view' },
+          { mod: 'purchases', action: 'view' },
+        ]);
+        requiredDesc = 'accounts:view';
+      } else if (method === 'POST') {
+        allowed = hasAnyPerm(perms, [{ mod: 'accounts', action: 'create' }]);
+        requiredDesc = 'accounts:create';
+      } else if (method === 'PUT' || method === 'PATCH') {
+        allowed = hasAnyPerm(perms, [{ mod: 'accounts', action: 'edit' }]);
+        requiredDesc = 'accounts:edit';
+      } else if (method === 'DELETE') {
+        allowed = hasAnyPerm(perms, [{ mod: 'accounts', action: 'delete' }]);
+        requiredDesc = 'accounts:delete';
+      }
+    } else if (domain === 'sales') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'sales', action: 'view' },
+          { mod: 'sale_returns', action: 'view' },
+          { mod: 'reports', action: 'view' },
+        ]);
+        requiredDesc = 'sales:view';
+      } else if (method === 'POST') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'sales', action: 'create' },
+          { mod: 'sale_returns', action: 'create' },
+        ]);
+        requiredDesc = 'sales:create';
+      } else if (method === 'PUT' || method === 'PATCH') {
+        allowed = hasAnyPerm(perms, [{ mod: 'sales', action: 'edit' }]);
+        requiredDesc = 'sales:edit';
+      } else if (method === 'DELETE') {
+        allowed = hasAnyPerm(perms, [{ mod: 'sales', action: 'delete' }]);
+        requiredDesc = 'sales:delete';
+      }
+    } else if (domain === 'purchases') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'purchases', action: 'view' },
+          { mod: 'purchase_returns', action: 'view' },
+          { mod: 'reports', action: 'view' },
+        ]);
+        requiredDesc = 'purchases:view';
+      } else if (method === 'POST') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'purchases', action: 'create' },
+          { mod: 'purchase_returns', action: 'create' },
+        ]);
+        requiredDesc = 'purchases:create';
+      } else if (method === 'PUT' || method === 'PATCH') {
+        allowed = hasAnyPerm(perms, [{ mod: 'purchases', action: 'edit' }]);
+        requiredDesc = 'purchases:edit';
+      } else if (method === 'DELETE') {
+        allowed = hasAnyPerm(perms, [{ mod: 'purchases', action: 'delete' }]);
+        requiredDesc = 'purchases:delete';
+      }
+    } else if (domain === 'inventory') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [{ mod: 'items', action: 'view' }]);
+        requiredDesc = 'inventory:view';
+      } else {
+        allowed = hasAnyPerm(perms, [{ mod: 'items', action: 'create' }, { mod: 'items', action: 'edit' }]);
+        requiredDesc = 'inventory:edit';
+      }
+    } else if (domain === 'accounting') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'accounts', action: 'view' },
+          { mod: 'cashbook', action: 'view' },
+          { mod: 'expenses', action: 'view' },
+          { mod: 'reports', action: 'view' },
+        ]);
+        requiredDesc = 'accounting:view';
+      } else {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'accounts', action: 'create' },
+          { mod: 'cashbook', action: 'create' },
+          { mod: 'expenses', action: 'create' },
+        ]);
+        requiredDesc = 'accounting:create';
+      }
+    }
+
+    if (!allowed) {
+      try {
+        const db = getDatabase();
+        logAuditEvent(db, {
+          userId: req.user.id,
+          username: req.user.username,
+          action: 'MODULE_PERMISSION_DENIED',
+          status: 'WARNING',
+          ipAddress: req.socket.remoteAddress || '127.0.0.1',
+          userAgent: (req.headers['user-agent'] as string) || 'Unknown',
+          details: `User @${req.user.username} (${req.user.role}) denied on ${domain} (${method} ${req.originalUrl})`,
+        });
+      } catch {
+        // Ignore
+      }
+
+      return res.status(403).json({
+        success: false,
+        error: `Permission denied: Your account is not authorized to access this section (${requiredDesc}).`,
+        code: 'INSUFFICIENT_PERMISSIONS',
+      });
+    }
+
+    return next();
+  };
+}

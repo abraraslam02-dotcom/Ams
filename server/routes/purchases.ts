@@ -1468,7 +1468,38 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
         ${whereClause}
         ORDER BY p.id DESC
       `)
-      .all(...params);
+      .all(...params) as Array<Record<string, unknown>>;
+
+    if (purchases.length > 0) {
+      const purchaseIds = purchases.map((p) => Number(p.id));
+      const placeholders = purchaseIds.map(() => '?').join(',');
+      const allPurchaseItems = db
+        .prepare(`
+          SELECT
+            pi.*,
+            COALESCE(NULLIF(TRIM(pi.company_name), ''), i.company_name, '') as company_name,
+            COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
+            COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code
+          FROM purchase_items pi
+          LEFT JOIN items i ON pi.item_id = i.id
+          WHERE pi.purchase_id IN (${placeholders})
+          ORDER BY pi.purchase_id DESC, pi.id ASC
+        `)
+        .all(...purchaseIds) as Array<Record<string, unknown>>;
+
+      const itemsByPurchaseId = new Map<number, Array<Record<string, unknown>>>();
+      for (const item of allPurchaseItems) {
+        const pid = Number(item.purchase_id);
+        if (!itemsByPurchaseId.has(pid)) {
+          itemsByPurchaseId.set(pid, []);
+        }
+        itemsByPurchaseId.get(pid)!.push(item);
+      }
+
+      for (const p of purchases) {
+        p.items = itemsByPurchaseId.get(Number(p.id)) || [];
+      }
+    }
 
     const stats = db
       .prepare(`
@@ -1531,7 +1562,17 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
     }
 
     const items = db
-      .prepare('SELECT * FROM purchase_items WHERE purchase_id = ? ORDER BY id ASC')
+      .prepare(`
+        SELECT
+          pi.*,
+          COALESCE(NULLIF(TRIM(pi.company_name), ''), i.company_name, '') as company_name,
+          COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
+          COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code
+        FROM purchase_items pi
+        LEFT JOIN items i ON pi.item_id = i.id
+        WHERE pi.purchase_id = ?
+        ORDER BY pi.id ASC
+      `)
       .all(id);
 
     let journalEntry = null;

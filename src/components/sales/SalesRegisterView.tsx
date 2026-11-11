@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { SalesInvoiceRecord } from '../../types/sales';
 import { formatPKR } from '../../utils/formatters';
+import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { SalesPrintModal } from './SalesPrintModal';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import {
   Search,
   Download,
+  FileSpreadsheet,
   Printer,
   Eye,
   Pencil,
@@ -44,6 +45,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
   const pageSize = 25;
 
   const [loading, setLoading] = useState<boolean>(false);
+  const [exporting, setExporting] = useState<boolean>(false);
   const [viewInvoice, setViewInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printInvoice, setPrintInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printFormat, setPrintFormat] = useState<'a4' | '80mm' | '58mm'>('a4');
@@ -101,24 +103,52 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
     fetchRegister();
   };
 
-  const handleExportExcel = () => {
-    const exportRows = invoices.map((inv) => ({
-      'Invoice Number': inv.invoice_number,
-      Date: inv.invoice_date,
-      Customer: inv.customer_name,
-      'Invoice Type': inv.invoice_type,
-      'Total Amount (PKR)': Number(inv.net_total || 0),
-      'Discount (PKR)': Number(inv.discount_amount || 0),
-      'Paid (PKR)': Number(inv.paid_amount || 0),
-      'Balance (PKR)': Number(inv.balance_amount || 0),
-      'Payment Type': inv.payment_mode,
-      Salesman: inv.salesman,
-      Status: inv.status,
-    }));
-    const ws = XLSX.utils.json_to_sheet(exportRows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Sales Register');
-    XLSX.writeFile(wb, `AMS_Sales_Register_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  const handleExportSingleInvoice = async (inv: SalesInvoiceRecord) => {
+    try {
+      if (Array.isArray(inv.items) && inv.items.length > 0) {
+        exportSalesInvoicesToExcel([inv]);
+        return;
+      }
+      const res = await api.getSaleDetails(inv.id);
+      if (res?.data) {
+        exportSalesInvoicesToExcel([res.data]);
+      } else {
+        exportSalesInvoicesToExcel([inv]);
+      }
+    } catch {
+      exportSalesInvoicesToExcel([inv]);
+    }
+  };
+
+  const handleExportExcel = async () => {
+    try {
+      setExporting(true);
+      const statusParam = mode === 'held_or_draft' ? 'held_or_draft' : 'completed';
+      const res = await api.getSales({
+        q,
+        customerId,
+        paymentMode,
+        status: statusParam,
+        startDate,
+        endDate,
+        exportAll: true,
+      });
+      const records: SalesInvoiceRecord[] = res?.data && res.data.length > 0 ? res.data : invoices;
+      if (records.length === 0) return;
+      exportSalesInvoicesToExcel(
+        records,
+        `AMS_Sales_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`
+      );
+    } catch {
+      if (invoices.length > 0) {
+        exportSalesInvoicesToExcel(
+          invoices,
+          `AMS_Sales_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`
+        );
+      }
+    } finally {
+      setExporting(false);
+    }
   };
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
@@ -251,11 +281,13 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
 
         <button
           type="button"
+          disabled={exporting || invoices.length === 0}
           onClick={handleExportExcel}
-          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 cursor-pointer"
+          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+          title="Export all matching filtered Sales Invoices (Summary + Line Item Details) to Excel (.xlsx)"
         >
           <Download className="w-3.5 h-3.5" />
-          Export Excel
+          <span>{exporting ? 'Exporting...' : 'Export to Excel (.xlsx)'}</span>
         </button>
       </div>
 
@@ -336,6 +368,15 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                             </button>
                             <button
                               type="button"
+                              onClick={() => handleExportSingleInvoice(inv)}
+                              className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                              title="Export this invoice to Excel (.xlsx)"
+                            >
+                              <FileSpreadsheet className="w-3 h-3" />
+                              Excel
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => handleDeleteHeld(inv.id)}
                               className="p-1 rounded bg-rose-50 text-rose-600 hover:bg-rose-100 cursor-pointer"
                               title="Discard Held/Draft Invoice"
@@ -363,6 +404,15 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                             >
                               <Eye className="w-3 h-3" />
                               View
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleExportSingleInvoice(inv)}
+                              className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer shadow-2xs"
+                              title="Export this Sales Invoice (Summary + Line Items) to Excel (.xlsx)"
+                            >
+                              <FileSpreadsheet className="w-3 h-3" />
+                              Excel
                             </button>
                             <button
                               type="button"
@@ -466,6 +516,15 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => exportSalesInvoicesToExcel([viewInvoice])}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                  title="Export this Sales Invoice to Excel (.xlsx)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Export to Excel
+                </button>
                 {(onEditInvoice || onResumeInvoice) && (
                   <button
                     type="button"
