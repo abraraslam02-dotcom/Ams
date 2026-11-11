@@ -150,9 +150,6 @@ export type NavTabId =
   | 'report-discount'
   | 'report-sales-return'
   // H. SYSTEM & SETTINGS
-  | 'users'
-  | 'users-manage'
-  | 'roles-permissions'
   | 'company-settings'
   | 'system-settings'
   | 'printer-setup'
@@ -160,7 +157,6 @@ export type NavTabId =
   | 'data-import-export'
   | 'database'
   | 'audit-logs'
-  | 'user-passwords'
   | 'system-info'
   | 'system-admin';
 
@@ -357,15 +353,12 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'report-purchase-analysis': 'chart',
   'sales-discount-report': 'percent',
   'sales-return-report': 'refresh',
-  users: 'users',
-  'roles-permissions': 'shield',
   'company-settings': 'settings',
   'printer-setup': 'printer',
   'backup-restore': 'database',
   'data-import-export': 'swap',
   database: 'database',
   'audit-logs': 'doc',
-  'user-passwords': 'lock',
   'system-info': 'info',
 };
 
@@ -544,16 +537,13 @@ const MENU: MenuNode[] = [
       isAdmin || p.users?.view === true || p.settings?.view !== false || p.system?.view === true,
     icon: 'settings',
     children: [
-      { id: 'users', label: 'User Management', canSee: (p, isAdmin) => isAdmin || p.users?.view === true },
-      { id: 'roles-permissions', label: 'Roles & Permissions', canSee: (p, isAdmin) => isAdmin || p.users?.manage_roles === true },
-      { id: 'company-settings', label: 'Company Settings', canSee: (p, isAdmin) => isAdmin || p.settings?.view !== false },
-      { id: 'printer-setup', label: 'Printer Settings', canSee: (p, isAdmin) => isAdmin || p.settings?.view !== false },
-      { id: 'backup-restore', label: 'Backup & Restore', canSee: (p, isAdmin) => isAdmin || p.settings?.backup === true },
-      { id: 'data-import-export', label: 'Data Import / Export', canSee: (p, isAdmin) => isAdmin || p.settings?.view !== false },
-      { id: 'database', label: 'Database Status', canSee: (p, isAdmin) => isAdmin || p.system?.view === true },
-      { id: 'audit-logs', label: 'System Logs', canSee: (p, isAdmin) => isAdmin || p.users?.view === true || p.system?.view === true },
-      { id: 'user-passwords', label: 'User Passwords', canSee: (p, isAdmin) => isAdmin || p.users?.reset_password === true },
-      { id: 'system-info', label: 'System Info', canSee: (p, isAdmin) => isAdmin || p.settings?.view !== false },
+      { id: 'company-settings', label: 'Company Settings', canSee: (_p, _isAdmin) => true },
+      { id: 'printer-setup', label: 'Printer Settings', canSee: (_p, _isAdmin) => true },
+      { id: 'backup-restore', label: 'Backup & Restore', canSee: (_p, _isAdmin) => true },
+      { id: 'data-import-export', label: 'Data Import / Export', canSee: (_p, _isAdmin) => true },
+      { id: 'database', label: 'Database Status', canSee: (_p, _isAdmin) => true },
+      { id: 'audit-logs', label: 'System Logs', canSee: (_p, _isAdmin) => true },
+      { id: 'system-info', label: 'System Info', canSee: (_p, _isAdmin) => true },
     ],
   },
 ];
@@ -615,7 +605,6 @@ const LEGACY_TAB_MAP: Partial<Record<NavTabId, NavTabId>> = {
   'report-profit': 'sales-profit-report',
   'report-discount': 'sales-discount-report',
   'report-sales-return': 'sales-return-report',
-  'users-manage': 'users',
   'system-settings': 'company-settings',
   'system-admin': 'database',
 };

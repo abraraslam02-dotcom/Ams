@@ -13,7 +13,6 @@ interface TopHeaderProps {
   diagnostics: DatabaseDiagnostics | null;
   loading: boolean;
   onRefresh: () => void;
-  onNavigateToUsers: () => void;
   onNavigateToAudit: () => void;
   onNavigateToClearDemoData: () => void;
   compact?: boolean;
@@ -21,7 +20,7 @@ interface TopHeaderProps {
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   currentViewTitle, breadcrumbs, diagnostics, loading, onRefresh,
-  onNavigateToUsers, onNavigateToAudit, onNavigateToClearDemoData, compact = false,
+  onNavigateToAudit, onNavigateToClearDemoData, compact = false,
 }) => {
   const { user, isSuperAdmin, logout } = useAuth();
   const [now, setNow] = useState(new Date());
@@ -278,30 +277,22 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         <RefreshCw className={`w-4 h-4 ${loading || syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
       </button>
 
-      {/* User menu */}
+      {/* System menu */}
       <div className="relative" ref={menuRef}>
         <button
           type="button"
           onClick={() => setMenuOpen((o) => !o)}
-          className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-full hover:bg-slate-100 cursor-pointer transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer transition-colors"
         >
-          <span className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-white text-sm font-bold flex items-center justify-center uppercase">
-            {name.charAt(0)}
-          </span>
-          <span className="hidden sm:block text-left leading-tight">
-            <span className="block text-[13px] font-semibold text-slate-800">{name}</span>
-            <span className="block text-[10px] text-slate-400">{user?.role ?? ''}</span>
-          </span>
+          <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span>System</span>
           <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-full mt-2 w-60 bg-white rounded-xl border border-slate-200 shadow-xl p-1.5 z-50">
-            {isSuperAdmin && item(<Users2 className="w-4 h-4" />, 'Staff and permissions', onNavigateToUsers)}
-            {item(<ShieldCheck className="w-4 h-4" />, 'Security logs', onNavigateToAudit)}
-            {item(<Trash2 className="w-4 h-4" />, 'Clear demo data', onNavigateToClearDemoData)}
-            <div className="my-1 border-t border-slate-100" />
-            {item(<LogOut className="w-4 h-4" />, 'Log out', () => { logout(); }, true)}
+          <div className="absolute right-0 top-full mt-2 w-52 bg-white rounded-xl border border-slate-200 shadow-xl p-1.5 z-50">
+            {item(<ShieldCheck className="w-4 h-4" />, 'System logs', onNavigateToAudit)}
+            {item(<Trash2 className="w-4 h-4" />, 'System diagnostics', onNavigateToClearDemoData)}
           </div>
         )}
       </div>

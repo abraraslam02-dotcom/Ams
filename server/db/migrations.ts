@@ -1066,38 +1066,7 @@ export function runMigrations(): MigrationResult {
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName10, 10);
     }
 
-    // 11. Ensure Default Super Admin Account & Standard Pharmacy Items Exist (Self-Healing after Test Resets)
-    const userCnt = db.prepare('SELECT COUNT(*) as cnt FROM users').get() as { cnt: number };
-    if (userCnt.cnt === 0) {
-      // Pre-computed scrypt hash for 'MasterAdmin@2026' with salt 'ams_default_superadmin_salt_2026'
-      const defaultSalt = 'ams_default_superadmin_salt_2026';
-      const defaultHash =
-        '9d3990a8be03bc0dabf2ec5561478f79b91cad2293883f425440adaa9044a05af31eb1615e349254617c19c45cca6a991ef4a2d606ca4d38cc18d6aa3381d2cc';
-      const insUser = db
-        .prepare(`
-          INSERT INTO users (
-            username, full_name, email, phone, password_hash, salt,
-            role, status, failed_login_attempts, locked_until, last_login, last_login_ip, notes
-          ) VALUES (?, ?, ?, ?, ?, ?, 'Super Admin', 'Active', 0, NULL, datetime('now'), '127.0.0.1', 'Primary Store Owner & Super Administrator')
-        `)
-        .run(
-          'admin',
-          'Abrar Aslam',
-          'admin@abrarmedical.pk',
-          '+92 42 35789000',
-          defaultHash,
-          defaultSalt
-        );
-
-      const adminUserId = Number(insUser.lastInsertRowid);
-      const auditCnt = db.prepare('SELECT COUNT(*) as cnt FROM auth_audit_logs').get() as { cnt: number };
-      if (auditCnt.cnt === 0) {
-        db.prepare(`
-          INSERT INTO auth_audit_logs (user_id, username, action, status, ip_address, user_agent, details)
-          VALUES (?, 'admin', 'ADMIN_INITIALIZED', 'SUCCESS', '127.0.0.1', 'AMS Desktop ERP', 'System Super Admin account initialized and verified')
-        `).run(adminUserId);
-      }
-    }
+    // 11. Migration step (users and auth system removed per application reset)
 
     const existing11 = db.prepare('SELECT id FROM database_migrations WHERE migration_name = ?').get(migrationName11);
 

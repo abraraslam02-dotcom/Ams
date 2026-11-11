@@ -14,11 +14,6 @@ const PERSISTED_TABLES = [
   'advance_tax_settings',
   'advance_tax_history',
   'accounting_periods',
-  'users',
-  'role_permissions',
-  'device_registry',
-  'user_sessions',
-  'auth_audit_logs',
   'items',
   'accounts',
   'account_sequences',
@@ -58,7 +53,6 @@ const PERSISTED_TABLES = [
   'backup_history',
   'sync_audit_log',
   'system_error_logs',
-  'security_audit_logs',
   'idempotency_keys',
 ];
 

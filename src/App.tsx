@@ -13,10 +13,6 @@ import { AccountLedgersView } from './components/sales/AccountLedgersView';
 import { PaymentsWorkspaceView } from './components/sales/PaymentsWorkspaceView';
 import { SalesReportsView } from './components/sales/SalesReportsView';
 import { SystemSettingsView } from './components/views/SystemSettingsView';
-import { LoginScreen } from './components/auth/LoginScreen';
-import { FirstTimeSetupScreen } from './components/auth/FirstTimeSetupScreen';
-import { UserManagementView } from './components/admin/UserManagementView';
-import { UserPasswordManagementView } from './components/admin/UserPasswordManagementView';
 import { SecurityAuditView } from './components/admin/SecurityAuditView';
 import { InventoryWorkspaceView } from './components/inventory/InventoryWorkspaceView';
 import { ChartOfAccountsView } from './components/accounting/ChartOfAccountsView';
@@ -69,12 +65,6 @@ function AppContent() {
   const [hasUnsavedInvoiceItems, setHasUnsavedInvoiceItems] = useState<boolean>(false);
   const [quickShortcut, setQuickShortcut] = useState<QuickShortcutAction | null>(null);
 
-  // Forced password change state
-  const [currentPwd, setCurrentPwd] = useState<string>('');
-  const [newPwd, setNewPwd] = useState<string>('');
-  const [confirmPwd, setConfirmPwd] = useState<string>('');
-  const [pwdChangeError, setPwdChangeError] = useState<string | null>(null);
-  const [pwdChangeBusy, setPwdChangeBusy] = useState<boolean>(false);
 
   const isSalesInvoiceTab = activeTab === 'sales-new' || activeTab === 'sales-pos';
   const isPurchaseInvoiceTab = activeTab === 'purchases' || activeTab === 'purchases-bill';
@@ -95,168 +85,20 @@ function AppContent() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Check if current logged-in user is permitted to access a specific tab
-  const canAccessTab = useCallback(
-    (tab: NavTabId): boolean => {
-      if (!isAuthenticated || !user) return false;
-      if (
-        tab === 'user-passwords' ||
-        tab === 'users-manage' ||
-        tab === 'users' ||
-        tab === 'roles-permissions'
-      ) {
-        return isSuperAdmin;
-      }
-      if (isSuperAdmin) return true;
-      if (tab === 'dashboard') return true;
+  // Direct access for all tabs (no auth gate required)
+  const canAccessTab = useCallback((_tab: NavTabId): boolean => true, []);
 
-      if (
-        tab === 'audit-logs' ||
-        tab === 'system-settings' ||
-        tab === 'company-settings' ||
-        tab === 'printer-setup' ||
-        tab === 'backup-restore' ||
-        tab === 'data-import-export' ||
-        tab === 'database' ||
-        tab === 'system-info' ||
-        tab === 'system-admin'
-      ) {
-        return true;
-      }
-      if (
-        tab === 'sales-new' ||
-        tab === 'sales-pos' ||
-        tab === 'sales-register' ||
-        tab === 'sales-held' ||
-        tab === 'sales' ||
-        tab === 'sales-reports' ||
-        tab === 'sales-customer-wise' ||
-        tab === 'sales-salesman-wise' ||
-        tab === 'deliveryman-master' ||
-        tab === 'delivery-tracking' ||
-        tab === 'staff-salesmen' ||
-        tab === 'staff-deliverymen' ||
-        tab === 'staff-deliveries'
-      ) {
-        return hasPermission('sales') || hasPermission('reports');
-      }
-      if (tab === 'sales-return' || tab === 'sales-return-register' || tab === 'sale-returns') {
-        return hasPermission('sale_returns') || hasPermission('sales');
-      }
-      if (
-        tab === 'purchases' ||
-        tab === 'purchases-bill' ||
-        tab === 'purchase-history' ||
-        tab === 'purchase-reports' ||
-        tab === 'purchase-supplier-report'
-      ) {
-        return hasPermission('purchases') || hasPermission('reports');
-      }
-      if (tab === 'purchase-returns' || tab === 'purchases-return') {
-        return hasPermission('purchase_returns') || hasPermission('purchases');
-      }
-      if (
-        tab === 'items' ||
-        tab === 'items-master' ||
-        tab === 'item-categories' ||
-        tab === 'item-groups' ||
-        tab === 'item-search' ||
-        tab === 'item-offers' ||
-        tab === 'item-claims' ||
-        tab === 'item-log' ||
-        tab === 'item-import-export'
-      ) {
-        return hasPermission('items') || hasPermission('inventory');
-      }
-      if (
-        tab === 'inventory' ||
-        tab.startsWith('inv-') ||
-        tab === 'inventory-overview' ||
-        tab === 'stock-datasheet' ||
-        tab === 'batch-expiry' ||
-        tab === 'stock-adjustment' ||
-        tab === 'item-ledger' ||
-        tab === 'stock-movement' ||
-        tab === 'stock-transfer' ||
-        tab === 'warehouses-master' ||
-        tab === 'stock-valuation' ||
-        tab === 'expiry-alerts' ||
-        tab === 'low-stock' ||
-        tab === 'near-expiry' ||
-        tab === 'expired-items' ||
-        tab === 'physical-verification'
-      ) {
-        return hasPermission('inventory') || hasPermission('items') || user.role === 'Administrator';
-      }
-      if (
-        tab === 'accounts' ||
-        tab === 'accounts-master' ||
-        tab === 'party-customers' ||
-        tab === 'party-suppliers' ||
-        tab === 'party-master' ||
-        tab === 'account-groups' ||
-        tab === 'coa-hierarchy' ||
-        tab === 'cash-book-unified' ||
-        tab === 'cash-book-Daily'
-      ) {
-        return hasPermission('accounts') || hasPermission('ledgers') || hasPermission('payments');
-      }
-      if (
-        tab.startsWith('ledger-') ||
-        tab === 'party-ledger' ||
-        tab === 'bank-ledger' ||
-        tab === 'general-ledger' ||
-        tab === 'cash-book' ||
-        tab === 'account-statement'
-      ) {
-        return hasPermission('ledgers') || hasPermission('accounts');
-      }
-      if (
-        tab.startsWith('voucher-') ||
-        tab.startsWith('payment-') ||
-        tab === 'receipt-voucher' ||
-        tab === 'payment-voucher' ||
-        tab === 'bank-receipt' ||
-        tab === 'bank-payment' ||
-        tab === 'journal-voucher' ||
-        tab === 'contra-voucher' ||
-        tab === 'expense-entry' ||
-        tab === 'financial-income' ||
-        tab === 'recovery-sheet' ||
-        tab === 'supplier-payments'
-      ) {
-        return hasPermission('payments') || hasPermission('accounts');
-      }
-      if (tab.startsWith('tax-') || tab === 'advance-management') {
-        return hasPermission('tax') || hasPermission('accounts');
-      }
-      if (
-        tab.startsWith('fin-') ||
-        tab.startsWith('report-') ||
-        tab.startsWith('sales-') ||
-        tab === 'profit-loss' ||
-        tab === 'financial-reports' ||
-        tab === 'trial-balance' ||
-        tab === 'balance-sheet' ||
-        tab === 'aging-receivables' ||
-        tab === 'aging-payables'
-      ) {
-        return hasPermission('reports') || hasPermission('accounts') || hasPermission('sales');
-      }
-      return true;
-    },
-    [isAuthenticated, user, isSuperAdmin, hasPermission]
-  );
-
-  // Protect direct URLs: when unauthenticated, force URL to root and block direct path/hash bypass
+  // Clear any legacy browser cached drafts or tokens on mount
   useEffect(() => {
-    if (authLoading) return;
-    if (!isAuthenticated) {
-      if (window.location.pathname !== '/' || window.location.hash) {
-        window.history.replaceState(null, '', '/');
-      }
+    try {
+      localStorage.removeItem('ams_session_token');
+      localStorage.removeItem('ams_cached_session');
+      localStorage.removeItem('ams_sales_invoice_active_draft');
+      localStorage.removeItem('ams_active_purchase_draft');
+    } catch {
+      // ignore
     }
-  }, [authLoading, isAuthenticated]);
+  }, []);
 
   const fetchSystemData = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -311,46 +153,7 @@ function AppContent() {
     );
   }
 
-  // 2. Uninitialized System: First-Time Super Admin Setup
-  if (!isInitialized) {
-    return <FirstTimeSetupScreen />;
-  }
-
-  // 3. Unauthenticated: Display Login Screen First (Never reveal dashboard or menus before login)
-  if (!isAuthenticated) {
-    return <LoginScreen />;
-  }
-
-  // 3b. Forced Password Change Gate (if Super Admin required password change on next login)
-  const handleForcedPasswordSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPwdChangeError(null);
-    if (!currentPwd || !newPwd) {
-      setPwdChangeError('Please enter both your current password and a new password.');
-      return;
-    }
-    if (newPwd.length < 4) {
-      setPwdChangeError('New password must be at least 4 characters long.');
-      return;
-    }
-    if (newPwd !== confirmPwd) {
-      setPwdChangeError('New password and confirmation do not match.');
-      return;
-    }
-    try {
-      setPwdChangeBusy(true);
-      await api.changeMyPassword(currentPwd, newPwd);
-      setCurrentPwd('');
-      setNewPwd('');
-      setConfirmPwd('');
-      await refreshAuth();
-    } catch (err: any) {
-      setPwdChangeError(err?.message || 'Failed to update password.');
-    } finally {
-      setPwdChangeBusy(false);
-    }
-  };
-
+  // Direct Access: Render Full Medical Store ERP Workspace
   // 4. Authenticated: Render Full Medical Store ERP Workspace
   const handleResumeFromRegister = (id: number) => {
     setResumeInvoiceId(id);
@@ -594,11 +397,6 @@ function AppContent() {
         return { title: 'Sales Return Report — Returned Items & Credit Analysis', crumbs: ['Reports & Analytics', 'Sales Return Report'] };
 
       // H. SYSTEM & SETTINGS
-      case 'users':
-      case 'users-manage':
-        return { title: 'User Management — Staff Accounts & Access Control', crumbs: ['System & Settings', 'User Management'] };
-      case 'roles-permissions':
-        return { title: 'Roles & Permissions — Module Access Matrix', crumbs: ['System & Settings', 'Roles & Permissions'] };
       case 'company-settings':
       case 'system-settings':
         return { title: 'Company Settings — Store Profile & Localization', crumbs: ['System & Settings', 'Company Settings'] };
@@ -613,9 +411,7 @@ function AppContent() {
       case 'system-info':
         return { title: 'Database Status & System Diagnostics', crumbs: ['System & Settings', 'Database Status'] };
       case 'audit-logs':
-        return { title: 'System Logs — Authentication & Security Audit Trail', crumbs: ['System & Settings', 'System Logs'] };
-      case 'user-passwords':
-        return { title: 'User Passwords — Super Admin Credential & Access Control', crumbs: ['System & Settings', 'User Passwords'] };
+        return { title: 'System Logs — Activity & Audit Trail', crumbs: ['System & Settings', 'System Logs'] };
 
       default:
         return { title: 'Abrar Medical Store ERP', crumbs: ['Workspace'] };
@@ -677,7 +473,6 @@ function AppContent() {
           diagnostics={diagnostics}
           loading={loading}
           onRefresh={fetchSystemData}
-          onNavigateToUsers={() => setActiveTab('users')}
           onNavigateToAudit={() => setActiveTab('audit-logs')}
           onNavigateToClearDemoData={() => setActiveTab('database')}
           compact={isSalesInvoiceTab || isPurchaseInvoiceTab}
@@ -812,11 +607,7 @@ function AppContent() {
               {/* EXECUTIVE DASHBOARD */}
               {activeTab === 'dashboard' && <DashboardView onSelectTab={setActiveTab} />}
 
-              {/* H. SYSTEM & SETTINGS — USER MANAGEMENT & LOGS */}
-              {activeTab === 'user-passwords' && isSuperAdmin && <UserPasswordManagementView />}
-              {(activeTab === 'users-manage' ||
-                activeTab === 'users' ||
-                activeTab === 'roles-permissions') && <UserManagementView />}
+              {/* H. SYSTEM & SETTINGS — LOGS */}
               {activeTab === 'audit-logs' && (
                 <SecurityAuditView onNavigateToClearDemoData={() => setActiveTab('database')} />
               )}
@@ -1086,81 +877,6 @@ function AppContent() {
         onClose={() => setQuickShortcut(null)}
       />
 
-      {/* Mandatory Password Change Modal (when force_password_change === 1) */}
-      {user?.force_password_change === 1 && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden">
-            <div className="bg-slate-900 text-white px-5 py-4 flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-300">
-                <KeyRound className="w-4 h-4" />
-              </div>
-              <div>
-                <h4 className="text-sm font-bold">Password Change Required</h4>
-                <p className="text-[11px] text-slate-400">
-                  Your Super Administrator requires you to set a new password before continuing.
-                </p>
-              </div>
-            </div>
-            <form onSubmit={handleForcedPasswordSubmit} className="p-5 space-y-3.5 text-xs">
-              {pwdChangeError && (
-                <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 font-medium">
-                  {pwdChangeError}
-                </div>
-              )}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Current / Temporary Password *</label>
-                <input
-                  type="password"
-                  value={currentPwd}
-                  onChange={(e) => setCurrentPwd(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs"
-                  placeholder="Enter temporary password"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">New Personal Password *</label>
-                <input
-                  type="password"
-                  value={newPwd}
-                  onChange={(e) => setNewPwd(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs"
-                  placeholder="Minimum 4 characters"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Confirm New Password *</label>
-                <input
-                  type="password"
-                  value={confirmPwd}
-                  onChange={(e) => setConfirmPwd(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs"
-                  placeholder="Re-enter new password"
-                  required
-                />
-              </div>
-              <div className="flex items-center justify-between pt-2 border-t border-slate-200">
-                <button
-                  type="button"
-                  onClick={() => logout()}
-                  className="px-3 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-100 font-semibold cursor-pointer"
-                >
-                  Sign Out
-                </button>
-                <button
-                  type="submit"
-                  disabled={pwdChangeBusy}
-                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  <Lock className="w-3.5 h-3.5" />
-                  <span>{pwdChangeBusy ? 'Updating...' : 'Save New Password'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
