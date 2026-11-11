@@ -7,8 +7,9 @@ import {
   allocateNextInvoiceNumber,
   bindInvoiceNumberRecordId,
 } from '../services/invoiceSequenceService.ts';
-import { logAuditEvent } from '../services/authService.ts';
+import { logAuditEvent, hashPassword } from '../services/authService.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
+import { recordBatchStockMovement } from '../services/fifoAndOfferEngine.ts';
 
 export const supplyRouter = Router();
 
@@ -524,7 +525,7 @@ function saveSalesmanAssignments(
 supplyRouter.post('/salesmen', (req: Request, res: Response) => {
   const db = getDatabase();
   const tx = db.transaction((body: Record<string, unknown>) => {
-    const fullName = String(body.full_name || body.salesman_name || '').trim();
+    const fullName = String(body.full_name || body.salesman_name || body.name || '').trim();
     if (!fullName) throw new Error('Salesman Name is required.');
 
     let code = String(body.salesman_code || '').trim().toUpperCase();
@@ -532,8 +533,16 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
       code = getNextSeqNumber('salesmen', 'salesman_code', 'SM');
     }
 
-    const phone = String(body.phone || body.mobile_number || '').trim();
+    const phone = String(body.phone || body.mobile_number || body.mobile || '').trim();
     const address = String(body.address || '').trim();
+    const username = String(body.username || code.toLowerCase()).trim();
+    const plainPassword = String(body.password || '123456').trim();
+    const { salt, hash } = hashPassword(plainPassword);
+    const passwordHash = `${salt}:${hash}`;
+    const permittedItemsJson = JSON.stringify(
+      Array.isArray(body.permitted_item_ids) ? body.permitted_item_ids.map(Number) : []
+    );
+
     const openingBalance = round2(Math.max(0, Number(body.opening_balance || 0)));
     const openingBalanceType = body.opening_balance_type === 'Credit' ? 'Credit' : 'Debit';
     const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
@@ -542,18 +551,26 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
     const insert = db
       .prepare(`
         INSERT INTO salesmen (
-          salesman_code, full_name, phone, address, assigned_area,
-          commission_percent, monthly_target, opening_balance, opening_balance_type,
+          salesman_code, name, full_name, mobile, phone, address,
+          username, password_hash, permitted_items_json,
+          assigned_area, commission_percent, monthly_target,
+          opening_balance, current_balance, opening_balance_type,
           status, notes
-        ) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         code,
         fullName,
+        fullName,
+        phone,
         phone,
         address,
+        username,
+        passwordHash,
+        permittedItemsJson,
         round2(Number(body.commission_percent || 0)),
         round2(Number(body.monthly_target || 0)),
+        openingBalance,
         openingBalance,
         openingBalanceType,
         status,
@@ -566,7 +583,7 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
     const partyIds = Array.isArray(body.party_account_ids) ? body.party_account_ids.map(Number) : [];
 
     saveSalesmanAssignments(salesmanId, fullName, townIds, areaIds, partyIds);
-    recordAudit(req, 'SUPPLY_SALESMAN_CREATED', `Created salesman ${fullName} (${code})`);
+    recordAudit(req, 'SUPPLY_SALESMAN_CREATED', `Created salesman ${fullName} (${code}) [Username: ${username}]`);
 
     return db.prepare('SELECT * FROM salesmen WHERE id = ?').get(salesmanId);
   });
@@ -585,11 +602,29 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
     const existing = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (!existing) throw new Error('Salesman not found.');
 
-    const fullName = String(body.full_name || body.salesman_name || existing.full_name || '').trim();
+    const fullName = String(body.full_name || body.salesman_name || body.name || existing.full_name || existing.name || '').trim();
     if (!fullName) throw new Error('Salesman Name is required.');
 
-    const phone = body.phone !== undefined ? String(body.phone).trim() : String(existing.phone || '');
+    const phone =
+      body.phone !== undefined || body.mobile !== undefined
+        ? String(body.phone ?? body.mobile ?? '').trim()
+        : String(existing.phone || existing.mobile || '');
     const address = body.address !== undefined ? String(body.address).trim() : String(existing.address || '');
+    const username =
+      body.username !== undefined && String(body.username).trim()
+        ? String(body.username).trim()
+        : String(existing.username || existing.salesman_code || '').toLowerCase();
+
+    let passwordHash = String(existing.password_hash || '');
+    if (body.password && String(body.password).trim().length > 0) {
+      const { salt, hash } = hashPassword(String(body.password).trim());
+      passwordHash = `${salt}:${hash}`;
+    }
+
+    const permittedItemsJson = Array.isArray(body.permitted_item_ids)
+      ? JSON.stringify(body.permitted_item_ids.map(Number))
+      : String(existing.permitted_items_json || '[]');
+
     const openingBalance =
       body.opening_balance !== undefined
         ? round2(Math.max(0, Number(body.opening_balance)))
@@ -610,16 +645,35 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
 
     db.prepare(`
       UPDATE salesmen
-      SET full_name = ?,
+      SET name = ?,
+          full_name = ?,
+          mobile = ?,
           phone = ?,
           address = ?,
+          username = ?,
+          password_hash = ?,
+          permitted_items_json = ?,
           opening_balance = ?,
           opening_balance_type = ?,
           status = ?,
           notes = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(fullName, phone, address, openingBalance, openingBalanceType, status, notes, id);
+    `).run(
+      fullName,
+      fullName,
+      phone,
+      phone,
+      address,
+      username,
+      passwordHash,
+      permittedItemsJson,
+      openingBalance,
+      openingBalanceType,
+      status,
+      notes,
+      id
+    );
 
     const townIds = Array.isArray(body.town_ids)
       ? body.town_ids.map(Number)
@@ -2636,18 +2690,24 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
       const parsed = parsePacking(String(itemRow?.packing || line.packing || '1x1'));
       const totalUnitsToDeduct = round2(totalPackToDeduct * parsed.unitsPerPack);
 
+      const todayIso = new Date().toISOString().slice(0, 10);
       const allBatches = db
         .prepare(`
           SELECT * FROM inventory
           WHERE item_id = ?
-          ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, expiry_date ASC, id ASC
+            AND COALESCE(is_blocked, 0) = 0
+            AND COALESCE(batch_status, 'Active') != 'Blocked'
+            AND (expiry_date IS NULL OR expiry_date = '' OR expiry_date >= ?)
+          ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+                   COALESCE(NULLIF(purchase_date, ''), substr(created_at, 1, 10), '1970-01-01') ASC,
+                   id ASC
         `)
-        .all(itemId) as Array<Record<string, unknown>>;
+        .all(itemId, todayIso) as Array<Record<string, unknown>>;
 
       const totalAvailUnits = allBatches.reduce((s, b) => s + Number(b.total_stock_units || 0), 0);
       if (totalUnitsToDeduct > totalAvailUnits && !body.allow_negative_stock) {
         throw new Error(
-          `Insufficient stock to dispatch "${String(line.item_name)}". Required: ${totalPackToDeduct} Packs, Available: ${round2(totalAvailUnits / parsed.unitsPerPack)} Packs.`
+          `Insufficient eligible FIFO stock to dispatch "${String(line.item_name)}". Required: ${totalPackToDeduct} Packs, Available Eligible (Non-Expired/Unblocked): ${round2(totalAvailUnits / parsed.unitsPerPack)} Packs.`
         );
       }
 
@@ -2658,8 +2718,9 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
         db.prepare('UPDATE inventory SET reserved_pack_qty = ? WHERE id = ?').run(newRes, Number(firstBatch.id));
       }
 
-      // Deduct stock across batches in FEFO order
+      // Deduct stock across batches in strict FIFO order (oldest purchase/receipt date first)
       let remainingUnits = totalUnitsToDeduct;
+      let remainingBonusPacks = bonusQty;
       const minStock = Number(itemRow?.minimum_stock || 0);
 
       if (allBatches.length > 0) {
@@ -2678,24 +2739,61 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
           if (deductUnits > 0) {
             remainingUnits = round2(remainingUnits - deductUnits);
             const packSoldEq = round2(deductUnits / parsed.unitsPerPack);
+            const bonusPortion = round2(Math.min(remainingBonusPacks, packSoldEq));
+            remainingBonusPacks = round2(Math.max(0, remainingBonusPacks - bonusPortion));
+            const salePortion = round2(Math.max(0, packSoldEq - bonusPortion));
+
             const newSoldQty = round2(Number(bRow.sold_qty || 0) + packSoldEq);
+            const newDispatchedQty = round2(Number(bRow.dispatched_pack_qty || 0) + packSoldEq);
             const newTotalUnits = round2(bCurrentUnits - deductUnits);
             const newPackQty = round2(newTotalUnits / parsed.unitsPerPack);
             const newStripQty = round2(newPackQty * parsed.stripsPerBox);
             const newLooseQty = round2(newTotalUnits % parsed.unitsPerPack);
             const status = computeBatchStatus(newPackQty, String(bRow.expiry_date || ''), minStock);
+            const batchStatus = newPackQty <= 0 ? 'Exhausted' : status === 'expired' ? 'Expired' : 'Active';
 
             db.prepare(`
               UPDATE inventory
               SET sold_qty = ?,
+                  dispatched_pack_qty = ?,
                   current_pack_qty = ?,
                   current_strip_qty = ?,
                   current_loose_qty = ?,
                   total_stock_units = ?,
                   status = ?,
+                  batch_status = ?,
                   updated_at = CURRENT_TIMESTAMP
               WHERE id = ?
-            `).run(newSoldQty, newPackQty, newStripQty, newLooseQty, newTotalUnits, status, bId);
+            `).run(newSoldQty, newDispatchedQty, newPackQty, newStripQty, newLooseQty, newTotalUnits, status, batchStatus, bId);
+
+            recordBatchStockMovement({
+              movement_date: dispatchDate,
+              item_id: itemId,
+              item_code: String(line.item_code || ''),
+              item_name: String(line.item_name || itemRow?.item_name || ''),
+              company_name: String(line.company_name || ''),
+              inventory_id: bId,
+              batch_number: String(bRow.batch_number || line.batch_number || 'BATCH-1'),
+              expiry_date: String(bRow.expiry_date || ''),
+              purchase_date: String(bRow.purchase_date || ''),
+              movement_type: 'DISPATCH_OUT',
+              reference_type: 'SUPPLY_DISPATCH',
+              reference_id: townSupplyId,
+              reference_number: dispatchNumber,
+              party_account_id: Number(line.party_account_id || 0) || null,
+              party_name: String(line.party_name || ''),
+              salesman_id: Number(supply.salesman_id || 0) || null,
+              salesman_name: String(supply.salesman_name || ''),
+              town_name: String(supply.town_name || ''),
+              quantity_packs: salePortion,
+              bonus_packs: bonusPortion,
+              total_units: -deductUnits,
+              purchase_rate: Number(bRow.cost_price || 0),
+              trade_price: Number(line.trade_price || bRow.trade_price || 0),
+              balance_after_packs: newPackQty,
+              remarks: `Supply ${String(supply.supply_number)} Dispatched (${dispatchNumber})`,
+              performed_by: deliveryPerson || 'Dispatcher',
+            });
           }
         }
       }
@@ -3157,6 +3255,7 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
               current_loose_qty = ?,
               total_stock_units = ?,
               status = ?,
+              batch_status = CASE WHEN ? > 0 AND batch_status = 'Exhausted' THEN 'Active' ELSE batch_status END,
               updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
@@ -3168,8 +3267,71 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
           newLooseQty,
           newTotalUnits,
           status,
+          newPackQty,
           Number(batchRow.id)
         );
+
+        if (acceptedQty > 0) {
+          recordBatchStockMovement({
+            movement_date: returnDate,
+            item_id: itemId,
+            item_code: String(psItem.item_code || ''),
+            item_name: String(psItem.item_name || ''),
+            company_name: String(psItem.company_name || ''),
+            inventory_id: Number(batchRow.id),
+            batch_number: String(batchRow.batch_number || psItem.batch_number || 'BATCH-1'),
+            expiry_date: String(batchRow.expiry_date || ''),
+            purchase_date: String(batchRow.purchase_date || ''),
+            movement_type: 'RETURN_IN_SALEABLE',
+            reference_type: 'SUPPLY_RETURN',
+            reference_id: supplyReturnId,
+            reference_number: returnNumber,
+            party_account_id: Number(psItem.party_account_id || 0) || null,
+            party_name: String(psItem.party_name || ''),
+            salesman_id: Number(supply.salesman_id || 0) || null,
+            salesman_name: String(supply.salesman_name || ''),
+            town_name: String(supply.town_name || ''),
+            quantity_packs: acceptedQty,
+            bonus_packs: 0,
+            total_units: acceptedUnits,
+            purchase_rate: Number(batchRow.cost_price || 0),
+            trade_price: Number(psItem.trade_price || batchRow.trade_price || 0),
+            balance_after_packs: newPackQty,
+            remarks: `Saleable Return (${returnNumber}): ${returnReason}`,
+            performed_by: String((req as AuthenticatedRequest).user?.full_name || 'Admin'),
+          });
+        }
+
+        if (damagedQty > 0) {
+          recordBatchStockMovement({
+            movement_date: returnDate,
+            item_id: itemId,
+            item_code: String(psItem.item_code || ''),
+            item_name: String(psItem.item_name || ''),
+            company_name: String(psItem.company_name || ''),
+            inventory_id: Number(batchRow.id),
+            batch_number: String(batchRow.batch_number || psItem.batch_number || 'BATCH-1'),
+            expiry_date: String(batchRow.expiry_date || ''),
+            purchase_date: String(batchRow.purchase_date || ''),
+            movement_type: 'RETURN_DAMAGED',
+            reference_type: 'SUPPLY_RETURN',
+            reference_id: supplyReturnId,
+            reference_number: returnNumber,
+            party_account_id: Number(psItem.party_account_id || 0) || null,
+            party_name: String(psItem.party_name || ''),
+            salesman_id: Number(supply.salesman_id || 0) || null,
+            salesman_name: String(supply.salesman_name || ''),
+            town_name: String(supply.town_name || ''),
+            quantity_packs: damagedQty,
+            bonus_packs: 0,
+            total_units: 0,
+            purchase_rate: Number(batchRow.cost_price || 0),
+            trade_price: Number(psItem.trade_price || batchRow.trade_price || 0),
+            balance_after_packs: newPackQty,
+            remarks: `Damaged Return Isolated (${returnNumber}): ${returnReason}`,
+            performed_by: String((req as AuthenticatedRequest).user?.full_name || 'Admin'),
+          });
+        }
       }
     }
 

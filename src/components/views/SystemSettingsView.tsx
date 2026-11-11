@@ -27,6 +27,7 @@ import {
   parseFieldVisibility,
 } from '../../types/system';
 import { api } from '../../services/api';
+import { MasterResetAndLocalBackupPanel } from '../admin/MasterResetAndLocalBackupPanel';
 
 export type AdminSubTab = 'store-printing' | 'backup-restore' | 'system-admin';
 
@@ -940,6 +941,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       ===================================================================== */}
       {subTab === 'backup-restore' && (
         <div className="space-y-5">
+          <MasterResetAndLocalBackupPanel
+            initialSection="backup-restore"
+            onDataChanged={fetchAdminData}
+          />
           {/* Backup Controls & Configuration Card */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
             <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
@@ -1253,6 +1258,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       ===================================================================== */}
       {subTab === 'system-admin' && (
         <div className="space-y-4">
+          <MasterResetAndLocalBackupPanel
+            initialSection="master-reset"
+            onDataChanged={fetchAdminData}
+          />
           {/* 1. Clear Temporary / Demo Data Card (Strictly Protects Genuine Business Records) */}
           <div className="bg-white rounded-2xl border border-rose-200 shadow-xs overflow-hidden">
             <div className="px-5 py-3 bg-gradient-to-r from-rose-900 via-rose-800 to-slate-900 text-white flex items-center justify-between">

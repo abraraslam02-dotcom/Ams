@@ -34,6 +34,9 @@ import {
   SupplyDistributionWorkspace,
   type SupplySubView,
 } from './components/supply/SupplyDistributionWorkspace';
+import { SalesmanMobileBookingApp } from './components/mobile/SalesmanMobileBookingApp';
+import { TradeDealsAndPartyDiscountsWorkspace } from './components/offers/TradeDealsAndPartyDiscountsWorkspace';
+import { MasterResetAndLocalBackupPanel } from './components/admin/MasterResetAndLocalBackupPanel';
 import { api } from './services/api';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
@@ -229,6 +232,25 @@ function AppContent() {
       setActiveTab('dashboard');
     }
   }, [user?.id]);
+
+  // Standalone Salesman Mobile Booking PWA mode (?mode=mobile-booking or /mobile-booking)
+  const isStandaloneMobileBooking =
+    typeof window !== 'undefined' &&
+    (window.location.search.includes('mode=mobile-booking') ||
+      window.location.pathname === '/mobile-booking');
+
+  if (isStandaloneMobileBooking) {
+    return (
+      <div className="min-h-screen w-screen bg-slate-950 p-2 sm:p-4">
+        <SalesmanMobileBookingApp
+          onExitMobileMode={() => {
+            window.history.replaceState({}, '', '/');
+            window.location.reload();
+          }}
+        />
+      </div>
+    );
+  }
 
   // 1. Loading Splash while checking server-side authentication session
   if (authLoading) {
@@ -914,11 +936,39 @@ function AppContent() {
                 activeTab === 'items-master' ||
                 activeTab === 'item-categories' ||
                 activeTab === 'item-groups' ||
-                activeTab === 'item-search' ||
-                activeTab === 'item-offers') && <ItemsMasterView initialOpenImport={false} />}
+                activeTab === 'item-search') && <ItemsMasterView initialOpenImport={false} />}
 
               {(activeTab === 'item-import-export' || activeTab === 'data-import-export') && (
                 <ItemsMasterView initialOpenImport={true} />
+              )}
+
+              {/* TRADE DEALS, PARTY DISCOUNTS, FIFO BATCHES & OFFER REPORTS */}
+              {(activeTab === 'item-offers' || activeTab === 'trade-deals-offers') && (
+                <TradeDealsAndPartyDiscountsWorkspace initialTab="trade-offers" />
+              )}
+              {activeTab === 'party-special-discounts' && (
+                <TradeDealsAndPartyDiscountsWorkspace initialTab="party-discounts" />
+              )}
+              {activeTab === 'fifo-batch-control' && (
+                <TradeDealsAndPartyDiscountsWorkspace initialTab="fifo-batches" />
+              )}
+              {activeTab === 'offer-discount-reports' && (
+                <TradeDealsAndPartyDiscountsWorkspace initialTab="offer-reports" />
+              )}
+
+              {/* SUPPLY & DISTRIBUTION MANAGEMENT SYSTEM */}
+              {activeTab.startsWith('supply-') && (
+                <SupplyDistributionWorkspace
+                  initialView={activeTab as SupplySubView}
+                  onNavigate={(view) => setActiveTab(view as NavTabId)}
+                />
+              )}
+
+              {/* SALESMAN MOBILE BOOKING PWA */}
+              {activeTab === 'mobile-booking-app' && (
+                <SalesmanMobileBookingApp
+                  onExitMobileMode={() => setActiveTab('supply-dashboard')}
+                />
               )}
 
               {hasPermission('purchases') && hasVisitedPurchases && (
@@ -984,6 +1034,12 @@ function AppContent() {
                   initialSubTab="backup-restore"
                   onSettingsUpdated={(updated) => setSettings(updated)}
                   onNavigateToAuditLogs={() => setActiveTab('audit-logs')}
+                />
+              )}
+              {activeTab === 'master-reset' && isSuperAdmin && (
+                <MasterResetAndLocalBackupPanel
+                  initialSection="master-reset"
+                  onDataChanged={fetchSystemData}
                 />
               )}
               {(activeTab === 'system-admin' ||

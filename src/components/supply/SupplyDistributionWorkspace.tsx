@@ -34,6 +34,7 @@ import type {
 } from '../../types/supply';
 import { SupplyPrintModal, type SupplyDocumentPrintType } from './SupplyPrintModal';
 import { SupplyReportsAndRecoverySection } from './SupplyReportsAndRecoverySection';
+import { ImportSalesmanBookingsPanel } from './ImportSalesmanBookingsPanel';
 import { exportSupplyTableToExcel } from '../../utils/supplyExcelExport';
 
 export type SupplySubView =
@@ -42,6 +43,7 @@ export type SupplySubView =
   | 'supply-towns'
   | 'supply-order-forms'
   | 'supply-bookings'
+  | 'supply-import-bookings'
   | 'supply-creation'
   | 'supply-packing'
   | 'supply-dispatch'
@@ -62,6 +64,7 @@ const NAV_TABS: Array<{ id: SupplySubView; label: string; icon: React.ComponentT
   { id: 'supply-towns', label: '2. Towns / Areas', icon: MapPin },
   { id: 'supply-order-forms', label: '3. Order Form', icon: ClipboardList },
   { id: 'supply-bookings', label: '4. Booking', icon: BookOpen },
+  { id: 'supply-import-bookings', label: 'Import Mobile Bookings', icon: Plus },
   { id: 'supply-creation', label: '5. Town Supply', icon: Layers },
   { id: 'supply-packing', label: '6. Packing', icon: PackageCheck },
   { id: 'supply-dispatch', label: '7. Dispatch', icon: Send },
@@ -184,6 +187,8 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   const [editingSalesmanId, setEditingSalesmanId] = useState<number | null>(null);
   const [smCode, setSmCode] = useState('');
   const [smName, setSmName] = useState('');
+  const [smUsername, setSmUsername] = useState('');
+  const [smPassword, setSmPassword] = useState('');
   const [smPhone, setSmPhone] = useState('');
   const [smAddress, setSmAddress] = useState('');
   const [smOpeningBal, setSmOpeningBal] = useState('0');
@@ -196,6 +201,8 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
     setEditingSalesmanId(s.id);
     setSmCode(s.salesman_code);
     setSmName(s.full_name);
+    setSmUsername((s as any).username || s.salesman_code || '');
+    setSmPassword('');
     setSmPhone(s.phone || '');
     setSmAddress(s.address || '');
     setSmOpeningBal(String(s.opening_balance || 0));
@@ -209,6 +216,8 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
     setEditingSalesmanId(null);
     setSmCode('');
     setSmName('');
+    setSmUsername('');
+    setSmPassword('');
     setSmPhone('');
     setSmAddress('');
     setSmOpeningBal('0');
@@ -225,6 +234,8 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
         {
           salesman_code: smCode || undefined,
           full_name: smName,
+          username: smUsername.trim() || undefined,
+          password: smPassword || undefined,
           phone: smPhone,
           address: smAddress,
           opening_balance: Number(smOpeningBal || 0),
@@ -232,7 +243,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
           town_ids: smSelectedTownIds,
           area_ids: smSelectedAreaIds,
           party_account_ids: smSelectedPartyIds,
-        },
+        } as any,
         editingSalesmanId || undefined
       );
       setBanner({
@@ -1047,6 +1058,33 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                 className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
                 required
               />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                  Mobile Login Username
+                </label>
+                <input
+                  type="text"
+                  value={smUsername}
+                  onChange={(e) => setSmUsername(e.target.value)}
+                  placeholder="e.g. ali.salesman"
+                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                  Mobile App Password
+                </label>
+                <input
+                  type="password"
+                  value={smPassword}
+                  onChange={(e) => setSmPassword(e.target.value)}
+                  placeholder={editingSalesmanId ? 'Leave blank to keep' : 'Set login password'}
+                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2.5">
@@ -3249,6 +3287,10 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
             )}
           </div>
         </div>
+      )}
+
+      {activeTab === 'supply-import-bookings' && (
+        <ImportSalesmanBookingsPanel onImportCompleted={loadCoreData} />
       )}
 
       {/* ====================================================================

@@ -631,10 +631,81 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           next[rowIndex] = recalcRow(updatedRow);
           return next;
         });
+
+        // Also evaluate active Trade Deals & Party Special Discounts from the centralized engine
+        const resCalc = await fetch('/api/enhancements/calculate-line', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_id: itemId,
+            quantity: 1,
+            party_account_id: custId || null,
+          }),
+        }).then((r) => r.json()).catch(() => null);
+
+        if (resCalc?.success && resCalc.calculation) {
+          const calc = resCalc.calculation;
+          if (calc.effective_discount_percent > 0 || calc.bonus_quantity > 0) {
+            setRows((prev) => {
+              const next = [...prev];
+              const target = next[rowIndex];
+              if (!target || target.item_id !== itemId) return prev;
+              const updated = { ...target };
+              if (calc.effective_discount_percent > 0) {
+                updated.discount_percent = round2(calc.effective_discount_percent);
+              }
+              if (calc.bonus_quantity > 0) {
+                updated.bonus_quantity = round2(calc.bonus_quantity);
+              }
+              next[rowIndex] = recalcRow(updated);
+              return next;
+            });
+          }
+        }
       } catch {
         // ignore network hiccup
       } finally {
         setHistoryLoading(false);
+      }
+    },
+    []
+  );
+
+  const evaluateOfferAndPartyDiscountForRow = useCallback(
+    async (rowIndex: number, itemId: number, qty: number, custId: number, unitPrice?: number) => {
+      if (!itemId || qty <= 0) return;
+      try {
+        const resCalc = await fetch('/api/enhancements/calculate-line', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_id: itemId,
+            quantity: qty,
+            trade_price: unitPrice,
+            party_account_id: custId || null,
+          }),
+        }).then((r) => r.json());
+        if (resCalc?.success && resCalc.calculation) {
+          const calc = resCalc.calculation;
+          if (calc.effective_discount_percent > 0 || calc.bonus_quantity > 0) {
+            setRows((prev) => {
+              const next = [...prev];
+              const target = next[rowIndex];
+              if (!target || target.item_id !== itemId) return prev;
+              const updated = { ...target };
+              if (calc.effective_discount_percent > 0) {
+                updated.discount_percent = round2(calc.effective_discount_percent);
+              }
+              if (calc.bonus_quantity > 0) {
+                updated.bonus_quantity = round2(calc.bonus_quantity);
+              }
+              next[rowIndex] = recalcRow(updated);
+              return next;
+            });
+          }
+        }
+      } catch {
+        // ignore
       }
     },
     []
@@ -648,10 +719,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       rows.forEach((r, idx) => {
         if (r.item_id) {
           fetchAndApplyItemHistory(idx, r.item_id, customerAccountId, invoiceType);
+          evaluateOfferAndPartyDiscountForRow(idx, r.item_id, r.quantity, customerAccountId, r.unit_price);
         }
       });
     }
-  }, [customerAccountId, rows, invoiceType, fetchAndApplyItemHistory]);
+  }, [customerAccountId, rows, invoiceType, fetchAndApplyItemHistory, evaluateOfferAndPartyDiscountForRow]);
 
   // Also ensure the currently selected row has its history loaded if it has an item_id
   useEffect(() => {
@@ -1253,7 +1325,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         current.discount_amount = discAmt;
         current.discount_percent = gross > 0 ? round2((discAmt / gross) * 100) : 0;
       } else if (field === 'quantity') {
-        current.quantity = Math.max(0, Number(value || 0));
+        const nextQty = Math.max(0, Number(value || 0));
+        current.quantity = nextQty;
+        if (current.item_id && nextQty > 0) {
+          setTimeout(() => {
+            evaluateOfferAndPartyDiscountForRow(
+              rowIndex,
+              Number(current.item_id),
+              nextQty,
+              customerAccountId,
+              current.unit_price
+            );
+          }, 10);
+        }
       } else if (field === 'bonus_quantity') {
         current.bonus_quantity = Math.max(0, Number(value || 0));
       } else if (field === 'discount_percent') {

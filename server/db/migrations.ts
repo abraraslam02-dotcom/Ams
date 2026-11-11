@@ -46,6 +46,7 @@ export function runMigrations(): MigrationResult {
   const migrationName17 = '017_universal_auto_account_sequences';
   const migrationName18 = '018_cash_book_sequences_and_audit';
   const migrationName19 = '019_supply_and_distribution_management_system';
+  const migrationName20 = '020_master_enhancement_fifo_offers_discounts_mobile_reset_backup';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -2234,6 +2235,777 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName19, 19);
     }
+
+    // =========================================================================
+    // MIGRATION 20: Salesman Login + Mobile Booking + Batch FIFO + Trade Deals
+    //               + Party Discounts + Master Reset + Local Backup & Restore
+    // =========================================================================
+    // 1. Salesmen extended columns (syncing name/full_name and mobile/phone)
+    ensureCol('salesmen', 'full_name', "TEXT NOT NULL DEFAULT ''");
+    ensureCol('salesmen', 'phone', "TEXT NOT NULL DEFAULT ''");
+    ensureCol('salesmen', 'assigned_area', "TEXT NOT NULL DEFAULT ''");
+    ensureCol('salesmen', 'commission_percent', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('salesmen', 'monthly_target', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('salesmen', 'username', 'TEXT DEFAULT NULL');
+    ensureCol('salesmen', 'password_hash', 'TEXT DEFAULT NULL');
+    ensureCol('salesmen', 'user_id', 'INTEGER DEFAULT NULL');
+    ensureCol('salesmen', 'permitted_items_json', "TEXT NOT NULL DEFAULT '[]'");
+
+    db.exec(`
+      UPDATE salesmen SET full_name = name WHERE (full_name IS NULL OR full_name = '') AND name IS NOT NULL AND name != '';
+      UPDATE salesmen SET name = full_name WHERE (name IS NULL OR name = '') AND full_name IS NOT NULL AND full_name != '';
+      UPDATE salesmen SET phone = mobile WHERE (phone IS NULL OR phone = '') AND mobile IS NOT NULL AND mobile != '';
+      UPDATE salesmen SET mobile = phone WHERE (mobile IS NULL OR mobile = '') AND phone IS NOT NULL AND phone != '';
+    `);
+
+    // 2. Inventory Batch-Wise FIFO & Expiry Management columns
+    ensureCol('inventory', 'purchase_date', "TEXT DEFAULT ''");
+    ensureCol('inventory', 'purchase_invoice_number', "TEXT DEFAULT ''");
+    ensureCol('inventory', 'supplier_name', "TEXT DEFAULT ''");
+    ensureCol('inventory', 'dispatched_pack_qty', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('inventory', 'is_blocked', 'INTEGER NOT NULL DEFAULT 0');
+    ensureCol('inventory', 'blocked_reason', "TEXT DEFAULT ''");
+    ensureCol('inventory', 'blocked_by', "TEXT DEFAULT ''");
+    ensureCol('inventory', 'blocked_at', 'DATETIME DEFAULT NULL');
+    ensureCol('inventory', 'batch_status', "TEXT NOT NULL DEFAULT 'Active'");
+
+    // Reconcile existing inventory batch metadata from purchase records (never inventing batch numbers or expiry dates)
+    db.exec(`
+      UPDATE inventory
+      SET purchase_date = COALESCE(
+        NULLIF(purchase_date, ''),
+        (SELECT p.bill_date FROM purchases p WHERE p.id = inventory.last_purchase_id),
+        DATE(inventory.created_at)
+      ),
+      purchase_invoice_number = COALESCE(
+        NULLIF(purchase_invoice_number, ''),
+        (SELECT p.bill_number FROM purchases p WHERE p.id = inventory.last_purchase_id),
+        ''
+      ),
+      supplier_name = COALESCE(
+        NULLIF(supplier_name, ''),
+        (SELECT a.account_name FROM accounts a WHERE a.id = inventory.last_supplier_id),
+        ''
+      )
+      WHERE purchase_date IS NULL OR purchase_date = '';
+    `);
+
+    // 3. Company Settings columns for Discount Stacking & Local Backup/Retention
+    ensureCol('company_settings', 'discount_stacking_rule', "TEXT NOT NULL DEFAULT 'higher_only'");
+    ensureCol('company_settings', 'local_backup_folder', "TEXT NOT NULL DEFAULT 'D:\\Abrar Medical Store Backups'");
+    ensureCol('company_settings', 'auto_weekly_backup', 'INTEGER NOT NULL DEFAULT 1');
+    ensureCol('company_settings', 'auto_backup_time', "TEXT NOT NULL DEFAULT '22:00'");
+    ensureCol('company_settings', 'daily_retention_count', 'INTEGER NOT NULL DEFAULT 7');
+    ensureCol('company_settings', 'weekly_retention_count', 'INTEGER NOT NULL DEFAULT 4');
+    ensureCol('company_settings', 'backup_before_master_reset', 'INTEGER NOT NULL DEFAULT 1');
+    ensureCol('company_settings', 'last_scheduled_backup_check', 'TEXT DEFAULT NULL');
+
+    // 4. Sale Items & Supply Items Offer, Party Discount & FIFO Batch Allocation columns
+    ensureCol('sale_items', 'offer_id', 'INTEGER DEFAULT NULL');
+    ensureCol('sale_items', 'offer_name', "TEXT DEFAULT ''");
+    ensureCol('sale_items', 'offer_discount_percent', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('sale_items', 'offer_discount_amount', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('sale_items', 'party_discount_id', 'INTEGER DEFAULT NULL');
+    ensureCol('sale_items', 'party_discount_percent', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('sale_items', 'party_discount_amount', 'REAL NOT NULL DEFAULT 0.0');
+    ensureCol('sale_items', 'manual_override_reason', "TEXT DEFAULT ''");
+    ensureCol('sale_items', 'fifo_batches_json', "TEXT DEFAULT '[]'");
+
+    const mig20Applied = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName20);
+
+    if (!mig20Applied) {
+      // Upgrade supply tables if empty so all column aliases and mobile statuses are supported seamlessly
+      const supplyCountRow = db.prepare('SELECT COUNT(*) as c FROM town_supplies').get() as { c: number } | undefined;
+      const bookingCountRow = db.prepare('SELECT COUNT(*) as c FROM supply_bookings').get() as { c: number } | undefined;
+      const orderFormCountRow = db.prepare('SELECT COUNT(*) as c FROM supply_order_forms').get() as { c: number } | undefined;
+
+      if (Number(orderFormCountRow?.c || 0) === 0) {
+        db.exec(`
+          DROP TABLE IF EXISTS supply_order_form_items;
+          DROP TABLE IF EXISTS supply_order_forms;
+          CREATE TABLE supply_order_forms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_number TEXT NOT NULL UNIQUE,
+            order_date TEXT NOT NULL,
+            store_name TEXT NOT NULL DEFAULT 'ABRAR MEDICAL STORE',
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            area_id INTEGER,
+            area_name TEXT NOT NULL DEFAULT '',
+            party_account_id INTEGER,
+            party_code TEXT DEFAULT '',
+            party_name TEXT NOT NULL DEFAULT '',
+            remarks TEXT DEFAULT '',
+            total_items INTEGER NOT NULL DEFAULT 0,
+            total_quantity REAL NOT NULL DEFAULT 0.0,
+            total_amount REAL NOT NULL DEFAULT 0.0,
+            estimated_amount REAL NOT NULL DEFAULT 0.0,
+            status TEXT NOT NULL DEFAULT 'Draft',
+            converted_booking_id INTEGER DEFAULT NULL,
+            converted_booking_number TEXT DEFAULT NULL,
+            converted_at DATETIME DEFAULT NULL,
+            created_by TEXT DEFAULT 'Super Admin',
+            updated_by TEXT DEFAULT 'Super Admin',
+            cancelled_by TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE supply_order_form_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_form_id INTEGER NOT NULL,
+            s_no INTEGER NOT NULL DEFAULT 1,
+            item_id INTEGER NOT NULL,
+            item_code TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            packing TEXT DEFAULT '1x1',
+            trade_price REAL NOT NULL DEFAULT 0.0,
+            quantity REAL NOT NULL DEFAULT 0.0,
+            bonus_quantity REAL NOT NULL DEFAULT 0.0,
+            amount REAL NOT NULL DEFAULT 0.0,
+            remarks TEXT DEFAULT '',
+            FOREIGN KEY (order_form_id) REFERENCES supply_order_forms (id) ON DELETE CASCADE
+          );
+        `);
+      }
+
+      if (Number(bookingCountRow?.c || 0) === 0) {
+        db.exec(`
+          DROP TABLE IF EXISTS supply_booking_items;
+          DROP TABLE IF EXISTS supply_bookings;
+          CREATE TABLE supply_bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            booking_number TEXT NOT NULL UNIQUE,
+            booking_date TEXT NOT NULL,
+            order_form_id INTEGER DEFAULT NULL,
+            order_number TEXT DEFAULT NULL,
+            source_type TEXT NOT NULL DEFAULT 'ERP',
+            mobile_booking_uuid TEXT DEFAULT NULL,
+            import_batch_id INTEGER DEFAULT NULL,
+            import_batch_number TEXT DEFAULT NULL,
+            mobile_status TEXT NOT NULL DEFAULT 'Received',
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            area_id INTEGER,
+            area_name TEXT NOT NULL DEFAULT '',
+            party_account_id INTEGER NOT NULL,
+            party_code TEXT DEFAULT '',
+            party_name TEXT NOT NULL,
+            remarks TEXT DEFAULT '',
+            total_items INTEGER NOT NULL DEFAULT 0,
+            total_quantity REAL NOT NULL DEFAULT 0.0,
+            total_supplied_qty REAL NOT NULL DEFAULT 0.0,
+            total_pending_qty REAL NOT NULL DEFAULT 0.0,
+            total_bonus REAL NOT NULL DEFAULT 0.0,
+            gross_amount REAL NOT NULL DEFAULT 0.0,
+            offer_discount_amount REAL NOT NULL DEFAULT 0.0,
+            party_discount_amount REAL NOT NULL DEFAULT 0.0,
+            discount_amount REAL NOT NULL DEFAULT 0.0,
+            total_amount REAL NOT NULL DEFAULT 0.0,
+            net_amount REAL NOT NULL DEFAULT 0.0,
+            status TEXT NOT NULL DEFAULT 'Booking Pending',
+            created_by TEXT DEFAULT 'Super Admin',
+            updated_by TEXT DEFAULT 'Super Admin',
+            cancelled_by TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (party_account_id) REFERENCES accounts (id) ON DELETE RESTRICT
+          );
+
+          CREATE TABLE supply_booking_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            booking_id INTEGER NOT NULL,
+            s_no INTEGER NOT NULL DEFAULT 1,
+            item_id INTEGER NOT NULL,
+            item_code TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            packing TEXT DEFAULT '1x1',
+            quantity REAL NOT NULL DEFAULT 0.0,
+            supplied_quantity REAL NOT NULL DEFAULT 0.0,
+            pending_quantity REAL NOT NULL DEFAULT 0.0,
+            bonus_quantity REAL NOT NULL DEFAULT 0.0,
+            trade_price REAL NOT NULL DEFAULT 0.0,
+            offer_id INTEGER DEFAULT NULL,
+            offer_name TEXT DEFAULT '',
+            offer_discount_percent REAL NOT NULL DEFAULT 0.0,
+            offer_discount_amount REAL NOT NULL DEFAULT 0.0,
+            party_discount_id INTEGER DEFAULT NULL,
+            party_discount_percent REAL NOT NULL DEFAULT 0.0,
+            party_discount_amount REAL NOT NULL DEFAULT 0.0,
+            discount_percent REAL NOT NULL DEFAULT 0.0,
+            discount_amount REAL NOT NULL DEFAULT 0.0,
+            amount REAL NOT NULL DEFAULT 0.0,
+            remarks TEXT DEFAULT '',
+            FOREIGN KEY (booking_id) REFERENCES supply_bookings (id) ON DELETE CASCADE
+          );
+        `);
+      }
+
+      if (Number(supplyCountRow?.c || 0) === 0) {
+        db.exec(`
+          DROP TABLE IF EXISTS supply_return_items;
+          DROP TABLE IF EXISTS supply_returns;
+          DROP TABLE IF EXISTS supply_dispatch_items;
+          DROP TABLE IF EXISTS supply_dispatches;
+          DROP TABLE IF EXISTS party_supply_items;
+          DROP TABLE IF EXISTS party_supplies;
+          DROP TABLE IF EXISTS town_supplies;
+          DROP TABLE IF EXISTS supply_recoveries;
+          DROP TABLE IF EXISTS salesman_settlements;
+
+          CREATE TABLE town_supplies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supply_number TEXT NOT NULL UNIQUE,
+            supply_date TEXT NOT NULL,
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            area_id INTEGER,
+            area_name TEXT DEFAULT '',
+            import_batch_id INTEGER DEFAULT NULL,
+            import_batch_number TEXT DEFAULT NULL,
+            total_parties INTEGER NOT NULL DEFAULT 0,
+            total_items INTEGER NOT NULL DEFAULT 0,
+            total_ordered_qty REAL NOT NULL DEFAULT 0.0,
+            total_supply_qty REAL NOT NULL DEFAULT 0.0,
+            total_packed_qty REAL NOT NULL DEFAULT 0.0,
+            total_dispatched_qty REAL NOT NULL DEFAULT 0.0,
+            total_return_qty REAL NOT NULL DEFAULT 0.0,
+            total_returned_qty REAL NOT NULL DEFAULT 0.0,
+            total_damaged_qty REAL NOT NULL DEFAULT 0.0,
+            total_billed_qty REAL NOT NULL DEFAULT 0.0,
+            total_bonus_qty REAL NOT NULL DEFAULT 0.0,
+            gross_amount REAL NOT NULL DEFAULT 0.0,
+            offer_discount_amount REAL NOT NULL DEFAULT 0.0,
+            party_discount_amount REAL NOT NULL DEFAULT 0.0,
+            discount_amount REAL NOT NULL DEFAULT 0.0,
+            total_supply_amount REAL NOT NULL DEFAULT 0.0,
+            supply_amount REAL NOT NULL DEFAULT 0.0,
+            total_return_amount REAL NOT NULL DEFAULT 0.0,
+            return_amount REAL NOT NULL DEFAULT 0.0,
+            net_billable_amount REAL NOT NULL DEFAULT 0.0,
+            total_billed_amount REAL NOT NULL DEFAULT 0.0,
+            final_bill_amount REAL NOT NULL DEFAULT 0.0,
+            total_recovered_amount REAL NOT NULL DEFAULT 0.0,
+            recovered_amount REAL NOT NULL DEFAULT 0.0,
+            packing_status TEXT NOT NULL DEFAULT 'Pending',
+            supply_status TEXT NOT NULL DEFAULT 'Packing Pending',
+            super_admin_reviewed INTEGER NOT NULL DEFAULT 1,
+            dispatch_id INTEGER DEFAULT NULL,
+            dispatch_number TEXT DEFAULT NULL,
+            dispatch_date TEXT DEFAULT NULL,
+            vehicle_van TEXT DEFAULT '',
+            delivery_person TEXT DEFAULT '',
+            stock_deducted INTEGER NOT NULL DEFAULT 0,
+            remarks TEXT DEFAULT '',
+            created_by TEXT DEFAULT 'Super Admin',
+            updated_by TEXT DEFAULT 'Super Admin',
+            cancelled_by TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE party_supplies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            party_supply_number TEXT NOT NULL UNIQUE,
+            town_supply_id INTEGER NOT NULL,
+            supply_number TEXT NOT NULL,
+            supply_date TEXT NOT NULL,
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            area_id INTEGER,
+            area_name TEXT DEFAULT '',
+            party_account_id INTEGER NOT NULL,
+            party_code TEXT DEFAULT '',
+            party_name TEXT NOT NULL,
+            booking_ids_json TEXT DEFAULT '[]',
+            booking_numbers TEXT DEFAULT '',
+            total_items INTEGER NOT NULL DEFAULT 0,
+            ordered_qty REAL NOT NULL DEFAULT 0.0,
+            supply_qty REAL NOT NULL DEFAULT 0.0,
+            packed_qty REAL NOT NULL DEFAULT 0.0,
+            dispatched_qty REAL NOT NULL DEFAULT 0.0,
+            delivered_qty REAL NOT NULL DEFAULT 0.0,
+            return_qty REAL NOT NULL DEFAULT 0.0,
+            returned_qty REAL NOT NULL DEFAULT 0.0,
+            damaged_qty REAL NOT NULL DEFAULT 0.0,
+            billed_qty REAL NOT NULL DEFAULT 0.0,
+            bonus_qty REAL NOT NULL DEFAULT 0.0,
+            gross_amount REAL NOT NULL DEFAULT 0.0,
+            offer_discount_amount REAL NOT NULL DEFAULT 0.0,
+            party_discount_amount REAL NOT NULL DEFAULT 0.0,
+            discount_amount REAL NOT NULL DEFAULT 0.0,
+            supply_amount REAL NOT NULL DEFAULT 0.0,
+            return_amount REAL NOT NULL DEFAULT 0.0,
+            net_billable_amount REAL NOT NULL DEFAULT 0.0,
+            billed_amount REAL NOT NULL DEFAULT 0.0,
+            final_bill_amount REAL NOT NULL DEFAULT 0.0,
+            recovered_amount REAL NOT NULL DEFAULT 0.0,
+            packing_status TEXT NOT NULL DEFAULT 'Pending',
+            delivery_status TEXT NOT NULL DEFAULT 'Pending',
+            supply_status TEXT NOT NULL DEFAULT 'Packing Pending',
+            final_sale_id INTEGER DEFAULT NULL,
+            final_invoice_number TEXT DEFAULT NULL,
+            stock_deducted INTEGER NOT NULL DEFAULT 0,
+            remarks TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (town_supply_id) REFERENCES town_supplies (id) ON DELETE CASCADE,
+            FOREIGN KEY (party_account_id) REFERENCES accounts (id) ON DELETE RESTRICT
+          );
+
+          CREATE TABLE party_supply_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            party_supply_id INTEGER NOT NULL,
+            town_supply_id INTEGER NOT NULL,
+            supply_number TEXT DEFAULT '',
+            party_account_id INTEGER NOT NULL,
+            party_name TEXT NOT NULL,
+            booking_id INTEGER DEFAULT NULL,
+            booking_item_id INTEGER DEFAULT NULL,
+            booking_number TEXT DEFAULT '',
+            s_no INTEGER NOT NULL DEFAULT 1,
+            item_id INTEGER NOT NULL,
+            inventory_id INTEGER DEFAULT NULL,
+            batch_number TEXT DEFAULT '',
+            expiry_date TEXT DEFAULT '',
+            fifo_batches_json TEXT DEFAULT '[]',
+            item_code TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            packing TEXT DEFAULT '1x1',
+            ordered_quantity REAL NOT NULL DEFAULT 0.0,
+            ordered_qty REAL NOT NULL DEFAULT 0.0,
+            supply_quantity REAL NOT NULL DEFAULT 0.0,
+            supply_qty REAL NOT NULL DEFAULT 0.0,
+            bonus_quantity REAL NOT NULL DEFAULT 0.0,
+            bonus_qty REAL NOT NULL DEFAULT 0.0,
+            packed_quantity REAL NOT NULL DEFAULT 0.0,
+            packed_qty REAL NOT NULL DEFAULT 0.0,
+            remaining_pack_quantity REAL NOT NULL DEFAULT 0.0,
+            remaining_pack_qty REAL NOT NULL DEFAULT 0.0,
+            packing_status TEXT NOT NULL DEFAULT 'Pending',
+            reserved_qty REAL NOT NULL DEFAULT 0.0,
+            dispatched_qty REAL NOT NULL DEFAULT 0.0,
+            delivered_qty REAL NOT NULL DEFAULT 0.0,
+            returned_quantity REAL NOT NULL DEFAULT 0.0,
+            returned_qty REAL NOT NULL DEFAULT 0.0,
+            accepted_return_qty REAL NOT NULL DEFAULT 0.0,
+            damaged_return_qty REAL NOT NULL DEFAULT 0.0,
+            billed_quantity REAL NOT NULL DEFAULT 0.0,
+            billed_qty REAL NOT NULL DEFAULT 0.0,
+            net_billable_qty REAL NOT NULL DEFAULT 0.0,
+            pending_bill_qty REAL NOT NULL DEFAULT 0.0,
+            trade_price REAL NOT NULL DEFAULT 0.0,
+            offer_id INTEGER DEFAULT NULL,
+            offer_name TEXT DEFAULT '',
+            offer_discount_percent REAL NOT NULL DEFAULT 0.0,
+            offer_discount_amount REAL NOT NULL DEFAULT 0.0,
+            party_discount_id INTEGER DEFAULT NULL,
+            party_discount_percent REAL NOT NULL DEFAULT 0.0,
+            party_discount_amount REAL NOT NULL DEFAULT 0.0,
+            discount_percent REAL NOT NULL DEFAULT 0.0,
+            discount_amount REAL NOT NULL DEFAULT 0.0,
+            amount REAL NOT NULL DEFAULT 0.0,
+            return_amount REAL NOT NULL DEFAULT 0.0,
+            net_billable_amount REAL NOT NULL DEFAULT 0.0,
+            final_billed_amount REAL NOT NULL DEFAULT 0.0,
+            manual_override_reason TEXT DEFAULT '',
+            remarks TEXT DEFAULT '',
+            FOREIGN KEY (party_supply_id) REFERENCES party_supplies (id) ON DELETE CASCADE,
+            FOREIGN KEY (town_supply_id) REFERENCES town_supplies (id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE supply_dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_number TEXT NOT NULL UNIQUE,
+            town_supply_id INTEGER NOT NULL,
+            supply_number TEXT NOT NULL,
+            dispatch_date TEXT NOT NULL,
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            vehicle_number TEXT NOT NULL DEFAULT '',
+            vehicle_van TEXT NOT NULL DEFAULT '',
+            driver_name TEXT NOT NULL DEFAULT '',
+            driver_phone TEXT NOT NULL DEFAULT '',
+            delivery_person TEXT NOT NULL DEFAULT '',
+            total_parties INTEGER NOT NULL DEFAULT 0,
+            total_items INTEGER NOT NULL DEFAULT 0,
+            total_packed_qty REAL NOT NULL DEFAULT 0.0,
+            total_dispatched_qty REAL NOT NULL DEFAULT 0.0,
+            total_bonus_qty REAL NOT NULL DEFAULT 0.0,
+            total_quantity REAL NOT NULL DEFAULT 0.0,
+            total_dispatch_amount REAL NOT NULL DEFAULT 0.0,
+            total_amount REAL NOT NULL DEFAULT 0.0,
+            delivery_status TEXT NOT NULL DEFAULT 'Dispatched',
+            status TEXT NOT NULL DEFAULT 'Dispatched',
+            dispatched_by TEXT DEFAULT 'Super Admin',
+            remarks TEXT DEFAULT '',
+            created_by TEXT DEFAULT 'Super Admin',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (town_supply_id) REFERENCES town_supplies (id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE supply_dispatch_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id INTEGER NOT NULL,
+            town_supply_id INTEGER NOT NULL,
+            party_supply_id INTEGER NOT NULL,
+            party_supply_item_id INTEGER NOT NULL,
+            supply_number TEXT DEFAULT '',
+            party_account_id INTEGER NOT NULL,
+            party_name TEXT NOT NULL,
+            s_no INTEGER NOT NULL DEFAULT 1,
+            item_id INTEGER NOT NULL,
+            inventory_id INTEGER DEFAULT NULL,
+            batch_number TEXT DEFAULT '',
+            expiry_date TEXT DEFAULT '',
+            item_code TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            packing TEXT DEFAULT '1x1',
+            ordered_quantity REAL NOT NULL DEFAULT 0.0,
+            packed_quantity REAL NOT NULL DEFAULT 0.0,
+            packed_qty REAL NOT NULL DEFAULT 0.0,
+            dispatched_quantity REAL NOT NULL DEFAULT 0.0,
+            dispatched_qty REAL NOT NULL DEFAULT 0.0,
+            delivered_qty REAL NOT NULL DEFAULT 0.0,
+            pending_qty REAL NOT NULL DEFAULT 0.0,
+            bonus_quantity REAL NOT NULL DEFAULT 0.0,
+            bonus_qty REAL NOT NULL DEFAULT 0.0,
+            trade_price REAL NOT NULL DEFAULT 0.0,
+            discount_percent REAL NOT NULL DEFAULT 0.0,
+            discount_amount REAL NOT NULL DEFAULT 0.0,
+            amount REAL NOT NULL DEFAULT 0.0,
+            delivery_status TEXT NOT NULL DEFAULT 'Dispatched',
+            FOREIGN KEY (dispatch_id) REFERENCES supply_dispatches (id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE supply_returns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            return_number TEXT NOT NULL UNIQUE,
+            return_date TEXT NOT NULL,
+            town_supply_id INTEGER NOT NULL,
+            supply_number TEXT NOT NULL,
+            party_supply_id INTEGER DEFAULT NULL,
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            party_account_id INTEGER,
+            party_name TEXT DEFAULT '',
+            total_returned_qty REAL NOT NULL DEFAULT 0.0,
+            total_accepted_qty REAL NOT NULL DEFAULT 0.0,
+            total_damaged_qty REAL NOT NULL DEFAULT 0.0,
+            total_return_amount REAL NOT NULL DEFAULT 0.0,
+            stock_restored INTEGER NOT NULL DEFAULT 1,
+            remarks TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'Completed',
+            created_by TEXT DEFAULT 'Super Admin',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (town_supply_id) REFERENCES town_supplies (id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE supply_return_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supply_return_id INTEGER NOT NULL,
+            town_supply_id INTEGER NOT NULL,
+            party_supply_id INTEGER NOT NULL,
+            party_supply_item_id INTEGER NOT NULL,
+            party_account_id INTEGER NOT NULL,
+            party_name TEXT NOT NULL,
+            item_id INTEGER NOT NULL,
+            inventory_id INTEGER DEFAULT NULL,
+            batch_number TEXT DEFAULT '',
+            item_code TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            packing TEXT DEFAULT '1x1',
+            supplied_quantity REAL NOT NULL DEFAULT 0.0,
+            supplied_qty REAL NOT NULL DEFAULT 0.0,
+            previously_returned_qty REAL NOT NULL DEFAULT 0.0,
+            new_return_quantity REAL NOT NULL DEFAULT 0.0,
+            new_return_qty REAL NOT NULL DEFAULT 0.0,
+            accepted_quantity REAL NOT NULL DEFAULT 0.0,
+            accepted_qty REAL NOT NULL DEFAULT 0.0,
+            damaged_quantity REAL NOT NULL DEFAULT 0.0,
+            damaged_qty REAL NOT NULL DEFAULT 0.0,
+            return_reason TEXT DEFAULT '',
+            trade_price REAL NOT NULL DEFAULT 0.0,
+            discount_percent REAL NOT NULL DEFAULT 0.0,
+            return_amount REAL NOT NULL DEFAULT 0.0,
+            FOREIGN KEY (supply_return_id) REFERENCES supply_returns (id) ON DELETE CASCADE
+          );
+
+          CREATE TABLE supply_recoveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_number TEXT NOT NULL UNIQUE,
+            recovery_date TEXT NOT NULL,
+            salesman_id INTEGER,
+            salesman_name TEXT NOT NULL DEFAULT '',
+            town_id INTEGER,
+            town_name TEXT NOT NULL DEFAULT '',
+            area_id INTEGER,
+            area_name TEXT DEFAULT '',
+            party_account_id INTEGER NOT NULL,
+            party_code TEXT DEFAULT '',
+            party_name TEXT NOT NULL,
+            town_supply_id INTEGER DEFAULT NULL,
+            party_supply_id INTEGER DEFAULT NULL,
+            supply_number TEXT DEFAULT '',
+            sale_id INTEGER DEFAULT NULL,
+            invoice_number TEXT DEFAULT '',
+            invoice_amount REAL NOT NULL DEFAULT 0.0,
+            previous_outstanding REAL NOT NULL DEFAULT 0.0,
+            recovery_amount REAL NOT NULL DEFAULT 0.0,
+            remaining_balance REAL NOT NULL DEFAULT 0.0,
+            payment_method TEXT NOT NULL DEFAULT 'Cash',
+            financial_account_id INTEGER,
+            financial_account_name TEXT NOT NULL DEFAULT '',
+            journal_entry_id INTEGER DEFAULT NULL,
+            payment_voucher_id INTEGER DEFAULT NULL,
+            cash_book_voucher_id INTEGER DEFAULT NULL,
+            settlement_id INTEGER DEFAULT NULL,
+            is_settled INTEGER NOT NULL DEFAULT 0,
+            remarks TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'Posted',
+            created_by TEXT DEFAULT 'Super Admin',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (party_account_id) REFERENCES accounts (id) ON DELETE RESTRICT
+          );
+
+          CREATE TABLE salesman_settlements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            settlement_number TEXT NOT NULL UNIQUE,
+            settlement_date TEXT NOT NULL,
+            from_date TEXT DEFAULT '',
+            to_date TEXT DEFAULT '',
+            salesman_id INTEGER NOT NULL,
+            salesman_code TEXT DEFAULT '',
+            salesman_name TEXT NOT NULL,
+            town_id INTEGER DEFAULT NULL,
+            town_name TEXT DEFAULT '',
+            town_supply_id INTEGER DEFAULT NULL,
+            supply_number TEXT DEFAULT '',
+            total_supplies REAL NOT NULL DEFAULT 0.0,
+            total_returns REAL NOT NULL DEFAULT 0.0,
+            total_final_billing REAL NOT NULL DEFAULT 0.0,
+            total_cash_collected REAL NOT NULL DEFAULT 0.0,
+            total_bank_collections REAL NOT NULL DEFAULT 0.0,
+            total_outstanding REAL NOT NULL DEFAULT 0.0,
+            expenses_amount REAL NOT NULL DEFAULT 0.0,
+            short_cash_amount REAL NOT NULL DEFAULT 0.0,
+            final_handover_amount REAL NOT NULL DEFAULT 0.0,
+            cash_submitted_to_store REAL NOT NULL DEFAULT 0.0,
+            remaining_cash_in_hand REAL NOT NULL DEFAULT 0.0,
+            difference REAL NOT NULL DEFAULT 0.0,
+            financial_account_id INTEGER DEFAULT NULL,
+            financial_account_name TEXT DEFAULT '',
+            journal_entry_id INTEGER DEFAULT NULL,
+            cash_book_voucher_id INTEGER DEFAULT NULL,
+            remarks TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'Completed',
+            created_by TEXT DEFAULT 'Super Admin',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (salesman_id) REFERENCES salesmen (id) ON DELETE RESTRICT
+          );
+        `);
+      }
+
+      // Create New Enhancement Tables: FIFO Movements, Trade Offers, Party Discounts, Mobile Booking Imports, Verification Codes, Protected Audit Logs
+      db.exec(`
+        -- 11. Batch-Wise FIFO Stock Movement History
+        CREATE TABLE IF NOT EXISTS batch_stock_movements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          movement_date TEXT NOT NULL,
+          item_id INTEGER NOT NULL,
+          item_code TEXT NOT NULL DEFAULT '',
+          item_name TEXT NOT NULL DEFAULT '',
+          company_name TEXT NOT NULL DEFAULT '',
+          inventory_id INTEGER NOT NULL,
+          batch_number TEXT NOT NULL DEFAULT '',
+          expiry_date TEXT NOT NULL DEFAULT '',
+          purchase_date TEXT DEFAULT '',
+          movement_type TEXT NOT NULL, -- 'PURCHASE_IN', 'RESERVE_PACKING', 'UNRESERVE_PACKING', 'DISPATCH_OUT', 'COUNTER_SALE_OUT', 'BONUS_OUT', 'RETURN_IN_SALEABLE', 'RETURN_DAMAGED', 'BATCH_ADJUSTMENT', 'BATCH_BLOCK', 'BATCH_UNBLOCK'
+          reference_type TEXT NOT NULL DEFAULT '', -- 'PURCHASE', 'SALE', 'SUPPLY_PACK', 'SUPPLY_DISPATCH', 'SUPPLY_RETURN', 'SALE_RETURN', 'ADJUSTMENT'
+          reference_id INTEGER DEFAULT NULL,
+          reference_number TEXT DEFAULT '',
+          party_account_id INTEGER DEFAULT NULL,
+          party_name TEXT DEFAULT '',
+          salesman_id INTEGER DEFAULT NULL,
+          salesman_name TEXT DEFAULT '',
+          town_name TEXT DEFAULT '',
+          quantity_packs REAL NOT NULL DEFAULT 0.0,
+          bonus_packs REAL NOT NULL DEFAULT 0.0,
+          total_units REAL NOT NULL DEFAULT 0.0,
+          purchase_rate REAL NOT NULL DEFAULT 0.0,
+          trade_price REAL NOT NULL DEFAULT 0.0,
+          balance_after_packs REAL NOT NULL DEFAULT 0.0,
+          remarks TEXT DEFAULT '',
+          performed_by TEXT NOT NULL DEFAULT 'Super Admin',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_batch_mov_item ON batch_stock_movements(item_id);
+        CREATE INDEX IF NOT EXISTS idx_batch_mov_inv ON batch_stock_movements(inventory_id);
+        CREATE INDEX IF NOT EXISTS idx_batch_mov_batch ON batch_stock_movements(batch_number);
+        CREATE INDEX IF NOT EXISTS idx_batch_mov_date ON batch_stock_movements(movement_date);
+
+        -- 12. Trade Deals & Offers Management
+        CREATE TABLE IF NOT EXISTS trade_offers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          offer_code TEXT NOT NULL UNIQUE,
+          offer_name TEXT NOT NULL,
+          offer_type TEXT NOT NULL DEFAULT 'percentage_discount', -- 'percentage_discount', 'bonus_quantity', 'fixed_discount', 'slab_based'
+          scope_type TEXT NOT NULL DEFAULT 'item', -- 'all_items', 'company', 'item'
+          company_name TEXT DEFAULT '',
+          item_id INTEGER DEFAULT NULL,
+          item_code TEXT DEFAULT '',
+          item_name TEXT DEFAULT '',
+          town_id INTEGER DEFAULT NULL,
+          town_name TEXT DEFAULT '',
+          party_account_id INTEGER DEFAULT NULL,
+          party_name TEXT DEFAULT '',
+          salesman_id INTEGER DEFAULT NULL,
+          salesman_name TEXT DEFAULT '',
+          min_quantity REAL NOT NULL DEFAULT 1.0,
+          max_quantity REAL DEFAULT NULL,
+          discount_percent REAL NOT NULL DEFAULT 0.0,
+          fixed_discount_amount REAL NOT NULL DEFAULT 0.0,
+          bonus_quantity REAL NOT NULL DEFAULT 0.0,
+          bonus_item_id INTEGER DEFAULT NULL,
+          bonus_item_code TEXT DEFAULT '',
+          bonus_item_name TEXT DEFAULT '',
+          slabs_json TEXT NOT NULL DEFAULT '[]', -- Array of { min_qty, max_qty, discount_percent, fixed_discount_amount, bonus_quantity, bonus_item_id, bonus_item_name }
+          start_date TEXT NOT NULL,
+          end_date TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'Active', -- 'Active', 'Inactive'
+          remarks TEXT DEFAULT '',
+          created_by TEXT DEFAULT 'Super Admin',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_trade_offers_item ON trade_offers(item_id);
+        CREATE INDEX IF NOT EXISTS idx_trade_offers_company ON trade_offers(company_name);
+        CREATE INDEX IF NOT EXISTS idx_trade_offers_dates ON trade_offers(start_date, end_date);
+
+        -- 13. Party-Wise Special Discounts Management
+        CREATE TABLE IF NOT EXISTS party_discounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          discount_code TEXT NOT NULL UNIQUE,
+          party_account_id INTEGER NOT NULL,
+          party_name TEXT NOT NULL,
+          scope_type TEXT NOT NULL DEFAULT 'item', -- 'all_items', 'company', 'item'
+          company_name TEXT DEFAULT '',
+          item_id INTEGER DEFAULT NULL,
+          item_code TEXT DEFAULT '',
+          item_name TEXT DEFAULT '',
+          discount_percent REAL NOT NULL DEFAULT 0.0,
+          fixed_discount_amount REAL NOT NULL DEFAULT 0.0,
+          start_date TEXT DEFAULT '',
+          end_date TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'Active', -- 'Active', 'Inactive'
+          remarks TEXT DEFAULT '',
+          created_by TEXT DEFAULT 'Super Admin',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (party_account_id) REFERENCES accounts (id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_party_discounts_party ON party_discounts(party_account_id);
+        CREATE INDEX IF NOT EXISTS idx_party_discounts_item ON party_discounts(item_id);
+
+        CREATE TABLE IF NOT EXISTS party_discount_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          party_discount_id INTEGER NOT NULL,
+          discount_code TEXT NOT NULL,
+          action TEXT NOT NULL, -- 'CREATED', 'UPDATED', 'DEACTIVATED', 'ACTIVATED'
+          old_values_json TEXT DEFAULT '{}',
+          new_values_json TEXT DEFAULT '{}',
+          performed_by TEXT NOT NULL DEFAULT 'Super Admin',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- 14. Salesman Mobile Booking Import Batches & History
+        CREATE TABLE IF NOT EXISTS mobile_booking_imports (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_batch_number TEXT NOT NULL UNIQUE,
+          file_name TEXT NOT NULL DEFAULT '',
+          file_hash TEXT NOT NULL DEFAULT '',
+          salesman_id INTEGER DEFAULT NULL,
+          salesman_name TEXT NOT NULL DEFAULT '',
+          total_bookings_in_file INTEGER NOT NULL DEFAULT 0,
+          valid_bookings_count INTEGER NOT NULL DEFAULT 0,
+          duplicate_bookings_count INTEGER NOT NULL DEFAULT 0,
+          invalid_bookings_count INTEGER NOT NULL DEFAULT 0,
+          imported_booking_ids_json TEXT NOT NULL DEFAULT '[]',
+          imported_booking_numbers TEXT NOT NULL DEFAULT '',
+          generated_supply_ids_json TEXT NOT NULL DEFAULT '[]',
+          generated_supply_numbers TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'Imported', -- 'Imported', 'Supply Generated'
+          remarks TEXT DEFAULT '',
+          imported_by TEXT NOT NULL DEFAULT 'Super Admin',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- 15. One-Time Security Verification Codes (Master Reset & Local Restore)
+        CREATE TABLE IF NOT EXISTS security_verification_codes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          purpose TEXT NOT NULL, -- 'MASTER_RESET_TRANSACTIONS', 'MASTER_RESET_COMPLETE', 'LOCAL_RESTORE'
+          code_hash TEXT NOT NULL,
+          target_email TEXT NOT NULL,
+          expires_at DATETIME NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 5,
+          locked_until DATETIME DEFAULT NULL,
+          used INTEGER NOT NULL DEFAULT 0,
+          used_at DATETIME DEFAULT NULL,
+          created_by TEXT NOT NULL DEFAULT 'Super Admin',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- 16. Protected Immutable Audit Logs (NEVER deleted by Master Reset)
+        CREATE TABLE IF NOT EXISTS protected_audit_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER DEFAULT NULL,
+          username TEXT NOT NULL DEFAULT 'Super Admin',
+          user_role TEXT NOT NULL DEFAULT 'Super Admin',
+          action TEXT NOT NULL,
+          module TEXT NOT NULL DEFAULT 'SYSTEM',
+          record_reference TEXT DEFAULT '',
+          old_value_json TEXT DEFAULT '',
+          new_value_json TEXT DEFAULT '',
+          result TEXT NOT NULL DEFAULT 'SUCCESS',
+          ip_address TEXT DEFAULT '',
+          details TEXT DEFAULT '',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_protected_audit_action ON protected_audit_logs(action);
+        CREATE INDEX IF NOT EXISTS idx_protected_audit_module ON protected_audit_logs(module);
+        CREATE INDEX IF NOT EXISTS idx_protected_audit_created ON protected_audit_logs(created_at);
+      `);
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName20, 20);
+    }
   });
 
   try {
@@ -2252,7 +3024,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

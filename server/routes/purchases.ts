@@ -8,6 +8,7 @@ import {
   allocateNextInvoiceNumber,
   bindInvoiceNumberRecordId,
 } from '../services/invoiceSequenceService.ts';
+import { recordBatchStockMovement } from '../services/fifoAndOfferEngine.ts';
 
 export const purchasesRouter = Router();
 
@@ -2158,7 +2159,11 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             total_stock_units = ?,
             last_purchase_id = ?,
             last_supplier_id = ?,
+            purchase_date = COALESCE(NULLIF(purchase_date, ''), ?),
+            purchase_invoice_number = ?,
+            supplier_name = ?,
             status = ?,
+            batch_status = 'Active',
             updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
@@ -2180,10 +2185,39 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           nextTotalUnits,
           purchaseId,
           supplierId,
+          invoiceDate,
+          finalBillNumber,
+          String(supplier.account_name || ''),
           nextStatus,
           existingBatch.id
         );
         inventoryId = Number(existingBatch.id);
+
+        recordBatchStockMovement({
+          movementDate: invoiceDate,
+          itemId: line.itemId,
+          itemCode: line.itemCode,
+          itemName: line.itemName,
+          companyName: line.companyName,
+          inventoryId,
+          batchNumber: String(existingBatch.batch_number || line.batchNo),
+          expiryDate: preservedExpiryDate,
+          purchaseDate: invoiceDate,
+          movementType: 'PURCHASE_IN',
+          referenceType: 'PURCHASE_INVOICE',
+          referenceId: purchaseId,
+          referenceNumber: finalBillNumber,
+          partyAccountId: supplierId,
+          partyName: String(supplier.account_name || ''),
+          quantityPacks: line.qty,
+          bonusPacks: line.bonusQty,
+          totalUnits: line.totalLooseUnits,
+          purchaseRate: line.purchaseRate,
+          tradePrice: Number(line.dbItem.trade_price || line.mrpRate || 0),
+          balanceAfterPacks: nextPackQty,
+          remarks: `Purchase Invoice ${finalBillNumber}`,
+          performedBy: 'Super Admin',
+        });
       } else {
         const nextPackQty = line.totalPacksAdded;
         const nextStripQty = round2(nextPackQty * line.parsedPack.stripsPerBox);
@@ -2203,8 +2237,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
               pack_cost, pack_retail,
               purchased_qty, bonus_qty, returned_qty, sold_qty,
               current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
-              rack_shelf, last_purchase_id, last_supplier_id, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+              rack_shelf, last_purchase_id, last_supplier_id,
+              purchase_date, purchase_invoice_number, supplier_name, status, batch_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
           `)
           .run(
             line.itemId,
@@ -2230,9 +2265,38 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             line.dbItem.rack_number || null,
             purchaseId,
             supplierId,
+            invoiceDate,
+            finalBillNumber,
+            String(supplier.account_name || ''),
             nextStatus
           );
         inventoryId = Number(invResult.lastInsertRowid);
+
+        recordBatchStockMovement({
+          movementDate: invoiceDate,
+          itemId: line.itemId,
+          itemCode: line.itemCode,
+          itemName: line.itemName,
+          companyName: line.companyName,
+          inventoryId,
+          batchNumber: line.batchNo,
+          expiryDate: line.expiryDate,
+          purchaseDate: invoiceDate,
+          movementType: 'PURCHASE_IN',
+          referenceType: 'PURCHASE_INVOICE',
+          referenceId: purchaseId,
+          referenceNumber: finalBillNumber,
+          partyAccountId: supplierId,
+          partyName: String(supplier.account_name || ''),
+          quantityPacks: line.qty,
+          bonusPacks: line.bonusQty,
+          totalUnits: nextTotalUnits,
+          purchaseRate: line.purchaseRate,
+          tradePrice: Number(line.dbItem.trade_price || line.mrpRate || 0),
+          balanceAfterPacks: nextPackQty,
+          remarks: `Purchase Invoice ${finalBillNumber}`,
+          performedBy: 'Super Admin',
+        });
       }
 
       // Update Item Master prices ONLY when explicitly approved by user confirmation

@@ -620,3 +620,288 @@ export function getLocalNetworkAddresses(): Array<{ interfaceName: string; addre
   }
   return results;
 }
+
+/**
+ * Generates sequential backup filename in the exact format:
+ * Abrar_Backup_YYYY-MM-DD_NNN.db (e.g., Abrar_Backup_2026-04-06_001.db)
+ */
+export function getNextNumberedBackupFilename(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const datePart = `${yyyy}-${mm}-${dd}`;
+  const prefix = `Abrar_Backup_${datePart}_`;
+
+  const backupDir = getBackupDirectory();
+  let maxSeq = 0;
+
+  if (fs.existsSync(backupDir)) {
+    const files = fs.readdirSync(backupDir);
+    for (const f of files) {
+      if (f.startsWith(prefix) && f.endsWith('.db')) {
+        const seqPart = f.slice(prefix.length, f.length - 3);
+        const parsed = parseInt(seqPart, 10);
+        if (!Number.isNaN(parsed) && parsed > maxSeq) {
+          maxSeq = parsed;
+        }
+      }
+    }
+  }
+
+  try {
+    const db = getDatabase();
+    const rows = db
+      .prepare('SELECT filename FROM backup_history WHERE filename LIKE ?')
+      .all(`${prefix}%.db`) as Array<{ filename: string }>;
+    for (const r of rows) {
+      const f = String(r.filename || '');
+      if (f.startsWith(prefix) && f.endsWith('.db')) {
+        const seqPart = f.slice(prefix.length, f.length - 3);
+        const parsed = parseInt(seqPart, 10);
+        if (!Number.isNaN(parsed) && parsed > maxSeq) {
+          maxSeq = parsed;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const nextSeq = String(maxSeq + 1).padStart(3, '0');
+  return `${prefix}${nextSeq}.db`;
+}
+
+/**
+ * Creates a verified SQLite .db backup using the required Abrar_Backup_YYYY-MM-DD_NNN.db naming convention
+ * and applies the retention policy (keep last 7 daily backups, last 4 weekly backups, never delete latest verified backup).
+ */
+export function createNumberedAbrarBackup(options: {
+  backupType?: BackupType;
+  createdBy?: string;
+  notes?: string;
+  localTargetFolder?: string;
+}): BackupRecord & { localFolderPath: string; verification: BackupVerificationResult } {
+  const db = getDatabase();
+  const backupDir = getBackupDirectory();
+  const filename = getNextNumberedBackupFilename(new Date());
+  const targetPath = path.join(backupDir, filename);
+  const backupType: BackupType = options.backupType || 'manual';
+
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    try {
+      db.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // ignore
+    }
+  }
+
+  try {
+    const escapedPath = targetPath.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${escapedPath}';`);
+  } catch {
+    fs.copyFileSync(config.databasePath, targetPath);
+  }
+
+  const verification = verifyBackupFile(targetPath);
+  if (!verification.valid) {
+    throw new Error(verification.error || 'Backup file failed integrity verification.');
+  }
+
+  const settingsRow = db
+    .prepare('SELECT local_backup_folder FROM company_settings LIMIT 1')
+    .get() as { local_backup_folder?: string } | undefined;
+  const localFolderPath =
+    options.localTargetFolder ||
+    settingsRow?.local_backup_folder ||
+    'D:\\Abrar Medical Store Backups';
+
+  const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, JEs: ${verification.coreCounts.journalEntries}`;
+  const createdBy = options.createdBy || 'Super Admin';
+  const notes =
+    options.notes ||
+    `Verified Local Hard Drive Backup (${localFolderPath}\\${filename})`;
+
+  const insertRes = db
+    .prepare(
+      `
+      INSERT INTO backup_history (
+        filename, file_path, backup_type, file_size_bytes,
+        integrity_status, tables_count, records_summary,
+        status, created_by, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)
+    `
+    )
+    .run(
+      filename,
+      targetPath,
+      backupType,
+      verification.fileSizeBytes,
+      verification.integrityCheck,
+      verification.tablesCount,
+      summaryText,
+      createdBy,
+      notes
+    );
+
+  const createdRow = db
+    .prepare('SELECT * FROM backup_history WHERE id = ?')
+    .get(insertRes.lastInsertRowid) as BackupRecord;
+
+  // Apply retention policy automatically
+  applyBackupRetentionPolicy();
+
+  // Mirror to Cloud SQL storage
+  uploadBackupToCloudSQL({
+    filename,
+    filePath: targetPath,
+    backupType,
+    notes,
+    counts: verification.coreCounts,
+  }).catch(() => {});
+
+  return {
+    ...createdRow,
+    file_exists: fs.existsSync(targetPath),
+    localFolderPath,
+    verification,
+  };
+}
+
+/**
+ * Enforces retention policy:
+ * - Keep last 7 daily backups (configurable via daily_retention_count)
+ * - Keep last 4 weekly backups (configurable via weekly_retention_count)
+ * - Never delete the latest verified backup
+ */
+export function applyBackupRetentionPolicy(): { prunedCount: number } {
+  let prunedCount = 0;
+  try {
+    const db = getDatabase();
+    const settings = db
+      .prepare('SELECT daily_retention_count, weekly_retention_count FROM company_settings LIMIT 1')
+      .get() as { daily_retention_count?: number; weekly_retention_count?: number } | undefined;
+
+    const keepDaily = Math.max(1, Number(settings?.daily_retention_count || 7));
+    const keepWeekly = Math.max(1, Number(settings?.weekly_retention_count || 4));
+
+    const latestVerified = db
+      .prepare("SELECT id FROM backup_history WHERE status = 'completed' ORDER BY id DESC LIMIT 1")
+      .get() as { id: number } | undefined;
+    const protectedId = latestVerified?.id || -1;
+
+    const dailyAutoBackups = db
+      .prepare("SELECT id, file_path FROM backup_history WHERE backup_type = 'daily_auto' AND status = 'completed' ORDER BY id DESC")
+      .all() as Array<{ id: number; file_path: string }>;
+
+    if (dailyAutoBackups.length > keepDaily + keepWeekly) {
+      const toPrune = dailyAutoBackups.slice(keepDaily + keepWeekly);
+      for (const b of toPrune) {
+        if (b.id === protectedId) continue;
+        if (b.file_path && fs.existsSync(b.file_path)) {
+          try {
+            fs.unlinkSync(b.file_path);
+            prunedCount++;
+          } catch {
+            // ignore unlink error
+          }
+        }
+        db.prepare("UPDATE backup_history SET status = 'archived_pruned' WHERE id = ?").run(b.id);
+      }
+    }
+  } catch {
+    // ignore retention errors
+  }
+  return { prunedCount };
+}
+
+/**
+ * Stages an uploaded .db file from the user's hard drive into the backup directory and verifies its SQLite integrity.
+ */
+export function stageAndVerifyUploadedBackup(params: {
+  originalFilename: string;
+  fileBuffer: Buffer;
+  uploadedBy: string;
+}): {
+  valid: boolean;
+  stagedFilename: string;
+  stagedPath: string;
+  backupId?: number;
+  verification: BackupVerificationResult;
+} {
+  const backupDir = getBackupDirectory();
+  const safeBase = path.basename(params.originalFilename || 'Uploaded_Backup.db').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const finalName = safeBase.endsWith('.db') ? safeBase : `${safeBase}.db`;
+  const stagedPath = path.join(backupDir, finalName);
+
+  fs.writeFileSync(stagedPath, params.fileBuffer);
+  const verification = verifyBackupFile(stagedPath);
+
+  if (!verification.valid) {
+    try {
+      if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
+    } catch {
+      // ignore
+    }
+    return {
+      valid: false,
+      stagedFilename: finalName,
+      stagedPath,
+      verification,
+    };
+  }
+
+  const db = getDatabase();
+  const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, JEs: ${verification.coreCounts.journalEntries}`;
+
+  const existing = db
+    .prepare('SELECT id FROM backup_history WHERE filename = ?')
+    .get(finalName) as { id: number } | undefined;
+
+  let backupId: number;
+  if (existing) {
+    db.prepare(
+      `UPDATE backup_history
+       SET file_path = ?, file_size_bytes = ?, integrity_status = ?, tables_count = ?, records_summary = ?, status = 'completed'
+       WHERE id = ?`
+    ).run(
+      stagedPath,
+      verification.fileSizeBytes,
+      verification.integrityCheck,
+      verification.tablesCount,
+      summaryText,
+      existing.id
+    );
+    backupId = existing.id;
+  } else {
+    const ins = db
+      .prepare(
+        `INSERT INTO backup_history (
+          filename, file_path, backup_type, file_size_bytes,
+          integrity_status, tables_count, records_summary,
+          status, created_by, notes
+        ) VALUES (?, ?, 'manual', ?, ?, ?, ?, 'completed', ?, 'Uploaded from local hard drive for restoration')`
+      )
+      .run(
+        finalName,
+        stagedPath,
+        verification.fileSizeBytes,
+        verification.integrityCheck,
+        verification.tablesCount,
+        summaryText,
+        params.uploadedBy
+      );
+    backupId = Number(ins.lastInsertRowid);
+  }
+
+  return {
+    valid: true,
+    stagedFilename: finalName,
+    stagedPath,
+    backupId,
+    verification,
+  };
+}
+

@@ -168,6 +168,7 @@ export type NavTabId =
   | 'supply-towns'
   | 'supply-order-forms'
   | 'supply-bookings'
+  | 'supply-import-bookings'
   | 'supply-creation'
   | 'supply-packing'
   | 'supply-dispatch'
@@ -175,7 +176,13 @@ export type NavTabId =
   | 'supply-billing'
   | 'supply-recovery'
   | 'supply-settlement'
-  | 'supply-reports';
+  | 'supply-reports'
+  | 'mobile-booking-app'
+  | 'trade-deals-offers'
+  | 'party-special-discounts'
+  | 'fifo-batch-control'
+  | 'offer-discount-reports'
+  | 'master-reset';
 
 interface SidebarProps {
   activeTab: NavTabId;
@@ -330,6 +337,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'supply-towns': 'layers',
   'supply-order-forms': 'clipboard',
   'supply-bookings': 'book',
+  'supply-import-bookings': 'swap',
   'supply-creation': 'truck',
   'supply-packing': 'checkClipboard',
   'supply-dispatch': 'truck',
@@ -338,6 +346,12 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'supply-recovery': 'cash',
   'supply-settlement': 'scale',
   'supply-reports': 'chart',
+  'mobile-booking-app': 'pos',
+  'trade-deals-offers': 'gift',
+  'party-special-discounts': 'percent',
+  'fifo-batch-control': 'clock',
+  'offer-discount-reports': 'chart',
+  'master-reset': 'lock',
   'purchases-bill': 'doc',
   'purchases-return': 'refresh',
   'purchase-history': 'clock',
@@ -435,7 +449,8 @@ const MENU: MenuNode[] = [
       { id: 'item-search', label: 'Item Search', canSee: (p) => p.items?.view !== false },
       { id: 'stock-datasheet', label: 'Item Stock', canSee: (p) => p.inventory?.view !== false },
       { id: 'batch-expiry', label: 'Batch & Expiry', canSee: (p) => p.inventory?.view !== false },
-      { id: 'item-offers', label: 'Item Offers', canSee: (p) => p.items?.view !== false },
+      { id: 'fifo-batch-control', label: 'Batch-Wise FIFO Queue', badge: 'FIFO', canSee: (p) => p.inventory?.view !== false },
+      { id: 'item-offers', label: 'Trade Deals & Offers', badge: 'Deals', canSee: (p) => p.items?.view !== false },
       { id: 'item-claims', label: 'Item Claims', canSee: (p) => p.items?.view !== false },
       { id: 'stock-adjustment', label: 'Stock Adjustment', canSee: (p) => p.inventory?.adjust !== false },
       { id: 'item-ledger', label: 'Item Ledger', canSee: (p) => p.inventory?.view !== false },
@@ -453,6 +468,7 @@ const MENU: MenuNode[] = [
       { id: 'party-customers', label: 'Customer Management' },
       { id: 'party-suppliers', label: 'Supplier Management' },
       { id: 'party-master', label: 'Party Master' },
+      { id: 'party-special-discounts', label: 'Party Special Discounts', badge: 'Disc %' },
       { id: 'accounts-master', label: 'Account Management' },
       { id: 'account-groups', label: 'Account Groups' },
       { id: 'party-ledger', label: 'Party Ledger' },
@@ -490,6 +506,8 @@ const MENU: MenuNode[] = [
     children: [
       { id: 'supply-dashboard', label: 'Supply Dashboard', badge: 'ERP' },
       { id: 'supply-salesmen', label: 'Salesman Management' },
+      { id: 'mobile-booking-app', label: 'Salesman Mobile Booking App', badge: 'PWA' },
+      { id: 'supply-import-bookings', label: 'Import Salesman Bookings', badge: 'JSON' },
       { id: 'supply-towns', label: 'Town / Area / Party' },
       { id: 'supply-order-forms', label: 'Order Form (1/2/3 Col)' },
       { id: 'supply-bookings', label: 'Order Booking' },
@@ -582,6 +600,7 @@ const MENU: MenuNode[] = [
       { id: 'sales-daily-summary', label: 'Sales Analysis' },
       { id: 'report-purchase-analysis', label: 'Purchase Analysis' },
       { id: 'sales-discount-report', label: 'Discount Report' },
+      { id: 'offer-discount-reports', label: 'Offer & Party Discount Reports (11)', badge: '11' },
       { id: 'sales-return-report', label: 'Sales Return Report' },
     ],
   },
@@ -596,7 +615,8 @@ const MENU: MenuNode[] = [
       { id: 'company-settings', label: 'Company Settings', canSee: (_p, _isAdmin) => true },
       { id: 'more-options', label: 'More Options', badge: 'Sales', canSee: (_p, isAdmin) => isAdmin },
       { id: 'printer-setup', label: 'Printer Settings', canSee: (_p, _isAdmin) => true },
-      { id: 'backup-restore', label: 'Backup & Restore', canSee: (_p, _isAdmin) => true },
+      { id: 'backup-restore', label: 'Local Backup & Restore', badge: '.db', canSee: (_p, _isAdmin) => true },
+      { id: 'master-reset', label: 'Master Reset (Option A & B)', badge: 'Reset', canSee: (_p, isAdmin) => isAdmin },
       { id: 'data-import-export', label: 'Data Import / Export', canSee: (_p, _isAdmin) => true },
       { id: 'database', label: 'Database Status', canSee: (_p, _isAdmin) => true },
       { id: 'audit-logs', label: 'System Logs', canSee: (_p, isAdmin) => isAdmin },

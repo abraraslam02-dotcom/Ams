@@ -15,6 +15,7 @@ import { whatsappRouter } from './server/routes/whatsapp.ts';
 import { syncRouter } from './server/routes/sync.ts';
 import { cashBookRouter } from './server/routes/cashBook.ts';
 import { supplyRouter } from './server/routes/supply.ts';
+import { enhancementsRouter } from './server/routes/enhancements.ts';
 import { authenticateToken, enforceModulePermissions } from './server/middleware/authMiddleware.ts';
 import { runMigrations } from './server/db/migrations.ts';
 import { checkDatabaseConnection, getDatabase } from './server/db/connection.ts';
@@ -28,7 +29,7 @@ import {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   const distPath = path.resolve(process.cwd(), 'dist');
   const distIndexHtml = path.resolve(distPath, 'index.html');
@@ -75,6 +76,7 @@ async function startServer() {
   app.use('/api/sync', syncRouter);
   app.use('/api/cash-book', cashBookRouter);
   app.use('/api/supply', authenticateToken, enforceModulePermissions('supply'), supplyRouter);
+  app.use('/api/enhancements', enhancementsRouter);
 
   // Prevent browser/proxy HTTP caching on HTML shell and Service Worker scripts
   app.use((req, res, next) => {

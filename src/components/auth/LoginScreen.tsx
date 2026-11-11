@@ -208,6 +208,16 @@ export const LoginScreen: React.FC = () => {
             </div>
           </div>
 
+          {/* Salesman Mobile Booking App Launcher */}
+          <div className="mt-4">
+            <a
+              href="/?mode=mobile-booking"
+              className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-emerald-300 font-bold text-xs flex items-center justify-center gap-2 transition-colors"
+            >
+              <span>Open Salesman Mobile Booking App (Android / Offline PWA)</span>
+            </a>
+          </div>
+
           {/* Footer note */}
           <div className="mt-5 pt-4 border-t border-slate-100 text-center">
             <p className="text-[11px] text-slate-400">
