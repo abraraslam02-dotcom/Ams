@@ -100,7 +100,10 @@ function revertCompletedSaleEffects(saleId: number) {
     .prepare('SELECT * FROM sale_items WHERE sale_id = ?')
     .all(saleId) as Array<Record<string, unknown>>;
 
+  const stockAlreadyManagedBySupply = Number(existingSale.stock_deducted_at_dispatch || 0) === 1;
+
   for (const line of existingItems) {
+    if (stockAlreadyManagedBySupply) break;
     const itemId = Number(line.item_id);
     const batchNumber = String(line.batch_number);
     const totalUnitsSold = Number(line.total_units || 0);

@@ -161,7 +161,21 @@ export type NavTabId =
   | 'users'
   | 'users-manage'
   | 'system-info'
-  | 'system-admin';
+  | 'system-admin'
+  // I. SUPPLY & DISTRIBUTION MANAGEMENT SYSTEM
+  | 'supply-dashboard'
+  | 'supply-salesmen'
+  | 'supply-towns'
+  | 'supply-order-forms'
+  | 'supply-bookings'
+  | 'supply-creation'
+  | 'supply-packing'
+  | 'supply-dispatch'
+  | 'supply-returns'
+  | 'supply-billing'
+  | 'supply-recovery'
+  | 'supply-settlement'
+  | 'supply-reports';
 
 interface SidebarProps {
   activeTab: NavTabId;
@@ -267,6 +281,7 @@ const ACCENTS: Record<string, Accent> = {
   'group-item-management': { tile: 'bg-sky-500/10 text-sky-300', tileActive: 'bg-sky-500/25 text-sky-200 ring-1 ring-sky-400/40', text: 'text-sky-300', bar: 'bg-sky-400' },
   'group-party-accounts': { tile: 'bg-violet-500/10 text-violet-300', tileActive: 'bg-violet-500/25 text-violet-200 ring-1 ring-violet-400/40', text: 'text-violet-300', bar: 'bg-violet-400' },
   'group-sales-management': { tile: 'bg-emerald-500/10 text-emerald-300', tileActive: 'bg-emerald-500/25 text-emerald-200 ring-1 ring-emerald-400/40', text: 'text-emerald-300', bar: 'bg-emerald-400' },
+  'group-supply-distribution': { tile: 'bg-teal-500/10 text-teal-300', tileActive: 'bg-teal-500/25 text-teal-200 ring-1 ring-teal-400/40', text: 'text-teal-300', bar: 'bg-teal-400' },
   'group-purchase-management': { tile: 'bg-amber-500/10 text-amber-300', tileActive: 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400/40', text: 'text-amber-300', bar: 'bg-amber-400' },
   'group-financial-management': { tile: 'bg-cyan-500/10 text-cyan-300', tileActive: 'bg-cyan-500/25 text-cyan-200 ring-1 ring-cyan-400/40', text: 'text-cyan-300', bar: 'bg-cyan-400' },
   'group-inventory-warehouse': { tile: 'bg-orange-500/10 text-orange-300', tileActive: 'bg-orange-500/25 text-orange-200 ring-1 ring-orange-400/40', text: 'text-orange-300', bar: 'bg-orange-400' },
@@ -310,6 +325,19 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'sales-return-register': 'clipboard',
   'deliveryman-master': 'user',
   'delivery-tracking': 'truck',
+  'supply-dashboard': 'truck',
+  'supply-salesmen': 'users',
+  'supply-towns': 'layers',
+  'supply-order-forms': 'clipboard',
+  'supply-bookings': 'book',
+  'supply-creation': 'truck',
+  'supply-packing': 'checkClipboard',
+  'supply-dispatch': 'truck',
+  'supply-returns': 'refresh',
+  'supply-billing': 'doc',
+  'supply-recovery': 'cash',
+  'supply-settlement': 'scale',
+  'supply-reports': 'chart',
   'purchases-bill': 'doc',
   'purchases-return': 'refresh',
   'purchase-history': 'clock',
@@ -451,6 +479,28 @@ const MENU: MenuNode[] = [
       { id: 'sales-return-register', label: 'Sales Return Register' },
       { id: 'deliveryman-master', label: 'Deliveryman Directory' },
       { id: 'delivery-tracking', label: 'Delivery Dispatch' },
+    ],
+  },
+  {
+    id: 'group-supply-distribution',
+    code: 'S',
+    label: 'Supply & Distribution',
+    canSee: (p) => p.sales?.view !== false || p.supply_booking?.view !== false,
+    icon: 'truck',
+    children: [
+      { id: 'supply-dashboard', label: 'Supply Dashboard', badge: 'ERP' },
+      { id: 'supply-salesmen', label: 'Salesman Management' },
+      { id: 'supply-towns', label: 'Town / Area / Party' },
+      { id: 'supply-order-forms', label: 'Order Form (1/2/3 Col)' },
+      { id: 'supply-bookings', label: 'Order Booking' },
+      { id: 'supply-creation', label: 'Town-Wise Supply' },
+      { id: 'supply-packing', label: 'Packing Management' },
+      { id: 'supply-dispatch', label: 'Dispatch / Delivery' },
+      { id: 'supply-returns', label: 'Salesman Return' },
+      { id: 'supply-billing', label: 'Final Billing / Invoice' },
+      { id: 'supply-recovery', label: 'Recovery & 3 Reports' },
+      { id: 'supply-settlement', label: 'Salesman Settlement' },
+      { id: 'supply-reports', label: 'Distribution Reports (38)' },
     ],
   },
   {

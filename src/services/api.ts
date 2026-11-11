@@ -4886,5 +4886,362 @@ export const api = {
     }
     return { success: true, offline: true, logs: [] };
   },
+
+  // ==========================================================================
+  // SUPPLY & DISTRIBUTION MANAGEMENT SYSTEM
+  // ==========================================================================
+
+  async getSupplyNextNumbers() {
+    const res = await authFetch('/api/supply/next-numbers');
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch supply sequence numbers');
+    return data;
+  },
+
+  async getSupplyDashboard(date?: string) {
+    const q = date ? `?date=${encodeURIComponent(date)}` : '';
+    const res = await authFetch(`/api/supply/dashboard${q}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Supply Dashboard');
+    return data;
+  },
+
+  async getSupplySalesmen(params?: { q?: string; status?: string }) {
+    const q = new URLSearchParams();
+    if (params?.q) q.set('q', params.q);
+    if (params?.status) q.set('status', params.status);
+    const res = await authFetch(`/api/supply/salesmen?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load salesmen');
+    return data;
+  },
+
+  async saveSupplySalesman(payload: Record<string, unknown>, id?: number) {
+    const res = await authFetch(id ? `/api/supply/salesmen/${id}` : '/api/supply/salesmen', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save salesman');
+    return data;
+  },
+
+  async getSupplyTowns() {
+    const res = await authFetch('/api/supply/towns');
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Towns & Areas');
+    return data;
+  },
+
+  async saveSupplyTown(payload: Record<string, unknown>, id?: number) {
+    const res = await authFetch(id ? `/api/supply/towns/${id}` : '/api/supply/towns', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save Town');
+    return data;
+  },
+
+  async createSupplyArea(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/areas', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to create Area');
+    return data;
+  },
+
+  async assignPartyTerritory(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/assign-party', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to assign Party to Town/Area');
+    return data;
+  },
+
+  async getSupplyOrderFormCatalog(params?: { company?: string; q?: string }) {
+    const q = new URLSearchParams();
+    if (params?.company) q.set('company', params.company);
+    if (params?.q) q.set('q', params.q);
+    const res = await authFetch(`/api/supply/order-forms/catalog?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load company-wise item catalog');
+    return data;
+  },
+
+  async getSupplyOrderForms(params?: Record<string, string | number | undefined>) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/order-forms?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Order Forms');
+    return data;
+  },
+
+  async saveSupplyOrderForm(payload: Record<string, unknown>, id?: number) {
+    const res = await authFetch(id ? `/api/supply/order-forms/${id}` : '/api/supply/order-forms', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save Order Form');
+    return data;
+  },
+
+  async convertOrderFormToBooking(id: number, payload: Record<string, unknown>) {
+    const res = await authFetch(`/api/supply/order-forms/${id}/convert-to-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to convert Order Form to Booking');
+    return data;
+  },
+
+  async getSupplyBookings(params?: Record<string, string | number | boolean | undefined>) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/bookings?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Order Bookings');
+    return data;
+  },
+
+  async saveSupplyBooking(payload: Record<string, unknown>, id?: number) {
+    const res = await authFetch(id ? `/api/supply/bookings/${id}` : '/api/supply/bookings', {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save Order Booking');
+    return data;
+  },
+
+  async getTownPendingBookings(params: { town_id?: number; town_name?: string; salesman_id?: number; area_id?: number }) {
+    const q = new URLSearchParams();
+    if (params.town_id) q.set('town_id', String(params.town_id));
+    if (params.town_name) q.set('town_name', params.town_name);
+    if (params.salesman_id) q.set('salesman_id', String(params.salesman_id));
+    if (params.area_id) q.set('area_id', String(params.area_id));
+    const res = await authFetch(`/api/supply/town-pending-bookings?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load pending bookings for Town');
+    return data;
+  },
+
+  async getTownSupplies(params?: Record<string, string | number | undefined>) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/supplies?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Town Supplies');
+    return data;
+  },
+
+  async createTownSupply(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/supplies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to create Town Supply');
+    return data;
+  },
+
+  async packTownSupply(id: number, payload: Record<string, unknown>) {
+    const res = await authFetch(`/api/supply/supplies/${id}/pack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update packing');
+    return data;
+  },
+
+  async getSupplyDispatches(params?: Record<string, string | number | undefined>) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/dispatches?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Dispatches');
+    return data;
+  },
+
+  async createSupplyDispatch(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/dispatches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to dispatch supply');
+    return data;
+  },
+
+  async updateDispatchDeliveryStatus(id: number, payload: { delivery_status: string; party_supply_id?: number }) {
+    const res = await authFetch(`/api/supply/dispatches/${id}/delivery`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update delivery status');
+    return data;
+  },
+
+  async getSupplyReturns(params?: Record<string, string | number | undefined>) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/returns?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Salesman Returns');
+    return data;
+  },
+
+  async createSupplyReturn(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/returns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to record Salesman Return');
+    return data;
+  },
+
+  async finalizeSupplyBilling(townSupplyId: number, payload: Record<string, unknown>) {
+    const res = await authFetch(`/api/supply/supplies/${townSupplyId}/finalize-billing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to finalize billing');
+    return data;
+  },
+
+  async getSupplyRecoveries(params?: Record<string, string | number | boolean | undefined>) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/recoveries?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Recoveries');
+    return data;
+  },
+
+  async createSupplyRecovery(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/recoveries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to post Recovery');
+    return data;
+  },
+
+  async getSupplyRecoveryReports(params: {
+    type: 'party-wise' | 'town-wise' | 'supply-wise';
+    from_date?: string;
+    to_date?: string;
+    salesman_id?: number;
+    town_id?: number;
+    party_account_id?: number;
+    supply_number?: string;
+  }) {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== '') q.set(k, String(v));
+    });
+    const res = await authFetch(`/api/supply/recovery-reports?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Recovery Report');
+    return data;
+  },
+
+  async previewSalesmanSettlement(params: { salesman_id: number; from_date?: string; to_date?: string }) {
+    const q = new URLSearchParams();
+    q.set('salesman_id', String(params.salesman_id));
+    if (params.from_date) q.set('from_date', params.from_date);
+    if (params.to_date) q.set('to_date', params.to_date);
+    const res = await authFetch(`/api/supply/settlements/preview?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to preview Salesman Settlement');
+    return data;
+  },
+
+  async getSalesmanSettlements(salesmanId?: number) {
+    const q = salesmanId ? `?salesman_id=${salesmanId}` : '';
+    const res = await authFetch(`/api/supply/settlements${q}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Settlements');
+    return data;
+  },
+
+  async createSalesmanSettlement(payload: Record<string, unknown>) {
+    const res = await authFetch('/api/supply/settlements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save Salesman Settlement');
+    return data;
+  },
+
+  async getSupplyDistributionReport(
+    category: string,
+    reportKey: string,
+    params?: Record<string, string | number | undefined>
+  ) {
+    const q = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') q.set(k, String(v));
+      });
+    }
+    const res = await authFetch(`/api/supply/reports/${category}/${reportKey}?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load distribution report');
+    return data;
+  },
 };
+
 

@@ -61,6 +61,13 @@ export const PERMISSION_MODULES: Array<{ key: string; label: string; description
   { key: 'backup', label: 'Backup & Restore', description: 'Database backup creation and recovery' },
   { key: 'settings', label: 'Application Settings', description: 'Store settings, printer setup, and more options' },
   { key: 'users', label: 'User Management', description: 'Super Admin user accounts and individual permissions' },
+  { key: 'supply_booking', label: 'Supply: Order & Booking', description: 'Order forms, order booking, salesmen, and Towns/Areas' },
+  { key: 'supply_packing', label: 'Supply: Town Supply & Packing', description: 'Town-wise supply creation and packing management' },
+  { key: 'supply_dispatch', label: 'Supply: Dispatch & Delivery', description: 'Supply dispatch challans and stock deduction' },
+  { key: 'supply_returns', label: 'Supply: Salesman Returns', description: 'Salesman stock returns, saleable & damaged stock' },
+  { key: 'supply_billing', label: 'Supply: Final Billing', description: 'Final sales invoice generation from delivered supplies' },
+  { key: 'supply_recovery', label: 'Supply: Recovery & Settlement', description: 'Party/Town/Supply recovery receipts and salesman settlement' },
+  { key: 'supply_reports', label: 'Supply: Distribution Reports', description: 'Booking, supply, return, billing, and recovery reports' },
 ];
 
 let tablesInitialized = false;

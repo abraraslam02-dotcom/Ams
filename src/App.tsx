@@ -30,6 +30,10 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { UserManagementView } from './components/admin/UserManagementView';
 import { MoreOptionsView } from './components/views/MoreOptionsView';
+import {
+  SupplyDistributionWorkspace,
+  type SupplySubView,
+} from './components/supply/SupplyDistributionWorkspace';
 import { api } from './services/api';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';

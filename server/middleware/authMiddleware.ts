@@ -213,7 +213,7 @@ function hasAnyPerm(
  * Route-aware RBAC enforcement for domain routers
  */
 export function enforceModulePermissions(
-  domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting' | 'settings' | 'users'
+  domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting' | 'settings' | 'users' | 'supply'
 ) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
@@ -350,6 +350,50 @@ export function enforceModulePermissions(
           { mod: 'expenses', action: 'create' },
         ]);
         requiredDesc = 'accounting:create';
+      }
+    } else if (domain === 'supply') {
+      if (method === 'GET') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'sales', action: 'view' },
+          { mod: 'supply_booking', action: 'view' },
+          { mod: 'supply_packing', action: 'view' },
+          { mod: 'supply_dispatch', action: 'view' },
+          { mod: 'supply_returns', action: 'view' },
+          { mod: 'supply_billing', action: 'view' },
+          { mod: 'supply_recovery', action: 'view' },
+          { mod: 'supply_reports', action: 'view' },
+        ]);
+        requiredDesc = 'supply:view';
+      } else if (method === 'POST') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'sales', action: 'create' },
+          { mod: 'supply_booking', action: 'create' },
+          { mod: 'supply_packing', action: 'create' },
+          { mod: 'supply_dispatch', action: 'create' },
+          { mod: 'supply_returns', action: 'create' },
+          { mod: 'supply_billing', action: 'create' },
+          { mod: 'supply_recovery', action: 'create' },
+        ]);
+        requiredDesc = 'supply:create';
+      } else if (method === 'PUT' || method === 'PATCH') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'sales', action: 'edit' },
+          { mod: 'supply_booking', action: 'edit' },
+          { mod: 'supply_packing', action: 'edit' },
+          { mod: 'supply_dispatch', action: 'edit' },
+          { mod: 'supply_returns', action: 'edit' },
+          { mod: 'supply_billing', action: 'edit' },
+          { mod: 'supply_recovery', action: 'edit' },
+        ]);
+        requiredDesc = 'supply:edit';
+      } else if (method === 'DELETE') {
+        allowed = hasAnyPerm(perms, [
+          { mod: 'sales', action: 'delete' },
+          { mod: 'supply_booking', action: 'delete' },
+          { mod: 'supply_packing', action: 'delete' },
+          { mod: 'supply_dispatch', action: 'delete' },
+        ]);
+        requiredDesc = 'supply:delete';
       }
     }
 

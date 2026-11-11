@@ -893,6 +893,27 @@ accountsRouter.post('/', (req: Request, res: Response) => {
     );
 
     const newId = Number(result.lastInsertRowid);
+    const rawTown = String(req.body.town_name || city || '').trim();
+    const rawArea = String(req.body.area_name || '').trim();
+    if (rawTown) {
+      let tRow = db
+        .prepare('SELECT id, town_name FROM towns WHERE LOWER(town_name) = LOWER(?)')
+        .get(rawTown) as { id: number; town_name: string } | undefined;
+      if (!tRow) {
+        const tCount = (db.prepare('SELECT COUNT(*) as c FROM towns').get() as { c: number }).c + 1;
+        const insT = db
+          .prepare('INSERT INTO towns (town_code, town_name, status) VALUES (?, ?, ?)')
+          .run(`TWN-${String(tCount).padStart(3, '0')}`, rawTown, 'Active');
+        tRow = { id: Number(insT.lastInsertRowid), town_name: rawTown };
+      }
+      db.prepare('UPDATE accounts SET town_id = ?, town_name = ?, city = ?, area_name = ? WHERE id = ?').run(
+        tRow.id,
+        tRow.town_name,
+        tRow.town_name,
+        rawArea,
+        newId
+      );
+    }
     recalculateAccountBalance(newId);
 
     const created = db
@@ -1040,6 +1061,13 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
         ? filer_status
         : existing.filer_status || 'Filer';
 
+    const resolvedTown =
+      req.body.town_name !== undefined
+        ? String(req.body.town_name || '').trim()
+        : city !== undefined
+        ? String(city || '').trim()
+        : String(existing.city || '');
+
     db.prepare(`
       UPDATE accounts SET
         account_code = ?,
@@ -1059,6 +1087,7 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
         tax_registration_details = ?,
         address = ?,
         city = ?,
+        town_name = ?,
         credit_limit = ?,
         status = ?,
         notes = ?,
@@ -1085,12 +1114,31 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
           : null
         : existing.tax_registration_details,
       address !== undefined ? (address ? String(address).trim() : null) : existing.address,
-      city !== undefined ? (city ? String(city).trim() : null) : existing.city,
+      resolvedTown || null,
+      resolvedTown,
       credLimit,
       accStatus,
       notes !== undefined ? (notes ? String(notes).trim() : null) : existing.notes,
       id
     );
+
+    if (resolvedTown) {
+      let tRow = db
+        .prepare('SELECT id, town_name FROM towns WHERE LOWER(town_name) = LOWER(?)')
+        .get(resolvedTown) as { id: number; town_name: string } | undefined;
+      if (!tRow) {
+        const tCount = (db.prepare('SELECT COUNT(*) as c FROM towns').get() as { c: number }).c + 1;
+        const insT = db
+          .prepare('INSERT INTO towns (town_code, town_name, status) VALUES (?, ?, ?)')
+          .run(`TWN-${String(tCount).padStart(3, '0')}`, resolvedTown, 'Active');
+        tRow = { id: Number(insT.lastInsertRowid), town_name: resolvedTown };
+      }
+      db.prepare('UPDATE accounts SET town_id = ?, town_name = ? WHERE id = ?').run(
+        tRow.id,
+        tRow.town_name,
+        id
+      );
+    }
 
     recalculateAccountBalance(id);
 
