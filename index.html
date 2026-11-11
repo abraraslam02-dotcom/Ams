@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Abrar Medical Store (AMS) - Management System Daulatpur</title>
+    <meta name="description" content="Professional Medical Store Invoice and Inventory Management System for Abrar Medical Store, Pakistan." />
+    <meta property="og:title" content="Abrar Medical Store (AMS) - Management System" />
+    <meta property="og:description" content="Professional Medical Store Invoice and Inventory Management System for Abrar Medical Store, Pakistan." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#065f46" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <script>
+      // Automatic stale Service Worker & CacheStorage invalidation when app build updates
+      (function () {
+        try {
+          var BUILD_STAMP = '2026-11-10-prod-sync-v7';
+          var prevStamp = localStorage.getItem('ams_app_build_stamp');
+          if (prevStamp !== BUILD_STAMP) {
+            localStorage.setItem('ams_app_build_stamp', BUILD_STAMP);
+            var tasks = [];
+            if ('caches' in window) {
+              tasks.push(
+                caches.keys().then(function (keys) {
+                  return Promise.all(
+                    keys.map(function (k) {
+                      return caches.delete(k);
+                    })
+                  );
+                })
+              );
+            }
+            if ('serviceWorker' in navigator) {
+              tasks.push(
+                navigator.serviceWorker.getRegistrations().then(function (regs) {
+                  return Promise.all(
+                    regs.map(function (r) {
+                      return r.unregister().catch(function () {});
+                    })
+                  );
+                })
+              );
+            }
+            if (tasks.length > 0) {
+              Promise.all(tasks).finally(function () {
+                window.location.reload();
+              });
+            }
+          }
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.addEventListener('message', function (event) {
+              if (event.data && event.data.type === 'AMS_SW_ACTIVATED' && event.data.deletedLegacy) {
+                window.location.reload();
+              }
+            });
+          }
+        } catch (e) {
+          // ignore
+        }
+      })();
+
+      // Suppress benign preview iframe Vite HMR WebSocket disconnects
+      (function () {
+        if (typeof window !== 'undefined' && window.WebSocket) {
+          try {
+            var OrigWebSocket = window.WebSocket;
+            window.WebSocket = function (url, protocols) {
+              if (
+                protocols === 'vite-hmr' ||
+                (typeof protocols === 'string' && protocols.indexOf('vite') !== -1) ||
+                (typeof url === 'string' && (url.indexOf('vite') !== -1 || url.indexOf('hmr') !== -1))
+              ) {
+                return {
+                  readyState: 3, // CLOSED
+                  addEventListener: function () {},
+                  removeEventListener: function () {},
+                  send: function () {},
+                  close: function () {},
+                  dispatchEvent: function () { return false; },
+                  onopen: null,
+                  onclose: null,
+                  onerror: null,
+                  onmessage: null,
+                };
+              }
+              return new OrigWebSocket(url, protocols);
+            };
+            window.WebSocket.prototype = OrigWebSocket.prototype;
+            window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+            window.WebSocket.OPEN = OrigWebSocket.OPEN;
+            window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+            window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (
+              event.message &&
+              (event.message.includes('WebSocket') || event.message.includes('[vite]'))
+            ) {
+              event.stopImmediatePropagation();
+              event.preventDefault();
+            }
+          },
+          true
+        );
+
+        window.addEventListener(
+          'unhandledrejection',
+          function (event) {
+            if (
+              event.reason &&
+              typeof event.reason.message === 'string' &&
+              (event.reason.message.includes('WebSocket') || event.reason.message.includes('[vite]'))
+            ) {
+              event.stopImmediatePropagation();
+              event.preventDefault();
+            }
+          },
+          true
+        );
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

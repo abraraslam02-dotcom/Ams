@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#065f46" />
+      <stop offset="50%" stop-color="#047857" />
+      <stop offset="100%" stop-color="#0f766e" />
+    </linearGradient>
+    <linearGradient id="crossGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#d1fae5" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bgGrad)" />
+  <rect x="28" y="28" width="456" height="456" rx="88" fill="none" stroke="#34d399" stroke-width="8" stroke-opacity="0.35" />
+  <!-- Medical Cross -->
+  <path d="M216 96h80a16 16 0 0 1 16 16v72h72a16 16 0 0 1 16 16v80a16 16 0 0 1-16 16h-72v72a16 16 0 0 1-16 16h-80a16 16 0 0 1-16-16v-72h-72a16 16 0 0 1-16-16v-80a16 16 0 0 1 16-16h72v-72a16 16 0 0 1 16-16z" fill="url(#crossGrad)" />
+  <!-- AMS POS Pill Badge -->
+  <rect x="116" y="408" width="280" height="54" rx="27" fill="#022c22" fill-opacity="0.85" stroke="#10b981" stroke-width="4" />
+  <text x="256" y="444" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="30" fill="#ecfdf5" text-anchor="middle" letter-spacing="3">AMS POS</text>
+</svg>

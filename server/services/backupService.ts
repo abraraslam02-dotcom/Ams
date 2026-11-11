@@ -1,0 +1,622 @@
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import Database from 'better-sqlite3';
+import { config } from '../config.ts';
+import {
+  getDatabase,
+  closeDatabaseConnection,
+  reopenDatabaseConnection,
+} from '../db/connection.ts';
+import { runMigrations } from '../db/migrations.ts';
+import {
+  uploadBackupToCloudSQL,
+  syncDatabaseToCloudSQL,
+} from './cloudPersistenceService.ts';
+
+export type BackupType = 'manual' | 'daily_auto' | 'pre_change' | 'pre_restore_safety';
+
+export interface BackupRecord {
+  id: number;
+  filename: string;
+  file_path: string;
+  backup_type: BackupType;
+  file_size_bytes: number;
+  integrity_status: string;
+  tables_count: number;
+  records_summary: string;
+  status: string;
+  created_by: string;
+  notes: string;
+  created_at: string;
+  file_exists?: boolean;
+}
+
+export interface BackupVerificationResult {
+  valid: boolean;
+  filename: string;
+  filePath: string;
+  fileSizeBytes: number;
+  modifiedAt: string;
+  integrityCheck: string;
+  tablesCount: number;
+  coreCounts: {
+    items: number;
+    accounts: number;
+    purchases: number;
+    sales: number;
+    inventoryBatches: number;
+    journalEntries: number;
+    users: number;
+  };
+  error?: string;
+}
+
+/**
+ * Resolves the configured backup directory from company_settings or defaults to data/backups
+ */
+export function getBackupDirectory(): string {
+  const runtimeBaseDir = path.dirname(config.databasePath);
+  const defaultDir = path.resolve(runtimeBaseDir, 'backups');
+
+  try {
+    const db = getDatabase();
+    const row = db
+      .prepare('SELECT backup_directory FROM company_settings LIMIT 1')
+      .get() as { backup_directory?: string } | undefined;
+    const customDir = row?.backup_directory ? String(row.backup_directory).trim() : '';
+    if (customDir && customDir !== 'data/backups' && customDir !== './data/backups') {
+      const candidate = path.isAbsolute(customDir)
+        ? customDir
+        : path.resolve(runtimeBaseDir, customDir);
+      // Never write runtime backups inside the source workspace directory
+      const workspaceRoot = path.resolve(process.cwd());
+      if (!candidate.startsWith(workspaceRoot)) {
+        if (!fs.existsSync(candidate)) {
+          fs.mkdirSync(candidate, { recursive: true });
+        }
+        return candidate;
+      }
+    }
+  } catch {
+    // Fallback to default runtime backup directory
+  }
+
+  if (!fs.existsSync(defaultDir)) {
+    fs.mkdirSync(defaultDir, { recursive: true });
+  }
+  return defaultDir;
+}
+
+/**
+ * Formats current timestamp for backup filenames: YYYY-MM-DD_HH-mm-ss
+ */
+function formatBackupTimestamp(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const min = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  const ms = String(date.getMilliseconds()).padStart(3, '0');
+  return `${yyyy}-${mm}-${dd}_${hh}-${min}-${ss}-${ms}`;
+}
+
+/**
+ * Inspects and verifies any SQLite backup file on disk without modifying it.
+ */
+export function verifyBackupFile(filePath: string): BackupVerificationResult {
+  const filename = path.basename(filePath);
+  if (!fs.existsSync(filePath)) {
+    return {
+      valid: false,
+      filename,
+      filePath,
+      fileSizeBytes: 0,
+      modifiedAt: '',
+      integrityCheck: 'missing_file',
+      tablesCount: 0,
+      coreCounts: {
+        items: 0,
+        accounts: 0,
+        purchases: 0,
+        sales: 0,
+        inventoryBatches: 0,
+        journalEntries: 0,
+        users: 0,
+      },
+      error: 'Backup file does not exist on disk.',
+    };
+  }
+
+  const stats = fs.statSync(filePath);
+  if (stats.size < 4096) {
+    return {
+      valid: false,
+      filename,
+      filePath,
+      fileSizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      integrityCheck: 'invalid_size',
+      tablesCount: 0,
+      coreCounts: {
+        items: 0,
+        accounts: 0,
+        purchases: 0,
+        sales: 0,
+        inventoryBatches: 0,
+        journalEntries: 0,
+        users: 0,
+      },
+      error: 'Backup file is too small to be a valid SQLite database.',
+    };
+  }
+
+  let tempDb: Database.Database | null = null;
+  try {
+    tempDb = new Database(filePath, { readonly: true, fileMustExist: true });
+    const integrity = String(tempDb.pragma('integrity_check', { simple: true }) || '');
+    const tables = tempDb
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+      )
+      .all() as Array<{ name: string }>;
+
+    const tableSet = new Set(tables.map((t) => t.name));
+    const requiredTables = ['items', 'accounts', 'sales', 'purchases', 'inventory', 'users'];
+    const missingRequired = requiredTables.filter((t) => !tableSet.has(t));
+
+    const safeCount = (tableName: string): number => {
+      if (!tableSet.has(tableName)) return 0;
+      const r = tempDb!.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as {
+        cnt: number;
+      };
+      return Number(r?.cnt || 0);
+    };
+
+    const coreCounts = {
+      items: safeCount('items'),
+      accounts: safeCount('accounts'),
+      purchases: safeCount('purchases'),
+      sales: safeCount('sales'),
+      inventoryBatches: safeCount('inventory'),
+      journalEntries: safeCount('journal_entries'),
+      users: safeCount('users'),
+    };
+
+    const isValid = integrity.toLowerCase() === 'ok' && missingRequired.length === 0;
+
+    return {
+      valid: isValid,
+      filename,
+      filePath,
+      fileSizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      integrityCheck: integrity,
+      tablesCount: tables.length,
+      coreCounts,
+      error: isValid
+        ? undefined
+        : missingRequired.length > 0
+        ? `Backup is missing core tables: ${missingRequired.join(', ')}`
+        : `SQLite integrity check failed: ${integrity}`,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      valid: false,
+      filename,
+      filePath,
+      fileSizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      integrityCheck: 'corrupted',
+      tablesCount: 0,
+      coreCounts: {
+        items: 0,
+        accounts: 0,
+        purchases: 0,
+        sales: 0,
+        inventoryBatches: 0,
+        journalEntries: 0,
+        users: 0,
+      },
+      error: `Failed to open or verify SQLite backup file: ${msg}`,
+    };
+  } finally {
+    if (tempDb) {
+      try {
+        tempDb.close();
+      } catch {
+        // ignore close error
+      }
+    }
+  }
+}
+
+/**
+ * Creates an immediate, consistent snapshot backup of the active SQLite database.
+ */
+export function createDatabaseBackup(options: {
+  backupType: BackupType;
+  createdBy?: string;
+  notes?: string;
+}): BackupRecord {
+  const db = getDatabase();
+  const backupDir = getBackupDirectory();
+  const timestamp = formatBackupTimestamp(new Date());
+  const filename = `AMS_Backup_${timestamp}_${options.backupType}.db`;
+  const targetPath = path.join(backupDir, filename);
+
+  // 1. Flush WAL to main database file so copy is 100% consistent
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // fallback to PASSIVE checkpoint if busy
+    try {
+      db.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2. Use SQLite VACUUM INTO for an atomic, transactionally consistent backup copy
+  try {
+    const escapedPath = targetPath.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${escapedPath}';`);
+  } catch {
+    // Fallback to direct file copy if VACUUM INTO fails
+    fs.copyFileSync(config.databasePath, targetPath);
+  }
+
+  // 3. Verify the created backup file immediately
+  const verification = verifyBackupFile(targetPath);
+  const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, JEs: ${verification.coreCounts.journalEntries}`;
+
+  const status = verification.valid ? 'completed' : 'failed';
+  const createdBy = options.createdBy || 'System';
+  const notes =
+    options.notes ||
+    (options.backupType === 'daily_auto'
+      ? 'Automatic scheduled daily database backup'
+      : options.backupType === 'pre_change'
+      ? 'Automatic safety backup prior to major database operation'
+      : options.backupType === 'pre_restore_safety'
+      ? 'Automatic safety backup created immediately before database restoration'
+      : 'Manual on-demand database backup');
+
+  const insertRes = db
+    .prepare(
+      `
+      INSERT INTO backup_history (
+        filename, file_path, backup_type, file_size_bytes,
+        integrity_status, tables_count, records_summary,
+        status, created_by, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+    )
+    .run(
+      filename,
+      targetPath,
+      options.backupType,
+      verification.fileSizeBytes,
+      verification.integrityCheck,
+      verification.tablesCount,
+      summaryText,
+      status,
+      createdBy,
+      notes
+    );
+
+  const createdRow = db
+    .prepare('SELECT * FROM backup_history WHERE id = ?')
+    .get(insertRes.lastInsertRowid) as BackupRecord;
+
+  // Asynchronously mirror backup to permanent Cloud SQL storage
+  uploadBackupToCloudSQL({
+    filename,
+    filePath: targetPath,
+    backupType: options.backupType,
+    notes,
+    counts: verification.coreCounts,
+  }).catch(() => {});
+
+  return {
+    ...createdRow,
+    file_exists: fs.existsSync(targetPath),
+  };
+}
+
+/**
+ * Triggers an automatic backup before major database changes if enabled in company_settings.
+ */
+export function triggerPreChangeBackupIfEnabled(operationReason: string, username = 'System'): BackupRecord | null {
+  try {
+    const db = getDatabase();
+    const settings = db
+      .prepare('SELECT auto_backup_before_changes FROM company_settings LIMIT 1')
+      .get() as { auto_backup_before_changes?: number } | undefined;
+
+    if (settings && Number(settings.auto_backup_before_changes) === 0) {
+      return null;
+    }
+
+    return createDatabaseBackup({
+      backupType: 'pre_change',
+      createdBy: username,
+      notes: `Pre-change safety backup before: ${operationReason}`,
+    });
+  } catch (err) {
+    console.warn('[AMS Backup] Pre-change backup warning:', err);
+    return null;
+  }
+}
+
+/**
+ * Checks and runs automatic daily backup if enabled and not yet created today.
+ */
+export function ensureDailyAutomaticBackup(): BackupRecord | null {
+  try {
+    const db = getDatabase();
+    const settings = db
+      .prepare('SELECT auto_daily_backup FROM company_settings LIMIT 1')
+      .get() as { auto_daily_backup?: number } | undefined;
+
+    if (settings && Number(settings.auto_daily_backup) === 0) {
+      return null;
+    }
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const existingToday = db
+      .prepare(
+        `
+        SELECT id FROM backup_history
+        WHERE backup_type = 'daily_auto'
+          AND status = 'completed'
+          AND DATE(created_at) = DATE(?)
+        LIMIT 1
+      `
+      )
+      .get(todayStr);
+
+    if (existingToday) {
+      return null;
+    }
+
+    return createDatabaseBackup({
+      backupType: 'daily_auto',
+      createdBy: 'System Scheduler',
+      notes: `Automatic Daily Backup for ${todayStr}`,
+    });
+  } catch (err) {
+    console.warn('[AMS Backup] Daily automatic backup check failed:', err);
+    return null;
+  }
+}
+
+/**
+ * Lists all backups (syncing any physical .db files in the backup folder with backup_history).
+ */
+export function listBackups(): BackupRecord[] {
+  const db = getDatabase();
+  const backupDir = getBackupDirectory();
+
+  // Discover any .db files in backupDir that might not be in backup_history (e.g., after a restore)
+  if (fs.existsSync(backupDir)) {
+    const files = fs.readdirSync(backupDir).filter((f) => f.endsWith('.db'));
+    for (const file of files) {
+      const existing = db
+        .prepare('SELECT id FROM backup_history WHERE filename = ?')
+        .get(file);
+      if (!existing) {
+        const fullPath = path.join(backupDir, file);
+        const ver = verifyBackupFile(fullPath);
+        let inferredType: BackupType = 'manual';
+        if (file.includes('daily_auto')) inferredType = 'daily_auto';
+        else if (file.includes('pre_change')) inferredType = 'pre_change';
+        else if (file.includes('pre_restore_safety')) inferredType = 'pre_restore_safety';
+
+        const summaryText = `Items: ${ver.coreCounts.items}, Accounts: ${ver.coreCounts.accounts}, Sales: ${ver.coreCounts.sales}, Purchases: ${ver.coreCounts.purchases}, Batches: ${ver.coreCounts.inventoryBatches}`;
+        db.prepare(
+          `
+          INSERT OR IGNORE INTO backup_history (
+            filename, file_path, backup_type, file_size_bytes,
+            integrity_status, tables_count, records_summary,
+            status, created_by, notes, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'System', 'Discovered in backup directory', ?)
+        `
+        ).run(
+          file,
+          fullPath,
+          inferredType,
+          ver.fileSizeBytes,
+          ver.integrityCheck,
+          ver.tablesCount,
+          summaryText,
+          ver.valid ? 'completed' : 'failed',
+          ver.modifiedAt || new Date().toISOString()
+        );
+      }
+    }
+  }
+
+  const rows = db
+    .prepare('SELECT * FROM backup_history ORDER BY id DESC LIMIT 100')
+    .all() as BackupRecord[];
+
+  return rows.map((r) => ({
+    ...r,
+    file_exists: fs.existsSync(r.file_path),
+  }));
+}
+
+/**
+ * Restores the database from a verified backup file:
+ * 1. Verifies backup integrity before touching current database.
+ * 2. Creates an automatic safety backup of the current database before restoration.
+ * 3. Safely closes the current DB connection, replaces the DB file, reopens, and runs migrations.
+ */
+export function restoreDatabaseFromBackup(options: {
+  backupId?: number;
+  filename?: string;
+  restoredBy: string;
+}): {
+  success: boolean;
+  safetyBackup: BackupRecord;
+  restoredVerification: BackupVerificationResult;
+  message: string;
+} {
+  const db = getDatabase();
+  const backupDir = getBackupDirectory();
+
+  let targetFilePath = '';
+  let targetFilename = '';
+
+  if (options.backupId) {
+    const row = db
+      .prepare('SELECT * FROM backup_history WHERE id = ?')
+      .get(options.backupId) as BackupRecord | undefined;
+    if (!row) {
+      throw new Error(`Backup record #${options.backupId} not found.`);
+    }
+    targetFilePath = row.file_path;
+    targetFilename = row.filename;
+  } else if (options.filename) {
+    const safeName = path.basename(options.filename);
+    targetFilePath = path.join(backupDir, safeName);
+    targetFilename = safeName;
+  } else {
+    throw new Error('Backup ID or filename is required for restoration.');
+  }
+
+  // Step 1: Verify candidate backup integrity BEFORE making any changes
+  const verification = verifyBackupFile(targetFilePath);
+  if (!verification.valid) {
+    throw new Error(
+      verification.error ||
+        `Backup file "${targetFilename}" failed SQLite integrity verification (${verification.integrityCheck}). Restoration aborted to protect existing data.`
+    );
+  }
+
+  // Step 2: Automatically create a safety backup of the current live database before restoration
+  const safetyBackup = createDatabaseBackup({
+    backupType: 'pre_restore_safety',
+    createdBy: options.restoredBy,
+    notes: `Safety snapshot taken automatically prior to restoring ${targetFilename}`,
+  });
+
+  // Step 3: Close current connection, clean WAL/SHM sidecars, copy verified backup over live DB, and reopen
+  closeDatabaseConnection();
+
+  try {
+    const walPath = `${config.databasePath}-wal`;
+    const shmPath = `${config.databasePath}-shm`;
+    if (fs.existsSync(walPath)) fs.unlinkSync(walPath);
+    if (fs.existsSync(shmPath)) fs.unlinkSync(shmPath);
+
+    fs.copyFileSync(targetFilePath, config.databasePath);
+  } catch (copyErr: unknown) {
+    // Reopen and rethrow if copy failed
+    reopenDatabaseConnection();
+    const msg = copyErr instanceof Error ? copyErr.message : String(copyErr);
+    throw new Error(`Failed to replace database file during restoration: ${msg}`);
+  }
+
+  // Step 4: Reopen connection and run idempotent migrations so all tables (including backup_history) are up to date
+  const newDb = reopenDatabaseConnection();
+  runMigrations();
+
+  // Re-sync backup directory files into backup_history of the restored DB
+  listBackups();
+
+  // Mark the restored backup record and log audit trail
+  newDb
+    .prepare(
+      `
+      UPDATE backup_history
+      SET status = 'restored',
+          notes = COALESCE(notes, '') || ' [Restored on ' || CURRENT_TIMESTAMP || ' by ' || ? || ']'
+      WHERE filename = ?
+    `
+    )
+    .run(options.restoredBy, targetFilename);
+
+  newDb
+    .prepare(
+      `
+      INSERT INTO auth_audit_logs (username, action, status, details)
+      VALUES (?, 'DATABASE_RESTORE', 'WARNING', ?)
+    `
+    )
+    .run(
+      options.restoredBy,
+      `Restored database from ${targetFilename} (Safety backup created: ${safetyBackup.filename})`
+    );
+
+  // Immediately sync restored database to Cloud SQL permanent storage
+  syncDatabaseToCloudSQL(`restore:${targetFilename}`).catch(() => {});
+
+  return {
+    success: true,
+    safetyBackup,
+    restoredVerification: verification,
+    message: `Database successfully restored from "${targetFilename}". A pre-restoration safety backup ("${safetyBackup.filename}") was automatically saved.`,
+  };
+}
+
+/**
+ * Logs an application or database error safely without exposing sensitive internals to ordinary users.
+ */
+export function logSystemError(params: {
+  severity?: 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
+  module: string;
+  operation: string;
+  userMessage: string;
+  technicalDetails?: string;
+  username?: string;
+}): void {
+  try {
+    const db = getDatabase();
+    db.prepare(
+      `
+      INSERT INTO system_error_logs (
+        severity, module, operation, user_message, technical_details, username
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `
+    ).run(
+      params.severity || 'ERROR',
+      params.module,
+      params.operation,
+      params.userMessage,
+      params.technicalDetails || '',
+      params.username || 'System'
+    );
+  } catch (err) {
+    console.error('[AMS Error Logger] Failed to write error log:', err);
+  }
+}
+
+/**
+ * Returns local network IPv4 addresses for Multi-Computer LAN access readiness.
+ */
+export function getLocalNetworkAddresses(): Array<{ interfaceName: string; address: string; url: string }> {
+  const results: Array<{ interfaceName: string; address: string; url: string }> = [];
+  try {
+    const nets = os.networkInterfaces();
+    for (const [name, netList] of Object.entries(nets)) {
+      if (!netList) continue;
+      for (const net of netList) {
+        if (net.family === 'IPv4' && !net.internal) {
+          results.push({
+            interfaceName: name,
+            address: net.address,
+            url: `http://${net.address}:${config.port}`,
+          });
+        }
+      }
+    }
+  } catch {
+    // ignore os interface errors
+  }
+  return results;
+}

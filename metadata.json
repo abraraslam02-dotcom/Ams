@@ -1,0 +1,6 @@
+{
+  "name": "Abrar Medical Store (AMS) - Management System",
+  "description": "Professional Medical Store Invoice and Inventory Management System for Abrar Medical Store, Pakistan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

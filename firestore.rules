@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Server-side SQLite snapshot persistence for Abrar Medical Store ERP
+    match /ams_cloud_snapshots/{docId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.syncKey == 'ams_erp_cloud_sync_v2_2026'
+                            && request.resource.data.snapshotKey is string
+                            && request.resource.data.updatedAt is string;
+      allow delete: if false;
+    }
+
+    match /ams_erp_snapshots/{docId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.syncKey == 'ams_erp_cloud_sync_v2_2026'
+                            && request.resource.data.snapshotKey is string
+                            && request.resource.data.updatedAt is string;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

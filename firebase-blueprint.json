@@ -1,0 +1,43 @@
+{
+  "entities": {
+    "CloudSnapshotMeta": {
+      "title": "Cloud Snapshot Metadata",
+      "description": "Metadata for the authoritative SQLite database snapshot persisted to Firebase Firestore across container deployments",
+      "type": "object",
+      "properties": {
+        "snapshotKey": { "type": "string" },
+        "syncKey": { "type": "string" },
+        "checksum": { "type": "string" },
+        "fileSizeBytes": { "type": "number" },
+        "compressedSizeBytes": { "type": "number" },
+        "chunkCount": { "type": "number" },
+        "itemsCount": { "type": "number" },
+        "accountsCount": { "type": "number" },
+        "salesCount": { "type": "number" },
+        "purchasesCount": { "type": "number" },
+        "journalEntriesCount": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["snapshotKey", "syncKey", "checksum", "chunkCount", "updatedAt"]
+    },
+    "CloudSnapshotChunk": {
+      "title": "Cloud Snapshot Chunk",
+      "description": "Base64 gzipped chunk of the SQLite database snapshot",
+      "type": "object",
+      "properties": {
+        "snapshotKey": { "type": "string" },
+        "syncKey": { "type": "string" },
+        "chunkIndex": { "type": "number" },
+        "dataBase64": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["snapshotKey", "syncKey", "chunkIndex", "dataBase64", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/ams_cloud_snapshots/{docId}": {
+      "schema": "CloudSnapshotMeta",
+      "description": "Stores primary_meta and chunk_N documents for Abrar Medical Store SQLite persistence"
+    }
+  }
+}
