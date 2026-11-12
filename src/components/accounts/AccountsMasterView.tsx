@@ -71,10 +71,20 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
   const [selectedMainGroup, setSelectedMainGroup] = useState<string>('all');
   const [selectedAccountGroup, setSelectedAccountGroup] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
+  const [selectedTownId, setSelectedTownId] = useState<string>('all');
+  const [selectedAreaId, setSelectedAreaId] = useState<string>('all');
   const [ledgerView, setLedgerView] = useState<'all' | 'customer' | 'supplier'>(initialLedgerView);
   const [hierarchyMode, setHierarchyMode] = useState<boolean>(initialHierarchyMode);
   const [sortBy, setSortBy] = useState<string>('account_code');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+
+  // Filter option lists
+  const [townsFilterList, setTownsFilterList] = useState<
+    Array<{ id: number; town_code: string; town_name: string }>
+  >([]);
+  const [areasFilterList, setAreasFilterList] = useState<
+    Array<{ id: number; area_code: string; area_name: string; town_id: number; town_name: string }>
+  >([]);
 
   useEffect(() => {
     setLedgerView(initialLedgerView);
@@ -105,6 +115,8 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
         mainGroup: selectedMainGroup,
         accountGroup: selectedAccountGroup,
         status: selectedStatus,
+        townId: selectedTownId !== 'all' ? selectedTownId : undefined,
+        areaId: selectedAreaId !== 'all' ? selectedAreaId : undefined,
         ledgerView,
         sortBy,
         sortOrder,
@@ -115,6 +127,8 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
       if (res.filters) {
         if (res.filters.groupsByMain) setGroupsByMain(res.filters.groupsByMain);
         if (res.filters.parentCandidates) setParentCandidates(res.filters.parentCandidates);
+        if (Array.isArray(res.filters.towns)) setTownsFilterList(res.filters.towns);
+        if (Array.isArray(res.filters.areas)) setAreasFilterList(res.filters.areas);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -127,6 +141,8 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
     selectedMainGroup,
     selectedAccountGroup,
     selectedStatus,
+    selectedTownId,
+    selectedAreaId,
     ledgerView,
     sortBy,
     sortOrder,
@@ -201,6 +217,13 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
     }
     return groupsByMain[selectedMainGroup] || [];
   }, [selectedMainGroup, groupsByMain]);
+
+  // Dependent areas filtered by selected Town in search bar
+  const availableFilterAreas = useMemo(() => {
+    if (selectedTownId === 'all') return areasFilterList;
+    const tId = parseInt(selectedTownId, 10);
+    return areasFilterList.filter((a) => Number(a.town_id) === tId);
+  }, [areasFilterList, selectedTownId]);
 
   const handleOpenAdd = () => {
     setEditingAccount(null);
@@ -531,7 +554,7 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Fast search by Code, Name, Group, Phone, Contact, Address..."
+              placeholder="Fast search by Code, Name, Town, Area, Phone, Address..."
               className="w-full pl-9 pr-8 py-1.5 text-xs rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
             {searchQuery && (
@@ -598,6 +621,70 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Territory Route Filters: Town Master & Dependent Area */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center pt-2.5 border-t border-slate-100">
+          <div className="md:col-span-3 flex items-center gap-1.5 text-xs text-slate-600 font-bold">
+            <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>Territory Route Filter:</span>
+          </div>
+
+          {/* Town Filter */}
+          <div className="md:col-span-4">
+            <select
+              value={selectedTownId}
+              onChange={(e) => {
+                const newTownId = e.target.value;
+                setSelectedTownId(newTownId);
+                setSelectedAreaId('all');
+              }}
+              className="w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-slate-50 text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            >
+              <option value="all">All Towns ({townsFilterList.length})</option>
+              {townsFilterList.map((t) => (
+                <option key={t.id} value={t.id}>
+                  [{t.town_code}] {t.town_name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Dependent Area Filter */}
+          <div className="md:col-span-4">
+            <select
+              value={selectedAreaId}
+              onChange={(e) => setSelectedAreaId(e.target.value)}
+              className="w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-slate-50 text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+            >
+              <option value="all">
+                {selectedTownId !== 'all'
+                  ? `All Areas in Town (${availableFilterAreas.length})`
+                  : `All Areas (${areasFilterList.length})`}
+              </option>
+              {availableFilterAreas.map((a) => (
+                <option key={a.id} value={a.id}>
+                  [{a.area_code}] {a.area_name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Reset button */}
+          <div className="md:col-span-1 flex justify-end">
+            {(selectedTownId !== 'all' || selectedAreaId !== 'all') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedTownId('all');
+                  setSelectedAreaId('all');
+                }}
+                className="text-xs font-bold text-rose-600 hover:text-rose-800 cursor-pointer underline whitespace-nowrap"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Main Chart of Accounts Desktop Table */}
@@ -637,6 +724,24 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
                   Account Group
                 </th>
                 <th
+                  onClick={() => handleSort('town_name')}
+                  className="py-2.5 px-3 cursor-pointer hover:text-emerald-700 whitespace-nowrap"
+                >
+                  <div className="flex items-center gap-1">
+                    <span>Town</span>
+                    <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('area_name')}
+                  className="py-2.5 px-3 cursor-pointer hover:text-emerald-700 whitespace-nowrap"
+                >
+                  <div className="flex items-center gap-1">
+                    <span>Area</span>
+                    <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                  </div>
+                </th>
+                <th
                   onClick={() => handleSort('opening_balance')}
                   className="py-2.5 px-3 text-right cursor-pointer hover:text-emerald-700"
                 >
@@ -666,14 +771,14 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
             <tbody className="divide-y divide-slate-100">
               {loading && displayAccounts.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-12 text-center text-slate-500">
+                  <td colSpan={12} className="py-12 text-center text-slate-500">
                     <RefreshCw className="w-5 h-5 animate-spin mx-auto text-emerald-600 mb-2" />
                     <span>Loading Chart of Accounts...</span>
                   </td>
                 </tr>
               ) : displayAccounts.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-12 text-center text-slate-500">
+                  <td colSpan={12} className="py-12 text-center text-slate-500">
                     <div className="max-w-md mx-auto space-y-2">
                       <Users2 className="w-8 h-8 text-slate-400 mx-auto" />
                       <div className="font-bold text-slate-800 text-sm">
@@ -782,6 +887,28 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
                         >
                           {acc.account_group}
                         </span>
+                      </td>
+
+                      {/* Town */}
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        {acc.town_name || acc.city ? (
+                          <span className="font-semibold text-slate-800 bg-slate-100 px-2 py-0.5 rounded text-[11px] border border-slate-200">
+                            {acc.town_name || acc.city}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+
+                      {/* Area */}
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        {acc.area_name ? (
+                          <span className="text-[11px] font-medium bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded border border-emerald-200">
+                            {acc.area_name}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
                       </td>
 
                       {/* Opening Balance */}

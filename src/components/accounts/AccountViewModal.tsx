@@ -264,6 +264,44 @@ export const AccountViewModal: React.FC<AccountViewModalProps> = ({
             )}
           </div>
 
+          {/* Territory & Supply Route Information */}
+          <div className="p-3.5 rounded-xl bg-emerald-50/50 border border-emerald-200/80 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-950 flex items-center gap-1.5">
+                <MapPin className="w-3.5 h-3.5 text-emerald-700" />
+                <span>Territory & Supply Route (Town Master & Area)</span>
+              </span>
+              {(account.town_name || account.area_name) && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 border border-emerald-300">
+                  {account.town_name || 'Town'} &bull; {account.area_name || 'Area'}
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="p-2.5 rounded-lg bg-white border border-emerald-200">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Town</span>
+                <div className="font-bold text-slate-900 mt-0.5">
+                  {account.town_name || account.city || <span className="text-slate-400 font-normal">Not assigned</span>}
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-white border border-emerald-200">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Dependent Area</span>
+                <div className="font-bold text-slate-900 mt-0.5">
+                  {account.area_name || <span className="text-slate-400 font-normal">Not assigned</span>}
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-white border border-emerald-200">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Assigned Field Salesman</span>
+                <div className="font-bold text-slate-900 mt-0.5">
+                  {account.assigned_salesman_name || <span className="text-slate-400 font-normal">None assigned</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Contact & Address Information */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
@@ -303,9 +341,9 @@ export const AccountViewModal: React.FC<AccountViewModalProps> = ({
             </div>
 
             <div className="sm:col-span-2 p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
-              <span className="text-slate-400 font-medium">Address & City</span>
+              <span className="text-slate-400 font-medium">Market Street Address</span>
               <div className="font-medium text-slate-800">
-                {account.address ? `${account.address}${account.city ? `, ${account.city}` : ''}` : account.city || '—'}
+                {account.address ? `${account.address}${account.town_name || account.city ? `, ${account.town_name || account.city}` : ''}` : account.town_name || account.city || '—'}
               </div>
               {account.notes && (
                 <div className="text-[11px] text-slate-500 pt-1 border-t border-slate-200/60 mt-1">

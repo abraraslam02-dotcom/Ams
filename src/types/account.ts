@@ -65,6 +65,12 @@ export interface Account {
   tax_registration_details: string | null;
   address: string | null;
   city: string | null;
+  town_id: number | null;
+  town_name: string | null;
+  area_id: number | null;
+  area_name: string | null;
+  assigned_salesman_id: number | null;
+  assigned_salesman_name: string | null;
   credit_limit: number;
   is_system_account: number;
   status: 'Active' | 'Inactive';
@@ -93,6 +99,12 @@ export interface AccountFormData {
   tax_registration_details: string;
   address: string;
   city: string;
+  town_id: number | null;
+  town_name: string;
+  area_id: number | null;
+  area_name: string;
+  assigned_salesman_id: number | null;
+  assigned_salesman_name: string;
   credit_limit: number;
   status: 'Active' | 'Inactive';
   notes: string;

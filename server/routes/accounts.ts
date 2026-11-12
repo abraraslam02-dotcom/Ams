@@ -69,6 +69,12 @@ export interface AccountRow {
   tax_registration_details: string | null;
   address: string | null;
   city: string | null;
+  town_id?: number | null;
+  town_name?: string | null;
+  area_id?: number | null;
+  area_name?: string | null;
+  assigned_salesman_id?: number | null;
+  assigned_salesman_name?: string | null;
   credit_limit: number;
   is_system_account: number;
   status: 'Active' | 'Inactive';
@@ -321,6 +327,10 @@ accountsRouter.get('/', (req: Request, res: Response) => {
       parentAccountId,
       status,
       ledgerView, // 'all' | 'customer' | 'supplier'
+      townId,
+      town,
+      areaId,
+      area,
       sortBy = 'account_code',
       sortOrder = 'asc',
     } = req.query;
@@ -331,9 +341,25 @@ accountsRouter.get('/', (req: Request, res: Response) => {
     if (q && typeof q === 'string' && q.trim().length > 0) {
       const term = `%${q.trim()}%`;
       conditions.push(
-        '(a.account_code LIKE ? OR a.account_name LIKE ? OR a.account_group LIKE ? OR a.contact_person LIKE ? OR a.phone LIKE ? OR a.address LIKE ? OR a.ntn_cnic LIKE ?)'
+        '(a.account_code LIKE ? OR a.account_name LIKE ? OR a.account_group LIKE ? OR a.contact_person LIKE ? OR a.phone LIKE ? OR a.address LIKE ? OR a.ntn_cnic LIKE ? OR a.town_name LIKE ? OR a.area_name LIKE ?)'
       );
-      params.push(term, term, term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term);
+    }
+
+    if (townId && typeof townId === 'string' && townId !== 'all') {
+      conditions.push('a.town_id = ?');
+      params.push(parseInt(townId, 10));
+    } else if (town && typeof town === 'string' && town !== 'all' && town.trim().length > 0) {
+      conditions.push('(LOWER(a.town_name) = LOWER(?) OR LOWER(a.city) = LOWER(?))');
+      params.push(town.trim(), town.trim());
+    }
+
+    if (areaId && typeof areaId === 'string' && areaId !== 'all') {
+      conditions.push('a.area_id = ?');
+      params.push(parseInt(areaId, 10));
+    } else if (area && typeof area === 'string' && area !== 'all' && area.trim().length > 0) {
+      conditions.push('LOWER(a.area_name) = LOWER(?)');
+      params.push(area.trim());
     }
 
     if (mainGroup && typeof mainGroup === 'string' && mainGroup !== 'all') {
@@ -463,6 +489,14 @@ accountsRouter.get('/', (req: Request, res: Response) => {
       .prepare('SELECT id, account_code, account_name, main_group, account_group FROM accounts ORDER BY account_code ASC')
       .all();
 
+    const activeTowns = db
+      .prepare('SELECT id, town_code, town_name, status FROM towns WHERE status = \'Active\' ORDER BY town_name ASC')
+      .all();
+
+    const activeAreas = db
+      .prepare('SELECT id, area_code, area_name, town_id, town_name, status FROM town_areas WHERE status = \'Active\' ORDER BY town_name ASC, area_name ASC')
+      .all();
+
     return res.json({
       success: true,
       accounts,
@@ -486,6 +520,8 @@ accountsRouter.get('/', (req: Request, res: Response) => {
         mainGroups: MAIN_ACCOUNT_GROUPS,
         groupsByMain,
         parentCandidates,
+        towns: activeTowns,
+        areas: activeAreas,
       },
     });
   } catch (error: unknown) {
@@ -893,27 +929,58 @@ accountsRouter.post('/', (req: Request, res: Response) => {
     );
 
     const newId = Number(result.lastInsertRowid);
-    const rawTown = String(req.body.town_name || city || '').trim();
-    const rawArea = String(req.body.area_name || '').trim();
-    if (rawTown) {
-      let tRow = db
-        .prepare('SELECT id, town_name FROM towns WHERE LOWER(town_name) = LOWER(?)')
-        .get(rawTown) as { id: number; town_name: string } | undefined;
-      if (!tRow) {
-        const tCount = (db.prepare('SELECT COUNT(*) as c FROM towns').get() as { c: number }).c + 1;
-        const insT = db
-          .prepare('INSERT INTO towns (town_code, town_name, status) VALUES (?, ?, ?)')
-          .run(`TWN-${String(tCount).padStart(3, '0')}`, rawTown, 'Active');
-        tRow = { id: Number(insT.lastInsertRowid), town_name: rawTown };
+    let townId: number | null = req.body.town_id ? parseInt(String(req.body.town_id), 10) : null;
+    let townName = String(req.body.town_name || '').trim();
+    let areaId: number | null = req.body.area_id ? parseInt(String(req.body.area_id), 10) : null;
+    let areaName = String(req.body.area_name || '').trim();
+    let salesmanId: number | null = req.body.assigned_salesman_id ? parseInt(String(req.body.assigned_salesman_id), 10) : null;
+    let salesmanName = String(req.body.assigned_salesman_name || '').trim();
+
+    if (townId) {
+      const t = db.prepare('SELECT id, town_name FROM towns WHERE id = ?').get(townId) as { id: number; town_name: string } | undefined;
+      if (t) townName = t.town_name;
+    } else if (townName) {
+      const t = db.prepare('SELECT id, town_name FROM towns WHERE LOWER(town_name) = LOWER(?)').get(townName) as { id: number; town_name: string } | undefined;
+      if (t) {
+        townId = t.id;
+        townName = t.town_name;
       }
-      db.prepare('UPDATE accounts SET town_id = ?, town_name = ?, city = ?, area_name = ? WHERE id = ?').run(
-        tRow.id,
-        tRow.town_name,
-        tRow.town_name,
-        rawArea,
-        newId
-      );
     }
+
+    if (areaId) {
+      const a = db.prepare('SELECT id, area_name, town_id, town_name FROM town_areas WHERE id = ?').get(areaId) as { id: number; area_name: string; town_id: number; town_name: string } | undefined;
+      if (a) {
+        areaName = a.area_name;
+        if (!townId) {
+          townId = a.town_id;
+          townName = a.town_name;
+        }
+      }
+    } else if (areaName && townId) {
+      const a = db.prepare('SELECT id, area_name FROM town_areas WHERE town_id = ? AND LOWER(area_name) = LOWER(?)').get(townId, areaName) as { id: number; area_name: string } | undefined;
+      if (a) {
+        areaId = a.id;
+        areaName = a.area_name;
+      }
+    }
+
+    if (salesmanId) {
+      const s = db.prepare('SELECT id, full_name FROM salesmen WHERE id = ?').get(salesmanId) as { id: number; full_name: string } | undefined;
+      if (s) salesmanName = s.full_name;
+    }
+
+    db.prepare(`
+      UPDATE accounts SET
+        town_id = ?,
+        town_name = ?,
+        city = COALESCE(NULLIF(?, ''), city),
+        area_id = ?,
+        area_name = ?,
+        assigned_salesman_id = ?,
+        assigned_salesman_name = ?
+      WHERE id = ?
+    `).run(townId, townName || null, townName || null, areaId, areaName || null, salesmanId, salesmanName || null, newId);
+
     recalculateAccountBalance(newId);
 
     const created = db
@@ -1122,23 +1189,58 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
       id
     );
 
-    if (resolvedTown) {
-      let tRow = db
-        .prepare('SELECT id, town_name FROM towns WHERE LOWER(town_name) = LOWER(?)')
-        .get(resolvedTown) as { id: number; town_name: string } | undefined;
-      if (!tRow) {
-        const tCount = (db.prepare('SELECT COUNT(*) as c FROM towns').get() as { c: number }).c + 1;
-        const insT = db
-          .prepare('INSERT INTO towns (town_code, town_name, status) VALUES (?, ?, ?)')
-          .run(`TWN-${String(tCount).padStart(3, '0')}`, resolvedTown, 'Active');
-        tRow = { id: Number(insT.lastInsertRowid), town_name: resolvedTown };
+    // Update Town, Area and Salesman assignments
+    let nextTownId = req.body.town_id !== undefined ? (req.body.town_id ? parseInt(String(req.body.town_id), 10) : null) : existing.town_id;
+    let nextTownName = req.body.town_name !== undefined ? String(req.body.town_name || '').trim() : (existing.town_name || resolvedTown || '');
+    let nextAreaId = req.body.area_id !== undefined ? (req.body.area_id ? parseInt(String(req.body.area_id), 10) : null) : existing.area_id;
+    let nextAreaName = req.body.area_name !== undefined ? String(req.body.area_name || '').trim() : (existing.area_name || '');
+    let nextSalesmanId = req.body.assigned_salesman_id !== undefined ? (req.body.assigned_salesman_id ? parseInt(String(req.body.assigned_salesman_id), 10) : null) : existing.assigned_salesman_id;
+    let nextSalesmanName = req.body.assigned_salesman_name !== undefined ? String(req.body.assigned_salesman_name || '').trim() : (existing.assigned_salesman_name || '');
+
+    if (nextTownId) {
+      const t = db.prepare('SELECT id, town_name FROM towns WHERE id = ?').get(nextTownId) as { id: number; town_name: string } | undefined;
+      if (t) nextTownName = t.town_name;
+    } else if (nextTownName) {
+      const t = db.prepare('SELECT id, town_name FROM towns WHERE LOWER(town_name) = LOWER(?)').get(nextTownName) as { id: number; town_name: string } | undefined;
+      if (t) {
+        nextTownId = t.id;
+        nextTownName = t.town_name;
       }
-      db.prepare('UPDATE accounts SET town_id = ?, town_name = ? WHERE id = ?').run(
-        tRow.id,
-        tRow.town_name,
-        id
-      );
     }
+
+    if (nextAreaId) {
+      const a = db.prepare('SELECT id, area_name, town_id, town_name FROM town_areas WHERE id = ?').get(nextAreaId) as { id: number; area_name: string; town_id: number; town_name: string } | undefined;
+      if (a) {
+        nextAreaName = a.area_name;
+        if (!nextTownId) {
+          nextTownId = a.town_id;
+          nextTownName = a.town_name;
+        }
+      }
+    } else if (nextAreaName && nextTownId) {
+      const a = db.prepare('SELECT id, area_name FROM town_areas WHERE town_id = ? AND LOWER(area_name) = LOWER(?)').get(nextTownId, nextAreaName) as { id: number; area_name: string } | undefined;
+      if (a) {
+        nextAreaId = a.id;
+        nextAreaName = a.area_name;
+      }
+    }
+
+    if (nextSalesmanId) {
+      const s = db.prepare('SELECT id, full_name FROM salesmen WHERE id = ?').get(nextSalesmanId) as { id: number; full_name: string } | undefined;
+      if (s) nextSalesmanName = s.full_name;
+    }
+
+    db.prepare(`
+      UPDATE accounts SET
+        town_id = ?,
+        town_name = ?,
+        city = COALESCE(NULLIF(?, ''), city),
+        area_id = ?,
+        area_name = ?,
+        assigned_salesman_id = ?,
+        assigned_salesman_name = ?
+      WHERE id = ?
+    `).run(nextTownId, nextTownName || null, nextTownName || null, nextAreaId, nextAreaName || null, nextSalesmanId, nextSalesmanName || null, id);
 
     recalculateAccountBalance(id);
 

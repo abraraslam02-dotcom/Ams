@@ -2313,6 +2313,47 @@ export function runMigrations(): MigrationResult {
       UPDATE salesmen SET mobile = phone WHERE (mobile IS NULL OR mobile = '') AND phone IS NOT NULL AND phone != '';
     `);
 
+    // Ensure active Town Master and dependent Areas exist if empty
+    const townCount = Number((db.prepare('SELECT COUNT(*) as c FROM towns').get() as { c: number })?.c || 0);
+    if (townCount === 0) {
+      db.prepare("INSERT OR IGNORE INTO towns (town_code, town_name, status, notes) VALUES ('TWN-001', 'Lahore City', 'Active', 'Primary store territory')").run();
+      db.prepare("INSERT OR IGNORE INTO towns (town_code, town_name, status, notes) VALUES ('TWN-002', 'Faisalabad', 'Active', 'Distribution territory')").run();
+
+      const lhr = db.prepare("SELECT id FROM towns WHERE town_code = 'TWN-001'").get() as { id: number } | undefined;
+      if (lhr) {
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-001', 'Circular Road (Medicine Market)', ?, 'Lahore City', 'Active', 'Wholesale market')").run(lhr.id);
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-002', 'Anarkali & Mall Road', ?, 'Lahore City', 'Active', 'Retail pharmacy hub')").run(lhr.id);
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-003', 'Gulberg & Main Market', ?, 'Lahore City', 'Active', 'Commercial zone')").run(lhr.id);
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-004', 'Model Town & Faisal Town', ?, 'Lahore City', 'Active', 'Hospital and clinic belt')").run(lhr.id);
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-005', 'Dharampura & Saddar Cantt', ?, 'Lahore City', 'Active', 'Local pharmacy route')").run(lhr.id);
+      }
+
+      const fsd = db.prepare("SELECT id FROM towns WHERE town_code = 'TWN-002'").get() as { id: number } | undefined;
+      if (fsd) {
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-006', 'Katchery Bazar & Rail Bazar', ?, 'Faisalabad', 'Active', 'Wholesale market')").run(fsd.id);
+        db.prepare("INSERT OR IGNORE INTO town_areas (area_code, area_name, town_id, town_name, status, notes) VALUES ('ARA-007', 'Civil Lines & D Ground', ?, 'Faisalabad', 'Active', 'Commercial belt')").run(fsd.id);
+      }
+    }
+
+    // Ensure active field salesmen exist if empty
+    const salesmanCount = Number((db.prepare('SELECT COUNT(*) as c FROM salesmen').get() as { c: number })?.c || 0);
+    if (salesmanCount === 0) {
+      db.prepare(`
+        INSERT OR IGNORE INTO salesmen (salesman_code, name, full_name, mobile, phone, assigned_area, commission_percent, monthly_target, status)
+        VALUES ('SAL-001', 'Muhammad Akram', 'Muhammad Akram', '+92 300 4567890', '+92 300 4567890', 'Circular Road, Lahore', 1.5, 500000.0, 'Active')
+      `).run();
+      db.prepare(`
+        INSERT OR IGNORE INTO salesmen (salesman_code, name, full_name, mobile, phone, assigned_area, commission_percent, monthly_target, status)
+        VALUES ('SAL-002', 'Tariq Mahmood', 'Tariq Mahmood', '+92 321 8765432', '+92 321 8765432', 'Faisalabad Center', 1.5, 400000.0, 'Active')
+      `).run();
+
+      const lhr = db.prepare("SELECT id FROM towns WHERE town_code = 'TWN-001'").get() as { id: number } | undefined;
+      const sal1 = db.prepare("SELECT id FROM salesmen WHERE salesman_code = 'SAL-001'").get() as { id: number } | undefined;
+      if (lhr && sal1) {
+        db.prepare("INSERT OR IGNORE INTO salesman_towns (salesman_id, town_id, town_name) VALUES (?, ?, 'Lahore City')").run(sal1.id, lhr.id);
+      }
+    }
+
     // 2. Inventory Batch-Wise FIFO & Expiry Management columns
     ensureCol('inventory', 'purchase_date', "TEXT DEFAULT ''");
     ensureCol('inventory', 'purchase_invoice_number', "TEXT DEFAULT ''");

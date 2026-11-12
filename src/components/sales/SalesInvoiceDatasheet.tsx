@@ -3005,6 +3005,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     setCustomerAccountId(id);
                     if (id > 0) {
                       refreshCustomerBalanceSummary(id, editingSaleId);
+                      const chosenCust = customers.find((c) => Number(c.id) === id);
+                      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
+                        setSalesmanId(Number(chosenCust.assigned_salesman_id));
+                        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
+                      }
                     } else {
                       setLiveBalanceSummary(null);
                     }
@@ -3014,7 +3019,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <option value={0}>— Select Customer (Walk-in Cash) —</option>
                   {customers.map((c) => (
                     <option key={c.id} value={c.id}>
-                      [{c.account_code}] {c.account_name} ({c.phone || 'No phone'})
+                      [{c.account_code}] {c.account_name} {c.town_name ? `• ${c.town_name}` : ''} {c.area_name ? `(${c.area_name})` : ''} {c.phone ? `• ${c.phone}` : ''}
                     </option>
                   ))}
                 </select>
@@ -4218,6 +4223,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setCustomerAccountId(id);
                       if (id > 0) {
                         refreshCustomerBalanceSummary(id, editingSaleId);
+                        const chosenCust = customers.find((c) => Number(c.id) === id);
+                        if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
+                          setSalesmanId(Number(chosenCust.assigned_salesman_id));
+                          setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
+                        }
                       } else {
                         setLiveBalanceSummary(null);
                       }
@@ -4227,7 +4237,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     <option value={0}>— Select Customer (Walk-in Cash) —</option>
                     {filteredCustomers.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.account_name} ({c.account_code})
+                        {c.account_name} ({c.account_code}){c.town_name ? ` • ${c.town_name}` : ''}
                       </option>
                     ))}
                   </select>

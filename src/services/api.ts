@@ -1171,6 +1171,10 @@ export const api = {
     parentAccountId?: string;
     status?: string;
     ledgerView?: 'all' | 'customer' | 'supplier';
+    townId?: string;
+    town?: string;
+    areaId?: string;
+    area?: string;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
   }) {
@@ -1181,6 +1185,10 @@ export const api = {
     if (params?.parentAccountId) query.append('parentAccountId', params.parentAccountId);
     if (params?.status) query.append('status', params.status);
     if (params?.ledgerView && params.ledgerView !== 'all') query.append('ledgerView', params.ledgerView);
+    if (params?.townId) query.append('townId', params.townId);
+    if (params?.town) query.append('town', params.town);
+    if (params?.areaId) query.append('areaId', params.areaId);
+    if (params?.area) query.append('area', params.area);
     if (params?.sortBy) query.append('sortBy', params.sortBy);
     if (params?.sortOrder) query.append('sortOrder', params.sortOrder);
 

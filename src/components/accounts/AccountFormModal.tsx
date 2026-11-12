@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   X,
   Save,
@@ -11,6 +11,7 @@ import {
   Plus,
   Lock,
   Sparkles,
+  UserCheck,
 } from 'lucide-react';
 import {
   Account,
@@ -20,6 +21,7 @@ import {
   STANDARD_ACCOUNT_GROUPS,
   ParentAccountCandidate,
 } from '../../types/account';
+import { TownRecord, TownAreaRecord } from '../../types/supply';
 import { api } from '../../services/api';
 import { NumericInput } from '../common/NumericInput';
 
@@ -31,6 +33,14 @@ interface AccountFormModalProps {
   defaultParentAccount?: Account | null;
   groupsByMain: Record<string, string[]>;
   parentCandidates: ParentAccountCandidate[];
+}
+
+interface SalesmanOption {
+  id: number;
+  salesman_code: string;
+  full_name: string;
+  phone?: string;
+  status: string;
 }
 
 const CREDIT_DEFAULT_GROUPS = new Set([
@@ -72,6 +82,12 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
     tax_registration_details: '',
     address: '',
     city: 'Lahore',
+    town_id: null,
+    town_name: '',
+    area_id: null,
+    area_name: '',
+    assigned_salesman_id: null,
+    assigned_salesman_name: '',
     credit_limit: 0,
     status: 'Active',
     notes: '',
@@ -84,6 +100,43 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Territory & Supply Route state
+  const [townsList, setTownsList] = useState<TownRecord[]>([]);
+  const [areasList, setAreasList] = useState<TownAreaRecord[]>([]);
+  const [salesmenList, setSalesmenList] = useState<SalesmanOption[]>([]);
+  const [loadingTerritory, setLoadingTerritory] = useState<boolean>(false);
+
+  // Fetch active Towns, Areas, and Salesmen
+  useEffect(() => {
+    if (!isOpen) return;
+    let isMounted = true;
+    setLoadingTerritory(true);
+
+    Promise.all([
+      api.getSupplyTowns().catch(() => ({ towns: [], areas: [] })),
+      api.getSupplySalesmen({ status: 'Active' }).catch(() => ({ salesmen: [] })),
+    ])
+      .then(([townsRes, salesmenRes]) => {
+        if (!isMounted) return;
+        if (Array.isArray(townsRes?.towns)) {
+          setTownsList(townsRes.towns.filter((t: TownRecord) => t.status === 'Active'));
+        }
+        if (Array.isArray(townsRes?.areas)) {
+          setAreasList(townsRes.areas.filter((a: TownAreaRecord) => a.status === 'Active'));
+        }
+        if (Array.isArray(salesmenRes?.salesmen)) {
+          setSalesmenList(salesmenRes.salesmen.filter((s: SalesmanOption) => s.status === 'Active'));
+        }
+      })
+      .finally(() => {
+        if (isMounted) setLoadingTerritory(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen]);
 
   const fetchNextCode = useCallback(async (targetGroup: string, targetMain?: string) => {
     if (!targetGroup.trim()) return;
@@ -119,7 +172,13 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
         filer_status: editingAccount.filer_status || 'Filer',
         tax_registration_details: editingAccount.tax_registration_details || '',
         address: editingAccount.address || '',
-        city: editingAccount.city || '',
+        city: editingAccount.city || editingAccount.town_name || 'Lahore',
+        town_id: editingAccount.town_id ?? null,
+        town_name: editingAccount.town_name || '',
+        area_id: editingAccount.area_id ?? null,
+        area_name: editingAccount.area_name || '',
+        assigned_salesman_id: editingAccount.assigned_salesman_id ?? null,
+        assigned_salesman_name: editingAccount.assigned_salesman_name || '',
         credit_limit: editingAccount.credit_limit || 0,
         status: editingAccount.status,
         notes: editingAccount.notes || '',
@@ -150,6 +209,101 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
     }
     setFormError(null);
   }, [editingAccount, defaultParentAccount, isOpen, fetchNextCode]);
+
+  // Dependent areas: strictly filtered by the currently selected Town ID
+  const availableAreasForTown = useMemo(() => {
+    if (!formData.town_id) return [];
+    return areasList.filter(
+      (a) => Number(a.town_id) === Number(formData.town_id) && a.status === 'Active'
+    );
+  }, [areasList, formData.town_id]);
+
+  const handleTownChange = (selectedTownIdStr: string) => {
+    if (!selectedTownIdStr) {
+      setFormData((prev) => ({
+        ...prev,
+        town_id: null,
+        town_name: '',
+        area_id: null,
+        area_name: '',
+      }));
+      return;
+    }
+
+    const tId = parseInt(selectedTownIdStr, 10);
+    const matchedTown = townsList.find((t) => t.id === tId);
+    if (!matchedTown) return;
+
+    // Verify whether existing selected area belongs to the new town
+    const areaBelongsToNewTown = areasList.some(
+      (a) => a.id === formData.area_id && Number(a.town_id) === tId
+    );
+
+    // Auto-suggest town's assigned salesman if account does not have one yet
+    let autoSalesmanId = formData.assigned_salesman_id;
+    let autoSalesmanName = formData.assigned_salesman_name;
+    if (
+      !autoSalesmanId &&
+      matchedTown.assigned_salesmen &&
+      matchedTown.assigned_salesmen.length > 0
+    ) {
+      autoSalesmanId = matchedTown.assigned_salesmen[0].salesman_id;
+      autoSalesmanName = matchedTown.assigned_salesmen[0].salesman_name;
+    }
+
+    setFormData((prev) => ({
+      ...prev,
+      town_id: tId,
+      town_name: matchedTown.town_name,
+      city: matchedTown.town_name, // keep city consistent with selected town
+      area_id: areaBelongsToNewTown ? prev.area_id : null,
+      area_name: areaBelongsToNewTown ? prev.area_name : '',
+      assigned_salesman_id: autoSalesmanId,
+      assigned_salesman_name: autoSalesmanName,
+    }));
+  };
+
+  const handleAreaChange = (selectedAreaIdStr: string) => {
+    if (!selectedAreaIdStr) {
+      setFormData((prev) => ({
+        ...prev,
+        area_id: null,
+        area_name: '',
+      }));
+      return;
+    }
+
+    const aId = parseInt(selectedAreaIdStr, 10);
+    const matchedArea = areasList.find((a) => a.id === aId);
+    if (!matchedArea) return;
+
+    setFormData((prev) => ({
+      ...prev,
+      area_id: aId,
+      area_name: matchedArea.area_name,
+    }));
+  };
+
+  const handleSalesmanChange = (selectedSalesmanIdStr: string) => {
+    if (!selectedSalesmanIdStr) {
+      setFormData((prev) => ({
+        ...prev,
+        assigned_salesman_id: null,
+        assigned_salesman_name: '',
+      }));
+      return;
+    }
+
+    const sId = parseInt(selectedSalesmanIdStr, 10);
+    const matchedSalesman = salesmenList.find((s) => s.id === sId);
+    if (!matchedSalesman) return;
+
+    setFormData((prev) => ({
+      ...prev,
+      assigned_salesman_id: sId,
+      assigned_salesman_name: matchedSalesman.full_name,
+    }));
+  };
 
   if (!isOpen) return null;
 
@@ -572,12 +726,120 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
             </p>
           </div>
 
-          {/* Section 3: Contact Details & Address (Where Applicable) */}
+          {/* Section 3: Territory, Town, Area & Route Assignment */}
+          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/90 space-y-3.5">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                <MapPin className="w-4 h-4 text-emerald-600" />
+                <span>
+                  3. Territory & Supply Route Assignment (Town & Dependent Area Master)
+                </span>
+              </h4>
+              <span className="text-[10px] font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                {formData.town_name ? `${formData.town_name}${formData.area_name ? ` → ${formData.area_name}` : ''}` : 'Select Town & Area'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+              {/* Town Dropdown */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Town Master <span className="text-emerald-600 font-bold">*</span>
+                  </label>
+                  {loadingTerritory && (
+                    <span className="text-[10px] text-slate-400 animate-pulse">Loading towns...</span>
+                  )}
+                </div>
+                <select
+                  value={formData.town_id ?? ''}
+                  onChange={(e) => handleTownChange(e.target.value)}
+                  className="w-full px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                >
+                  <option value="">— Select Town (Town Master) —</option>
+                  {townsList.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      [{t.town_code}] {t.town_name} {t.areas?.length ? `(${t.areas.length} Areas)` : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-500">
+                  Defines the primary delivery and booking town.
+                </p>
+              </div>
+
+              {/* Dependent Area Dropdown */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Dependent Area / Sector
+                  </label>
+                  {formData.town_id && (
+                    <span className="text-[10px] text-emerald-700 font-medium">
+                      {availableAreasForTown.length} Area(s) available
+                    </span>
+                  )}
+                </div>
+                <select
+                  value={formData.area_id ?? ''}
+                  onChange={(e) => handleAreaChange(e.target.value)}
+                  disabled={!formData.town_id || availableAreasForTown.length === 0}
+                  className={`w-full px-3 py-1.5 text-xs font-medium rounded-lg border focus:outline-none focus:ring-1 focus:ring-emerald-500 ${
+                    !formData.town_id
+                      ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
+                      : 'border-slate-300 bg-white text-slate-900'
+                  }`}
+                >
+                  {!formData.town_id ? (
+                    <option value="">— Select Town First —</option>
+                  ) : availableAreasForTown.length === 0 ? (
+                    <option value="">— No Areas defined for this Town —</option>
+                  ) : (
+                    <>
+                      <option value="">— Select Area / Sector (Optional) —</option>
+                      {availableAreasForTown.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          [{a.area_code}] {a.area_name}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </select>
+                <p className="text-[10px] text-slate-500">
+                  Filtered automatically to areas belonging to selected Town.
+                </p>
+              </div>
+
+              {/* Assigned Field Salesman */}
+              <div className="space-y-1">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Assigned Field Salesman
+                </label>
+                <select
+                  value={formData.assigned_salesman_id ?? ''}
+                  onChange={(e) => handleSalesmanChange(e.target.value)}
+                  className="w-full px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                >
+                  <option value="">— Select Field Salesman (Optional) —</option>
+                  {salesmenList.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      [{s.salesman_code}] {s.full_name} {s.phone ? `(${s.phone})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-500">
+                  Assigned order booking & recovery agent for this party.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 4: Contact Details & Physical Location */}
           <div className="space-y-2.5">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
               <Phone className="w-3.5 h-3.5 text-slate-600" />
               <span>
-                3. Contact Details & Address{' '}
+                4. Contact Details & Address{' '}
                 {showPartyOrBankDetails ? '(Party / Bank Details)' : '(Optional where applicable)'}
               </span>
             </h4>
@@ -641,13 +903,13 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
                   type="text"
                   value={formData.address}
                   onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                  placeholder="e.g. Medicine Market, Circular Road"
+                  placeholder="e.g. Shop #14, Medicine Market, Circular Road"
                   className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">City</label>
+                <label className="block text-xs font-semibold text-slate-700">City / Town Name</label>
                 <input
                   type="text"
                   value={formData.city}
@@ -670,13 +932,13 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
             </div>
           </div>
 
-          {/* Section 4: Supplier Tax & Filer Settings (shown for Supplier / Customer & Supplier / Party accounts) */}
+          {/* Section 5: Supplier Tax & Filer Settings (shown for Supplier / Customer & Supplier / Party accounts) */}
           {formData.main_group === 'PARTY ACCOUNTS' && (
             <div className="p-4 rounded-xl bg-amber-50/60 border border-amber-200/80 space-y-3">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-amber-950 flex items-center gap-1.5">
                   <Building2 className="w-4 h-4 text-amber-700" />
-                  <span>4. Supplier Tax & Advance Tax Filer Settings (FBR Pakistan)</span>
+                  <span>5. Supplier Tax & Advance Tax Filer Settings (FBR Pakistan)</span>
                 </h4>
                 <span className="text-[11px] font-semibold text-amber-800 bg-amber-100 px-2.5 py-0.5 rounded-full border border-amber-200">
                   Auto-selects Advance Tax Rate on Purchase Invoices
