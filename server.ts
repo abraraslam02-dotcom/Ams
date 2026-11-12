@@ -1,5 +1,3 @@
-import { mobileRouter } from './server/routes/mobile.ts'; // with the other imports
-app.use('/api/mobile', mobileRouter); // right before the /api/enhancements line
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
