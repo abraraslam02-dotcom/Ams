@@ -1355,6 +1355,61 @@ export function runMigrations(): MigrationResult {
       WHERE password_hash = ?
     `).run(validDefaultHash, brokenDefaultHash);
 
+    // Self-heal core Chart of Accounts heads if missing
+    const ensureCoaAccount = (
+      code: string,
+      name: string,
+      mainGroup: string,
+      accountGroup: string,
+      balType: 'Debit' | 'Credit',
+      openingBal: number,
+      notes: string
+    ) => {
+      const found = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(code);
+      if (!found) {
+        db.prepare(`
+          INSERT INTO accounts (
+            account_code, account_name, main_group, account_group, parent_account_id,
+            opening_balance, opening_balance_type, total_debit, total_credit,
+            current_balance, current_balance_type, is_system_account, status, notes
+          ) VALUES (?, ?, ?, ?, NULL, ?, ?, 0.0, 0.0, ?, ?, 1, 'Active', ?)
+        `).run(code, name, mainGroup, accountGroup, openingBal, balType, openingBal, balType, notes);
+      }
+    };
+
+    // 1. Control & Party Parent Accounts
+    ensureCoaAccount('ACC-1000', 'Trade Customers (Receivables Control)', 'PARTY ACCOUNTS', 'Customer', 'Debit', 0, 'Parent control head for Customer Receivable Ledgers');
+    ensureCoaAccount('ACC-2000', 'Pharmaceutical Suppliers (Payables Control)', 'PARTY ACCOUNTS', 'Supplier', 'Credit', 0, 'Parent control head for Supplier & Distributor Payable Ledgers');
+    ensureCoaAccount('ACC-3000', 'Dual Party Accounts (Customer & Supplier Control)', 'PARTY ACCOUNTS', 'Customer & Supplier', 'Debit', 0, 'Parent control head for parties acting as both Customer & Supplier');
+    ensureCoaAccount('CUS-1001', 'Walk-in Cash Customer', 'PARTY ACCOUNTS', 'Customer', 'Debit', 0, 'Default counter retail walk-in customer account');
+
+    // 2. Financial Accounts
+    ensureCoaAccount('FIN-1010', 'Cash in Hand (Main Counter Drawer)', 'FINANCIAL ACCOUNTS', 'Cash in Hand', 'Debit', 250000.0, 'Primary store cash drawer account');
+    ensureCoaAccount('FIN-1020', 'Bank Accounts Control', 'FINANCIAL ACCOUNTS', 'Bank', 'Debit', 0, 'Parent head for all bank accounts');
+    ensureCoaAccount('FIN-1021', 'Meezan Bank - Main Business Account', 'FINANCIAL ACCOUNTS', 'Bank', 'Debit', 500000.0, 'Primary operating bank account');
+    ensureCoaAccount('FIN-1030', 'Store Fixed Assets & Furniture', 'FINANCIAL ACCOUNTS', 'Assets', 'Debit', 0, 'Refrigerators, racks, computer hardware & fixtures');
+    ensureCoaAccount('FIN-2010', 'Accrued Store Liabilities & Taxes', 'FINANCIAL ACCOUNTS', 'Liabilities', 'Credit', 0, 'Short-term store liabilities and payables');
+    ensureCoaAccount('FIN-2020', 'Business Loans & Financing', 'FINANCIAL ACCOUNTS', 'Loans', 'Credit', 0, 'Long-term and short-term loan accounts');
+    ensureCoaAccount('FIN-3010', 'Owner Capital Account (Abrar Medical Store)', 'FINANCIAL ACCOUNTS', 'Capital', 'Credit', 750000.0, 'Owner equity and capital investment');
+    ensureCoaAccount('FIN-3020', 'Owner Drawings Account', 'FINANCIAL ACCOUNTS', 'Drawings', 'Debit', 0, 'Owner personal withdrawals');
+
+    // 3. Income, Expense & Dedicated Accounts
+    ensureCoaAccount('INC-4010', 'Medicine Sales Income', 'INCOME & EXPENSE ACCOUNTS', 'Sales Income', 'Credit', 0, 'Revenue from retail and wholesale medicine sales');
+    ensureCoaAccount('SAL-4015', 'Medicine Sales Returns Account', 'INCOME & EXPENSE ACCOUNTS', 'Sales Income', 'Debit', 0, 'Contra-revenue account for confirmed customer sale returns');
+    ensureCoaAccount('INC-4020', 'Purchase Discount Received', 'INCOME & EXPENSE ACCOUNTS', 'Purchase Discount', 'Credit', 0, 'Trade and cash discounts earned on supplier purchases');
+    ensureCoaAccount('INC-4030', 'Other Pharmacy Income', 'INCOME & EXPENSE ACCOUNTS', 'Other Income', 'Credit', 0, 'Miscellaneous pharmacy income');
+    ensureCoaAccount('PUR-5001', 'Medicine Purchases Account', 'INCOME & EXPENSE ACCOUNTS', 'Purchases', 'Debit', 0, 'Dedicated double-entry account for confirmed medicine and stock purchases');
+    ensureCoaAccount('PUR-5002', 'Purchase Returns Account', 'INCOME & EXPENSE ACCOUNTS', 'Purchase Returns', 'Credit', 0, 'Dedicated double-entry account for confirmed supplier purchase returns (debit notes)');
+    ensureCoaAccount('TAX-1040', 'Advance Tax Receivable (u/s 236)', 'FINANCIAL ACCOUNTS', 'Assets', 'Debit', 0, 'Dedicated account for Advance Tax paid on supplier purchases');
+    ensureCoaAccount('TAX-1045', 'GST / Input Tax Adjustable', 'FINANCIAL ACCOUNTS', 'Assets', 'Debit', 0, 'Dedicated account for GST / Applicable Input Tax on supplier purchases');
+    ensureCoaAccount('TAX-2040', 'Advance Tax Collected on Sales (u/s 236G/H)', 'FINANCIAL ACCOUNTS', 'Liabilities', 'Credit', 0, 'Dedicated account for Advance Tax collected from customer sales');
+    ensureCoaAccount('DIS-5015', 'Sales Discount Allowed', 'INCOME & EXPENSE ACCOUNTS', 'Other Expenses', 'Debit', 0, 'Account for item & invoice discounts allowed on sales');
+    ensureCoaAccount('EXP-5010', 'Shop Rent Expense', 'INCOME & EXPENSE ACCOUNTS', 'Rent', 'Debit', 0, 'Monthly medical store premises rent');
+    ensureCoaAccount('EXP-5020', 'Electricity & Backup Power Expense', 'INCOME & EXPENSE ACCOUNTS', 'Electricity', 'Debit', 0, 'WAPDA electricity bills and cold-chain generator fuel');
+    ensureCoaAccount('EXP-5030', 'Staff Salaries & Wages', 'INCOME & EXPENSE ACCOUNTS', 'Salaries', 'Debit', 0, 'Pharmacist and counter staff salaries');
+    ensureCoaAccount('EXP-5040', 'Shop & Counter Expenses', 'INCOME & EXPENSE ACCOUNTS', 'Shop Expenses', 'Debit', 0, 'Packaging, thermal rolls, cleaning and daily store maintenance');
+    ensureCoaAccount('EXP-5050', 'Other Miscellaneous Expenses', 'INCOME & EXPENSE ACCOUNTS', 'Other Expenses', 'Debit', 0, 'General administrative expenses');
+
     // Ensure all Financial, Income, Expense & Control accounts are permanently protected
     db.prepare(`
       UPDATE accounts
