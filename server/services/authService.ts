@@ -58,6 +58,7 @@ export const PERMISSION_MODULES: Array<{ key: string; label: string; description
   { key: 'cashbook', label: 'Cashbook', description: 'Daily cash book receipts and payments' },
   { key: 'expenses', label: 'Expenses', description: 'Operational expense vouchers' },
   { key: 'reports', label: 'Reports', description: 'Financial statements, sales, and inventory analytics' },
+  { key: 'closing', label: 'Closing Management', description: 'Daily, Monthly, Yearly & Stock closing, carry-forward, and period locking' },
   { key: 'backup', label: 'Backup & Restore', description: 'Database backup creation and recovery' },
   { key: 'settings', label: 'Application Settings', description: 'Store settings, printer setup, and more options' },
   { key: 'users', label: 'User Management', description: 'Super Admin user accounts and individual permissions' },

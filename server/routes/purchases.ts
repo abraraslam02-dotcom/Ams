@@ -9,6 +9,7 @@ import {
   bindInvoiceNumberRecordId,
 } from '../services/invoiceSequenceService.ts';
 import { recordBatchStockMovement } from '../services/fifoAndOfferEngine.ts';
+import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const purchasesRouter = Router();
 
@@ -644,6 +645,9 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
         error: 'Return Reason is required.',
       });
     }
+
+    const targetReturnDate = String(return_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    assertPeriodOpen(targetReturnDate, 'record a purchase return');
 
     const origPurchase = db
       .prepare('SELECT * FROM purchases WHERE id = ?')
@@ -2685,6 +2689,11 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
       }
     }
 
+    const targetBillDate = String(
+      req.body?.bill_date || req.body?.invoice_date || new Date().toISOString().slice(0, 10)
+    ).slice(0, 10);
+    assertPeriodOpen(targetBillDate, 'create a purchase invoice');
+
     const username = req.user?.username || 'Super Admin';
     let newPurchaseId = 0;
 
@@ -2779,6 +2788,14 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
       );
     }
 
+    assertPeriodOpen(String(existing.bill_date || ''), 'edit an existing purchase invoice');
+    if (req.body?.bill_date || req.body?.invoice_date) {
+      assertPeriodOpen(
+        String(req.body.bill_date || req.body.invoice_date),
+        'move a purchase invoice into a closed period'
+      );
+    }
+
     const username = req.user?.username || 'Super Admin';
     const editTx = db.transaction(() => {
       reverseExistingPurchase(id, 'Invoice Edit & Re-posting');
@@ -2841,6 +2858,8 @@ function handleCancelOrDeletePurchase(req: Request, res: Response) {
     if (!existing) {
       return res.status(404).json({ success: false, error: 'Purchase Invoice not found.' });
     }
+
+    assertPeriodOpen(String(existing.bill_date || ''), 'cancel or delete a purchase invoice');
 
     // Held or draft purchases never affected stock or ledgers; allow clean discarding
     if (existing.status === 'held' || existing.status === 'draft') {

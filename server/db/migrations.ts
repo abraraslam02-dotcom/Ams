@@ -51,6 +51,7 @@ export function runMigrations(): MigrationResult {
   const migrationName21 = '021_inventory_reports_idempotency_and_reference_columns';
   const migrationName22 = '022_salesman_monotonic_sequence_and_sync';
   const migrationName23 = '023_supply_account_type_and_schema_alignment';
+  const migrationName24 = '024_complete_closing_and_financial_period_management';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3298,6 +3299,223 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName23, 23);
     }
+
+    // 24. Migration 024: Complete Closing & Financial Period Management Module
+    const existing24 = db.prepare('SELECT id FROM database_migrations WHERE migration_name = ?').get(migrationName24);
+    if (!existing24) {
+      const addColSafe24 = (table: string, colName: string, colDef: string) => {
+        const tblExists = db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+          .get(table);
+        if (!tblExists) return;
+        const cols = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>;
+        if (!cols.some((c) => c.name === colName)) {
+          db.exec(`ALTER TABLE "${table}" ADD COLUMN ${colName} ${colDef};`);
+        }
+      };
+
+      // A. Extend accounting_periods for full lock/reopen traceability
+      addColSafe24('accounting_periods', 'period_type', "TEXT NOT NULL DEFAULT 'MONTHLY'");
+      addColSafe24('accounting_periods', 'closing_id', 'INTEGER DEFAULT NULL');
+      addColSafe24('accounting_periods', 'reopened_by', 'TEXT DEFAULT NULL');
+      addColSafe24('accounting_periods', 'reopened_at', 'DATETIME DEFAULT NULL');
+      addColSafe24('accounting_periods', 'reopen_reason', "TEXT DEFAULT ''");
+      addColSafe24('accounting_periods', 'notes', "TEXT DEFAULT ''");
+
+      // B. Extend company_settings for configurable Financial Year & Costing Method
+      addColSafe24('company_settings', 'financial_year_start_month', 'INTEGER NOT NULL DEFAULT 7');
+      addColSafe24('company_settings', 'financial_year_start_day', 'INTEGER NOT NULL DEFAULT 1');
+      addColSafe24('company_settings', 'current_financial_year_start', "TEXT NOT NULL DEFAULT '2025-07-01'");
+      addColSafe24('company_settings', 'current_financial_year_end', "TEXT NOT NULL DEFAULT '2026-06-30'");
+      addColSafe24('company_settings', 'costing_method', "TEXT NOT NULL DEFAULT 'Weighted Average / FIFO'");
+
+      // C. Create Closing Management tables if not already created by SCHEMA_SQL
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS financial_closings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          closing_code TEXT NOT NULL UNIQUE,
+          closing_type TEXT NOT NULL CHECK(closing_type IN ('DAILY', 'MONTHLY', 'YEARLY', 'STOCK')),
+          period_name TEXT NOT NULL,
+          period_start_date TEXT NOT NULL,
+          period_end_date TEXT NOT NULL,
+          next_period_start_date TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'CLOSED' CHECK(status IN ('CLOSED', 'REOPENED')),
+          is_locked INTEGER NOT NULL DEFAULT 0 CHECK(is_locked IN (0, 1)),
+          opening_cash_balance REAL NOT NULL DEFAULT 0.0,
+          opening_bank_balance REAL NOT NULL DEFAULT 0.0,
+          cash_sales REAL NOT NULL DEFAULT 0.0,
+          credit_sales REAL NOT NULL DEFAULT 0.0,
+          total_sales REAL NOT NULL DEFAULT 0.0,
+          sales_returns REAL NOT NULL DEFAULT 0.0,
+          net_sales REAL NOT NULL DEFAULT 0.0,
+          cash_purchases REAL NOT NULL DEFAULT 0.0,
+          credit_purchases REAL NOT NULL DEFAULT 0.0,
+          total_purchases REAL NOT NULL DEFAULT 0.0,
+          purchase_returns REAL NOT NULL DEFAULT 0.0,
+          net_purchases REAL NOT NULL DEFAULT 0.0,
+          cash_receipts REAL NOT NULL DEFAULT 0.0,
+          cash_payments REAL NOT NULL DEFAULT 0.0,
+          bank_receipts REAL NOT NULL DEFAULT 0.0,
+          bank_payments REAL NOT NULL DEFAULT 0.0,
+          bank_transactions_net REAL NOT NULL DEFAULT 0.0,
+          total_expenses REAL NOT NULL DEFAULT 0.0,
+          other_income REAL NOT NULL DEFAULT 0.0,
+          expected_closing_cash REAL NOT NULL DEFAULT 0.0,
+          actual_physical_cash REAL NOT NULL DEFAULT 0.0,
+          cash_difference REAL NOT NULL DEFAULT 0.0,
+          discrepancy_explanation TEXT DEFAULT '',
+          closing_cash_balance REAL NOT NULL DEFAULT 0.0,
+          closing_bank_balance REAL NOT NULL DEFAULT 0.0,
+          opening_inventory_qty REAL NOT NULL DEFAULT 0.0,
+          opening_inventory_value REAL NOT NULL DEFAULT 0.0,
+          closing_inventory_qty REAL NOT NULL DEFAULT 0.0,
+          closing_inventory_value REAL NOT NULL DEFAULT 0.0,
+          cost_of_goods_sold REAL NOT NULL DEFAULT 0.0,
+          gross_profit REAL NOT NULL DEFAULT 0.0,
+          net_profit_loss REAL NOT NULL DEFAULT 0.0,
+          total_receivables REAL NOT NULL DEFAULT 0.0,
+          total_payables REAL NOT NULL DEFAULT 0.0,
+          customer_count INTEGER NOT NULL DEFAULT 0,
+          supplier_count INTEGER NOT NULL DEFAULT 0,
+          stock_item_count INTEGER NOT NULL DEFAULT 0,
+          costing_method TEXT NOT NULL DEFAULT 'Weighted Average / FIFO',
+          carry_forward_completed INTEGER NOT NULL DEFAULT 1,
+          profit_transfer_journal_id INTEGER DEFAULT NULL,
+          discrepancy_journal_id INTEGER DEFAULT NULL,
+          accounting_period_id INTEGER DEFAULT NULL,
+          notes TEXT DEFAULT '',
+          snapshot_json TEXT NOT NULL DEFAULT '{}',
+          closed_by TEXT NOT NULL DEFAULT 'Super Admin',
+          closed_by_role TEXT NOT NULL DEFAULT 'Super Admin',
+          closed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          reopened_by TEXT DEFAULT NULL,
+          reopened_by_role TEXT DEFAULT NULL,
+          reopened_at DATETIME DEFAULT NULL,
+          reopen_reason TEXT DEFAULT '',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS closing_account_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          closing_id INTEGER NOT NULL,
+          closing_code TEXT NOT NULL,
+          closing_type TEXT NOT NULL,
+          period_start_date TEXT NOT NULL,
+          period_end_date TEXT NOT NULL,
+          next_period_start_date TEXT NOT NULL,
+          account_id INTEGER NOT NULL,
+          account_code TEXT NOT NULL,
+          account_name TEXT NOT NULL,
+          main_group TEXT NOT NULL,
+          account_group TEXT NOT NULL,
+          account_type TEXT NOT NULL DEFAULT '',
+          financial_category TEXT NOT NULL,
+          town_name TEXT DEFAULT '',
+          area_name TEXT DEFAULT '',
+          opening_debit REAL NOT NULL DEFAULT 0.0,
+          opening_credit REAL NOT NULL DEFAULT 0.0,
+          period_debit REAL NOT NULL DEFAULT 0.0,
+          period_credit REAL NOT NULL DEFAULT 0.0,
+          closing_debit REAL NOT NULL DEFAULT 0.0,
+          closing_credit REAL NOT NULL DEFAULT 0.0,
+          closing_signed_balance REAL NOT NULL DEFAULT 0.0,
+          closing_balance_amount REAL NOT NULL DEFAULT 0.0,
+          closing_balance_type TEXT NOT NULL DEFAULT 'Debit',
+          carried_forward_amount REAL NOT NULL DEFAULT 0.0,
+          carried_forward_type TEXT NOT NULL DEFAULT 'Debit',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (closing_id) REFERENCES financial_closings (id) ON DELETE CASCADE,
+          FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS closing_stock_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          closing_id INTEGER NOT NULL,
+          closing_code TEXT NOT NULL,
+          closing_type TEXT NOT NULL,
+          period_start_date TEXT NOT NULL,
+          period_end_date TEXT NOT NULL,
+          next_period_start_date TEXT NOT NULL,
+          item_id INTEGER NOT NULL,
+          item_code TEXT NOT NULL,
+          item_name TEXT NOT NULL,
+          company_name TEXT NOT NULL,
+          category TEXT DEFAULT '',
+          packing TEXT DEFAULT '1x1',
+          opening_qty REAL NOT NULL DEFAULT 0.0,
+          purchased_qty REAL NOT NULL DEFAULT 0.0,
+          sold_qty REAL NOT NULL DEFAULT 0.0,
+          purchase_returns_qty REAL NOT NULL DEFAULT 0.0,
+          sales_returns_qty REAL NOT NULL DEFAULT 0.0,
+          adjustments_qty REAL NOT NULL DEFAULT 0.0,
+          closing_qty REAL NOT NULL DEFAULT 0.0,
+          unit_cost_rate REAL NOT NULL DEFAULT 0.0,
+          trade_price REAL NOT NULL DEFAULT 0.0,
+          closing_stock_value REAL NOT NULL DEFAULT 0.0,
+          costing_method TEXT NOT NULL DEFAULT 'Weighted Average / FIFO',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (closing_id) REFERENCES financial_closings (id) ON DELETE CASCADE,
+          FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS closing_audit_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          closing_id INTEGER DEFAULT NULL,
+          closing_code TEXT DEFAULT '',
+          closing_type TEXT NOT NULL,
+          action TEXT NOT NULL,
+          period_start_date TEXT NOT NULL,
+          period_end_date TEXT NOT NULL,
+          performed_by TEXT NOT NULL,
+          performed_by_role TEXT NOT NULL DEFAULT 'Super Admin',
+          reason TEXT DEFAULT '',
+          details_json TEXT DEFAULT '{}',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_fin_closings_type_dates ON financial_closings(closing_type, period_start_date, period_end_date);
+        CREATE INDEX IF NOT EXISTS idx_fin_closings_status ON financial_closings(status);
+        CREATE INDEX IF NOT EXISTS idx_closing_acc_snap_cid ON closing_account_snapshots(closing_id);
+        CREATE INDEX IF NOT EXISTS idx_closing_acc_snap_acc ON closing_account_snapshots(account_id);
+        CREATE INDEX IF NOT EXISTS idx_closing_stk_snap_cid ON closing_stock_snapshots(closing_id);
+        CREATE INDEX IF NOT EXISTS idx_closing_stk_snap_item ON closing_stock_snapshots(item_id);
+        CREATE INDEX IF NOT EXISTS idx_closing_audit_cid ON closing_audit_logs(closing_id);
+        CREATE INDEX IF NOT EXISTS idx_acc_periods_dates ON accounting_periods(is_closed, start_date, end_date);
+      `);
+
+      // D. Ensure Retained Earnings / Period Profit & Loss Summary system account exists
+      const eqtFound = db.prepare("SELECT id FROM accounts WHERE account_code = 'EQT-3030'").get();
+      if (!eqtFound) {
+        db.prepare(`
+          INSERT INTO accounts (
+            account_code, account_name, main_group, account_group, account_type, financial_category,
+            opening_balance, opening_balance_type, current_balance, current_balance_type,
+            filer_status, status, is_system_account, notes
+          ) VALUES (
+            'EQT-3030', 'Retained Earnings & Period Profit/Loss Summary',
+            'FINANCIAL ACCOUNTS', 'Capital', 'Capital', 'Capital / Equity',
+            0.0, 'Credit', 0.0, 'Credit', 'Filer', 'Active', 1,
+            'System equity account for period-end profit/loss retention and carry-forward'
+          )
+        `).run();
+      }
+
+      // E. Seed role permissions for 'closing' module
+      const insertClosingPerm = db.prepare(`
+        INSERT OR IGNORE INTO role_permissions (
+          role, module_key, can_view, can_create, can_edit, can_delete, can_export
+        ) VALUES (?, 'closing', ?, ?, ?, ?, ?)
+      `);
+      insertClosingPerm.run('Super Admin', 1, 1, 1, 1, 1);
+      insertClosingPerm.run('Administrator', 1, 1, 1, 0, 1);
+      insertClosingPerm.run('Accountant', 1, 1, 1, 0, 1);
+      insertClosingPerm.run('Salesman', 0, 0, 0, 0, 0);
+      insertClosingPerm.run('Purchase Operator', 0, 0, 0, 0, 0);
+      insertClosingPerm.run('Viewer', 1, 0, 0, 0, 1);
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName24, 24);
+    }
   });
 
   try {
@@ -3316,7 +3534,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

@@ -38,6 +38,10 @@ import { SalesmanMobileBookingApp } from './components/mobile/SalesmanMobileBook
 import { TradeDealsAndPartyDiscountsWorkspace } from './components/offers/TradeDealsAndPartyDiscountsWorkspace';
 import { MasterResetAndLocalBackupPanel } from './components/admin/MasterResetAndLocalBackupPanel';
 import { TopPerformanceReportsView } from './components/reports/TopPerformanceReportsView';
+import {
+  ClosingManagementWorkspace,
+  ClosingTabId,
+} from './components/closing/ClosingManagementWorkspace';
 import { api } from './services/api';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
@@ -183,6 +187,16 @@ function AppContent() {
       }
       if (tab === 'system-settings' || tab === 'company-settings' || tab === 'printer-setup') {
         return hasPermission('settings');
+      }
+      if (tab.startsWith('closing-')) {
+        if (tab === 'closing-reopen') {
+          return isSuperAdmin || hasPermission('closing') || hasPermission('accounts');
+        }
+        return (
+          hasPermission('closing') ||
+          hasPermission('accounts') ||
+          hasPermission('reports')
+        );
       }
       return true;
     },
@@ -562,6 +576,38 @@ function AppContent() {
         return { title: 'Database Status & System Diagnostics', crumbs: ['System & Settings', 'Database Status'] };
       case 'audit-logs':
         return { title: 'System Logs — Activity & Audit Trail', crumbs: ['System & Settings', 'System Logs'] };
+
+      // I. CLOSING MANAGEMENT
+      case 'closing-daily':
+        return {
+          title: 'Daily Closing — Cash Drawer Reconciliation, Bank Balance & Discrepancy Audit',
+          crumbs: ['Closing Management', 'Daily Closing'],
+        };
+      case 'closing-monthly':
+        return {
+          title: 'Monthly Closing — Complete Financial Closing & Opening Balance Carry-Forward',
+          crumbs: ['Closing Management', 'Monthly Closing'],
+        };
+      case 'closing-yearly':
+        return {
+          title: 'Yearly Closing — Annual Profit/Loss Transfer & Next Financial Year Roll-Forward',
+          crumbs: ['Closing Management', 'Yearly Closing'],
+        };
+      case 'closing-stock':
+        return {
+          title: 'Stock Closing — Item-Wise Movement, Closing Quantity & Valuation Snapshot',
+          crumbs: ['Closing Management', 'Stock Closing'],
+        };
+      case 'closing-history':
+        return {
+          title: 'Closing History — Searchable Register & Printable Historical Closing Reports',
+          crumbs: ['Closing Management', 'Closing History'],
+        };
+      case 'closing-reopen':
+        return {
+          title: 'Reopen Closed Period — Super Admin Period Lock Control & Audit Trail',
+          crumbs: ['Closing Management', 'Reopen Closed Period'],
+        };
 
       default:
         return { title: 'Abrar Medical Store ERP', crumbs: ['Workspace'] };
@@ -1096,6 +1142,14 @@ function AppContent() {
               {/* SUPER ADMIN: USER MANAGEMENT */}
               {(activeTab === 'users' || activeTab === 'users-manage') && isSuperAdmin && (
                 <UserManagementView />
+              )}
+
+              {/* CLOSING & FINANCIAL PERIOD MANAGEMENT */}
+              {activeTab.startsWith('closing-') && (
+                <ClosingManagementWorkspace
+                  initialTab={activeTab as ClosingTabId}
+                  onNavigateTab={handleSelectTab}
+                />
               )}
             </>
           )}

@@ -946,6 +946,161 @@ CREATE INDEX IF NOT EXISTS idx_cb_vouchers_type ON cash_book_vouchers(transactio
 CREATE INDEX IF NOT EXISTS idx_cb_vouchers_head ON cash_book_vouchers(head_account_id);
 CREATE INDEX IF NOT EXISTS idx_cb_vouchers_cb_acc ON cash_book_vouchers(cash_bank_account_id);
 CREATE INDEX IF NOT EXISTS idx_cb_vouchers_status ON cash_book_vouchers(status);
+
+-- 35. Financial & Stock Period Closings (Daily, Monthly, Yearly, Stock)
+CREATE TABLE IF NOT EXISTS financial_closings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    closing_code TEXT NOT NULL UNIQUE,
+    closing_type TEXT NOT NULL CHECK(closing_type IN ('DAILY', 'MONTHLY', 'YEARLY', 'STOCK')),
+    period_name TEXT NOT NULL,
+    period_start_date TEXT NOT NULL,
+    period_end_date TEXT NOT NULL,
+    next_period_start_date TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'CLOSED' CHECK(status IN ('CLOSED', 'REOPENED')),
+    is_locked INTEGER NOT NULL DEFAULT 0 CHECK(is_locked IN (0, 1)),
+    opening_cash_balance REAL NOT NULL DEFAULT 0.0,
+    opening_bank_balance REAL NOT NULL DEFAULT 0.0,
+    cash_sales REAL NOT NULL DEFAULT 0.0,
+    credit_sales REAL NOT NULL DEFAULT 0.0,
+    total_sales REAL NOT NULL DEFAULT 0.0,
+    sales_returns REAL NOT NULL DEFAULT 0.0,
+    net_sales REAL NOT NULL DEFAULT 0.0,
+    cash_purchases REAL NOT NULL DEFAULT 0.0,
+    credit_purchases REAL NOT NULL DEFAULT 0.0,
+    total_purchases REAL NOT NULL DEFAULT 0.0,
+    purchase_returns REAL NOT NULL DEFAULT 0.0,
+    net_purchases REAL NOT NULL DEFAULT 0.0,
+    cash_receipts REAL NOT NULL DEFAULT 0.0,
+    cash_payments REAL NOT NULL DEFAULT 0.0,
+    bank_receipts REAL NOT NULL DEFAULT 0.0,
+    bank_payments REAL NOT NULL DEFAULT 0.0,
+    bank_transactions_net REAL NOT NULL DEFAULT 0.0,
+    total_expenses REAL NOT NULL DEFAULT 0.0,
+    other_income REAL NOT NULL DEFAULT 0.0,
+    expected_closing_cash REAL NOT NULL DEFAULT 0.0,
+    actual_physical_cash REAL NOT NULL DEFAULT 0.0,
+    cash_difference REAL NOT NULL DEFAULT 0.0,
+    discrepancy_explanation TEXT DEFAULT '',
+    closing_cash_balance REAL NOT NULL DEFAULT 0.0,
+    closing_bank_balance REAL NOT NULL DEFAULT 0.0,
+    opening_inventory_qty REAL NOT NULL DEFAULT 0.0,
+    opening_inventory_value REAL NOT NULL DEFAULT 0.0,
+    closing_inventory_qty REAL NOT NULL DEFAULT 0.0,
+    closing_inventory_value REAL NOT NULL DEFAULT 0.0,
+    cost_of_goods_sold REAL NOT NULL DEFAULT 0.0,
+    gross_profit REAL NOT NULL DEFAULT 0.0,
+    net_profit_loss REAL NOT NULL DEFAULT 0.0,
+    total_receivables REAL NOT NULL DEFAULT 0.0,
+    total_payables REAL NOT NULL DEFAULT 0.0,
+    customer_count INTEGER NOT NULL DEFAULT 0,
+    supplier_count INTEGER NOT NULL DEFAULT 0,
+    stock_item_count INTEGER NOT NULL DEFAULT 0,
+    costing_method TEXT NOT NULL DEFAULT 'Weighted Average / FIFO',
+    carry_forward_completed INTEGER NOT NULL DEFAULT 1,
+    profit_transfer_journal_id INTEGER DEFAULT NULL,
+    discrepancy_journal_id INTEGER DEFAULT NULL,
+    accounting_period_id INTEGER DEFAULT NULL,
+    notes TEXT DEFAULT '',
+    snapshot_json TEXT NOT NULL DEFAULT '{}',
+    closed_by TEXT NOT NULL DEFAULT 'Super Admin',
+    closed_by_role TEXT NOT NULL DEFAULT 'Super Admin',
+    closed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reopened_by TEXT DEFAULT NULL,
+    reopened_by_role TEXT DEFAULT NULL,
+    reopened_at DATETIME DEFAULT NULL,
+    reopen_reason TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 36. Closing Account Carry-Forward Snapshots
+CREATE TABLE IF NOT EXISTS closing_account_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    closing_id INTEGER NOT NULL,
+    closing_code TEXT NOT NULL,
+    closing_type TEXT NOT NULL,
+    period_start_date TEXT NOT NULL,
+    period_end_date TEXT NOT NULL,
+    next_period_start_date TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    account_code TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    main_group TEXT NOT NULL,
+    account_group TEXT NOT NULL,
+    account_type TEXT NOT NULL DEFAULT '',
+    financial_category TEXT NOT NULL,
+    town_name TEXT DEFAULT '',
+    area_name TEXT DEFAULT '',
+    opening_debit REAL NOT NULL DEFAULT 0.0,
+    opening_credit REAL NOT NULL DEFAULT 0.0,
+    period_debit REAL NOT NULL DEFAULT 0.0,
+    period_credit REAL NOT NULL DEFAULT 0.0,
+    closing_debit REAL NOT NULL DEFAULT 0.0,
+    closing_credit REAL NOT NULL DEFAULT 0.0,
+    closing_signed_balance REAL NOT NULL DEFAULT 0.0,
+    closing_balance_amount REAL NOT NULL DEFAULT 0.0,
+    closing_balance_type TEXT NOT NULL DEFAULT 'Debit',
+    carried_forward_amount REAL NOT NULL DEFAULT 0.0,
+    carried_forward_type TEXT NOT NULL DEFAULT 'Debit',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (closing_id) REFERENCES financial_closings (id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT
+);
+
+-- 37. Closing Stock Snapshots (Item-by-Item Valuation & Carry-Forward)
+CREATE TABLE IF NOT EXISTS closing_stock_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    closing_id INTEGER NOT NULL,
+    closing_code TEXT NOT NULL,
+    closing_type TEXT NOT NULL,
+    period_start_date TEXT NOT NULL,
+    period_end_date TEXT NOT NULL,
+    next_period_start_date TEXT NOT NULL,
+    item_id INTEGER NOT NULL,
+    item_code TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    company_name TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    packing TEXT DEFAULT '1x1',
+    opening_qty REAL NOT NULL DEFAULT 0.0,
+    purchased_qty REAL NOT NULL DEFAULT 0.0,
+    sold_qty REAL NOT NULL DEFAULT 0.0,
+    purchase_returns_qty REAL NOT NULL DEFAULT 0.0,
+    sales_returns_qty REAL NOT NULL DEFAULT 0.0,
+    adjustments_qty REAL NOT NULL DEFAULT 0.0,
+    closing_qty REAL NOT NULL DEFAULT 0.0,
+    unit_cost_rate REAL NOT NULL DEFAULT 0.0,
+    trade_price REAL NOT NULL DEFAULT 0.0,
+    closing_stock_value REAL NOT NULL DEFAULT 0.0,
+    costing_method TEXT NOT NULL DEFAULT 'Weighted Average / FIFO',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (closing_id) REFERENCES financial_closings (id) ON DELETE CASCADE,
+    FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE RESTRICT
+);
+
+-- 38. Closing & Period Audit Logs
+CREATE TABLE IF NOT EXISTS closing_audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    closing_id INTEGER DEFAULT NULL,
+    closing_code TEXT DEFAULT '',
+    closing_type TEXT NOT NULL,
+    action TEXT NOT NULL,
+    period_start_date TEXT NOT NULL,
+    period_end_date TEXT NOT NULL,
+    performed_by TEXT NOT NULL,
+    performed_by_role TEXT NOT NULL DEFAULT 'Super Admin',
+    reason TEXT DEFAULT '',
+    details_json TEXT DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_fin_closings_type_dates ON financial_closings(closing_type, period_start_date, period_end_date);
+CREATE INDEX IF NOT EXISTS idx_fin_closings_status ON financial_closings(status);
+CREATE INDEX IF NOT EXISTS idx_closing_acc_snap_cid ON closing_account_snapshots(closing_id);
+CREATE INDEX IF NOT EXISTS idx_closing_acc_snap_acc ON closing_account_snapshots(account_id);
+CREATE INDEX IF NOT EXISTS idx_closing_stk_snap_cid ON closing_stock_snapshots(closing_id);
+CREATE INDEX IF NOT EXISTS idx_closing_stk_snap_item ON closing_stock_snapshots(item_id);
+CREATE INDEX IF NOT EXISTS idx_closing_audit_cid ON closing_audit_logs(closing_id);
 `;
 
 
@@ -1024,6 +1179,19 @@ export const MODULE_CATALOG = [
     status: 'Finalized & Operational',
   },
   {
+    moduleKey: 'closing',
+    name: 'Closing & Financial Period Management',
+    tables: [
+      'financial_closings',
+      'closing_account_snapshots',
+      'closing_stock_snapshots',
+      'closing_audit_logs',
+      'accounting_periods',
+    ],
+    purpose: 'Daily Cash/Bank Closing with Discrepancy Reconciliation, Monthly Financial Closing, Stock Valuation Closing, Configurable Yearly Closing, Automatic Opening Balance Carry-Forward, Closed Period Locking, and Super Admin Reopening with Audit Trail.',
+    status: 'Finalized & Operational',
+  },
+  {
     moduleKey: 'users',
     name: 'Users, Authentication & Role-Based Permissions',
     tables: ['users', 'user_sessions', 'role_permissions', 'auth_audit_logs'],
@@ -1038,4 +1206,5 @@ export const MODULE_CATALOG = [
     status: 'Schema Prepared & Initialized',
   },
 ];
+
 

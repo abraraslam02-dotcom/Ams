@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
 import { recalculateAccountBalance } from './accounts.ts';
 import { authenticateToken } from '../middleware/authMiddleware.ts';
+import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const cashBookRouter = Router();
 
@@ -640,6 +641,7 @@ cashBookRouter.post('/vouchers', authenticateToken, (req: Request, res: Response
     } = req.body || {};
 
     const cleanDate = String(voucher_date || new Date().toISOString().slice(0, 10)).trim();
+    assertPeriodOpen(cleanDate, 'create a cash book voucher');
     const cleanType = String(transaction_type || 'Receipt');
     const recAmt = round2(Math.max(0, Number(receipt_amount || 0)));
     const payAmt = round2(Math.max(0, Number(payment_amount || 0)));
@@ -881,6 +883,8 @@ cashBookRouter.put('/vouchers/:id', authenticateToken, (req: Request, res: Respo
     } = req.body || {};
 
     const cleanDate = String(voucher_date || existing.voucher_date).trim();
+    assertPeriodOpen(String(existing.voucher_date || ''), 'edit an existing cash book voucher');
+    assertPeriodOpen(cleanDate, 'move a cash book voucher into a closed period');
     const cleanType = String(transaction_type || existing.transaction_type);
     const recAmt = round2(Math.max(0, Number(receipt_amount || 0)));
     const payAmt = round2(Math.max(0, Number(payment_amount || 0)));
@@ -1063,6 +1067,8 @@ cashBookRouter.delete('/vouchers/:id', authenticateToken, (req: Request, res: Re
     if (!existing) {
       return res.status(404).json({ success: false, error: 'Voucher not found.' });
     }
+
+    assertPeriodOpen(String(existing.voucher_date || ''), 'delete or cancel a cash book voucher');
 
     const hardDelete = req.query.soft !== 'true';
 

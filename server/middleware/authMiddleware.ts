@@ -238,7 +238,7 @@ function hasAnyPerm(
  * Route-aware RBAC enforcement for domain routers
  */
 export function enforceModulePermissions(
-  domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting' | 'settings' | 'users' | 'supply'
+  domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting' | 'settings' | 'users' | 'supply' | 'closing'
 ) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
@@ -375,6 +375,28 @@ export function enforceModulePermissions(
           { mod: 'expenses', action: 'create' },
         ]);
         requiredDesc = 'accounting:create';
+      }
+    } else if (domain === 'closing') {
+      if (method === 'GET') {
+        allowed =
+          req.user.role === 'Administrator' ||
+          req.user.role === 'Accountant' ||
+          hasAnyPerm(perms, [
+            { mod: 'closing', action: 'view' },
+            { mod: 'reports', action: 'view' },
+            { mod: 'accounts', action: 'view' },
+          ]);
+        requiredDesc = 'closing:view';
+      } else {
+        allowed =
+          req.user.role === 'Administrator' ||
+          req.user.role === 'Accountant' ||
+          hasAnyPerm(perms, [
+            { mod: 'closing', action: 'create' },
+            { mod: 'closing', action: 'edit' },
+            { mod: 'accounts', action: 'create' },
+          ]);
+        requiredDesc = 'closing:create';
       }
     } else if (domain === 'supply') {
       if (method === 'GET') {

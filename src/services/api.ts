@@ -5146,6 +5146,236 @@ export const api = {
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load distribution report');
     return data;
   },
+
+  // =========================================================================
+  // CLOSING & FINANCIAL PERIOD MANAGEMENT MODULE
+  // =========================================================================
+
+  async getClosingOverview() {
+    const res = await authFetch('/api/closing/overview');
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Closing Overview');
+    return data;
+  },
+
+  async previewDailyClosing(date: string) {
+    const q = new URLSearchParams({ date });
+    const res = await authFetch(`/api/closing/daily/preview?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to preview Daily Closing');
+    return data;
+  },
+
+  async executeDailyClosing(payload: {
+    date: string;
+    actual_physical_cash: number;
+    discrepancy_explanation?: string;
+    cash_discrepancy_reason?: string;
+    post_discrepancy_adjustment?: boolean;
+    notes?: string;
+  }) {
+    const body = {
+      ...payload,
+      discrepancy_explanation:
+        payload.discrepancy_explanation ?? payload.cash_discrepancy_reason ?? '',
+    };
+    const res = await authFetch('/api/closing/daily/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to execute Daily Closing');
+    return data;
+  },
+
+  async previewMonthlyClosing(params: {
+    month?: string;
+    startDate?: string;
+    endDate?: string;
+    start_date?: string;
+    end_date?: string;
+    periodName?: string;
+  }) {
+    const q = new URLSearchParams();
+    if (params.month) q.set('month', params.month);
+    if (params.startDate || params.start_date) q.set('startDate', (params.startDate || params.start_date)!);
+    if (params.endDate || params.end_date) q.set('endDate', (params.endDate || params.end_date)!);
+    if (params.periodName) q.set('periodName', params.periodName);
+    const res = await authFetch(`/api/closing/monthly/preview?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to preview Monthly Closing');
+    return data;
+  },
+
+  async executeMonthlyClosing(payload: {
+    month?: string;
+    start_date?: string;
+    end_date?: string;
+    period_name?: string;
+    costing_method?: string;
+    lock_period?: boolean;
+    notes?: string;
+  }) {
+    const res = await authFetch('/api/closing/monthly/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to execute Monthly Closing');
+    return data;
+  },
+
+  async previewStockClosing(params: {
+    startDate?: string;
+    endDate?: string;
+    start_date?: string;
+    end_date?: string;
+    costing_method?: string;
+  }) {
+    const q = new URLSearchParams();
+    if (params.startDate || params.start_date) q.set('startDate', (params.startDate || params.start_date)!);
+    if (params.endDate || params.end_date) q.set('endDate', (params.endDate || params.end_date)!);
+    const res = await authFetch(`/api/closing/stock/preview?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to preview Stock Closing');
+    return data;
+  },
+
+  async executeStockClosing(payload: {
+    start_date: string;
+    end_date: string;
+    costing_method?: string;
+    period_name?: string;
+    notes?: string;
+  }) {
+    const res = await authFetch('/api/closing/stock/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to execute Stock Closing');
+    return data;
+  },
+
+  async previewYearlyClosing(params?: {
+    startDate?: string;
+    endDate?: string;
+    start_date?: string;
+    end_date?: string;
+    costing_method?: string;
+    periodName?: string;
+  }) {
+    const q = new URLSearchParams();
+    if (params?.startDate || params?.start_date) q.set('startDate', (params.startDate || params.start_date)!);
+    if (params?.endDate || params?.end_date) q.set('endDate', (params.endDate || params.end_date)!);
+    if (params?.periodName) q.set('periodName', params.periodName);
+    const res = await authFetch(`/api/closing/yearly/preview?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to preview Yearly Closing');
+    return data;
+  },
+
+  async executeYearlyClosing(payload: {
+    start_date: string;
+    end_date: string;
+    costing_method?: string;
+    period_name?: string;
+    lock_period?: boolean;
+    advance_financial_year?: boolean;
+    advance_financial_year_dates?: boolean;
+    notes?: string;
+  }) {
+    const body = {
+      ...payload,
+      advance_financial_year_dates:
+        payload.advance_financial_year_dates ?? payload.advance_financial_year ?? true,
+    };
+    const res = await authFetch('/api/closing/yearly/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to execute Yearly Closing');
+    return data;
+  },
+
+  async updateFinancialYearConfig(payload: {
+    current_financial_year_start?: string;
+    current_financial_year_end?: string;
+    start_date?: string;
+    end_date?: string;
+    costing_method?: string;
+  }) {
+    const body = {
+      current_financial_year_start:
+        payload.current_financial_year_start || payload.start_date || '2025-07-01',
+      current_financial_year_end:
+        payload.current_financial_year_end || payload.end_date || '2026-06-30',
+      costing_method: payload.costing_method || 'Weighted Average / FIFO',
+    };
+    const res = await authFetch('/api/closing/financial-year-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update Financial Year configuration');
+    return data;
+  },
+
+  async getClosingHistory(params?: {
+    closingType?: string;
+    closing_type?: string;
+    status?: string;
+    startDate?: string;
+    endDate?: string;
+    start_date?: string;
+    end_date?: string;
+    q?: string;
+    search?: string;
+  }) {
+    const q = new URLSearchParams();
+    if (params?.closingType || params?.closing_type) {
+      q.set('closingType', (params.closingType || params.closing_type)!);
+    }
+    if (params?.status) q.set('status', params.status);
+    if (params?.startDate || params?.start_date) {
+      q.set('startDate', (params.startDate || params.start_date)!);
+    }
+    if (params?.endDate || params?.end_date) {
+      q.set('endDate', (params.endDate || params.end_date)!);
+    }
+    if (params?.q || params?.search) {
+      q.set('q', (params.q || params.search)!);
+    }
+    const res = await authFetch(`/api/closing/history?${q.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Closing History');
+    return data;
+  },
+
+  async getClosingDetailById(id: number) {
+    const res = await authFetch(`/api/closing/history/${id}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Closing Detail');
+    return data;
+  },
+
+  async reopenClosedPeriod(id: number, reason: string) {
+    const res = await authFetch(`/api/closing/${id}/reopen`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to reopen closed period');
+    return data;
+  },
 };
+
 
 

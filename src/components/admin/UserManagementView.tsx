@@ -39,6 +39,7 @@ const MODULES_LIST = [
   { key: 'cashbook', label: 'Cashbook', desc: 'Daily cash book receipts and payments' },
   { key: 'expenses', label: 'Expenses', desc: 'Operational expense vouchers' },
   { key: 'reports', label: 'Reports', desc: 'Financial statements, sales, and inventory analytics' },
+  { key: 'closing', label: 'Closing Management', desc: 'Daily, Monthly, Yearly & Stock Closing, Carry-Forward, and Period Reports' },
   { key: 'backup', label: 'Backup & Restore', desc: 'Database backup creation and recovery' },
   { key: 'settings', label: 'Application Settings', desc: 'Store settings, printer setup, and more options' },
   { key: 'users', label: 'User Management', desc: 'Super Admin user accounts and individual permissions' },

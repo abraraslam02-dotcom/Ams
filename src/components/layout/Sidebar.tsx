@@ -187,7 +187,14 @@ export type NavTabId =
   | 'party-special-discounts'
   | 'fifo-batch-control'
   | 'offer-discount-reports'
-  | 'master-reset';
+  | 'master-reset'
+  // J. CLOSING & FINANCIAL PERIOD MANAGEMENT
+  | 'closing-daily'
+  | 'closing-monthly'
+  | 'closing-yearly'
+  | 'closing-stock'
+  | 'closing-history'
+  | 'closing-reopen';
 
 interface SidebarProps {
   activeTab: NavTabId;
@@ -297,6 +304,7 @@ const ACCENTS: Record<string, Accent> = {
   'group-purchase-management': { tile: 'bg-amber-500/10 text-amber-300', tileActive: 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400/40', text: 'text-amber-300', bar: 'bg-amber-400' },
   'group-financial-management': { tile: 'bg-cyan-500/10 text-cyan-300', tileActive: 'bg-cyan-500/25 text-cyan-200 ring-1 ring-cyan-400/40', text: 'text-cyan-300', bar: 'bg-cyan-400' },
   'group-inventory-warehouse': { tile: 'bg-orange-500/10 text-orange-300', tileActive: 'bg-orange-500/25 text-orange-200 ring-1 ring-orange-400/40', text: 'text-orange-300', bar: 'bg-orange-400' },
+  'group-closing-management': { tile: 'bg-rose-500/10 text-rose-300', tileActive: 'bg-rose-500/25 text-rose-200 ring-1 ring-rose-400/40', text: 'text-rose-300', bar: 'bg-rose-400' },
   'group-reports-analytics': { tile: 'bg-pink-500/10 text-pink-300', tileActive: 'bg-pink-500/25 text-pink-200 ring-1 ring-pink-400/40', text: 'text-pink-300', bar: 'bg-pink-400' },
   'group-system-settings': { tile: 'bg-slate-500/15 text-slate-300', tileActive: 'bg-slate-400/25 text-slate-100 ring-1 ring-slate-400/40', text: 'text-slate-200', bar: 'bg-slate-300' },
 };
@@ -417,6 +425,12 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   users: 'users',
   'users-manage': 'users',
   'system-info': 'info',
+  'closing-daily': 'cash',
+  'closing-monthly': 'scale',
+  'closing-yearly': 'bank',
+  'closing-stock': 'warehouse',
+  'closing-history': 'clock',
+  'closing-reopen': 'lock',
 };
 
 interface MenuLeaf {
@@ -614,6 +628,22 @@ const MENU: MenuNode[] = [
       { id: 'sales-discount-report', label: 'Discount Report' },
       { id: 'offer-discount-reports', label: 'Offer & Party Discount Reports (11)', badge: '11' },
       { id: 'sales-return-report', label: 'Sales Return Report' },
+    ],
+  },
+  {
+    id: 'group-closing-management',
+    code: 'M',
+    label: 'Closing Management',
+    canSee: (p, isAdmin) =>
+      isAdmin || p.closing?.view !== false || p.accounts?.view !== false || p.reports?.view !== false,
+    icon: 'lock',
+    children: [
+      { id: 'closing-daily', label: 'Daily Closing', badge: 'Cash' },
+      { id: 'closing-monthly', label: 'Monthly Closing', badge: 'Carry' },
+      { id: 'closing-yearly', label: 'Yearly Closing', badge: 'FY' },
+      { id: 'closing-stock', label: 'Stock Closing' },
+      { id: 'closing-history', label: 'Closing History' },
+      { id: 'closing-reopen', label: 'Reopen Closed Period', badge: 'Admin' },
     ],
   },
   {

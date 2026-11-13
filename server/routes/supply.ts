@@ -17,6 +17,7 @@ import {
   refreshSalesmanPartiesJson,
   getSalesmanLinkedRecordCount,
 } from '../utils/salesmanCodeGenerator.ts';
+import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const supplyRouter = Router();
 
@@ -1997,7 +1998,11 @@ function upsertBooking(bookingId: number | null, body: Record<string, unknown>) 
 
 supplyRouter.post('/bookings', (req: Request, res: Response) => {
   const db = getDatabase();
-  const tx = db.transaction(() => upsertBooking(null, req.body || {}));
+  const tx = db.transaction(() => {
+    const bDate = String(req.body?.booking_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    assertPeriodOpen(bDate, 'create a supply booking');
+    return upsertBooking(null, req.body || {});
+  });
   try {
     const booking = tx();
     recordAudit(req, 'SUPPLY_BOOKING_CREATED', `Created Booking ${String(booking.booking_number)}`);
@@ -2009,7 +2014,16 @@ supplyRouter.post('/bookings', (req: Request, res: Response) => {
 
 supplyRouter.put('/bookings/:id', (req: Request, res: Response) => {
   const db = getDatabase();
-  const tx = db.transaction(() => upsertBooking(Number(req.params.id), req.body || {}));
+  const tx = db.transaction(() => {
+    const existing = db.prepare('SELECT booking_date FROM supply_bookings WHERE id = ?').get(Number(req.params.id)) as { booking_date?: string } | undefined;
+    if (existing?.booking_date) {
+      assertPeriodOpen(String(existing.booking_date).slice(0, 10), 'edit a supply booking');
+    }
+    if (req.body?.booking_date) {
+      assertPeriodOpen(String(req.body.booking_date).slice(0, 10), 'move a supply booking into a closed period');
+    }
+    return upsertBooking(Number(req.params.id), req.body || {});
+  });
   try {
     const booking = tx();
     recordAudit(req, 'SUPPLY_BOOKING_UPDATED', `Updated Booking ${String(booking.booking_number)}`);
@@ -2251,6 +2265,7 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
   const db = getDatabase();
   const tx = db.transaction((body: Record<string, unknown>) => {
     const supplyDate = String(body.supply_date || new Date().toISOString().slice(0, 10));
+    assertPeriodOpen(supplyDate, 'create a town supply');
     const supplyNumber =
       String(body.supply_number || '').trim() ||
       getNextSeqNumber('town_supplies', 'supply_number', 'SUP');
@@ -3232,6 +3247,7 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
     }
 
     const returnDate = String(body.return_date || new Date().toISOString().slice(0, 10));
+    assertPeriodOpen(returnDate, 'record a salesman supply return');
     const returnNumber =
       String(body.return_number || '').trim() ||
       getNextSeqNumber('supply_returns', 'return_number', 'SRT');
@@ -3639,6 +3655,7 @@ supplyRouter.post('/supplies/:id/finalize-billing', (req: Request, res: Response
     }
 
     const invoiceDate = String(body.invoice_date || new Date().toISOString().slice(0, 10));
+    assertPeriodOpen(invoiceDate, 'finalize supply billing');
     const partySupplyIdFilter = body.party_supply_id ? Number(body.party_supply_id) : null;
     const itemOverrides = Array.isArray(body.items) ? (body.items as Array<Record<string, unknown>>) : [];
 
@@ -4115,6 +4132,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
       const recoveryDate = String(
         entry.recovery_date || body.recovery_date || new Date().toISOString().slice(0, 10)
       );
+      assertPeriodOpen(recoveryDate, 'record a supply recovery receipt');
       const receiptNumber =
         String(entry.recovery_receipt_number || '').trim() ||
         getNextSeqNumber('supply_recoveries', 'receipt_number', 'REC');
@@ -4652,6 +4670,7 @@ supplyRouter.post('/settlements', (req: Request, res: Response) => {
     if (!salesman) throw new Error('Salesman not found.');
 
     const settlementDate = String(body.settlement_date || new Date().toISOString().slice(0, 10));
+    assertPeriodOpen(settlementDate, 'record a salesman settlement');
     const fromDate = String(body.from_date || settlementDate);
     const toDate = String(body.to_date || settlementDate);
     const settlementNumber =

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
+import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const inventoryRouter = Router();
 
@@ -2214,6 +2215,7 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
     const currentUserId = req.user?.id || null;
 
     const adjustmentDate = String(body.adjustment_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    assertPeriodOpen(adjustmentDate, 'create a stock adjustment');
     const rawType = body.adjustment_type || body.reason_category || 'Physical Difference';
     const adjustmentType = toDbAdjustmentType(String(rawType));
     const reasonText = String(body.reason || body.description || '').trim();
@@ -2503,11 +2505,11 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
         const insertJe = db
           .prepare(`
             INSERT INTO journal_entries (
-              entry_number, reference_type, reference_id, description,
+              entry_number, entry_date, reference_type, reference_id, description,
               total_debit, total_credit, is_balanced, status
-            ) VALUES (?, 'ADJUSTMENT', ?, ?, ?, ?, 1, 'posted')
+            ) VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, 1, 'posted')
           `)
-          .run(entryNumber, createdAdjId, desc, absCostImpact, absCostImpact);
+          .run(entryNumber, adjustmentDate, createdAdjId, desc, absCostImpact, absCostImpact);
 
         createdJeId = Number(insertJe.lastInsertRowid);
 
@@ -2582,6 +2584,7 @@ inventoryRouter.post('/transfers', (req: AuthenticatedRequest, res: Response) =>
       reference_no = null,
       items,
     } = body;
+    assertPeriodOpen(String(transfer_date).slice(0, 10), 'create a stock transfer');
     const reasonText = String(body.reason ?? body.remarks ?? '').trim();
 
     if (!from_location || !to_location) {
@@ -3550,6 +3553,7 @@ inventoryRouter.post('/physical-verifications', (req: AuthenticatedRequest, res:
       idempotency_key,
       items,
     } = body;
+    assertPeriodOpen(String(verification_date).slice(0, 10), 'create a physical stock verification');
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, error: 'At least one medicine item count is required.' });
@@ -3721,6 +3725,7 @@ inventoryRouter.post('/physical-verifications/:id/reconcile', (req: Authenticate
       if (!ver) {
         throw new Error('Physical verification record not found.');
       }
+      assertPeriodOpen(String(ver.verification_date || '').slice(0, 10), 'reconcile a physical stock verification');
       verificationNumber = String(ver.verification_number || '');
 
       if (String(ver.status).toLowerCase() === 'reconciled' || ver.adjustment_id) {

@@ -14,6 +14,7 @@ import {
   evaluateLineOfferAndPartyDiscount,
   recordBatchStockMovement,
 } from '../services/fifoAndOfferEngine.ts';
+import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const salesRouter = Router();
 
@@ -1905,6 +1906,9 @@ salesRouter.post('/', (req: Request, res: Response) => {
       }
     }
 
+    const targetSaleDate = String(body.invoice_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    assertPeriodOpen(targetSaleDate, 'create a sales invoice');
+
     const username = req.user?.username || 'Super Admin';
     const saleId = processSaleUpsert(null, body);
 
@@ -1983,6 +1987,11 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
       );
     }
 
+    assertPeriodOpen(String(existing.invoice_date || ''), 'edit an existing sales invoice');
+    if (req.body?.invoice_date) {
+      assertPeriodOpen(String(req.body.invoice_date), 'move a sales invoice into a closed period');
+    }
+
     const username = req.user?.username || 'Super Admin';
     processSaleUpsert(saleId, req.body || {});
     db.prepare('UPDATE sales SET updated_by = ? WHERE id = ?').run(username, saleId);
@@ -2041,6 +2050,8 @@ function handleCancelOrDeleteSale(req: Request, res: Response) {
         error: 'This sales invoice is already cancelled.',
       });
     }
+
+    assertPeriodOpen(String(existing.invoice_date || ''), 'cancel or delete a sales invoice');
 
     const username = req.user?.username || 'Super Admin';
     const cancelReason = req.body?.cancel_reason
@@ -2249,6 +2260,7 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
       }
 
       const returnDate = String(body.return_date || new Date().toISOString().slice(0, 10)).trim();
+      assertPeriodOpen(returnDate, 'record a sales return');
       const refundMode = ['Account Adjustment', 'Cash Refund', 'Bank Refund'].includes(String(body.refund_mode))
         ? String(body.refund_mode)
         : 'Account Adjustment';
@@ -2778,6 +2790,7 @@ salesRouter.post('/payments', (req: Request, res: Response) => {
 
       const voucherNumber = String(body.voucher_number || '').trim() || getNextVoucherNumber();
       const voucherDate = String(body.voucher_date || new Date().toISOString().slice(0, 10)).trim();
+      assertPeriodOpen(voucherDate, 'record a payment or receipt voucher');
       const paymentMethod = ['Cash', 'Bank Transfer', 'Cheque', 'Online'].includes(String(body.payment_method))
         ? String(body.payment_method)
         : voucherType === 'bank_payment'
