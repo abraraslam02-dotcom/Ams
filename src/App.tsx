@@ -37,6 +37,7 @@ import {
 import { SalesmanMobileBookingApp } from './components/mobile/SalesmanMobileBookingApp';
 import { TradeDealsAndPartyDiscountsWorkspace } from './components/offers/TradeDealsAndPartyDiscountsWorkspace';
 import { MasterResetAndLocalBackupPanel } from './components/admin/MasterResetAndLocalBackupPanel';
+import { TopPerformanceReportsView } from './components/reports/TopPerformanceReportsView';
 import { api } from './services/api';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
@@ -511,11 +512,23 @@ function AppContent() {
         return { title: 'Item Full Quarterly Report — Multi-Month Sales & Profit Performance', crumbs: ['Reports & Analytics', 'Item Full Quarterly Report'] };
       case 'report-account-profit':
         return { title: 'Account Profit Reports — Customer & Party Profitability Analysis', crumbs: ['Reports & Analytics', 'Account Profit Reports'] };
+      case 'top-performance-reports':
+        return {
+          title: 'Top Performance & Overall Sales / Purchase Reports — Increment / Decrement Analysis',
+          crumbs: ['Reports & Analytics', 'Top Performance & Overall Reports'],
+        };
       case 'sales-daily-summary':
+        return {
+          title: 'Sales Performance Analysis — Top Ranking, Overall Summary & Increment/Decrement',
+          crumbs: ['Reports & Analytics', 'Sales Analysis'],
+        };
       case 'report-daily-sales':
-        return { title: 'Sales Analysis — Daily & Period Sales Breakdown', crumbs: ['Reports & Analytics', 'Sales Analysis'] };
+        return { title: 'Daily Sales — Period Sales Breakdown', crumbs: ['Reports & Analytics', 'Daily Sales'] };
       case 'report-purchase-analysis':
-        return { title: 'Purchase Analysis — Procurement Trends & Supplier Breakdown', crumbs: ['Reports & Analytics', 'Purchase Analysis'] };
+        return {
+          title: 'Purchase Performance Analysis — Top Suppliers, Items, Towns & Increment/Decrement',
+          crumbs: ['Reports & Analytics', 'Purchase Analysis'],
+        };
       case 'sales-discount-report':
       case 'report-discount':
         return { title: 'Discount Report — Invoice & Line Discount Audit', crumbs: ['Reports & Analytics', 'Discount Report'] };
@@ -919,7 +932,16 @@ function AppContent() {
               )}
 
               {/* C. SALES REPORTS & G. REPORTS & ANALYTICS */}
-              {(activeTab === 'report-daily-sales' || activeTab === 'sales-daily-summary') && (
+              {activeTab === 'top-performance-reports' && (
+                <TopPerformanceReportsView initialAnalysisMode="overall" />
+              )}
+              {activeTab === 'sales-daily-summary' && (
+                <TopPerformanceReportsView initialAnalysisMode="sales" />
+              )}
+              {activeTab === 'report-purchase-analysis' && (
+                <TopPerformanceReportsView initialAnalysisMode="purchase" />
+              )}
+              {activeTab === 'report-daily-sales' && (
                 <SalesReportsView initialReport="daily-sales" />
               )}
               {(activeTab === 'report-monthly-sales' ||
@@ -1008,8 +1030,7 @@ function AppContent() {
               )}
               {(activeTab === 'purchase-reports' ||
                 activeTab === 'purchase-supplier-report' ||
-                activeTab === 'report-item-purchases' ||
-                activeTab === 'report-purchase-analysis') && (
+                activeTab === 'report-item-purchases') && (
                 <PurchasesWorkspaceView
                   initialSubTab="reports"
                   onBackToDashboard={handleCloseFullScreenInvoice}

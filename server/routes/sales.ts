@@ -4663,6 +4663,1284 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
       });
     }
 
+    if (reportType === 'top-performance') {
+      const periodPreset = String(req.query.periodPreset || 'this_month').trim().toLowerCase();
+      const rankingParam = String(req.query.ranking || '10').trim().toLowerCase();
+      const rankingLimit =
+        rankingParam === 'all' || rankingParam === 'overall' || rankingParam === '0'
+          ? 0
+          : Math.max(1, parseInt(rankingParam, 10) || 10);
+      const supplierId = req.query.supplierId ? String(req.query.supplierId).trim() : '';
+
+      const toIsoLocal = (d: Date): string => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      };
+
+      const parseIsoLocal = (iso: string): Date => {
+        const parts = String(iso || '').split('-').map(Number);
+        if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+          return new Date(parts[0], parts[1] - 1, parts[2]);
+        }
+        return new Date();
+      };
+
+      const resolvePeriodRanges = () => {
+        const now = new Date();
+        const Y = now.getFullYear();
+        const M = now.getMonth();
+        const D = now.getDate();
+
+        if (periodPreset === 'today') {
+          const cur = toIsoLocal(new Date(Y, M, D));
+          const prev = toIsoLocal(new Date(Y, M, D - 1));
+          return {
+            periodPreset: 'today',
+            periodLabel: 'Today',
+            comparisonLabel: 'Today vs Previous Day (Yesterday)',
+            currentStart: cur,
+            currentEnd: cur,
+            prevStart: prev,
+            prevEnd: prev,
+          };
+        }
+
+        if (periodPreset === 'last_day') {
+          const cur = toIsoLocal(new Date(Y, M, D - 1));
+          const prev = toIsoLocal(new Date(Y, M, D - 2));
+          return {
+            periodPreset: 'last_day',
+            periodLabel: 'Last Day (Complete Previous Day)',
+            comparisonLabel: 'Last Day vs The Day Before It',
+            currentStart: cur,
+            currentEnd: cur,
+            prevStart: prev,
+            prevEnd: prev,
+          };
+        }
+
+        if (periodPreset === 'last_month') {
+          const curStart = toIsoLocal(new Date(Y, M - 1, 1));
+          const curEnd = toIsoLocal(new Date(Y, M, 0));
+          const prevStart = toIsoLocal(new Date(Y, M - 2, 1));
+          const prevEnd = toIsoLocal(new Date(Y, M - 1, 0));
+          return {
+            periodPreset: 'last_month',
+            periodLabel: 'Last Month (Complete Calendar Month)',
+            comparisonLabel: 'Last Month vs The Month Before It',
+            currentStart: curStart,
+            currentEnd: curEnd,
+            prevStart,
+            prevEnd,
+          };
+        }
+
+        if (periodPreset === 'this_year') {
+          const curStart = toIsoLocal(new Date(Y, 0, 1));
+          const curEnd = toIsoLocal(new Date(Y, M, D));
+          const prevStart = toIsoLocal(new Date(Y - 1, 0, 1));
+          const maxDayInPrevYearMonth = new Date(Y - 1, M + 1, 0).getDate();
+          const prevEnd = toIsoLocal(new Date(Y - 1, M, Math.min(D, maxDayInPrevYearMonth)));
+          return {
+            periodPreset: 'this_year',
+            periodLabel: 'This Year (Year-to-Date)',
+            comparisonLabel: 'This Year vs Equivalent Elapsed Period of Previous Year',
+            currentStart: curStart,
+            currentEnd: curEnd,
+            prevStart,
+            prevEnd,
+          };
+        }
+
+        if (periodPreset === 'last_year') {
+          const curStart = `${Y - 1}-01-01`;
+          const curEnd = `${Y - 1}-12-31`;
+          const prevStart = `${Y - 2}-01-01`;
+          const prevEnd = `${Y - 2}-12-31`;
+          return {
+            periodPreset: 'last_year',
+            periodLabel: `Last Year (${Y - 1} Complete Calendar Year)`,
+            comparisonLabel: `Last Year (${Y - 1}) vs The Year Before It (${Y - 2})`,
+            currentStart: curStart,
+            currentEnd: curEnd,
+            prevStart,
+            prevEnd,
+          };
+        }
+
+        if (periodPreset === 'custom' && startDate && endDate) {
+          let sDate = parseIsoLocal(startDate);
+          let eDate = parseIsoLocal(endDate);
+          if (sDate.getTime() > eDate.getTime()) {
+            const tmp = sDate;
+            sDate = eDate;
+            eDate = tmp;
+          }
+          const durationDays =
+            Math.max(1, Math.round((eDate.getTime() - sDate.getTime()) / 86400000) + 1);
+          const pEnd = new Date(sDate.getFullYear(), sDate.getMonth(), sDate.getDate() - 1);
+          const pStart = new Date(
+            pEnd.getFullYear(),
+            pEnd.getMonth(),
+            pEnd.getDate() - (durationDays - 1)
+          );
+          return {
+            periodPreset: 'custom',
+            periodLabel: `Custom Date Range (${durationDays} Day${durationDays > 1 ? 's' : ''})`,
+            comparisonLabel: `Custom Range vs Immediately Preceding ${durationDays}-Day Period`,
+            currentStart: toIsoLocal(sDate),
+            currentEnd: toIsoLocal(eDate),
+            prevStart: toIsoLocal(pStart),
+            prevEnd: toIsoLocal(pEnd),
+          };
+        }
+
+        // Default: 'this_month' -> 1st of current month to today vs equivalent elapsed period of previous month
+        const curStart = toIsoLocal(new Date(Y, M, 1));
+        const curEnd = toIsoLocal(new Date(Y, M, D));
+        const prevStart = toIsoLocal(new Date(Y, M - 1, 1));
+        const daysInPrevMonth = new Date(Y, M, 0).getDate();
+        const prevEnd = toIsoLocal(new Date(Y, M - 1, Math.min(D, daysInPrevMonth)));
+        return {
+          periodPreset: 'this_month',
+          periodLabel: 'This Month (Month-to-Date)',
+          comparisonLabel: 'This Month vs Equivalent Elapsed Period of Previous Month',
+          currentStart: curStart,
+          currentEnd: curEnd,
+          prevStart,
+          prevEnd,
+        };
+      };
+
+      const ranges = resolvePeriodRanges();
+
+      // Safe Increment / Decrement calculation helper
+      const computeDelta = (
+        currAmtRaw: unknown,
+        prevAmtRaw: unknown,
+        currQtyRaw: unknown,
+        prevQtyRaw: unknown,
+        currInvRaw: unknown = 0,
+        prevInvRaw: unknown = 0
+      ) => {
+        const current_amount = round2(currAmtRaw);
+        const previous_amount = round2(prevAmtRaw);
+        const amount_difference = round2(current_amount - previous_amount);
+
+        let amount_pct_change = 0;
+        if (previous_amount !== 0) {
+          amount_pct_change = round2(
+            ((current_amount - previous_amount) / Math.abs(previous_amount)) * 100
+          );
+        } else if (current_amount > 0) {
+          amount_pct_change = 100;
+        } else if (current_amount < 0) {
+          amount_pct_change = -100;
+        }
+
+        const increment_percent = amount_pct_change > 0 ? amount_pct_change : 0;
+        const decrement_percent = amount_pct_change < 0 ? round2(Math.abs(amount_pct_change)) : 0;
+        const amount_trend: 'Increment' | 'Decrement' | 'No Change' =
+          amount_difference > 0 ? 'Increment' : amount_difference < 0 ? 'Decrement' : 'No Change';
+
+        const current_qty = round2(currQtyRaw);
+        const previous_qty = round2(prevQtyRaw);
+        const qty_difference = round2(current_qty - previous_qty);
+
+        let qty_pct_change = 0;
+        if (previous_qty !== 0) {
+          qty_pct_change = round2(((current_qty - previous_qty) / Math.abs(previous_qty)) * 100);
+        } else if (current_qty > 0) {
+          qty_pct_change = 100;
+        } else if (current_qty < 0) {
+          qty_pct_change = -100;
+        }
+
+        const qty_increment_percent = qty_pct_change > 0 ? qty_pct_change : 0;
+        const qty_decrement_percent = qty_pct_change < 0 ? round2(Math.abs(qty_pct_change)) : 0;
+        const qty_trend: 'Increment' | 'Decrement' | 'No Change' =
+          qty_difference > 0 ? 'Increment' : qty_difference < 0 ? 'Decrement' : 'No Change';
+
+        const current_invoices = Number(currInvRaw || 0);
+        const previous_invoices = Number(prevInvRaw || 0);
+        const invoice_difference = current_invoices - previous_invoices;
+
+        return {
+          previous_amount,
+          current_amount,
+          amount_difference,
+          amount_pct_change,
+          increment_percent,
+          decrement_percent,
+          amount_trend,
+          previous_qty,
+          current_qty,
+          qty_difference,
+          qty_pct_change,
+          qty_increment_percent,
+          qty_decrement_percent,
+          qty_trend,
+          previous_invoices,
+          current_invoices,
+          invoice_difference,
+        };
+      };
+
+      const fullPackPurchaseExpr =
+        'COALESCE(pi.quantity, 0) + (COALESCE(pi.loose_quantity, 0) / CASE WHEN COALESCE(pi.units_per_pack, 1) > 0 THEN pi.units_per_pack ELSE 1 END)';
+
+      // Load complete period dataset for a given [pStart, pEnd]
+      const loadPeriodDataset = (pStart: string, pEnd: string) => {
+        // 1. Sales header & item filters
+        let sWhere = " WHERE s.status = 'completed' AND DATE(s.invoice_date) >= DATE(?) AND DATE(s.invoice_date) <= DATE(?) ";
+        const sParams: Array<string | number> = [pStart, pEnd];
+
+        if (partyIdsFilter.length > 0) {
+          sWhere += ` AND s.customer_account_id IN (${partyIdsFilter.map(() => '?').join(',')}) `;
+          sParams.push(...partyIdsFilter);
+        } else if (customerId && customerId.toUpperCase() !== 'ALL') {
+          sWhere += ' AND s.customer_account_id = ? ';
+          sParams.push(Number(customerId));
+        }
+        if (salesmanId && salesmanId.toUpperCase() !== 'ALL') {
+          sWhere += ' AND s.salesman_id = ? ';
+          sParams.push(Number(salesmanId));
+        }
+        if (townName && townName.toUpperCase() !== 'ALL') {
+          sWhere +=
+            " AND COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+          sParams.push(townName);
+        }
+        if (areaName && areaName.toUpperCase() !== 'ALL') {
+          sWhere +=
+            " AND COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '') = ? ";
+          sParams.push(areaName);
+        }
+
+        const itemScope = buildItemScopeClause();
+        const retScope = buildReturnScopeClause();
+
+        // Sale returns filter
+        let srWhere =
+          " WHERE sr.status = 'completed' AND DATE(sr.return_date) >= DATE(?) AND DATE(sr.return_date) <= DATE(?) ";
+        const srParams: Array<string | number> = [pStart, pEnd];
+        if (partyIdsFilter.length > 0) {
+          srWhere += ` AND COALESCE(sr.customer_account_id, orig_s.customer_account_id) IN (${partyIdsFilter
+            .map(() => '?')
+            .join(',')}) `;
+          srParams.push(...partyIdsFilter);
+        } else if (customerId && customerId.toUpperCase() !== 'ALL') {
+          srWhere += ' AND COALESCE(sr.customer_account_id, orig_s.customer_account_id) = ? ';
+          srParams.push(Number(customerId));
+        }
+        if (salesmanId && salesmanId.toUpperCase() !== 'ALL') {
+          srWhere += ' AND COALESCE(orig_s.salesman_id, a.assigned_salesman_id) = ? ';
+          srParams.push(Number(salesmanId));
+        }
+        if (townName && townName.toUpperCase() !== 'ALL') {
+          srWhere +=
+            " AND COALESCE(NULLIF(TRIM(orig_s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+          srParams.push(townName);
+        }
+        if (areaName && areaName.toUpperCase() !== 'ALL') {
+          srWhere +=
+            " AND COALESCE(NULLIF(TRIM(orig_s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '') = ? ";
+          srParams.push(areaName);
+        }
+
+        // 2. Purchases header & item filters
+        let pWhere =
+          " WHERE p.status = 'completed' AND DATE(p.bill_date) >= DATE(?) AND DATE(p.bill_date) <= DATE(?) ";
+        const pParams: Array<string | number> = [pStart, pEnd];
+        if (partyIdsFilter.length > 0) {
+          pWhere += ` AND p.supplier_account_id IN (${partyIdsFilter.map(() => '?').join(',')}) `;
+          pParams.push(...partyIdsFilter);
+        } else if (supplierId && supplierId.toUpperCase() !== 'ALL') {
+          pWhere += ' AND p.supplier_account_id = ? ';
+          pParams.push(Number(supplierId));
+        }
+        if (townName && townName.toUpperCase() !== 'ALL') {
+          pWhere += " AND COALESCE(NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+          pParams.push(townName);
+        }
+        if (areaName && areaName.toUpperCase() !== 'ALL') {
+          pWhere += " AND COALESCE(NULLIF(TRIM(a.area_name), ''), '') = ? ";
+          pParams.push(areaName);
+        }
+
+        let pItemClause = '';
+        const pItemParams: Array<string | number> = [];
+        if (companiesFilter.length > 0) {
+          pItemClause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pi.company_name), ''), 'General') IN (${companiesFilter
+            .map(() => '?')
+            .join(',')}) `;
+          pItemParams.push(...companiesFilter);
+        }
+        if (itemIdsFilter.length > 0) {
+          pItemClause += ` AND pi.item_id IN (${itemIdsFilter.map(() => '?').join(',')}) `;
+          pItemParams.push(...itemIdsFilter);
+        }
+        if (itemGroup && itemGroup.toUpperCase() !== 'ALL') {
+          pItemClause += ` AND COALESCE(NULLIF(TRIM(i.category), ''), 'General') = ? `;
+          pItemParams.push(itemGroup);
+        }
+
+        let prWhere =
+          " WHERE pr.status = 'completed' AND DATE(pr.return_date) >= DATE(?) AND DATE(pr.return_date) <= DATE(?) ";
+        const prParams: Array<string | number> = [pStart, pEnd];
+        if (partyIdsFilter.length > 0) {
+          prWhere += ` AND pr.supplier_account_id IN (${partyIdsFilter.map(() => '?').join(',')}) `;
+          prParams.push(...partyIdsFilter);
+        } else if (supplierId && supplierId.toUpperCase() !== 'ALL') {
+          prWhere += ' AND pr.supplier_account_id = ? ';
+          prParams.push(Number(supplierId));
+        }
+        if (townName && townName.toUpperCase() !== 'ALL') {
+          prWhere += " AND COALESCE(NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+          prParams.push(townName);
+        }
+        if (areaName && areaName.toUpperCase() !== 'ALL') {
+          prWhere += " AND COALESCE(NULLIF(TRIM(a.area_name), ''), '') = ? ";
+          prParams.push(areaName);
+        }
+
+        let prItemClause = '';
+        const prItemParams: Array<string | number> = [];
+        if (companiesFilter.length > 0) {
+          prItemClause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pri.company_name), ''), 'General') IN (${companiesFilter
+            .map(() => '?')
+            .join(',')}) `;
+          prItemParams.push(...companiesFilter);
+        }
+        if (itemIdsFilter.length > 0) {
+          prItemClause += ` AND pri.item_id IN (${itemIdsFilter.map(() => '?').join(',')}) `;
+          prItemParams.push(...itemIdsFilter);
+        }
+        if (itemGroup && itemGroup.toUpperCase() !== 'ALL') {
+          prItemClause += ` AND COALESCE(NULLIF(TRIM(i.category), ''), 'General') = ? `;
+          prItemParams.push(itemGroup);
+        }
+
+        // --- A. ITEM SALES ---
+        const itemSaleRows = db
+          .prepare(`
+            SELECT
+              si.item_id,
+              COALESCE(NULLIF(TRIM(i.item_code), ''), si.item_code) AS item_code,
+              COALESCE(NULLIF(TRIM(i.item_name), ''), si.item_name) AS item_name,
+              COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') AS company_name,
+              COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+              COALESCE(NULLIF(TRIM(i.packing), ''), si.packing) AS packing,
+              COUNT(DISTINCT s.id) AS invoice_count,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_amount,
+              ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS line_net_sales
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${sWhere} ${itemScope.clause}
+            GROUP BY COALESCE(si.item_id, si.item_code)
+          `)
+          .all(...sParams, ...itemScope.params) as Array<Record<string, any>>;
+
+        const itemSaleRetRows = db
+          .prepare(`
+            SELECT
+              sri.item_id,
+              COALESCE(NULLIF(TRIM(i.item_code), ''), sri.item_code) AS item_code,
+              COALESCE(NULLIF(TRIM(i.item_name), ''), sri.item_name) AS item_name,
+              COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(sri.company_name), ''), 'General') AS company_name,
+              COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+              COALESCE(NULLIF(TRIM(i.packing), ''), sri.packing) AS packing,
+              ROUND(SUM(${fullPackRetExpr}), 2) AS return_qty,
+              ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS return_amount
+            FROM sale_return_items sri
+            JOIN sale_returns sr ON sri.sale_return_id = sr.id
+            LEFT JOIN sales orig_s ON sr.original_sale_id = orig_s.id
+            LEFT JOIN items i ON sri.item_id = i.id
+            LEFT JOIN accounts a ON COALESCE(sr.customer_account_id, orig_s.customer_account_id) = a.id
+            ${srWhere} ${retScope.clause}
+            GROUP BY COALESCE(sri.item_id, sri.item_code)
+          `)
+          .all(...srParams, ...retScope.params) as Array<Record<string, any>>;
+
+        const itemSalesMap = new Map<string, Record<string, any>>();
+        for (const r of itemSaleRows) {
+          const key = String(r.item_id || r.item_code);
+          itemSalesMap.set(key, {
+            item_id: Number(r.item_id || 0),
+            item_code: String(r.item_code || ''),
+            item_name: String(r.item_name || ''),
+            company_name: String(r.company_name || 'General'),
+            item_group: String(r.item_group || 'General'),
+            packing: String(r.packing || '1x1'),
+            invoice_count: Number(r.invoice_count || 0),
+            sale_qty: round2(r.sale_qty),
+            bonus_qty: round2(r.bonus_qty),
+            return_qty: 0,
+            net_qty: round2(r.sale_qty),
+            gross_amount: round2(r.gross_amount),
+            discount_amount: round2(r.discount_amount),
+            return_amount: 0,
+            net_amount: round2(r.line_net_sales),
+          });
+        }
+        for (const ret of itemSaleRetRows) {
+          const key = String(ret.item_id || ret.item_code);
+          const existing = itemSalesMap.get(key) || {
+            item_id: Number(ret.item_id || 0),
+            item_code: String(ret.item_code || ''),
+            item_name: String(ret.item_name || ''),
+            company_name: String(ret.company_name || 'General'),
+            item_group: String(ret.item_group || 'General'),
+            packing: String(ret.packing || '1x1'),
+            invoice_count: 0,
+            sale_qty: 0,
+            bonus_qty: 0,
+            return_qty: 0,
+            net_qty: 0,
+            gross_amount: 0,
+            discount_amount: 0,
+            return_amount: 0,
+            net_amount: 0,
+          };
+          existing.return_qty = round2(ret.return_qty);
+          existing.return_amount = round2(ret.return_amount);
+          existing.net_qty = round2(existing.sale_qty - existing.return_qty);
+          existing.net_amount = round2(existing.net_amount - existing.return_amount);
+          itemSalesMap.set(key, existing);
+        }
+
+        // --- B. ITEM PURCHASES ---
+        const itemPurchaseRows = db
+          .prepare(`
+            SELECT
+              pi.item_id,
+              COALESCE(NULLIF(TRIM(i.item_code), ''), pi.item_code) AS item_code,
+              COALESCE(NULLIF(TRIM(i.item_name), ''), pi.item_name) AS item_name,
+              COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pi.company_name), ''), 'General') AS company_name,
+              COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+              COALESCE(NULLIF(TRIM(i.packing), ''), pi.packing) AS packing,
+              COUNT(DISTINCT p.id) AS invoice_count,
+              ROUND(SUM(${fullPackPurchaseExpr}), 2) AS purchase_qty,
+              ROUND(SUM(COALESCE(pi.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(pi.gross_amount, 0)), 2) AS gross_amount,
+              ROUND(SUM(COALESCE(pi.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(pi.line_total, 0)), 2) AS line_net_purchases
+            FROM purchase_items pi
+            JOIN purchases p ON pi.purchase_id = p.id
+            LEFT JOIN items i ON pi.item_id = i.id
+            LEFT JOIN accounts a ON p.supplier_account_id = a.id
+            ${pWhere} ${pItemClause}
+            GROUP BY COALESCE(pi.item_id, pi.item_code)
+          `)
+          .all(...pParams, ...pItemParams) as Array<Record<string, any>>;
+
+        const itemPurRetRows = db
+          .prepare(`
+            SELECT
+              pri.item_id,
+              COALESCE(NULLIF(TRIM(i.item_code), ''), pri.item_code) AS item_code,
+              COALESCE(NULLIF(TRIM(i.item_name), ''), pri.item_name) AS item_name,
+              COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pri.company_name), ''), 'General') AS company_name,
+              COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+              COALESCE(NULLIF(TRIM(i.packing), ''), pri.packing) AS packing,
+              ROUND(SUM(COALESCE(pri.return_quantity, 0)), 2) AS return_qty,
+              ROUND(SUM(COALESCE(pri.line_total, 0)), 2) AS return_amount
+            FROM purchase_return_items pri
+            JOIN purchase_returns pr ON pri.purchase_return_id = pr.id
+            LEFT JOIN items i ON pri.item_id = i.id
+            LEFT JOIN accounts a ON pr.supplier_account_id = a.id
+            ${prWhere} ${prItemClause}
+            GROUP BY COALESCE(pri.item_id, pri.item_code)
+          `)
+          .all(...prParams, ...prItemParams) as Array<Record<string, any>>;
+
+        const itemPurchasesMap = new Map<string, Record<string, any>>();
+        for (const r of itemPurchaseRows) {
+          const key = String(r.item_id || r.item_code);
+          itemPurchasesMap.set(key, {
+            item_id: Number(r.item_id || 0),
+            item_code: String(r.item_code || ''),
+            item_name: String(r.item_name || ''),
+            company_name: String(r.company_name || 'General'),
+            item_group: String(r.item_group || 'General'),
+            packing: String(r.packing || '1x1'),
+            invoice_count: Number(r.invoice_count || 0),
+            purchase_qty: round2(r.purchase_qty),
+            bonus_qty: round2(r.bonus_qty),
+            return_qty: 0,
+            net_qty: round2(r.purchase_qty),
+            gross_amount: round2(r.gross_amount),
+            discount_amount: round2(r.discount_amount),
+            return_amount: 0,
+            net_amount: round2(r.line_net_purchases),
+          });
+        }
+        for (const ret of itemPurRetRows) {
+          const key = String(ret.item_id || ret.item_code);
+          const existing = itemPurchasesMap.get(key) || {
+            item_id: Number(ret.item_id || 0),
+            item_code: String(ret.item_code || ''),
+            item_name: String(ret.item_name || ''),
+            company_name: String(ret.company_name || 'General'),
+            item_group: String(ret.item_group || 'General'),
+            packing: String(ret.packing || '1x1'),
+            invoice_count: 0,
+            purchase_qty: 0,
+            bonus_qty: 0,
+            return_qty: 0,
+            net_qty: 0,
+            gross_amount: 0,
+            discount_amount: 0,
+            return_amount: 0,
+            net_amount: 0,
+          };
+          existing.return_qty = round2(ret.return_qty);
+          existing.return_amount = round2(ret.return_amount);
+          existing.net_qty = round2(existing.purchase_qty - existing.return_qty);
+          existing.net_amount = round2(existing.net_amount - existing.return_amount);
+          itemPurchasesMap.set(key, existing);
+        }
+
+        // --- C. CUSTOMER PERFORMANCE ---
+        const custSaleRows = db
+          .prepare(`
+            SELECT
+              COALESCE(s.customer_account_id, 0) AS account_id,
+              COALESCE(a.account_code, 'WALK-IN') AS account_code,
+              COALESCE(a.account_name, s.customer_name, 'Walk-in Cash Customer') AS party_name,
+              COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), 'General') AS town_name,
+              COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), 'General') AS area_name,
+              COUNT(DISTINCT s.id) AS invoice_count,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_amount,
+              ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS line_net_sales
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${sWhere} ${itemScope.clause}
+            GROUP BY COALESCE(s.customer_account_id, 0), party_name
+          `)
+          .all(...sParams, ...itemScope.params) as Array<Record<string, any>>;
+
+        const custRetRows = db
+          .prepare(`
+            SELECT
+              COALESCE(sr.customer_account_id, orig_s.customer_account_id, 0) AS account_id,
+              COALESCE(a.account_code, 'WALK-IN') AS account_code,
+              COALESCE(a.account_name, sr.customer_name, 'Walk-in Cash Customer') AS party_name,
+              COALESCE(NULLIF(TRIM(orig_s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), 'General') AS town_name,
+              COALESCE(NULLIF(TRIM(orig_s.area_name), ''), NULLIF(TRIM(a.area_name), ''), 'General') AS area_name,
+              ROUND(SUM(${fullPackRetExpr}), 2) AS return_qty,
+              ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS return_amount
+            FROM sale_return_items sri
+            JOIN sale_returns sr ON sri.sale_return_id = sr.id
+            LEFT JOIN sales orig_s ON sr.original_sale_id = orig_s.id
+            LEFT JOIN items i ON sri.item_id = i.id
+            LEFT JOIN accounts a ON COALESCE(sr.customer_account_id, orig_s.customer_account_id) = a.id
+            ${srWhere} ${retScope.clause}
+            GROUP BY COALESCE(sr.customer_account_id, orig_s.customer_account_id, 0), party_name
+          `)
+          .all(...srParams, ...retScope.params) as Array<Record<string, any>>;
+
+        const customersMap = new Map<string, Record<string, any>>();
+        for (const r of custSaleRows) {
+          const key = `${r.account_id}::${r.party_name}`;
+          customersMap.set(key, {
+            account_id: Number(r.account_id || 0),
+            account_code: String(r.account_code || 'WALK-IN'),
+            party_name: String(r.party_name || 'Walk-in Cash Customer'),
+            town_name: String(r.town_name || 'General'),
+            area_name: String(r.area_name || 'General'),
+            invoice_count: Number(r.invoice_count || 0),
+            sale_qty: round2(r.sale_qty),
+            bonus_qty: round2(r.bonus_qty),
+            return_qty: 0,
+            net_qty: round2(r.sale_qty),
+            gross_amount: round2(r.gross_amount),
+            discount_amount: round2(r.discount_amount),
+            return_amount: 0,
+            net_amount: round2(r.line_net_sales),
+          });
+        }
+        for (const ret of custRetRows) {
+          const key = `${ret.account_id}::${ret.party_name}`;
+          const existing = customersMap.get(key) || {
+            account_id: Number(ret.account_id || 0),
+            account_code: String(ret.account_code || 'WALK-IN'),
+            party_name: String(ret.party_name || 'Walk-in Cash Customer'),
+            town_name: String(ret.town_name || 'General'),
+            area_name: String(ret.area_name || 'General'),
+            invoice_count: 0,
+            sale_qty: 0,
+            bonus_qty: 0,
+            return_qty: 0,
+            net_qty: 0,
+            gross_amount: 0,
+            discount_amount: 0,
+            return_amount: 0,
+            net_amount: 0,
+          };
+          existing.return_qty = round2(ret.return_qty);
+          existing.return_amount = round2(ret.return_amount);
+          existing.net_qty = round2(existing.sale_qty - existing.return_qty);
+          existing.net_amount = round2(existing.net_amount - existing.return_amount);
+          customersMap.set(key, existing);
+        }
+
+        // --- D. SUPPLIER PERFORMANCE ---
+        const supPurRows = db
+          .prepare(`
+            SELECT
+              COALESCE(p.supplier_account_id, 0) AS account_id,
+              COALESCE(a.account_code, 'SUP') AS account_code,
+              COALESCE(a.account_name, 'Supplier') AS party_name,
+              COALESCE(NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), 'General') AS town_name,
+              COALESCE(NULLIF(TRIM(a.area_name), ''), 'General') AS area_name,
+              COUNT(DISTINCT p.id) AS invoice_count,
+              ROUND(SUM(${fullPackPurchaseExpr}), 2) AS purchase_qty,
+              ROUND(SUM(COALESCE(pi.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(pi.gross_amount, 0)), 2) AS gross_amount,
+              ROUND(SUM(COALESCE(pi.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(pi.line_total, 0)), 2) AS line_net_purchases
+            FROM purchase_items pi
+            JOIN purchases p ON pi.purchase_id = p.id
+            LEFT JOIN items i ON pi.item_id = i.id
+            LEFT JOIN accounts a ON p.supplier_account_id = a.id
+            ${pWhere} ${pItemClause}
+            GROUP BY COALESCE(p.supplier_account_id, 0), party_name
+          `)
+          .all(...pParams, ...pItemParams) as Array<Record<string, any>>;
+
+        const supRetRows = db
+          .prepare(`
+            SELECT
+              COALESCE(pr.supplier_account_id, 0) AS account_id,
+              COALESCE(a.account_code, 'SUP') AS account_code,
+              COALESCE(a.account_name, 'Supplier') AS party_name,
+              COALESCE(NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), 'General') AS town_name,
+              COALESCE(NULLIF(TRIM(a.area_name), ''), 'General') AS area_name,
+              ROUND(SUM(COALESCE(pri.return_quantity, 0)), 2) AS return_qty,
+              ROUND(SUM(COALESCE(pri.line_total, 0)), 2) AS return_amount
+            FROM purchase_return_items pri
+            JOIN purchase_returns pr ON pri.purchase_return_id = pr.id
+            LEFT JOIN items i ON pri.item_id = i.id
+            LEFT JOIN accounts a ON pr.supplier_account_id = a.id
+            ${prWhere} ${prItemClause}
+            GROUP BY COALESCE(pr.supplier_account_id, 0), party_name
+          `)
+          .all(...prParams, ...prItemParams) as Array<Record<string, any>>;
+
+        const suppliersMap = new Map<string, Record<string, any>>();
+        for (const r of supPurRows) {
+          const key = `${r.account_id}::${r.party_name}`;
+          suppliersMap.set(key, {
+            account_id: Number(r.account_id || 0),
+            account_code: String(r.account_code || 'SUP'),
+            party_name: String(r.party_name || 'Supplier'),
+            town_name: String(r.town_name || 'General'),
+            area_name: String(r.area_name || 'General'),
+            invoice_count: Number(r.invoice_count || 0),
+            purchase_qty: round2(r.purchase_qty),
+            bonus_qty: round2(r.bonus_qty),
+            return_qty: 0,
+            net_qty: round2(r.purchase_qty),
+            gross_amount: round2(r.gross_amount),
+            discount_amount: round2(r.discount_amount),
+            return_amount: 0,
+            net_amount: round2(r.line_net_purchases),
+          });
+        }
+        for (const ret of supRetRows) {
+          const key = `${ret.account_id}::${ret.party_name}`;
+          const existing = suppliersMap.get(key) || {
+            account_id: Number(ret.account_id || 0),
+            account_code: String(ret.account_code || 'SUP'),
+            party_name: String(ret.party_name || 'Supplier'),
+            town_name: String(ret.town_name || 'General'),
+            area_name: String(ret.area_name || 'General'),
+            invoice_count: 0,
+            purchase_qty: 0,
+            bonus_qty: 0,
+            return_qty: 0,
+            net_qty: 0,
+            gross_amount: 0,
+            discount_amount: 0,
+            return_amount: 0,
+            net_amount: 0,
+          };
+          existing.return_qty = round2(ret.return_qty);
+          existing.return_amount = round2(ret.return_amount);
+          existing.net_qty = round2(existing.purchase_qty - existing.return_qty);
+          existing.net_amount = round2(existing.net_amount - existing.return_amount);
+          suppliersMap.set(key, existing);
+        }
+
+        // --- E. TOWN-WISE & AREA-WISE PERFORMANCE ---
+        const townsMap = new Map<string, Record<string, any>>();
+        const areasMap = new Map<string, Record<string, any>>();
+
+        for (const c of customersMap.values()) {
+          const tName = c.town_name || 'General';
+          const aName = c.area_name || 'General';
+          const tRec = townsMap.get(tName) || {
+            town_name: tName,
+            customer_count: 0,
+            supplier_count: 0,
+            sales_invoices: 0,
+            sales_qty: 0,
+            net_sales: 0,
+            purchase_invoices: 0,
+            purchase_qty: 0,
+            net_purchases: 0,
+          };
+          if (c.invoice_count > 0 || c.return_qty > 0) tRec.customer_count += 1;
+          tRec.sales_invoices += Number(c.invoice_count || 0);
+          tRec.sales_qty = round2(tRec.sales_qty + Number(c.net_qty || 0));
+          tRec.net_sales = round2(tRec.net_sales + Number(c.net_amount || 0));
+          townsMap.set(tName, tRec);
+
+          const aKey = `${tName}::${aName}`;
+          const aRec = areasMap.get(aKey) || {
+            area_name: aName,
+            town_name: tName,
+            customer_count: 0,
+            supplier_count: 0,
+            sales_invoices: 0,
+            sales_qty: 0,
+            net_sales: 0,
+            purchase_invoices: 0,
+            purchase_qty: 0,
+            net_purchases: 0,
+          };
+          if (c.invoice_count > 0 || c.return_qty > 0) aRec.customer_count += 1;
+          aRec.sales_invoices += Number(c.invoice_count || 0);
+          aRec.sales_qty = round2(aRec.sales_qty + Number(c.net_qty || 0));
+          aRec.net_sales = round2(aRec.net_sales + Number(c.net_amount || 0));
+          areasMap.set(aKey, aRec);
+        }
+
+        for (const s of suppliersMap.values()) {
+          const tName = s.town_name || 'General';
+          const aName = s.area_name || 'General';
+          const tRec = townsMap.get(tName) || {
+            town_name: tName,
+            customer_count: 0,
+            supplier_count: 0,
+            sales_invoices: 0,
+            sales_qty: 0,
+            net_sales: 0,
+            purchase_invoices: 0,
+            purchase_qty: 0,
+            net_purchases: 0,
+          };
+          if (s.invoice_count > 0 || s.return_qty > 0) tRec.supplier_count += 1;
+          tRec.purchase_invoices += Number(s.invoice_count || 0);
+          tRec.purchase_qty = round2(tRec.purchase_qty + Number(s.net_qty || 0));
+          tRec.net_purchases = round2(tRec.net_purchases + Number(s.net_amount || 0));
+          townsMap.set(tName, tRec);
+
+          const aKey = `${tName}::${aName}`;
+          const aRec = areasMap.get(aKey) || {
+            area_name: aName,
+            town_name: tName,
+            customer_count: 0,
+            supplier_count: 0,
+            sales_invoices: 0,
+            sales_qty: 0,
+            net_sales: 0,
+            purchase_invoices: 0,
+            purchase_qty: 0,
+            net_purchases: 0,
+          };
+          if (s.invoice_count > 0 || s.return_qty > 0) aRec.supplier_count += 1;
+          aRec.purchase_invoices += Number(s.invoice_count || 0);
+          aRec.purchase_qty = round2(aRec.purchase_qty + Number(s.net_qty || 0));
+          aRec.net_purchases = round2(aRec.net_purchases + Number(s.net_amount || 0));
+          areasMap.set(aKey, aRec);
+        }
+
+        // Distinct invoice counts at header level
+        const salesHeaderStats = db
+          .prepare(`
+            SELECT
+              COUNT(DISTINCT s.id) AS total_invoices,
+              COUNT(DISTINCT CASE WHEN s.customer_account_id IS NOT NULL THEN s.customer_account_id ELSE s.customer_name END) AS active_customers
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${sWhere} ${itemScope.clause}
+          `)
+          .get(...sParams, ...itemScope.params) as Record<string, number>;
+
+        const purchaseHeaderStats = db
+          .prepare(`
+            SELECT
+              COUNT(DISTINCT p.id) AS total_invoices,
+              COUNT(DISTINCT p.supplier_account_id) AS active_suppliers
+            FROM purchase_items pi
+            JOIN purchases p ON pi.purchase_id = p.id
+            LEFT JOIN items i ON pi.item_id = i.id
+            LEFT JOIN accounts a ON p.supplier_account_id = a.id
+            ${pWhere} ${pItemClause}
+          `)
+          .get(...pParams, ...pItemParams) as Record<string, number>;
+
+        let totalSales = 0;
+        let totalSalesQty = 0;
+        for (const it of itemSalesMap.values()) {
+          totalSales = round2(totalSales + Number(it.net_amount || 0));
+          totalSalesQty = round2(totalSalesQty + Number(it.net_qty || 0));
+        }
+
+        let totalPurchases = 0;
+        let totalPurchaseQty = 0;
+        for (const it of itemPurchasesMap.values()) {
+          totalPurchases = round2(totalPurchases + Number(it.net_amount || 0));
+          totalPurchaseQty = round2(totalPurchaseQty + Number(it.net_qty || 0));
+        }
+
+        return {
+          itemSalesMap,
+          itemPurchasesMap,
+          customersMap,
+          suppliersMap,
+          townsMap,
+          areasMap,
+          totals: {
+            totalSales,
+            totalPurchases,
+            totalSalesQty,
+            totalPurchaseQty,
+            totalSalesInvoices: Number(salesHeaderStats?.total_invoices || 0),
+            totalPurchaseInvoices: Number(purchaseHeaderStats?.total_invoices || 0),
+            activeCustomers: Number(salesHeaderStats?.active_customers || 0),
+            activeSuppliers: Number(purchaseHeaderStats?.active_suppliers || 0),
+          },
+        };
+      };
+
+      const currentData = loadPeriodDataset(ranges.currentStart, ranges.currentEnd);
+      const prevData = loadPeriodDataset(ranges.prevStart, ranges.prevEnd);
+
+      // Total registered active Customers & Suppliers in accounts master
+      const masterPartyCounts = db
+        .prepare(`
+          SELECT
+            COUNT(CASE WHEN account_type IN ('Customer', 'Customer & Supplier') OR account_group IN ('Customer', 'Customer & Supplier') THEN 1 END) AS total_customers,
+            COUNT(CASE WHEN account_type IN ('Supplier', 'Customer & Supplier') OR account_group IN ('Supplier', 'Customer & Supplier') THEN 1 END) AS total_suppliers
+          FROM accounts
+          WHERE main_group = 'PARTY ACCOUNTS' AND status = 'Active' AND is_system_account = 0
+        `)
+        .get() as { total_customers: number; total_suppliers: number };
+
+      // 1. Build Items Sales Comparison
+      const allItemSalesKeys = new Set([
+        ...currentData.itemSalesMap.keys(),
+        ...prevData.itemSalesMap.keys(),
+      ]);
+      const itemsSalesAll = Array.from(allItemSalesKeys)
+        .map((key) => {
+          const cur = currentData.itemSalesMap.get(key);
+          const prv = prevData.itemSalesMap.get(key);
+          const meta = cur || prv!;
+          const delta = computeDelta(
+            cur?.net_amount || 0,
+            prv?.net_amount || 0,
+            cur?.net_qty || 0,
+            prv?.net_qty || 0,
+            cur?.invoice_count || 0,
+            prv?.invoice_count || 0
+          );
+          return {
+            item_id: meta.item_id,
+            item_code: meta.item_code,
+            item_name: meta.item_name,
+            company_name: meta.company_name,
+            item_group: meta.item_group,
+            packing: meta.packing,
+            sale_qty: round2(cur?.sale_qty || 0),
+            bonus_qty: round2(cur?.bonus_qty || 0),
+            return_qty: round2(cur?.return_qty || 0),
+            gross_amount: round2(cur?.gross_amount || 0),
+            discount_amount: round2(cur?.discount_amount || 0),
+            return_amount: round2(cur?.return_amount || 0),
+            ...delta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.current_amount - a.current_amount ||
+            b.current_qty - a.current_qty ||
+            b.previous_amount - a.previous_amount
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      // 2. Build Items Purchase Comparison
+      const allItemPurchaseKeys = new Set([
+        ...currentData.itemPurchasesMap.keys(),
+        ...prevData.itemPurchasesMap.keys(),
+      ]);
+      const itemsPurchaseAll = Array.from(allItemPurchaseKeys)
+        .map((key) => {
+          const cur = currentData.itemPurchasesMap.get(key);
+          const prv = prevData.itemPurchasesMap.get(key);
+          const meta = cur || prv!;
+          const delta = computeDelta(
+            cur?.net_amount || 0,
+            prv?.net_amount || 0,
+            cur?.net_qty || 0,
+            prv?.net_qty || 0,
+            cur?.invoice_count || 0,
+            prv?.invoice_count || 0
+          );
+          return {
+            item_id: meta.item_id,
+            item_code: meta.item_code,
+            item_name: meta.item_name,
+            company_name: meta.company_name,
+            item_group: meta.item_group,
+            packing: meta.packing,
+            purchase_qty: round2(cur?.purchase_qty || 0),
+            bonus_qty: round2(cur?.bonus_qty || 0),
+            return_qty: round2(cur?.return_qty || 0),
+            gross_amount: round2(cur?.gross_amount || 0),
+            discount_amount: round2(cur?.discount_amount || 0),
+            return_amount: round2(cur?.return_amount || 0),
+            ...delta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.current_amount - a.current_amount ||
+            b.current_qty - a.current_qty ||
+            b.previous_amount - a.previous_amount
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      // 3. Build Combined Items (Sales + Purchases) for Overall Report
+      const allCombinedItemKeys = new Set([...allItemSalesKeys, ...allItemPurchaseKeys]);
+      const itemsCombinedAll = Array.from(allCombinedItemKeys)
+        .map((key) => {
+          const curS = currentData.itemSalesMap.get(key);
+          const prvS = prevData.itemSalesMap.get(key);
+          const curP = currentData.itemPurchasesMap.get(key);
+          const prvP = prevData.itemPurchasesMap.get(key);
+          const meta = curS || curP || prvS || prvP!;
+          const salesDelta = computeDelta(
+            curS?.net_amount || 0,
+            prvS?.net_amount || 0,
+            curS?.net_qty || 0,
+            prvS?.net_qty || 0,
+            curS?.invoice_count || 0,
+            prvS?.invoice_count || 0
+          );
+          const purchaseDelta = computeDelta(
+            curP?.net_amount || 0,
+            prvP?.net_amount || 0,
+            curP?.net_qty || 0,
+            prvP?.net_qty || 0,
+            curP?.invoice_count || 0,
+            prvP?.invoice_count || 0
+          );
+          return {
+            item_id: meta.item_id,
+            item_code: meta.item_code,
+            item_name: meta.item_name,
+            company_name: meta.company_name,
+            item_group: meta.item_group,
+            packing: meta.packing,
+            sales_invoices: salesDelta.current_invoices,
+            sales_qty: salesDelta.current_qty,
+            prev_sales_qty: salesDelta.previous_qty,
+            sales_amount: salesDelta.current_amount,
+            prev_sales_amount: salesDelta.previous_amount,
+            purchase_invoices: purchaseDelta.current_invoices,
+            purchase_qty: purchaseDelta.current_qty,
+            prev_purchase_qty: purchaseDelta.previous_qty,
+            purchase_amount: purchaseDelta.current_amount,
+            prev_purchase_amount: purchaseDelta.previous_amount,
+            ...salesDelta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.sales_amount - a.sales_amount ||
+            b.purchase_amount - a.purchase_amount ||
+            b.sales_qty - a.sales_qty
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      // 4. Build Customers Comparison
+      const allCustomerKeys = new Set([
+        ...currentData.customersMap.keys(),
+        ...prevData.customersMap.keys(),
+      ]);
+      const customersAll = Array.from(allCustomerKeys)
+        .map((key) => {
+          const cur = currentData.customersMap.get(key);
+          const prv = prevData.customersMap.get(key);
+          const meta = cur || prv!;
+          const delta = computeDelta(
+            cur?.net_amount || 0,
+            prv?.net_amount || 0,
+            cur?.net_qty || 0,
+            prv?.net_qty || 0,
+            cur?.invoice_count || 0,
+            prv?.invoice_count || 0
+          );
+          return {
+            account_id: meta.account_id,
+            account_code: meta.account_code,
+            party_name: meta.party_name,
+            town_name: meta.town_name,
+            area_name: meta.area_name,
+            sale_qty: round2(cur?.sale_qty || 0),
+            bonus_qty: round2(cur?.bonus_qty || 0),
+            return_qty: round2(cur?.return_qty || 0),
+            gross_amount: round2(cur?.gross_amount || 0),
+            discount_amount: round2(cur?.discount_amount || 0),
+            return_amount: round2(cur?.return_amount || 0),
+            ...delta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.current_amount - a.current_amount ||
+            b.current_qty - a.current_qty ||
+            b.previous_amount - a.previous_amount
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      // 5. Build Suppliers Comparison
+      const allSupplierKeys = new Set([
+        ...currentData.suppliersMap.keys(),
+        ...prevData.suppliersMap.keys(),
+      ]);
+      const suppliersAll = Array.from(allSupplierKeys)
+        .map((key) => {
+          const cur = currentData.suppliersMap.get(key);
+          const prv = prevData.suppliersMap.get(key);
+          const meta = cur || prv!;
+          const delta = computeDelta(
+            cur?.net_amount || 0,
+            prv?.net_amount || 0,
+            cur?.net_qty || 0,
+            prv?.net_qty || 0,
+            cur?.invoice_count || 0,
+            prv?.invoice_count || 0
+          );
+          return {
+            account_id: meta.account_id,
+            account_code: meta.account_code,
+            party_name: meta.party_name,
+            town_name: meta.town_name,
+            area_name: meta.area_name,
+            purchase_qty: round2(cur?.purchase_qty || 0),
+            bonus_qty: round2(cur?.bonus_qty || 0),
+            return_qty: round2(cur?.return_qty || 0),
+            gross_amount: round2(cur?.gross_amount || 0),
+            discount_amount: round2(cur?.discount_amount || 0),
+            return_amount: round2(cur?.return_amount || 0),
+            ...delta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.current_amount - a.current_amount ||
+            b.current_qty - a.current_qty ||
+            b.previous_amount - a.previous_amount
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      // 6. Build Town-wise Performance Comparison
+      const allTownKeys = new Set([
+        ...currentData.townsMap.keys(),
+        ...prevData.townsMap.keys(),
+      ]);
+      const townsAll = Array.from(allTownKeys)
+        .map((key) => {
+          const cur = currentData.townsMap.get(key);
+          const prv = prevData.townsMap.get(key);
+          const meta = cur || prv!;
+          const salesDelta = computeDelta(
+            cur?.net_sales || 0,
+            prv?.net_sales || 0,
+            cur?.sales_qty || 0,
+            prv?.sales_qty || 0,
+            cur?.sales_invoices || 0,
+            prv?.sales_invoices || 0
+          );
+          const purchaseDelta = computeDelta(
+            cur?.net_purchases || 0,
+            prv?.net_purchases || 0,
+            cur?.purchase_qty || 0,
+            prv?.purchase_qty || 0,
+            cur?.purchase_invoices || 0,
+            prv?.purchase_invoices || 0
+          );
+          return {
+            town_name: meta.town_name,
+            customer_count: Number(cur?.customer_count || 0),
+            supplier_count: Number(cur?.supplier_count || 0),
+            sales_invoices: salesDelta.current_invoices,
+            prev_sales_invoices: salesDelta.previous_invoices,
+            sales_qty: salesDelta.current_qty,
+            prev_sales_qty: salesDelta.previous_qty,
+            net_sales: salesDelta.current_amount,
+            prev_net_sales: salesDelta.previous_amount,
+            purchase_invoices: purchaseDelta.current_invoices,
+            prev_purchase_invoices: purchaseDelta.previous_invoices,
+            purchase_qty: purchaseDelta.current_qty,
+            prev_purchase_qty: purchaseDelta.previous_qty,
+            net_purchases: purchaseDelta.current_amount,
+            prev_net_purchases: purchaseDelta.previous_amount,
+            sales_comparison: salesDelta,
+            purchase_comparison: purchaseDelta,
+            ...salesDelta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.net_sales + b.net_purchases - (a.net_sales + a.net_purchases) ||
+            b.net_sales - a.net_sales
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      // 7. Build Area-wise Performance Comparison
+      const allAreaKeys = new Set([
+        ...currentData.areasMap.keys(),
+        ...prevData.areasMap.keys(),
+      ]);
+      const areasAll = Array.from(allAreaKeys)
+        .map((key) => {
+          const cur = currentData.areasMap.get(key);
+          const prv = prevData.areasMap.get(key);
+          const meta = cur || prv!;
+          const salesDelta = computeDelta(
+            cur?.net_sales || 0,
+            prv?.net_sales || 0,
+            cur?.sales_qty || 0,
+            prv?.sales_qty || 0,
+            cur?.sales_invoices || 0,
+            prv?.sales_invoices || 0
+          );
+          const purchaseDelta = computeDelta(
+            cur?.net_purchases || 0,
+            prv?.net_purchases || 0,
+            cur?.purchase_qty || 0,
+            prv?.purchase_qty || 0,
+            cur?.purchase_invoices || 0,
+            prv?.purchase_invoices || 0
+          );
+          return {
+            area_name: meta.area_name,
+            town_name: meta.town_name,
+            customer_count: Number(cur?.customer_count || 0),
+            supplier_count: Number(cur?.supplier_count || 0),
+            sales_invoices: salesDelta.current_invoices,
+            prev_sales_invoices: salesDelta.previous_invoices,
+            sales_qty: salesDelta.current_qty,
+            prev_sales_qty: salesDelta.previous_qty,
+            net_sales: salesDelta.current_amount,
+            prev_net_sales: salesDelta.previous_amount,
+            purchase_invoices: purchaseDelta.current_invoices,
+            prev_purchase_invoices: purchaseDelta.previous_invoices,
+            purchase_qty: purchaseDelta.current_qty,
+            prev_purchase_qty: purchaseDelta.previous_qty,
+            net_purchases: purchaseDelta.current_amount,
+            prev_net_purchases: purchaseDelta.previous_amount,
+            sales_comparison: salesDelta,
+            purchase_comparison: purchaseDelta,
+            ...salesDelta,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.net_sales + b.net_purchases - (a.net_sales + a.net_purchases) ||
+            b.net_sales - a.net_sales
+        )
+        .map((row, idx) => ({ rank: idx + 1, ...row }));
+
+      const applyRankSlice = <T>(arr: T[]): T[] =>
+        rankingLimit > 0 ? arr.slice(0, rankingLimit) : arr;
+
+      const salesSummaryComparison = computeDelta(
+        currentData.totals.totalSales,
+        prevData.totals.totalSales,
+        currentData.totals.totalSalesQty,
+        prevData.totals.totalSalesQty,
+        currentData.totals.totalSalesInvoices,
+        prevData.totals.totalSalesInvoices
+      );
+
+      const purchaseSummaryComparison = computeDelta(
+        currentData.totals.totalPurchases,
+        prevData.totals.totalPurchases,
+        currentData.totals.totalPurchaseQty,
+        prevData.totals.totalPurchaseQty,
+        currentData.totals.totalPurchaseInvoices,
+        prevData.totals.totalPurchaseInvoices
+      );
+
+      return res.json({
+        success: true,
+        reportType,
+        period: ranges,
+        ranking: rankingLimit === 0 ? 'all' : String(rankingLimit),
+        summary: {
+          totalSales: currentData.totals.totalSales,
+          prevTotalSales: prevData.totals.totalSales,
+          totalPurchases: currentData.totals.totalPurchases,
+          prevTotalPurchases: prevData.totals.totalPurchases,
+          totalSalesQty: currentData.totals.totalSalesQty,
+          prevTotalSalesQty: prevData.totals.totalSalesQty,
+          totalPurchaseQty: currentData.totals.totalPurchaseQty,
+          prevTotalPurchaseQty: prevData.totals.totalPurchaseQty,
+          totalSalesInvoices: currentData.totals.totalSalesInvoices,
+          prevTotalSalesInvoices: prevData.totals.totalSalesInvoices,
+          totalPurchaseInvoices: currentData.totals.totalPurchaseInvoices,
+          prevTotalPurchaseInvoices: prevData.totals.totalPurchaseInvoices,
+          activeCustomers: currentData.totals.activeCustomers,
+          prevActiveCustomers: prevData.totals.activeCustomers,
+          activeSuppliers: currentData.totals.activeSuppliers,
+          prevActiveSuppliers: prevData.totals.activeSuppliers,
+          totalCustomers: Number(masterPartyCounts?.total_customers || 0),
+          totalSuppliers: Number(masterPartyCounts?.total_suppliers || 0),
+          salesComparison: salesSummaryComparison,
+          purchaseComparison: purchaseSummaryComparison,
+        },
+        ranked: {
+          itemsSales: applyRankSlice(itemsSalesAll),
+          itemsPurchase: applyRankSlice(itemsPurchaseAll),
+          itemsCombined: applyRankSlice(itemsCombinedAll),
+          customers: applyRankSlice(customersAll),
+          suppliers: applyRankSlice(suppliersAll),
+          towns: applyRankSlice(townsAll),
+          areas: applyRankSlice(areasAll),
+        },
+        overall: {
+          itemsSales: itemsSalesAll,
+          itemsPurchase: itemsPurchaseAll,
+          itemsCombined: itemsCombinedAll,
+          customers: customersAll,
+          suppliers: suppliersAll,
+          towns: townsAll,
+          areas: areasAll,
+        },
+      });
+    }
+
     res.status(400).json({ success: false, error: `Unknown report type: ${reportType}` });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -7,8 +7,10 @@ import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
+import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
 
 export type SalesReportKey =
+  | 'top-performance'
   | 'company-group-sales'
   | 'yearly-sales'
   | 'monthly-sales'
@@ -211,10 +213,12 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
   ]);
 
   useEffect(() => {
+    if (reportKey === 'top-performance') return;
     fetchReport();
-  }, [fetchReport]);
+  }, [fetchReport, reportKey]);
 
   const reportTabs: Array<{ id: SalesReportKey; label: string }> = [
+    { id: 'top-performance', label: 'Top Performance & Overall' },
     { id: 'company-group-sales', label: 'Company-wise Item Group Sales' },
     { id: 'yearly-sales', label: 'Yearly Sales' },
     { id: 'monthly-sales', label: 'Month-wise Sales' },
@@ -415,71 +419,73 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
               Sales, Profit, Party & Company Analytics Suite (Full Pack Standard)
             </h3>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            {reportKey === 'yearly-party-comparison' ? (
-              <>
-                <label className="font-semibold text-slate-600">Base Year:</label>
-                <input
-                  type="number"
-                  min={2000}
-                  max={2100}
-                  value={year1}
-                  onChange={(e) => setYear1(e.target.value)}
-                  className="w-20 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
-                />
-                <label className="font-semibold text-slate-600">Compare Year:</label>
-                <input
-                  type="number"
-                  min={2000}
-                  max={2100}
-                  value={year2}
-                  onChange={(e) => setYear2(e.target.value)}
-                  className="w-20 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
-                />
-              </>
-            ) : (
-              <>
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
-                />
-                <span className="text-slate-400">to</span>
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
-                />
-              </>
-            )}
+          {reportKey !== 'top-performance' && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {reportKey === 'yearly-party-comparison' ? (
+                <>
+                  <label className="font-semibold text-slate-600">Base Year:</label>
+                  <input
+                    type="number"
+                    min={2000}
+                    max={2100}
+                    value={year1}
+                    onChange={(e) => setYear1(e.target.value)}
+                    className="w-20 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
+                  />
+                  <label className="font-semibold text-slate-600">Compare Year:</label>
+                  <input
+                    type="number"
+                    min={2000}
+                    max={2100}
+                    value={year2}
+                    onChange={(e) => setYear2(e.target.value)}
+                    className="w-20 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
+                  />
+                </>
+              ) : (
+                <>
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
+                  />
+                  <span className="text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
+                  />
+                </>
+              )}
 
-            <button
-              type="button"
-              onClick={handleResetFilters}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold flex items-center gap-1 cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reset
-            </button>
-            <button
-              type="button"
-              onClick={handlePrint}
-              className="px-3 py-1.5 rounded-lg bg-slate-900 text-white font-bold flex items-center gap-1 cursor-pointer"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              Print A4
-            </button>
-            <button
-              type="button"
-              onClick={handleExportExcel}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Excel
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={handleResetFilters}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold flex items-center gap-1 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset
+              </button>
+              <button
+                type="button"
+                onClick={handlePrint}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 text-white font-bold flex items-center gap-1 cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Print A4
+              </button>
+              <button
+                type="button"
+                onClick={handleExportExcel}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Excel
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Report Type Tabs */}
@@ -501,7 +507,9 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
         </div>
 
         {/* Dimension Filters (Party, Salesman, Town, Dependent Area) */}
-        {reportKey !== 'tax-summary' && reportKey !== 'tax-history' && (
+        {reportKey !== 'tax-summary' &&
+          reportKey !== 'tax-history' &&
+          reportKey !== 'top-performance' && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 pt-2 border-t border-slate-100 text-xs">
             <div>
               <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
@@ -578,7 +586,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
         )}
 
         {/* Reusable Advanced Multi-Company & Multi-Item Selection (+ Party Selection on Item Sales Report) */}
-        {showCompanyItemFilter && (
+        {showCompanyItemFilter && reportKey !== 'top-performance' && (
           <CompanyItemSelector
             theme="light"
             defaultExpanded={false}
@@ -596,15 +604,19 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
         )}
       </div>
 
-      {error && (
-        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2 print:hidden">
-          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
+      {reportKey === 'top-performance' ? (
+        <TopPerformanceReportsView initialAnalysisMode="sales" embedded />
+      ) : (
+        <>
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2 print:hidden">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
 
-      {/* Printable Report Content */}
-      <div ref={salesReportPrintRef} className="space-y-4">
+          {/* Printable Report Content */}
+          <div ref={salesReportPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title={activeTabLabel.toUpperCase()}
           subtitle="Official Sales & Commercial Analytics Statement (Quantities in Full Packs)"
@@ -1560,6 +1572,9 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
           )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };
+

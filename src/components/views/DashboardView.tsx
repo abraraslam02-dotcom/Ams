@@ -903,13 +903,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onSelectTab }) => 
                 1. Top 10 Selling Items ({startDate} to {endDate})
               </h3>
             </div>
-            <button
-              type="button"
-              onClick={() => onSelectTab('sales-item-wise')}
-              className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 cursor-pointer"
-            >
-              Full Report →
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onSelectTab('top-performance-reports')}
+                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700 cursor-pointer"
+              >
+                Top Performance →
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                type="button"
+                onClick={() => onSelectTab('sales-item-wise')}
+                className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 cursor-pointer"
+              >
+                Item Sales →
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto flex-1">
             <table className="w-full text-left border-collapse text-xs">
@@ -1267,13 +1277,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onSelectTab }) => 
                 7. Top Customers ({startDate} to {endDate})
               </h3>
             </div>
-            <button
-              type="button"
-              onClick={() => onSelectTab('sales-customer-wise')}
-              className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer"
-            >
-              Customer Sales →
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onSelectTab('top-performance-reports')}
+                className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700 cursor-pointer"
+              >
+                Top Performance →
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                type="button"
+                onClick={() => onSelectTab('sales-customer-wise')}
+                className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 cursor-pointer"
+              >
+                Customer Sales →
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto flex-1">
             <table className="w-full text-left border-collapse text-xs">

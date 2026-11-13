@@ -2377,9 +2377,12 @@ export const api = {
   async getSalesReport(
     reportType: string,
     params?: {
+      periodPreset?: string;
+      ranking?: string;
       startDate?: string;
       endDate?: string;
       customerId?: string;
+      supplierId?: string;
       partyIds?: number[];
       itemId?: string;
       companies?: string[];
@@ -2393,9 +2396,12 @@ export const api = {
     }
   ) {
     const query = new URLSearchParams();
+    if (params?.periodPreset) query.append('periodPreset', params.periodPreset);
+    if (params?.ranking) query.append('ranking', params.ranking);
     if (params?.startDate) query.append('startDate', params.startDate);
     if (params?.endDate) query.append('endDate', params.endDate);
     if (params?.customerId) query.append('customerId', params.customerId);
+    if (params?.supplierId) query.append('supplierId', params.supplierId);
     if (params?.partyIds && params.partyIds.length > 0) {
       query.append('partyIds', params.partyIds.join(','));
     }

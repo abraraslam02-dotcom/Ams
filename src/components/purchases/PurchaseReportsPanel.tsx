@@ -18,6 +18,7 @@ import { Item } from '../../types/item';
 import { PurchaseReportType } from '../../types/purchase';
 import { api } from '../../services/api';
 import { formatPKR } from '../../utils/formatters';
+import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
 
 interface PurchaseReportsPanelProps {
   suppliers: Account[];
@@ -69,6 +70,11 @@ const REPORT_TABS: Array<{
     label: '8. Expiry-wise Purchase',
     subtitle: 'Batches sorted by nearest expiry date with days-to-expiry alert',
   },
+  {
+    id: 'top-performance',
+    label: '9. Top Performance & Overall',
+    subtitle: 'Top 1/2/3/5/10 & Overall Suppliers, Items, Towns, Areas + Increment/Decrement',
+  },
 ];
 
 export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
@@ -104,8 +110,9 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
   }, [activeReport, startDate, endDate, supplierId, itemId, filerStatus]);
 
   useEffect(() => {
+    if (activeReport === 'top-performance') return;
     loadReport();
-  }, [loadReport]);
+  }, [loadReport, activeReport]);
 
   const handleExportExcel = () => {
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -147,8 +154,12 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
         })}
       </div>
 
-      {/* Filters & Excel Export Bar */}
-      <div className="p-4 rounded-xl bg-white border border-slate-200 flex flex-wrap items-end justify-between gap-3">
+      {activeReport === 'top-performance' ? (
+        <TopPerformanceReportsView initialAnalysisMode="purchase" embedded />
+      ) : (
+        <>
+          {/* Filters & Excel Export Bar */}
+          <div className="p-4 rounded-xl bg-white border border-slate-200 flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap items-end gap-3">
           <div className="space-y-1">
             <label className="block text-[11px] font-semibold text-slate-600">From Date</label>
@@ -706,6 +717,9 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
           )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };
+

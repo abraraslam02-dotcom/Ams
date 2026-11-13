@@ -237,4 +237,6 @@ export type PurchaseReportType =
   | 'return-register'
   | 'supplier-outstanding'
   | 'advance-tax-summary'
-  | 'expiry-wise';
+  | 'expiry-wise'
+  | 'top-performance';
+

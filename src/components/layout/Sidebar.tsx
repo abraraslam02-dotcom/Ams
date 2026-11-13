@@ -135,6 +135,7 @@ export type NavTabId =
   | 'inv-ledger'
   | 'inv-verification'
   // G. REPORTS & ANALYTICS
+  | 'top-performance-reports'
   | 'report-item-reports'
   | 'detailed-stock-report'
   | 'sales-item-wise'
@@ -394,6 +395,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'near-expiry': 'alert',
   'expired-items': 'ban',
   'physical-verification': 'checkClipboard',
+  'top-performance-reports': 'trendUp',
   'report-item-reports': 'box',
   'detailed-stock-report': 'clipboard',
   'sales-item-wise': 'box',
@@ -600,6 +602,7 @@ const MENU: MenuNode[] = [
     canSee: (p) => p.reports?.sales !== false || p.reports?.financial !== false || p.sales?.view !== false,
     icon: 'chart',
     children: [
+      { id: 'top-performance-reports', label: 'Top Performance & Overall Reports', badge: 'TOP' },
       { id: 'report-item-reports', label: 'Detailed Item Stock Report' },
       { id: 'sales-item-wise', label: 'Item Sales Reports' },
       { id: 'report-item-purchases', label: 'Item Purchase Reports' },
