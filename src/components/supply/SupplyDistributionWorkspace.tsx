@@ -144,6 +144,9 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
         ]);
       setDashboardData(dashRes);
       setSalesmen(smRes.salesmen || []);
+      if (smRes.nextSalesmanCode) {
+        setNextSalesmanCode(String(smRes.nextSalesmanCode));
+      }
       setTowns(twnRes.towns || []);
       setCatalogCompanies(catRes.companies || []);
       setCatalogItems(catRes.items || []);
@@ -185,6 +188,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   // 1. SALESMAN FORM STATE
   // ==========================================================================
   const [editingSalesmanId, setEditingSalesmanId] = useState<number | null>(null);
+  const [nextSalesmanCode, setNextSalesmanCode] = useState('SAL-001');
   const [smCode, setSmCode] = useState('');
   const [smName, setSmName] = useState('');
   const [smUsername, setSmUsername] = useState('');
@@ -200,10 +204,10 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   const handleEditSalesman = (s: SupplySalesman) => {
     setEditingSalesmanId(s.id);
     setSmCode(s.salesman_code);
-    setSmName(s.full_name);
-    setSmUsername((s as any).username || s.salesman_code || '');
+    setSmName(s.full_name || s.name || '');
+    setSmUsername(s.username || s.salesman_code || '');
     setSmPassword('');
-    setSmPhone(s.phone || '');
+    setSmPhone(s.phone || s.mobile || '');
     setSmAddress(s.address || '');
     setSmOpeningBal(String(s.opening_balance || 0));
     setSmStatus(s.status);
@@ -230,14 +234,17 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   const handleSaveSalesman = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const cleanName = smName.trim();
+      const cleanPhone = smPhone.trim();
       await api.saveSupplySalesman(
         {
-          salesman_code: smCode || undefined,
-          full_name: smName,
+          name: cleanName,
+          full_name: cleanName,
           username: smUsername.trim() || undefined,
           password: smPassword || undefined,
-          phone: smPhone,
-          address: smAddress,
+          mobile: cleanPhone,
+          phone: cleanPhone,
+          address: smAddress.trim(),
           opening_balance: Number(smOpeningBal || 0),
           status: smStatus,
           town_ids: smSelectedTownIds,
@@ -251,6 +258,17 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
         msg: editingSalesmanId ? 'Salesman updated successfully.' : 'Salesman created successfully.',
       });
       resetSalesmanForm();
+      await loadCoreData();
+    } catch (err: any) {
+      setBanner({ type: 'error', msg: err.message });
+    }
+  };
+
+  const handleToggleSupplySalesmanStatus = async (s: SupplySalesman) => {
+    try {
+      const nextStatus = s.status === 'Active' ? 'Inactive' : 'Active';
+      const res = await api.updateSupplySalesmanStatus(s.id, nextStatus);
+      setBanner({ type: 'success', msg: res.message || `Salesman marked ${nextStatus}.` });
       await loadCoreData();
     } catch (err: any) {
       setBanner({ type: 'error', msg: err.message });
@@ -1023,15 +1041,18 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                  Salesman ID
+                  Salesman Number (Auto / Read-Only)
                 </label>
                 <input
                   type="text"
-                  value={smCode}
-                  onChange={(e) => setSmCode(e.target.value)}
-                  placeholder="Auto (e.g. SM-2026-0001)"
-                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg font-mono"
+                  readOnly
+                  disabled
+                  value={editingSalesmanId ? smCode : nextSalesmanCode}
+                  className="w-full px-2.5 py-1.5 text-xs border border-slate-200 bg-slate-100 text-slate-600 rounded-lg font-mono font-bold cursor-not-allowed"
                 />
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  Auto SAL-### (read-only)
+                </p>
               </div>
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 mb-1">Status</label>
@@ -1220,16 +1241,17 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                     <th className="p-2 text-right">Final Sales</th>
                     <th className="p-2 text-right">Recovery</th>
                     <th className="p-2 text-right">Outstanding</th>
-                    <th className="p-2 text-center">Edit</th>
+                    <th className="p-2 text-center">Status</th>
+                    <th className="p-2 text-center">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
                   {salesmen.map((s) => (
                     <tr key={s.id} className="hover:bg-slate-50">
                       <td className="p-2">
-                        <div className="font-bold text-slate-900">{s.full_name}</div>
+                        <div className="font-bold text-slate-900">{s.full_name || s.name}</div>
                         <div className="text-[10px] font-mono text-slate-500">
-                          {s.salesman_code} • {s.phone || 'No Mobile'}
+                          {s.salesman_code} • {s.phone || s.mobile || 'No Mobile'}
                         </div>
                       </td>
                       <td className="p-2 max-w-[180px]">
@@ -1260,13 +1282,34 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                         {Number(s.outstanding_balance || 0).toLocaleString()}
                       </td>
                       <td className="p-2 text-center">
-                        <button
-                          type="button"
-                          onClick={() => handleEditSalesman(s)}
-                          className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-[11px] font-bold"
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            s.status === 'Active'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-slate-200 text-slate-600'
+                          }`}
                         >
-                          Edit
-                        </button>
+                          {s.status}
+                        </span>
+                      </td>
+                      <td className="p-2 text-center">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleEditSalesman(s)}
+                            className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-[11px] font-bold cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleSupplySalesmanStatus(s)}
+                            className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-[11px] font-bold cursor-pointer"
+                            title={s.status === 'Active' ? 'Deactivate' : 'Activate'}
+                          >
+                            {s.status === 'Active' ? 'Disable' : 'Enable'}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

@@ -20,9 +20,15 @@ export type OrderFormPrintLayout =
 export interface SupplySalesman {
   id: number;
   salesman_code: string;
+  name?: string;
   full_name: string;
+  mobile?: string;
   phone: string;
   address: string;
+  username?: string;
+  joining_date?: string;
+  commission_type?: 'Percentage' | 'Fixed Amount';
+  commission_rate?: number;
   assigned_area: string;
   commission_percent: number;
   monthly_target: number;

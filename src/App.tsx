@@ -151,9 +151,10 @@ function AppContent() {
         tab.startsWith('ledger-') ||
         tab.startsWith('aging-') ||
         tab === 'recovery-sheet' ||
-        tab === 'supplier-payments'
+        tab === 'supplier-payments' ||
+        tab === 'staff-salesmen'
       ) {
-        return hasPermission('accounts');
+        return hasPermission('accounts') || (tab === 'staff-salesmen' && hasPermission('sales'));
       }
       if (tab === 'sales' || tab === 'sales-new' || tab === 'sales-pos' || tab === 'sales-register') {
         return hasPermission('sales');
@@ -372,7 +373,7 @@ function AppContent() {
       case 'sales-salesman-wise':
         return { title: 'Salesman Sales Report — Full Pack Performance & Outstanding', crumbs: ['Sales Management', 'Salesman Sales Report'] };
       case 'staff-salesmen':
-        return { title: 'Salesman Directory & Commission Profiles', crumbs: ['Sales Management', 'Salesman Directory'] };
+        return { title: 'Salesman Management — Directory, Commissions & Linked Profiles', crumbs: ['Party & Accounts', 'Salesman Management'] };
       case 'sales-held':
         return { title: 'Held & Draft Invoices — Resume or Discard Pending Bills', crumbs: ['Sales Management', 'Held / Draft Invoices'] };
       case 'sales-return-register':

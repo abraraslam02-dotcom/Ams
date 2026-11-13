@@ -327,6 +327,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'aging-payables': 'trendDown',
   'recovery-sheet': 'cash',
   'supplier-payments': 'coins',
+  'staff-salesmen': 'users',
   'sales-pos': 'pos',
   'sales-return': 'refresh',
   'sales-register': 'doc',
@@ -483,6 +484,7 @@ const MENU: MenuNode[] = [
       { id: 'aging-payables', label: 'Supplier Outstanding' },
       { id: 'recovery-sheet', label: 'Customer Recovery' },
       { id: 'supplier-payments', label: 'Supplier Payments' },
+      { id: 'staff-salesmen', label: 'Salesman Management' },
     ],
   },
   {

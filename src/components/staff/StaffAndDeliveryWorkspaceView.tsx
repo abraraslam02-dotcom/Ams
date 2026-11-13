@@ -63,6 +63,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   // 1. SALESMEN MANAGEMENT & COMMISSION REPORTS STATE
   // =========================================================================
   const [salesmen, setSalesmen] = useState<SalesmanRecord[]>([]);
+  const [nextSalesmanCode, setNextSalesmanCode] = useState<string>('SAL-001');
   const [salesmanSearch, setSalesmanSearch] = useState('');
   const [salesmanSubView, setSalesmanSubView] = useState<'directory' | 'reports'>('directory');
 
@@ -163,6 +164,9 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
         }),
       ]);
       setSalesmen(smRes.data || []);
+      if (smRes.nextSalesmanCode) {
+        setNextSalesmanCode(String(smRes.nextSalesmanCode));
+      }
       setDeliverymen(dmRes.data || []);
       setDeliveries(delRes.data || []);
       setDeliverySummary(delRes.summary || null);
@@ -222,7 +226,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   // =========================================================================
   const handleOpenNewSalesman = () => {
     setEditingSalesman(null);
-    setSmCode(`SM-${String(salesmen.length + 1).padStart(3, '0')}`);
+    setSmCode(nextSalesmanCode || 'SAL-001');
     setSmName('');
     setSmMobile('');
     setSmAddress('');
@@ -237,8 +241,8 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   const handleOpenEditSalesman = (sm: SalesmanRecord) => {
     setEditingSalesman(sm);
     setSmCode(sm.salesman_code);
-    setSmName(sm.name);
-    setSmMobile(sm.mobile || '');
+    setSmName(sm.name || sm.full_name || '');
+    setSmMobile(sm.mobile || sm.phone || '');
     setSmAddress(sm.address || '');
     setSmJoiningDate(sm.joining_date || new Date().toISOString().slice(0, 10));
     setSmCommissionType(sm.commission_type || 'Percentage');
@@ -252,10 +256,13 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
     e.preventDefault();
     try {
       setErrorMsg(null);
+      const cleanName = smName.trim();
+      const cleanMobile = smMobile.trim();
       const payload = {
-        salesman_code: smCode.trim(),
-        name: smName.trim(),
-        mobile: smMobile.trim(),
+        name: cleanName,
+        full_name: cleanName,
+        mobile: cleanMobile,
+        phone: cleanMobile,
         address: smAddress.trim(),
         joining_date: smJoiningDate,
         commission_type: smCommissionType,
@@ -582,9 +589,16 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                         <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
                           {sm.salesman_code}
                         </td>
-                        <td className="py-2.5 px-3 font-bold text-slate-900">{sm.name}</td>
+                        <td className="py-2.5 px-3">
+                          <div className="font-bold text-slate-900">{sm.name || sm.full_name}</div>
+                          {(Number(sm.assigned_towns_count || 0) > 0 || Number(sm.assigned_parties_count || 0) > 0) && (
+                            <div className="text-[10px] text-slate-500">
+                              {Number(sm.assigned_towns_count || 0)} Towns • {Number(sm.assigned_parties_count || 0)} Parties
+                            </div>
+                          )}
+                        </td>
                         <td className="py-2.5 px-2.5">
-                          <div className="font-mono text-slate-800">{sm.mobile || '—'}</div>
+                          <div className="font-mono text-slate-800">{sm.mobile || sm.phone || '—'}</div>
                           <div className="text-[10px] text-slate-500">{sm.address || '—'}</div>
                         </td>
                         <td className="py-2.5 px-2.5 font-mono">{sm.joining_date}</td>
@@ -1387,14 +1401,19 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Salesman Code *</label>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Salesman Number (Auto / Read-Only)
+                </label>
                 <input
                   type="text"
-                  required
-                  value={smCode}
-                  onChange={(e) => setSmCode(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-lg border border-slate-300 font-mono font-bold"
+                  readOnly
+                  disabled
+                  value={editingSalesman ? smCode : nextSalesmanCode}
+                  className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-100 text-slate-600 font-mono font-bold cursor-not-allowed"
                 />
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  Auto-assigned (SAL-001, SAL-002...) — read-only &amp; never reused
+                </p>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Full Name *</label>

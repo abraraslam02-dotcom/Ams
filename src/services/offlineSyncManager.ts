@@ -40,17 +40,7 @@ export function parseLocalUnitsPerPack(packingStr?: string | null): number {
 }
 
 function getStoredAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  try {
-    const token =
-      localStorage.getItem('ams_session_token') || sessionStorage.getItem('ams_session_token');
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-  } catch {
-    // ignore storage errors
-  }
-  return headers;
+  return { 'Content-Type': 'application/json' };
 }
 
 class OfflineSyncManager {

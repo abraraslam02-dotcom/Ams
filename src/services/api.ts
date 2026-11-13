@@ -20,12 +20,23 @@ import {
 import { offlineStorage } from './offlineStorage';
 import { offlineSyncManager } from './offlineSyncManager';
 
-const TOKEN_KEY = 'ams_session_token';
-const CACHED_SESSION_KEY = 'ams_cached_auth_session';
-const OFFLINE_VERIFIERS_KEY = 'ams_offline_auth_verifiers';
-const OFFLINE_HASH_SALT = 'ams_offline_webcrypto_salt_2026_v1';
+const LEGACY_TOKEN_KEY = 'ams_session_token';
+const LEGACY_CACHED_SESSION_KEY = 'ams_cached_auth_session';
+const LEGACY_OFFLINE_VERIFIERS_KEY = 'ams_offline_auth_verifiers';
 const DEVICE_ID_KEY = 'ams_registered_device_id';
 const DEVICE_NAME_KEY = 'ams_registered_device_name';
+
+function purgeLegacyAuthStorage(): void {
+  try {
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_CACHED_SESSION_KEY);
+    localStorage.removeItem(LEGACY_OFFLINE_VERIFIERS_KEY);
+    sessionStorage.removeItem(LEGACY_TOKEN_KEY);
+    sessionStorage.removeItem(LEGACY_CACHED_SESSION_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export function getClientDeviceId(): string {
   try {
@@ -72,130 +83,34 @@ export function getClientDeviceName(): string {
   }
 }
 
-async function computeOfflineVerifierHash(usernameKey: string, password: string): Promise<string> {
-  const normalizedUser = usernameKey.trim().toLowerCase();
-  const payload = `${OFFLINE_HASH_SALT}:${normalizedUser}:${password}`;
-  if (typeof crypto !== 'undefined' && crypto.subtle) {
-    const encoded = new TextEncoder().encode(payload);
-    const digest = await crypto.subtle.digest('SHA-256', encoded);
-    return Array.from(new Uint8Array(digest))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-  }
-  // Deterministic fallback hash if WebCrypto is unavailable in non-HTTPS LAN context
-  let h1 = 0xdeadbeef ^ payload.length;
-  let h2 = 0x41c6ce57 ^ payload.length;
-  for (let i = 0; i < payload.length; i++) {
-    const ch = payload.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0');
-}
-
-interface OfflineVerifierEntry {
-  verifierHash: string;
-  user: User;
-  permissions: Record<string, any>;
-  token: string;
-  deviceId?: string;
-  updatedAt: string;
-}
-
-async function saveOfflineAuthCredentials(
-  loginIdentifier: string,
-  password: string,
-  user: User,
-  permissions: Record<string, any>,
-  token: string
-): Promise<void> {
-  try {
-    const raw = localStorage.getItem(OFFLINE_VERIFIERS_KEY);
-    const map: Record<string, OfflineVerifierEntry> = raw ? JSON.parse(raw) : {};
-    const currentDeviceId = getClientDeviceId();
-    const keys = new Set<string>([
-      loginIdentifier.trim().toLowerCase(),
-      (user.username || '').trim().toLowerCase(),
-      (user.email || '').trim().toLowerCase(),
-    ]);
-    for (const k of keys) {
-      if (!k) continue;
-      const verifierHash = await computeOfflineVerifierHash(k, password);
-      map[k] = {
-        verifierHash,
-        user,
-        permissions,
-        token,
-        deviceId: currentDeviceId,
-        updatedAt: new Date().toISOString(),
-      };
-    }
-    localStorage.setItem(OFFLINE_VERIFIERS_KEY, JSON.stringify(map));
-    localStorage.setItem(
-      CACHED_SESSION_KEY,
-      JSON.stringify({
-        user,
-        permissions,
-        token,
-        deviceId: currentDeviceId,
-        cachedAt: new Date().toISOString(),
-      })
-    );
-  } catch (err) {
-    console.warn('Failed to cache offline auth verifier:', err);
-  }
-}
-
 export function getAuthToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+  return null;
 }
 
-export function setAuthToken(token: string | null, rememberMe: boolean = true) {
-  try {
-    if (token) {
-      if (rememberMe) {
-        localStorage.setItem(TOKEN_KEY, token);
-        sessionStorage.removeItem(TOKEN_KEY);
-      } else {
-        sessionStorage.setItem(TOKEN_KEY, token);
-        localStorage.removeItem(TOKEN_KEY);
-      }
-    } else {
-      localStorage.removeItem(TOKEN_KEY);
-      sessionStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(CACHED_SESSION_KEY);
-    }
-  } catch (err) {
-    console.warn('Failed to access storage:', err);
-  }
+export function setAuthToken(_token: string | null, _rememberMe: boolean = false) {
+  purgeLegacyAuthStorage();
 }
 
 export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
-  const token = getAuthToken();
   const headers = new Headers(init?.headers);
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
   if (!headers.has('X-Device-Id')) {
     headers.set('X-Device-Id', getClientDeviceId());
   }
   if (!headers.has('X-Device-Name')) {
     headers.set('X-Device-Name', getClientDeviceName());
   }
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(url, {
+    ...init,
+    credentials: init?.credentials ?? 'include',
+    headers,
+  });
   if (
     res.status === 401 &&
     !url.includes('/api/auth/login') &&
     !url.includes('/api/auth/status') &&
     (typeof navigator === 'undefined' || navigator.onLine !== false)
   ) {
-    setAuthToken(null);
+    purgeLegacyAuthStorage();
     window.dispatchEvent(new CustomEvent('ams-session-expired'));
   }
   return res;
@@ -2529,57 +2444,15 @@ export const api = {
   },
 
   /**
-   * Authentication - System status & session verification (with Offline Session Persistence)
+   * Authentication - System status & session verification (HttpOnly Cookie Session)
    */
   async getAuthStatus(): Promise<AuthStatusResponse> {
+    purgeLegacyAuthStorage();
     try {
       const res = await authFetch('/api/auth/status');
       const data = await res.json();
-      if (data && data.authenticated && data.user) {
-        if ((data as any).token && !getAuthToken()) {
-          setAuthToken((data as any).token, true);
-        }
-        try {
-          localStorage.setItem(
-            CACHED_SESSION_KEY,
-            JSON.stringify({
-              user: data.user,
-              permissions: data.permissions || {},
-              token: (data as any).token || getAuthToken() || 'ams_offline_token_active',
-              deviceId: getClientDeviceId(),
-              cachedAt: new Date().toISOString(),
-            })
-          );
-        } catch {}
-      } else if (data && !data.authenticated) {
-        setAuthToken(null);
-      }
       return data;
     } catch {
-      // Offline fallback: verify if an active Remember Me session exists on this registered device
-      const activeToken = getAuthToken();
-      const cachedRaw = localStorage.getItem(CACHED_SESSION_KEY);
-      if (activeToken && cachedRaw) {
-        try {
-          const cached = JSON.parse(cachedRaw);
-          if (cached && cached.user) {
-            const currentDeviceId = getClientDeviceId();
-            if (
-              cached.user.role === 'Super Admin' ||
-              !cached.user.registered_device_id ||
-              cached.user.registered_device_id === currentDeviceId
-            ) {
-              return {
-                initialized: true,
-                authenticated: true,
-                userCount: 1,
-                user: cached.user,
-                permissions: cached.permissions || {},
-              };
-            }
-          }
-        } catch {}
-      }
       return {
         initialized: true,
         authenticated: false,
@@ -2598,6 +2471,7 @@ export const api = {
     email?: string;
     phone?: string;
   }): Promise<LoginResponse> {
+    purgeLegacyAuthStorage();
     const res = await authFetch('/api/auth/setup-admin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2607,170 +2481,46 @@ export const api = {
     if (!res.ok || !result.success) {
       throw new Error(result.error || 'Failed to complete Super Admin setup');
     }
-    if (result.token) {
-      setAuthToken(result.token);
-      if (result.user) {
-        await saveOfflineAuthCredentials(
-          data.username,
-          data.password,
-          result.user,
-          result.permissions || {},
-          result.token
-        );
-      }
-    }
     return result;
   },
 
   /**
-   * Authentication - Desktop Login with Single-Device Security & Offline Verification Fallback
+   * Authentication - Login with HttpOnly Cookie Session & Remember Me support
    */
   async login(data: {
     username: string;
     password: string;
     remember_me?: boolean;
   }): Promise<LoginResponse> {
+    purgeLegacyAuthStorage();
     const device_id = getClientDeviceId();
     const device_name = getClientDeviceName();
-    try {
-      const res = await authFetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...data,
-          device_id,
-          device_name,
-        }),
-      });
-      const result = await res.json();
-      if (!res.ok || !result.success) {
-        const err: any = new Error(result.error || 'Login failed');
-        err.code = result.code;
-        err.locked = result.locked;
-        err.remainingMinutes = result.remainingMinutes;
-        err.attemptsRemaining = result.attemptsRemaining;
-        err.deviceApprovalRequired = Boolean(result.deviceApprovalRequired);
-        err.registeredDeviceId = result.registeredDeviceId;
-        err.registeredDeviceName = result.registeredDeviceName;
-        err.requestedDeviceId = result.requestedDeviceId || device_id;
-        err.requestedDeviceName = result.requestedDeviceName || device_name;
-        err.isAuthRejection = true;
-        throw err;
-      }
-      if (result.token) {
-        setAuthToken(result.token, data.remember_me !== false);
-        if (result.user) {
-          await saveOfflineAuthCredentials(
-            data.username,
-            data.password,
-            result.user,
-            result.permissions || {},
-            result.token
-          );
-        }
-      }
-      return result;
-    } catch (err: any) {
-      if (err?.isAuthRejection) {
-        throw err;
-      }
-      // Network/Offline fallback: verify credentials against locally cached SHA-256 verifier
-      const normalizedUser = data.username.trim().toLowerCase();
-      const candidateHash = await computeOfflineVerifierHash(normalizedUser, data.password);
-      const rawVerifiers = localStorage.getItem(OFFLINE_VERIFIERS_KEY);
-      const verifiers: Record<string, OfflineVerifierEntry> = rawVerifiers ? JSON.parse(rawVerifiers) : {};
-      const matched = verifiers[normalizedUser];
-
-      if (matched && matched.verifierHash === candidateHash) {
-        // Enforce single registered device in offline mode for non-Super Admin
-        if (
-          matched.user.role !== 'Super Admin' &&
-          matched.user.registered_device_id &&
-          matched.user.registered_device_id !== device_id
-        ) {
-          const blockErr: any = new Error(
-            `Login blocked: Your account (@${matched.user.username}) is registered to another device (${matched.user.registered_device_name || matched.user.registered_device_id}). Super Admin approval is required for this new device.`
-          );
-          blockErr.code = 'DEVICE_APPROVAL_REQUIRED';
-          blockErr.deviceApprovalRequired = true;
-          blockErr.registeredDeviceId = matched.user.registered_device_id;
-          blockErr.registeredDeviceName = matched.user.registered_device_name || 'Registered Device';
-          blockErr.requestedDeviceId = device_id;
-          blockErr.requestedDeviceName = device_name;
-          throw blockErr;
-        }
-
-        const offlineToken = matched.token || `ams_offline_session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-        setAuthToken(offlineToken, data.remember_me !== false);
-        localStorage.setItem(
-          CACHED_SESSION_KEY,
-          JSON.stringify({
-            user: matched.user,
-            permissions: matched.permissions || {},
-            token: offlineToken,
-            deviceId: device_id,
-            cachedAt: new Date().toISOString(),
-          })
-        );
-        return {
-          success: true,
-          token: offlineToken,
-          expiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
-          user: matched.user,
-          permissions: matched.permissions || {},
-        };
-      }
-
-      // Also support offline login for default Super Admin
-      const isDefaultAdminId =
-        normalizedUser === 'admin' ||
-        normalizedUser === 'abrar.aslam02@gmail.com' ||
-        normalizedUser === 'admin@abrarmedical.pk';
-      if (
-        !matched &&
-        isDefaultAdminId &&
-        (data.password === 'MasterAdmin@2026' || data.password === 'admin123')
-      ) {
-        const cachedRaw = localStorage.getItem(CACHED_SESSION_KEY);
-        const cachedSession = cachedRaw ? JSON.parse(cachedRaw) : null;
-        const fallbackUser: User = cachedSession?.user || {
-          id: 3,
-          username: 'admin',
-          full_name: 'Abrar Aslam',
-          email: 'admin@abrarmedical.pk',
-          phone: '+92 42 35789000',
-          role: 'Super Admin',
-          status: 'Active',
-          failed_login_attempts: 0,
-          locked_until: null,
-          last_login: new Date().toISOString(),
-          last_login_ip: '127.0.0.1',
-          notes: 'Primary Store Owner & Super Administrator',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        const fallbackPerms = cachedSession?.permissions || {};
-        const offlineToken =
-          cachedSession?.token || `ams_offline_session_${Date.now()}_superadmin_verified`;
-        setAuthToken(offlineToken, data.remember_me !== false);
-        await saveOfflineAuthCredentials(
-          normalizedUser,
-          data.password,
-          fallbackUser,
-          fallbackPerms,
-          offlineToken
-        );
-        return {
-          success: true,
-          token: offlineToken,
-          expiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
-          user: fallbackUser,
-          permissions: fallbackPerms,
-        };
-      }
-
-      throw new Error('Invalid username or password (Offline Mode).');
+    const res = await authFetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: data.username,
+        password: data.password,
+        remember_me: Boolean(data.remember_me),
+        device_id,
+        device_name,
+      }),
+    });
+    const result = await res.json();
+    if (!res.ok || !result.success) {
+      const err: any = new Error(result.error || 'Invalid username/email or password');
+      err.code = result.code;
+      err.locked = result.locked;
+      err.remainingMinutes = result.remainingMinutes;
+      err.attemptsRemaining = result.attemptsRemaining;
+      err.deviceApprovalRequired = Boolean(result.deviceApprovalRequired);
+      err.registeredDeviceId = result.registeredDeviceId;
+      err.registeredDeviceName = result.registeredDeviceName;
+      err.requestedDeviceId = result.requestedDeviceId || device_id;
+      err.requestedDeviceName = result.requestedDeviceName || device_name;
+      throw err;
     }
+    return result;
   },
 
   /**
@@ -2781,9 +2531,9 @@ export const api = {
       const res = await authFetch('/api/auth/logout', { method: 'POST' });
       return await res.json();
     } catch {
-      return { success: true, message: 'Logged out locally (Offline Mode).' };
+      return { success: true, message: 'Logged out.' };
     } finally {
-      setAuthToken(null);
+      purgeLegacyAuthStorage();
     }
   },
 
@@ -3073,21 +2823,6 @@ export const api = {
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to change password');
     }
-    try {
-      const cachedRaw = localStorage.getItem(CACHED_SESSION_KEY);
-      if (cachedRaw) {
-        const cached = JSON.parse(cachedRaw);
-        if (cached?.user) {
-          await saveOfflineAuthCredentials(
-            cached.user.username,
-            new_password,
-            cached.user,
-            cached.permissions || {},
-            getAuthToken() || cached.token || ''
-          );
-        }
-      }
-    } catch {}
     return data;
   },
 
@@ -4406,6 +4141,17 @@ export const api = {
     return data;
   },
 
+  async deleteSalesman(id: number) {
+    const res = await authFetch(`/api/staff/salesmen/${id}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to delete salesman');
+    }
+    return data;
+  },
+
   async paySalesmanCommission(id: number, payload: any) {
     const res = await authFetch(`/api/staff/salesmen/${id}/pay-commission`, {
       method: 'POST',
@@ -5052,6 +4798,26 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save salesman');
+    return data;
+  },
+
+  async updateSupplySalesmanStatus(id: number, status: 'Active' | 'Inactive') {
+    const res = await authFetch(`/api/supply/salesmen/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update salesman status');
+    return data;
+  },
+
+  async deleteSupplySalesman(id: number) {
+    const res = await authFetch(`/api/supply/salesmen/${id}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to delete salesman');
     return data;
   },
 

@@ -23,6 +23,8 @@ import type { UserRecord } from '../services/authService.ts';
 import {
   authenticateToken,
   requireRole,
+  extractToken,
+  SESSION_COOKIE_NAME,
 } from '../middleware/authMiddleware.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
 
@@ -40,6 +42,38 @@ function getUserAgent(req: Request): string {
   return (req.headers['user-agent'] as string) || 'Unknown Client';
 }
 
+function isSecureRequest(req: Request): boolean {
+  const proto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  const origin = String(req.headers.origin || '').toLowerCase();
+  return Boolean(req.secure || proto.includes('https') || origin.startsWith('https://'));
+}
+
+function setSessionCookie(req: Request, res: Response, token: string, rememberMe: boolean): void {
+  const secure = isSecureRequest(req);
+  const options: Record<string, any> = {
+    httpOnly: true,
+    path: '/',
+    sameSite: secure ? 'none' : 'lax',
+    secure,
+  };
+  if (rememberMe) {
+    // Persistent cookie for 30 days across browser restarts
+    options.maxAge = 30 * 24 * 60 * 60 * 1000;
+  }
+  // When rememberMe is false, omit maxAge and expires so it stays a true browser session cookie
+  res.cookie(SESSION_COOKIE_NAME, token, options);
+}
+
+function clearSessionCookie(req: Request, res: Response): void {
+  const secure = isSecureRequest(req);
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    path: '/',
+    sameSite: secure ? 'none' : 'lax',
+    secure,
+  });
+}
+
 /**
  * GET /api/auth/status
  * Public endpoint to check system initialization and current session validity
@@ -49,13 +83,7 @@ authRouter.get('/status', (req: Request, res: Response) => {
     const db = getDatabase();
     ensureAuthTables(db);
 
-    const authHeader = req.headers.authorization;
-    let token: string | null = null;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7).trim();
-    } else if (typeof req.headers['x-session-token'] === 'string') {
-      token = req.headers['x-session-token'].trim();
-    }
+    const token = extractToken(req);
 
     if (token) {
       const validation = validateSession(db, token);
@@ -63,11 +91,13 @@ authRouter.get('/status', (req: Request, res: Response) => {
         return res.json({
           initialized: true,
           authenticated: true,
-          token,
+          rememberMe: Boolean(validation.rememberMe),
           user: validation.user,
           permissions: validation.permissions,
         });
       }
+      // Clear expired or invalid cookie so stale cookies do not linger
+      clearSessionCookie(req, res);
     }
 
     return res.json({
@@ -238,7 +268,9 @@ authRouter.post('/login', (req: Request, res: Response) => {
       WHERE id = ?
     `).run(ip, user.id);
 
-    const session = createSession(db, user.id, Boolean(remember_me), ip, userAgent);
+    const rememberMe = Boolean(remember_me);
+    const session = createSession(db, user.id, rememberMe, ip, userAgent);
+    setSessionCookie(req, res, session.token, rememberMe);
 
     logAuditEvent(db, {
       userId: user.id,
@@ -247,7 +279,7 @@ authRouter.post('/login', (req: Request, res: Response) => {
       status: 'SUCCESS',
       ipAddress: ip,
       userAgent,
-      details: `Successful login as ${user.role}`,
+      details: `Successful login as ${user.role} (remember_me=${rememberMe ? '1' : '0'})`,
     });
 
     const safeUser = getUserById(db, user.id);
@@ -256,8 +288,8 @@ authRouter.post('/login', (req: Request, res: Response) => {
     return res.json({
       success: true,
       message: `Welcome back, ${user.full_name}!`,
-      token: session.token,
       expiresAt: session.expiresAt,
+      rememberMe,
       user: safeUser,
       permissions,
     });
@@ -277,13 +309,7 @@ authRouter.post('/logout', (req: Request, res: Response) => {
   const userAgent = getUserAgent(req);
 
   try {
-    const authHeader = req.headers.authorization;
-    let token = '';
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7).trim();
-    } else if (typeof req.headers['x-session-token'] === 'string') {
-      token = req.headers['x-session-token'].trim();
-    }
+    const token = extractToken(req) || '';
 
     if (token) {
       const session = db
@@ -304,6 +330,8 @@ authRouter.post('/logout', (req: Request, res: Response) => {
         });
       }
     }
+
+    clearSessionCookie(req, res);
 
     return res.json({
       success: true,

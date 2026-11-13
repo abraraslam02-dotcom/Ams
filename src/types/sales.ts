@@ -240,13 +240,18 @@ export interface SalesmanRecord {
   id: number;
   salesman_code: string;
   name: string;
+  full_name?: string;
   mobile: string;
+  phone?: string;
   address: string;
   joining_date: string;
   commission_type: 'Percentage' | 'Fixed Amount';
   commission_rate: number;
   status: 'Active' | 'Inactive';
   notes?: string;
+  assigned_towns_count?: number;
+  assigned_areas_count?: number;
+  assigned_parties_count?: number;
   completed_invoices_count?: number;
   invoice_count?: number;
   total_net_sales?: number;

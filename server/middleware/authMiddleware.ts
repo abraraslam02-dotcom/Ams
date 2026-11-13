@@ -19,10 +19,35 @@ export interface AuthenticatedRequest extends Request {
   sessionToken?: string;
 }
 
+export const SESSION_COOKIE_NAME = 'ams_sid';
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) return result;
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = pair.slice(0, eqIdx).trim();
+    const rawVal = pair.slice(eqIdx + 1).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(rawVal);
+    } catch {
+      result[key] = rawVal;
+    }
+  }
+  return result;
+}
+
 /**
- * Extracts session token from Authorization header or custom header
+ * Extracts session token from HttpOnly session cookie, Authorization header, or custom header
  */
-function extractToken(req: Request): string | null {
+export function extractToken(req: Request): string | null {
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies[SESSION_COOKIE_NAME] && cookies[SESSION_COOKIE_NAME].trim()) {
+    return cookies[SESSION_COOKIE_NAME].trim();
+  }
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     return authHeader.substring(7).trim();

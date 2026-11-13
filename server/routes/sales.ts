@@ -798,7 +798,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     let salesman = String(body.salesman || '').trim();
     if (salesmanId) {
       const smRow = db
-        .prepare('SELECT id, name FROM salesmen WHERE id = ?')
+        .prepare("SELECT id, COALESCE(NULLIF(TRIM(full_name), ''), name) as name FROM salesmen WHERE id = ?")
         .get(salesmanId) as { id: number; name: string } | undefined;
       if (smRow) {
         salesman = smRow.name;
@@ -807,8 +807,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       }
     } else if (salesman) {
       const smByName = db
-        .prepare('SELECT id, name FROM salesmen WHERE LOWER(name) = LOWER(?) LIMIT 1')
-        .get(salesman) as { id: number; name: string } | undefined;
+        .prepare("SELECT id, COALESCE(NULLIF(TRIM(full_name), ''), name) as name FROM salesmen WHERE LOWER(name) = LOWER(?) OR LOWER(full_name) = LOWER(?) LIMIT 1")
+        .get(salesman, salesman) as { id: number; name: string } | undefined;
       if (smByName) {
         salesmanId = smByName.id;
         salesman = smByName.name;
@@ -4288,7 +4288,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             SELECT
               COALESCE(s.salesman_id, 0) AS salesman_id,
               COALESCE(sal.salesman_code, 'COUNTER') AS salesman_code,
-              COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS salesman_name,
+              COALESCE(NULLIF(TRIM(sal.full_name), ''), NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS salesman_name,
               COUNT(DISTINCT s.id) AS invoice_count,
               COUNT(DISTINCT s.customer_account_id) AS party_count,
               ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
@@ -4315,7 +4315,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             SELECT
               COALESCE(s.salesman_id, 0) AS salesman_id,
               COALESCE(sal.salesman_code, 'COUNTER') AS salesman_code,
-              COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS salesman_name,
+              COALESCE(NULLIF(TRIM(sal.full_name), ''), NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS salesman_name,
               COUNT(s.id) AS invoice_count,
               COUNT(DISTINCT s.customer_account_id) AS party_count,
               ROUND(SUM(s.gross_total), 2) AS gross_sales,
@@ -4335,7 +4335,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         const qtyRows = db
           .prepare(`
             SELECT
-              COALESCE(s.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS skey,
+              COALESCE(s.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.full_name), ''), NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS skey,
               ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
               ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty
             FROM sale_items si
@@ -4371,7 +4371,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         ? (db
             .prepare(`
               SELECT
-                COALESCE(orig.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(orig.salesman), ''), 'Counter Sales') AS skey,
+                COALESCE(orig.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.full_name), ''), NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(orig.salesman), ''), 'Counter Sales') AS skey,
                 ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return
               FROM sale_return_items sri
               JOIN sale_returns sr ON sri.sale_return_id = sr.id
@@ -4385,7 +4385,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         : (db
             .prepare(`
               SELECT
-                COALESCE(orig.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(orig.salesman), ''), 'Counter Sales') AS skey,
+                COALESCE(orig.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.full_name), ''), NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(orig.salesman), ''), 'Counter Sales') AS skey,
                 ROUND(SUM(COALESCE(sr.total_refund_amount, 0)), 2) AS sales_return
               FROM sale_returns sr
               LEFT JOIN sales orig ON sr.original_sale_id = orig.id

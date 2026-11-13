@@ -6,6 +6,7 @@ import {
   allocateNextAccountCode,
   recordAccountCodeDeletion,
 } from '../utils/accountCodeGenerator.ts';
+import { refreshSalesmanPartiesJson } from '../utils/salesmanCodeGenerator.ts';
 
 export const accountsRouter = Router();
 
@@ -965,8 +966,15 @@ accountsRouter.post('/', (req: Request, res: Response) => {
     }
 
     if (salesmanId) {
-      const s = db.prepare('SELECT id, full_name FROM salesmen WHERE id = ?').get(salesmanId) as { id: number; full_name: string } | undefined;
-      if (s) salesmanName = s.full_name;
+      const s = db
+        .prepare("SELECT id, COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?")
+        .get(salesmanId) as { id: number; full_name: string } | undefined;
+      if (s) {
+        salesmanName = s.full_name;
+      } else {
+        salesmanId = null;
+        salesmanName = '';
+      }
     }
 
     db.prepare(`
@@ -980,6 +988,13 @@ accountsRouter.post('/', (req: Request, res: Response) => {
         assigned_salesman_name = ?
       WHERE id = ?
     `).run(townId, townName || null, townName || null, areaId, areaName || null, salesmanId, salesmanName || null, newId);
+
+    if (salesmanId) {
+      db.prepare(
+        'INSERT OR REPLACE INTO salesman_parties (salesman_id, party_account_id, party_name, town_name, area_name) VALUES (?, ?, ?, ?, ?)'
+      ).run(salesmanId, newId, String(account_name).trim(), townName || '', areaName || '');
+      refreshSalesmanPartiesJson(db, salesmanId);
+    }
 
     recalculateAccountBalance(newId);
 
@@ -1226,8 +1241,17 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
     }
 
     if (nextSalesmanId) {
-      const s = db.prepare('SELECT id, full_name FROM salesmen WHERE id = ?').get(nextSalesmanId) as { id: number; full_name: string } | undefined;
-      if (s) nextSalesmanName = s.full_name;
+      const s = db
+        .prepare("SELECT id, COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?")
+        .get(nextSalesmanId) as { id: number; full_name: string } | undefined;
+      if (s) {
+        nextSalesmanName = s.full_name;
+      } else {
+        nextSalesmanId = null;
+        nextSalesmanName = '';
+      }
+    } else {
+      nextSalesmanName = '';
     }
 
     db.prepare(`
@@ -1241,6 +1265,19 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
         assigned_salesman_name = ?
       WHERE id = ?
     `).run(nextTownId, nextTownName || null, nextTownName || null, nextAreaId, nextAreaName || null, nextSalesmanId, nextSalesmanName || null, id);
+
+    const prevSalesmanId = existing.assigned_salesman_id ? Number(existing.assigned_salesman_id) : null;
+    if (prevSalesmanId && prevSalesmanId !== (nextSalesmanId ? Number(nextSalesmanId) : null)) {
+      db.prepare('DELETE FROM salesman_parties WHERE salesman_id = ? AND party_account_id = ?').run(prevSalesmanId, id);
+      refreshSalesmanPartiesJson(db, prevSalesmanId);
+    }
+    if (nextSalesmanId) {
+      const savedPartyName = account_name !== undefined ? String(account_name).trim() : existing.account_name;
+      db.prepare(
+        'INSERT OR REPLACE INTO salesman_parties (salesman_id, party_account_id, party_name, town_name, area_name) VALUES (?, ?, ?, ?, ?)'
+      ).run(nextSalesmanId, id, savedPartyName, nextTownName || '', nextAreaName || '');
+      refreshSalesmanPartiesJson(db, Number(nextSalesmanId));
+    }
 
     recalculateAccountBalance(id);
 

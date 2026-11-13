@@ -2,25 +2,18 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
 import { round2 } from './purchases.ts';
+import { hashPassword } from '../services/authService.ts';
+import {
+  allocateNextSalesmanCode,
+  peekNextSalesmanCode,
+  syncSalesmanDenormalizedReferences,
+  getSalesmanLinkedRecordCount,
+} from '../utils/salesmanCodeGenerator.ts';
 
 export const staffRouter = Router();
 
 function getNextSalesmanCode(): string {
-  const db = getDatabase();
-  const row = db
-    .prepare("SELECT salesman_code FROM salesmen WHERE salesman_code LIKE 'SM-%' ORDER BY id DESC LIMIT 1")
-    .get() as { salesman_code: string } | undefined;
-  let seq = 1;
-  if (row?.salesman_code) {
-    const m = row.salesman_code.match(/(\d+)$/);
-    if (m) seq = parseInt(m[1], 10) + 1;
-  }
-  while (
-    db.prepare('SELECT id FROM salesmen WHERE UPPER(salesman_code) = UPPER(?)').get(`SM-${String(seq).padStart(3, '0')}`)
-  ) {
-    seq++;
-  }
-  return `SM-${String(seq).padStart(3, '0')}`;
+  return peekNextSalesmanCode(getDatabase());
 }
 
 function getNextDeliverymanCode(): string {
@@ -71,7 +64,7 @@ function getNextCommissionPaymentNumber(): string {
 
 /**
  * GET /api/staff/salesmen
- * List all salesmen with live performance summary
+ * List all salesmen with live performance summary & synchronized territory counts
  */
 staffRouter.get('/salesmen', (req: Request, res: Response) => {
   try {
@@ -88,25 +81,43 @@ staffRouter.get('/salesmen', (req: Request, res: Response) => {
 
     if (q && String(q).trim()) {
       const term = `%${String(q).trim()}%`;
-      whereSql += ' AND (sm.salesman_code LIKE ? OR sm.name LIKE ? OR sm.mobile LIKE ? OR sm.address LIKE ?) ';
-      params.push(term, term, term, term);
+      whereSql +=
+        ' AND (sm.salesman_code LIKE ? OR sm.name LIKE ? OR sm.full_name LIKE ? OR sm.mobile LIKE ? OR sm.phone LIKE ? OR sm.address LIKE ? OR sm.assigned_area LIKE ?) ';
+      params.push(term, term, term, term, term, term, term);
     }
 
     const rows = db
       .prepare(`
         SELECT
           sm.*,
+          COALESCE(NULLIF(TRIM(sm.name), ''), NULLIF(TRIM(sm.full_name), ''), '') as display_name,
+          COALESCE(NULLIF(TRIM(sm.mobile), ''), NULLIF(TRIM(sm.phone), ''), '') as display_mobile,
+          (
+            SELECT COUNT(*)
+            FROM salesman_towns st
+            WHERE st.salesman_id = sm.id
+          ) as assigned_towns_count,
+          (
+            SELECT COUNT(*)
+            FROM salesman_areas sa
+            WHERE sa.salesman_id = sm.id
+          ) as assigned_areas_count,
+          (
+            SELECT COUNT(*)
+            FROM salesman_parties sp
+            WHERE sp.salesman_id = sm.id
+          ) as assigned_parties_count,
           (
             SELECT COUNT(*)
             FROM sales s
             WHERE s.status = 'completed'
-              AND (s.salesman_id = sm.id OR (s.salesman_id IS NULL AND LOWER(s.salesman) = LOWER(sm.name)))
+              AND (s.salesman_id = sm.id OR (s.salesman_id IS NULL AND (LOWER(s.salesman) = LOWER(sm.name) OR LOWER(s.salesman) = LOWER(sm.full_name))))
           ) as completed_invoices_count,
           (
             SELECT COALESCE(SUM(s.net_total), 0)
             FROM sales s
             WHERE s.status = 'completed'
-              AND (s.salesman_id = sm.id OR (s.salesman_id IS NULL AND LOWER(s.salesman) = LOWER(sm.name)))
+              AND (s.salesman_id = sm.id OR (s.salesman_id IS NULL AND (LOWER(s.salesman) = LOWER(sm.name) OR LOWER(s.salesman) = LOWER(sm.full_name))))
           ) as total_net_sales,
           (
             SELECT COALESCE(SUM(scp.amount), 0)
@@ -130,9 +141,15 @@ staffRouter.get('/salesmen', (req: Request, res: Response) => {
           : round2((netSales * commRate) / 100);
       const commPaid = round2(Number(r.total_commission_paid || 0));
       const commOutstanding = round2(commEarned - commPaid);
+      const resolvedName = String(r.display_name || r.name || r.full_name || '').trim();
+      const resolvedMobile = String(r.display_mobile || r.mobile || r.phone || '').trim();
 
       return {
         ...r,
+        name: resolvedName,
+        full_name: resolvedName,
+        mobile: resolvedMobile,
+        phone: resolvedMobile,
         completed_invoices_count: count,
         total_net_sales: netSales,
         total_commission_earned: commEarned,
@@ -154,51 +171,71 @@ staffRouter.get('/salesmen', (req: Request, res: Response) => {
 
 /**
  * POST /api/staff/salesmen
- * Create a new Salesman
+ * Create a new Salesman with monotonic read-only SAL-### number
  */
 staffRouter.post('/salesmen', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
     const body = req.body || {};
-    const code = String(body.salesman_code || '').trim() || getNextSalesmanCode();
-    const name = String(body.name || '').trim();
+    const name = String(body.name || body.full_name || body.salesman_name || '').trim();
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'Salesman Name is required.' });
     }
 
-    const dupCode = db
-      .prepare('SELECT id FROM salesmen WHERE UPPER(salesman_code) = UPPER(?)')
-      .get(code);
-    if (dupCode) {
-      return res.status(400).json({ success: false, error: `Salesman Code "${code}" already exists.` });
-    }
-
-    const mobile = String(body.mobile || '').trim();
+    const mobile = String(body.mobile || body.phone || body.mobile_number || '').trim();
     const address = String(body.address || '').trim();
     const joiningDate = String(body.joining_date || new Date().toISOString().slice(0, 10)).trim();
     const commissionType =
       body.commission_type === 'Fixed Amount' ? 'Fixed Amount' : 'Percentage';
     const commissionRate = round2(Math.max(0, Number(body.commission_rate || 0)));
+    const commissionPercent =
+      commissionType === 'Percentage'
+        ? commissionRate
+        : round2(Math.max(0, Number(body.commission_percent || 0)));
     const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
     const notes = String(body.notes || '').trim();
 
-    const result = db
-      .prepare(`
-        INSERT INTO salesmen (
-          salesman_code, name, mobile, address, joining_date,
-          commission_type, commission_rate, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(code, name, mobile, address, joiningDate, commissionType, commissionRate, status, notes);
+    const created = db.transaction(() => {
+      // Strictly automatic & monotonic; ignores any client-supplied salesman_code
+      const code = allocateNextSalesmanCode(db);
+      const username = String(body.username || code.toLowerCase()).trim();
+      const plainPassword = String(body.password || '123456').trim();
+      const { salt, hash } = hashPassword(plainPassword);
+      const passwordHash = `${salt}:${hash}`;
 
-    const created = db
-      .prepare('SELECT * FROM salesmen WHERE id = ?')
-      .get(Number(result.lastInsertRowid));
+      const result = db
+        .prepare(`
+          INSERT INTO salesmen (
+            salesman_code, name, full_name, mobile, phone, address, joining_date,
+            commission_type, commission_rate, commission_percent,
+            username, password_hash, status, notes
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          code,
+          name,
+          name,
+          mobile,
+          mobile,
+          address,
+          joiningDate,
+          commissionType,
+          commissionRate,
+          commissionPercent,
+          username,
+          passwordHash,
+          status,
+          notes
+        );
+
+      return db.prepare('SELECT * FROM salesmen WHERE id = ?').get(Number(result.lastInsertRowid)) as Record<string, unknown>;
+    })();
 
     return res.status(201).json({
       success: true,
-      message: `Salesman "${name}" (${code}) created successfully.`,
+      message: `Salesman "${name}" (${created.salesman_code}) created successfully.`,
+      nextSalesmanCode: getNextSalesmanCode(),
       data: created,
     });
   } catch (err: unknown) {
@@ -209,7 +246,7 @@ staffRouter.post('/salesmen', (req: Request, res: Response) => {
 
 /**
  * PUT /api/staff/salesmen/:id
- * Update Salesman profile & commission rules
+ * Update Salesman profile & commission rules (Salesman Number is immutable & read-only)
  */
 staffRouter.put('/salesmen/:id', (req: Request, res: Response) => {
   try {
@@ -221,21 +258,21 @@ staffRouter.put('/salesmen/:id', (req: Request, res: Response) => {
     }
 
     const body = req.body || {};
-    const code = body.salesman_code !== undefined ? String(body.salesman_code).trim() : String(existing.salesman_code);
-    const name = body.name !== undefined ? String(body.name).trim() : String(existing.name);
+    // Preserve existing salesman_code — never editable once generated
+    const immutableCode = String(existing.salesman_code);
+    const name =
+      body.name !== undefined || body.full_name !== undefined || body.salesman_name !== undefined
+        ? String(body.name ?? body.full_name ?? body.salesman_name ?? '').trim()
+        : String(existing.name || existing.full_name || '').trim();
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'Salesman Name cannot be empty.' });
     }
 
-    const dupCode = db
-      .prepare('SELECT id FROM salesmen WHERE UPPER(salesman_code) = UPPER(?) AND id != ?')
-      .get(code, id);
-    if (dupCode) {
-      return res.status(400).json({ success: false, error: `Salesman Code "${code}" is already in use.` });
-    }
-
-    const mobile = body.mobile !== undefined ? String(body.mobile).trim() : String(existing.mobile || '');
+    const mobile =
+      body.mobile !== undefined || body.phone !== undefined
+        ? String(body.mobile ?? body.phone ?? '').trim()
+        : String(existing.mobile || existing.phone || '');
     const address = body.address !== undefined ? String(body.address).trim() : String(existing.address || '');
     const joiningDate =
       body.joining_date !== undefined ? String(body.joining_date).trim() : String(existing.joining_date || '');
@@ -249,6 +286,10 @@ staffRouter.put('/salesmen/:id', (req: Request, res: Response) => {
       body.commission_rate !== undefined
         ? round2(Math.max(0, Number(body.commission_rate)))
         : round2(Number(existing.commission_rate || 0));
+    const commissionPercent =
+      commissionType === 'Percentage'
+        ? commissionRate
+        : round2(Number(existing.commission_percent || 0));
     const status =
       body.status !== undefined
         ? body.status === 'Inactive'
@@ -257,28 +298,46 @@ staffRouter.put('/salesmen/:id', (req: Request, res: Response) => {
         : String(existing.status || 'Active');
     const notes = body.notes !== undefined ? String(body.notes).trim() : String(existing.notes || '');
 
-    db.prepare(`
-      UPDATE salesmen
-      SET salesman_code = ?,
-          name = ?,
-          mobile = ?,
-          address = ?,
-          joining_date = ?,
-          commission_type = ?,
-          commission_rate = ?,
-          status = ?,
-          notes = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(code, name, mobile, address, joiningDate, commissionType, commissionRate, status, notes, id);
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE salesmen
+        SET salesman_code = ?,
+            name = ?,
+            full_name = ?,
+            mobile = ?,
+            phone = ?,
+            address = ?,
+            joining_date = ?,
+            commission_type = ?,
+            commission_rate = ?,
+            commission_percent = ?,
+            status = ?,
+            notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        immutableCode,
+        name,
+        name,
+        mobile,
+        mobile,
+        address,
+        joiningDate,
+        commissionType,
+        commissionRate,
+        commissionPercent,
+        status,
+        notes,
+        id
+      );
 
-    // Keep denormalized salesman name in sync on linked sales
-    db.prepare('UPDATE sales SET salesman = ? WHERE salesman_id = ?').run(name, id);
+      syncSalesmanDenormalizedReferences(db, id, name);
+    })();
 
     const updated = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id);
     return res.json({
       success: true,
-      message: `Salesman "${name}" updated successfully.`,
+      message: `Salesman "${name}" (${immutableCode}) updated successfully.`,
       data: updated,
     });
   } catch (err: unknown) {
@@ -304,8 +363,42 @@ staffRouter.patch('/salesmen/:id/status', (req: Request, res: Response) => {
     const updated = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id);
     return res.json({
       success: true,
-      message: `Salesman "${existing.name}" marked as ${nextStatus}.`,
+      message: `Salesman "${existing.name || existing.full_name}" marked as ${nextStatus}.`,
       data: updated,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(400).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * DELETE /api/staff/salesmen/:id
+ * Safe deletion only when zero linked invoices/bookings/supplies/parties exist.
+ * Never resets or reuses the deleted salesman's SAL-### sequence number.
+ */
+staffRouter.delete('/salesmen/:id', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const id = Number(req.params.id);
+    const existing = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Salesman not found.' });
+    }
+
+    const linked = getSalesmanLinkedRecordCount(db, id);
+    if (linked.total > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot delete Salesman "${existing.name || existing.full_name}" (${existing.salesman_code}) because ${linked.total} linked record(s) exist. Please mark as Inactive instead.`,
+      });
+    }
+
+    db.prepare('DELETE FROM salesmen WHERE id = ?').run(id);
+    return res.json({
+      success: true,
+      message: `Salesman "${existing.name || existing.full_name}" (${existing.salesman_code}) deleted. Sequence number will not be reused.`,
+      nextSalesmanCode: getNextSalesmanCode(),
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

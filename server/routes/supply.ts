@@ -10,6 +10,13 @@ import {
 import { logAuditEvent, hashPassword } from '../services/authService.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
 import { recordBatchStockMovement } from '../services/fifoAndOfferEngine.ts';
+import {
+  allocateNextSalesmanCode,
+  peekNextSalesmanCode,
+  syncSalesmanDenormalizedReferences,
+  refreshSalesmanPartiesJson,
+  getSalesmanLinkedRecordCount,
+} from '../utils/salesmanCodeGenerator.ts';
 
 export const supplyRouter = Router();
 
@@ -176,8 +183,10 @@ function getItemStockSummary(itemId: number): {
 
 supplyRouter.get('/next-numbers', (_req: Request, res: Response) => {
   try {
+    const db = getDatabase();
     res.json({
       success: true,
+      nextSalesmanCode: peekNextSalesmanCode(db),
       nextOrderNumber: getNextSeqNumber('supply_order_forms', 'order_number', 'ORD'),
       nextBookingNumber: getNextSeqNumber('supply_bookings', 'booking_number', 'BKG'),
       nextSupplyNumber: getNextSeqNumber('town_supplies', 'supply_number', 'SUP'),
@@ -270,8 +279,8 @@ supplyRouter.get('/dashboard', (req: Request, res: Response) => {
         SELECT
           s.id,
           s.salesman_code,
-          s.full_name as salesman_name,
-          s.phone,
+          COALESCE(NULLIF(TRIM(s.full_name), ''), s.name) as salesman_name,
+          COALESCE(NULLIF(TRIM(s.phone), ''), s.mobile, '') as phone,
           s.status,
           COALESCE((SELECT COUNT(*) FROM supply_bookings b WHERE b.salesman_id = s.id AND b.status != 'Cancelled'), 0) as bookings_count,
           COALESCE((SELECT SUM(total_amount) FROM supply_bookings b WHERE b.salesman_id = s.id AND b.status != 'Cancelled'), 0) as bookings_amount,
@@ -281,7 +290,7 @@ supplyRouter.get('/dashboard', (req: Request, res: Response) => {
           COALESCE((SELECT SUM(total_billed_amount) FROM town_supplies ts WHERE ts.salesman_id = s.id AND ts.supply_status != 'Cancelled'), 0) as billed_amount,
           COALESCE((SELECT SUM(recovery_amount) FROM supply_recoveries r WHERE r.salesman_id = s.id AND r.status = 'Posted'), 0) as recovery_amount
         FROM salesmen s
-        ORDER BY s.full_name ASC
+        ORDER BY s.salesman_code ASC, salesman_name ASC
       `)
       .all() as Array<Record<string, unknown>>;
 
@@ -351,24 +360,35 @@ supplyRouter.get('/salesmen', (req: Request, res: Response) => {
     const statusFilter = String(req.query.status || '').trim();
 
     let rows = db
-      .prepare('SELECT * FROM salesmen ORDER BY full_name ASC')
+      .prepare(
+        `SELECT * FROM salesmen
+         ORDER BY CASE WHEN status = 'Active' THEN 0 ELSE 1 END,
+                  salesman_code ASC,
+                  COALESCE(NULLIF(TRIM(full_name), ''), name) ASC`
+      )
       .all() as Array<Record<string, unknown>>;
 
     if (statusFilter && statusFilter !== 'ALL') {
       rows = rows.filter((r) => String(r.status) === statusFilter);
     }
     if (q) {
-      rows = rows.filter(
-        (r) =>
+      rows = rows.filter((r) => {
+        const displayName = String(r.full_name || r.name || '').toLowerCase();
+        const displayPhone = String(r.phone || r.mobile || '').toLowerCase();
+        return (
           String(r.salesman_code || '').toLowerCase().includes(q) ||
-          String(r.full_name || '').toLowerCase().includes(q) ||
-          String(r.phone || '').toLowerCase().includes(q) ||
+          displayName.includes(q) ||
+          displayPhone.includes(q) ||
           String(r.assigned_area || '').toLowerCase().includes(q)
-      );
+        );
+      });
     }
 
     const enriched = rows.map((s) => {
       const sId = Number(s.id);
+      const canonicalName = String(s.full_name || s.name || '').trim();
+      const canonicalPhone = String(s.phone || s.mobile || '').trim();
+
       const assignedTowns = db
         .prepare('SELECT town_id, town_name FROM salesman_towns WHERE salesman_id = ? ORDER BY town_name ASC')
         .all(sId) as Array<{ town_id: number; town_name: string }>;
@@ -418,6 +438,10 @@ supplyRouter.get('/salesmen', (req: Request, res: Response) => {
 
       return {
         ...s,
+        name: canonicalName,
+        full_name: canonicalName,
+        mobile: canonicalPhone,
+        phone: canonicalPhone,
         opening_balance: openingBalance,
         opening_balance_type: openingType,
         assigned_towns: assignedTowns,
@@ -438,7 +462,11 @@ supplyRouter.get('/salesmen', (req: Request, res: Response) => {
       };
     });
 
-    res.json({ success: true, salesmen: enriched });
+    res.json({
+      success: true,
+      salesmen: enriched,
+      nextSalesmanCode: peekNextSalesmanCode(db),
+    });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
   }
@@ -453,12 +481,28 @@ function saveSalesmanAssignments(
 ) {
   const db = getDatabase();
 
+  const normalizedTownIds = Array.from(new Set(townIds.map(Number).filter(Boolean)));
+  const normalizedAreaIds = Array.from(new Set(areaIds.map(Number).filter(Boolean)));
+  const normalizedPartyIds = Array.from(new Set(partyAccountIds.map(Number).filter(Boolean)));
+
+  // Unassign any party accounts previously linked to this salesman that were unchecked
+  const previousParties = db
+    .prepare('SELECT party_account_id FROM salesman_parties WHERE salesman_id = ?')
+    .all(salesmanId) as Array<{ party_account_id: number }>;
+  for (const prev of previousParties) {
+    if (!normalizedPartyIds.includes(Number(prev.party_account_id))) {
+      db.prepare(
+        'UPDATE accounts SET assigned_salesman_id = NULL, assigned_salesman_name = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND assigned_salesman_id = ?'
+      ).run(prev.party_account_id, salesmanId);
+    }
+  }
+
   db.prepare('DELETE FROM salesman_towns WHERE salesman_id = ?').run(salesmanId);
   db.prepare('DELETE FROM salesman_areas WHERE salesman_id = ?').run(salesmanId);
   db.prepare('DELETE FROM salesman_parties WHERE salesman_id = ?').run(salesmanId);
 
   const townNames: string[] = [];
-  for (const tId of Array.from(new Set(townIds.map(Number).filter(Boolean)))) {
+  for (const tId of normalizedTownIds) {
     const tRow = db.prepare('SELECT id, town_name FROM towns WHERE id = ?').get(tId) as
       | { id: number; town_name: string }
       | undefined;
@@ -473,7 +517,7 @@ function saveSalesmanAssignments(
   }
 
   const areaNames: string[] = [];
-  for (const aId of Array.from(new Set(areaIds.map(Number).filter(Boolean)))) {
+  for (const aId of normalizedAreaIds) {
     const aRow = db
       .prepare('SELECT id, area_name, town_id, town_name FROM town_areas WHERE id = ?')
       .get(aId) as { id: number; area_name: string; town_id: number; town_name: string } | undefined;
@@ -485,7 +529,7 @@ function saveSalesmanAssignments(
     }
   }
 
-  for (const pId of Array.from(new Set(partyAccountIds.map(Number).filter(Boolean)))) {
+  for (const pId of normalizedPartyIds) {
     const pRow = db
       .prepare('SELECT id, account_name, town_name, city, area_name FROM accounts WHERE id = ?')
       .get(pId) as
@@ -495,7 +539,7 @@ function saveSalesmanAssignments(
       const townName = String(pRow.town_name || pRow.city || '');
       const areaName = String(pRow.area_name || '');
       db.prepare(
-        'INSERT OR IGNORE INTO salesman_parties (salesman_id, party_account_id, party_name, town_name, area_name) VALUES (?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO salesman_parties (salesman_id, party_account_id, party_name, town_name, area_name) VALUES (?, ?, ?, ?, ?)'
       ).run(salesmanId, pRow.id, pRow.account_name, townName, areaName);
 
       db.prepare(
@@ -515,9 +559,9 @@ function saveSalesmanAssignments(
     WHERE id = ?
   `).run(
     summaryTerritory,
-    JSON.stringify(townIds),
-    JSON.stringify(areaIds),
-    JSON.stringify(partyAccountIds),
+    JSON.stringify(normalizedTownIds),
+    JSON.stringify(normalizedAreaIds),
+    JSON.stringify(normalizedPartyIds),
     salesmanId
   );
 }
@@ -528,13 +572,12 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
     const fullName = String(body.full_name || body.salesman_name || body.name || '').trim();
     if (!fullName) throw new Error('Salesman Name is required.');
 
-    let code = String(body.salesman_code || '').trim().toUpperCase();
-    if (!code) {
-      code = getNextSeqNumber('salesmen', 'salesman_code', 'SM');
-    }
+    // Strictly monotonic automatic numbering: SAL-001, SAL-002, SAL-003... (never manual, never reused)
+    const code = allocateNextSalesmanCode(db);
 
     const phone = String(body.phone || body.mobile_number || body.mobile || '').trim();
     const address = String(body.address || '').trim();
+    const joiningDate = String(body.joining_date || new Date().toISOString().slice(0, 10)).trim();
     const username = String(body.username || code.toLowerCase()).trim();
     const plainPassword = String(body.password || '123456').trim();
     const { salt, hash } = hashPassword(plainPassword);
@@ -543,6 +586,10 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
       Array.isArray(body.permitted_item_ids) ? body.permitted_item_ids.map(Number) : []
     );
 
+    const commissionType = body.commission_type === 'Fixed Amount' ? 'Fixed Amount' : 'Percentage';
+    const commissionRate = round2(Number(body.commission_rate ?? body.commission_percent ?? 0));
+    const commissionPercent = round2(Number(body.commission_percent ?? body.commission_rate ?? 0));
+    const monthlyTarget = round2(Number(body.monthly_target || 0));
     const openingBalance = round2(Math.max(0, Number(body.opening_balance || 0)));
     const openingBalanceType = body.opening_balance_type === 'Credit' ? 'Credit' : 'Debit';
     const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
@@ -551,12 +598,13 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
     const insert = db
       .prepare(`
         INSERT INTO salesmen (
-          salesman_code, name, full_name, mobile, phone, address,
+          salesman_code, name, full_name, mobile, phone, address, joining_date,
+          commission_type, commission_rate,
           username, password_hash, permitted_items_json,
           assigned_area, commission_percent, monthly_target,
-          opening_balance, current_balance, opening_balance_type,
+          opening_balance, opening_balance_type,
           status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
       `)
       .run(
         code,
@@ -565,12 +613,14 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
         phone,
         phone,
         address,
+        joiningDate,
+        commissionType,
+        commissionRate,
         username,
         passwordHash,
         permittedItemsJson,
-        round2(Number(body.commission_percent || 0)),
-        round2(Number(body.monthly_target || 0)),
-        openingBalance,
+        commissionPercent,
+        monthlyTarget,
         openingBalance,
         openingBalanceType,
         status,
@@ -590,7 +640,11 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
 
   try {
     const record = tx(req.body || {});
-    res.status(201).json({ success: true, salesman: record });
+    res.status(201).json({
+      success: true,
+      salesman: record,
+      nextSalesmanCode: peekNextSalesmanCode(db),
+    });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: err instanceof Error ? err.message : String(err) });
   }
@@ -605,11 +659,16 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
     const fullName = String(body.full_name || body.salesman_name || body.name || existing.full_name || existing.name || '').trim();
     if (!fullName) throw new Error('Salesman Name is required.');
 
+    // Keep salesman_code strictly immutable / read-only
     const phone =
       body.phone !== undefined || body.mobile !== undefined
         ? String(body.phone ?? body.mobile ?? '').trim()
         : String(existing.phone || existing.mobile || '');
     const address = body.address !== undefined ? String(body.address).trim() : String(existing.address || '');
+    const joiningDate =
+      body.joining_date !== undefined && String(body.joining_date).trim()
+        ? String(body.joining_date).trim()
+        : String(existing.joining_date || new Date().toISOString().slice(0, 10));
     const username =
       body.username !== undefined && String(body.username).trim()
         ? String(body.username).trim()
@@ -624,6 +683,29 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
     const permittedItemsJson = Array.isArray(body.permitted_item_ids)
       ? JSON.stringify(body.permitted_item_ids.map(Number))
       : String(existing.permitted_items_json || '[]');
+
+    const commissionType =
+      body.commission_type !== undefined
+        ? body.commission_type === 'Fixed Amount'
+          ? 'Fixed Amount'
+          : 'Percentage'
+        : existing.commission_type === 'Fixed Amount'
+        ? 'Fixed Amount'
+        : 'Percentage';
+    const commissionRate =
+      body.commission_rate !== undefined
+        ? round2(Number(body.commission_rate))
+        : round2(Number(existing.commission_rate ?? existing.commission_percent ?? 0));
+    const commissionPercent =
+      body.commission_percent !== undefined
+        ? round2(Number(body.commission_percent))
+        : body.commission_rate !== undefined
+        ? round2(Number(body.commission_rate))
+        : round2(Number(existing.commission_percent ?? existing.commission_rate ?? 0));
+    const monthlyTarget =
+      body.monthly_target !== undefined
+        ? round2(Number(body.monthly_target))
+        : round2(Number(existing.monthly_target || 0));
 
     const openingBalance =
       body.opening_balance !== undefined
@@ -650,6 +732,11 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
           mobile = ?,
           phone = ?,
           address = ?,
+          joining_date = ?,
+          commission_type = ?,
+          commission_rate = ?,
+          commission_percent = ?,
+          monthly_target = ?,
           username = ?,
           password_hash = ?,
           permitted_items_json = ?,
@@ -665,6 +752,11 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
       phone,
       phone,
       address,
+      joiningDate,
+      commissionType,
+      commissionRate,
+      commissionPercent,
+      monthlyTarget,
       username,
       passwordHash,
       permittedItemsJson,
@@ -686,16 +778,78 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
       : JSON.parse(String(existing.assigned_parties_json || '[]'));
 
     saveSalesmanAssignments(id, fullName, townIds, areaIds, partyIds);
-    recordAudit(req, 'SUPPLY_SALESMAN_UPDATED', `Updated salesman ${fullName} (#${id})`);
+    syncSalesmanDenormalizedReferences(db, id, fullName);
+    recordAudit(req, 'SUPPLY_SALESMAN_UPDATED', `Updated salesman ${fullName} (${existing.salesman_code}) [#${id}]`);
 
     return db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id);
   });
 
   try {
     const record = tx(Number(req.params.id), req.body || {});
-    res.json({ success: true, salesman: record });
+    res.json({
+      success: true,
+      salesman: record,
+      nextSalesmanCode: peekNextSalesmanCode(db),
+    });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+supplyRouter.patch('/salesmen/:id/status', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const id = Number(req.params.id);
+    const existing = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!existing) {
+      res.status(404).json({ success: false, error: 'Salesman not found.' });
+      return;
+    }
+    const nextStatus = req.body?.status === 'Inactive' ? 'Inactive' : 'Active';
+    db.prepare('UPDATE salesmen SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(nextStatus, id);
+    const updated = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id);
+    recordAudit(
+      req,
+      'SUPPLY_SALESMAN_STATUS_CHANGED',
+      `Salesman "${existing.full_name || existing.name}" (${existing.salesman_code}) marked ${nextStatus}.`
+    );
+    res.json({ success: true, salesman: updated, message: `Salesman marked ${nextStatus}.` });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+supplyRouter.delete('/salesmen/:id', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const id = Number(req.params.id);
+    const existing = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!existing) {
+      res.status(404).json({ success: false, error: 'Salesman not found.' });
+      return;
+    }
+    const linked = getSalesmanLinkedRecordCount(db, id);
+    if (linked.total > 0) {
+      res.status(400).json({
+        success: false,
+        error: `Cannot delete "${existing.full_name || existing.name}" (${existing.salesman_code}) because they are linked to ${linked.total} record(s). Mark them Inactive instead.`,
+      });
+      return;
+    }
+
+    // Remove junction links only; sequence number is NEVER reset or decremented
+    db.prepare('DELETE FROM salesman_towns WHERE salesman_id = ?').run(id);
+    db.prepare('DELETE FROM salesman_areas WHERE salesman_id = ?').run(id);
+    db.prepare('DELETE FROM salesman_parties WHERE salesman_id = ?').run(id);
+    db.prepare('DELETE FROM salesmen WHERE id = ?').run(id);
+    recordAudit(req, 'SUPPLY_SALESMAN_DELETED', `Deleted salesman "${existing.full_name || existing.name}" (${existing.salesman_code})`);
+    res.json({
+      success: true,
+      message: `Salesman "${existing.full_name || existing.name}" deleted.`,
+      nextSalesmanCode: peekNextSalesmanCode(db),
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -716,7 +870,9 @@ supplyRouter.get('/towns', (_req: Request, res: Response) => {
 
     const salesmanTownLinks = db
       .prepare(`
-        SELECT st.town_id, st.salesman_id, s.full_name as salesman_name, s.salesman_code
+        SELECT st.town_id, st.salesman_id,
+               COALESCE(NULLIF(TRIM(s.full_name), ''), s.name) as salesman_name,
+               s.salesman_code
         FROM salesman_towns st
         JOIN salesmen s ON s.id = st.salesman_id
       `)
@@ -940,9 +1096,9 @@ supplyRouter.post('/assign-party', (req: Request, res: Response) => {
 
     let salesmanName = String(body.salesman_name || '').trim();
     if (salesmanId) {
-      const sRow = db.prepare('SELECT full_name FROM salesmen WHERE id = ?').get(salesmanId) as
-        | { full_name: string }
-        | undefined;
+      const sRow = db
+        .prepare("SELECT COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?")
+        .get(salesmanId) as { full_name: string } | undefined;
       if (sRow) salesmanName = sRow.full_name;
     }
 
@@ -992,6 +1148,10 @@ supplyRouter.post('/assign-party', (req: Request, res: Response) => {
           ).run(salesmanId, areaId, areaName, townId, townName);
         }
       }
+    }
+
+    if (salesmanId) {
+      refreshSalesmanPartiesJson(db, salesmanId);
     }
 
     recordAudit(
@@ -1135,7 +1295,7 @@ function upsertOrderForm(orderFormId: number | null, body: Record<string, unknow
   const salesmanId = body.salesman_id ? Number(body.salesman_id) : null;
   let salesmanName = String(body.salesman_name || '').trim();
   if (salesmanId && !salesmanName) {
-    const s = db.prepare('SELECT full_name FROM salesmen WHERE id = ?').get(salesmanId) as { full_name: string } | undefined;
+    const s = db.prepare("SELECT COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?").get(salesmanId) as { full_name: string } | undefined;
     if (s) salesmanName = s.full_name;
   }
 
@@ -1608,7 +1768,7 @@ function upsertBooking(bookingId: number | null, body: Record<string, unknown>) 
   const salesmanId = Number(body.salesman_id || partyRow.assigned_salesman_id || 0) || null;
   let salesmanName = String(body.salesman_name || partyRow.assigned_salesman_name || '').trim();
   if (salesmanId && !salesmanName) {
-    const s = db.prepare('SELECT full_name FROM salesmen WHERE id = ?').get(salesmanId) as { full_name: string } | undefined;
+    const s = db.prepare("SELECT COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?").get(salesmanId) as { full_name: string } | undefined;
     if (s) salesmanName = s.full_name;
   }
 
@@ -2070,7 +2230,7 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
     const salesmanId = body.salesman_id ? Number(body.salesman_id) : null;
     let salesmanName = String(body.salesman_name || '').trim();
     if (salesmanId && !salesmanName) {
-      const s = db.prepare('SELECT full_name FROM salesmen WHERE id = ?').get(salesmanId) as { full_name: string } | undefined;
+      const s = db.prepare("SELECT COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?").get(salesmanId) as { full_name: string } | undefined;
       if (s) salesmanName = s.full_name;
     }
 
@@ -3919,7 +4079,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
         entry.salesman_name || body.salesman_name || partyRow.assigned_salesman_name || ''
       ).trim();
       if (salesmanId && !salesmanName) {
-        const s = db.prepare('SELECT full_name FROM salesmen WHERE id = ?').get(salesmanId) as { full_name: string } | undefined;
+        const s = db.prepare("SELECT COALESCE(NULLIF(TRIM(full_name), ''), name) as full_name FROM salesmen WHERE id = ?").get(salesmanId) as { full_name: string } | undefined;
         if (s) salesmanName = s.full_name;
       }
 

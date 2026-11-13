@@ -574,6 +574,7 @@ export function validateSession(
   valid: boolean;
   user?: SafeUser;
   permissions?: Record<string, ModulePermission>;
+  rememberMe?: boolean;
   reason?: string;
   code?: string;
 } {
@@ -646,6 +647,7 @@ export function validateSession(
     valid: true,
     user: safeUser,
     permissions,
+    rememberMe: Boolean(session.remember_me),
   };
 }
 

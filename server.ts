@@ -29,6 +29,7 @@ import {
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '50mb' }));
 
   const distPath = path.resolve(process.cwd(), 'dist');

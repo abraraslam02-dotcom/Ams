@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { User, ModulePermission } from '../types/auth';
-import { api, getAuthToken, setAuthToken } from '../services/api';
+import { api } from '../services/api';
 
 interface AuthContextType {
   user: User | null;
@@ -31,9 +31,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await api.getAuthStatus();
 
       if (res && res.authenticated && res.user) {
-        if ((res as any).token) {
-          setAuthToken((res as any).token, true);
-        }
         setUser(res.user);
         setPermissions(res.permissions || {});
         setIsAuthenticated(true);
@@ -43,14 +40,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setIsAuthenticated(false);
       }
     } catch (err) {
-      console.warn('[AMS Auth Context] Verification note:', err);
-      // Fallback
-      const token = getAuthToken();
-      if (!token) {
-        setUser(null);
-        setPermissions({});
-        setIsAuthenticated(false);
-      }
+      console.warn('[AMS Auth Context] Verification failed:', err);
+      setUser(null);
+      setPermissions({});
+      setIsAuthenticated(false);
     } finally {
       setLoading(false);
     }
@@ -72,11 +65,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [checkStatus]);
 
   const login = async (username: string, password: string, rememberMe?: boolean) => {
-    const res = await api.login({ username, password, remember_me: rememberMe });
+    const res = await api.login({ username, password, remember_me: Boolean(rememberMe) });
     if (res.success && res.user) {
-      if (res.token) {
-        setAuthToken(res.token, Boolean(rememberMe));
-      }
       setUser(res.user);
       setPermissions(res.permissions || {});
       setIsAuthenticated(true);
@@ -89,7 +79,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       // Ignore network errors on logout
     } finally {
-      setAuthToken(null);
       setUser(null);
       setPermissions({});
       setIsAuthenticated(false);

@@ -38,8 +38,10 @@ interface AccountFormModalProps {
 interface SalesmanOption {
   id: number;
   salesman_code: string;
+  name?: string;
   full_name: string;
   phone?: string;
+  mobile?: string;
   status: string;
 }
 
@@ -115,7 +117,7 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
 
     Promise.all([
       api.getSupplyTowns().catch(() => ({ towns: [], areas: [] })),
-      api.getSupplySalesmen({ status: 'Active' }).catch(() => ({ salesmen: [] })),
+      api.getSupplySalesmen({ status: 'ALL' }).catch(() => ({ salesmen: [] })),
     ])
       .then(([townsRes, salesmenRes]) => {
         if (!isMounted) return;
@@ -126,7 +128,13 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
           setAreasList(townsRes.areas.filter((a: TownAreaRecord) => a.status === 'Active'));
         }
         if (Array.isArray(salesmenRes?.salesmen)) {
-          setSalesmenList(salesmenRes.salesmen.filter((s: SalesmanOption) => s.status === 'Active'));
+          setSalesmenList(
+            salesmenRes.salesmen.map((s: SalesmanOption) => ({
+              ...s,
+              full_name: s.full_name || s.name || '',
+              phone: s.phone || s.mobile || '',
+            }))
+          );
         }
       })
       .finally(() => {
@@ -821,11 +829,15 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
                   className="w-full px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 >
                   <option value="">— Select Field Salesman (Optional) —</option>
-                  {salesmenList.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      [{s.salesman_code}] {s.full_name} {s.phone ? `(${s.phone})` : ''}
-                    </option>
-                  ))}
+                  {salesmenList
+                    .filter((s) => s.status === 'Active' || s.id === formData.assigned_salesman_id)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        [{s.salesman_code}] {s.full_name || s.name}{' '}
+                        {s.phone || s.mobile ? `(${s.phone || s.mobile})` : ''}
+                        {s.status !== 'Active' ? ' [Inactive]' : ''}
+                      </option>
+                    ))}
                 </select>
                 <p className="text-[10px] text-slate-500">
                   Assigned order booking & recovery agent for this party.

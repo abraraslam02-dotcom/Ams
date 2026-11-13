@@ -1,6 +1,7 @@
 import { getDatabase } from './connection.ts';
 import { SCHEMA_SQL } from './schema.ts';
 import { config } from '../config.ts';
+import { ensureSalesmanSequenceTable } from '../utils/salesmanCodeGenerator.ts';
 
 export interface MigrationResult {
   success: boolean;
@@ -48,6 +49,7 @@ export function runMigrations(): MigrationResult {
   const migrationName19 = '019_supply_and_distribution_management_system';
   const migrationName20 = '020_master_enhancement_fifo_offers_discounts_mobile_reset_backup';
   const migrationName21 = '021_inventory_reports_idempotency_and_reference_columns';
+  const migrationName22 = '022_salesman_monotonic_sequence_and_sync';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3126,6 +3128,44 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName21, 21);
     }
+
+    // 22. Migration 022: Monotonic Salesman SAL-### Sequence, Cross-Module Sync & Indexes
+    const existing22 = db.prepare('SELECT id FROM database_migrations WHERE migration_name = ?').get(migrationName22);
+    if (!existing22) {
+      ensureSalesmanSequenceTable(db);
+
+      db.exec(`
+        UPDATE salesmen
+        SET full_name = name
+        WHERE (full_name IS NULL OR TRIM(full_name) = '') AND name IS NOT NULL AND TRIM(name) != '';
+
+        UPDATE salesmen
+        SET name = full_name
+        WHERE (name IS NULL OR TRIM(name) = '') AND full_name IS NOT NULL AND TRIM(full_name) != '';
+
+        UPDATE salesmen
+        SET phone = mobile
+        WHERE (phone IS NULL OR TRIM(phone) = '') AND mobile IS NOT NULL AND TRIM(mobile) != '';
+
+        UPDATE salesmen
+        SET mobile = phone
+        WHERE (mobile IS NULL OR TRIM(mobile) = '') AND phone IS NOT NULL AND TRIM(phone) != '';
+
+        INSERT OR IGNORE INTO salesman_parties (salesman_id, party_account_id, party_name, town_name, area_name)
+        SELECT a.assigned_salesman_id, a.id, a.account_name, COALESCE(NULLIF(a.town_name, ''), a.city, ''), COALESCE(a.area_name, '')
+        FROM accounts a
+        INNER JOIN salesmen s ON s.id = a.assigned_salesman_id
+        WHERE a.assigned_salesman_id IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_sales_salesman_id ON sales(salesman_id);
+        CREATE INDEX IF NOT EXISTS idx_accounts_assigned_salesman ON accounts(assigned_salesman_id);
+        CREATE INDEX IF NOT EXISTS idx_supply_bookings_salesman ON supply_bookings(salesman_id);
+        CREATE INDEX IF NOT EXISTS idx_town_supplies_salesman ON town_supplies(salesman_id);
+        CREATE INDEX IF NOT EXISTS idx_supply_recoveries_salesman ON supply_recoveries(salesman_id);
+      `);
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName22, 22);
+    }
   });
 
   try {
@@ -3144,7 +3184,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,
