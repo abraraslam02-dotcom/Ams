@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     account_name TEXT NOT NULL,
     main_group TEXT NOT NULL CHECK(main_group IN ('PARTY ACCOUNTS', 'FINANCIAL ACCOUNTS', 'INCOME & EXPENSE ACCOUNTS')),
     account_group TEXT NOT NULL,
+    account_type TEXT NOT NULL DEFAULT '',
     parent_account_id INTEGER,
     opening_balance REAL NOT NULL DEFAULT 0.0 CHECK(opening_balance >= 0),
     opening_balance_type TEXT NOT NULL DEFAULT 'Debit' CHECK(opening_balance_type IN ('Debit', 'Credit')),

@@ -93,22 +93,50 @@ function getNextVoucherNumber(): string {
   return `VCH-2026-${String(seq).padStart(4, '0')}`;
 }
 
-function getNextCashBookVoucherNo(): string {
-  const db = getDatabase();
-  const row = db
-    .prepare("SELECT voucher_no FROM cash_book_vouchers WHERE voucher_no LIKE 'CB-2026-%' ORDER BY id DESC LIMIT 1")
-    .get() as { voucher_no: string } | undefined;
-  let seq = 1;
-  if (row?.voucher_no) {
-    const match = row.voucher_no.match(/(\d+)$/);
-    if (match) seq = parseInt(match[1], 10) + 1;
+function allocateContinuousCashBookVoucherNo(db: any): {
+  nextSequence: number;
+  nextVoucherNumber: string;
+} {
+  const curMaxVoucher = Number(
+    (
+      db.prepare('SELECT COALESCE(MAX(sequence_number), 0) as m FROM cash_book_vouchers').get() as {
+        m: number;
+      }
+    )?.m || 0
+  );
+
+  let seqRow = db
+    .prepare("SELECT last_sequence FROM cash_book_sequences WHERE sequence_key = 'voucher_continuous'")
+    .get() as { last_sequence: number } | undefined;
+
+  if (!seqRow) {
+    db.prepare(`
+      INSERT INTO cash_book_sequences (sequence_key, last_sequence, updated_at)
+      VALUES ('voucher_continuous', ?, CURRENT_TIMESTAMP)
+    `).run(curMaxVoucher);
+    seqRow = { last_sequence: curMaxVoucher };
   }
+
+  const baseSeq = Math.max(Number(seqRow.last_sequence || 0), curMaxVoucher);
+  let nextSeq = baseSeq + 1;
+  let formattedNo = String(nextSeq).padStart(3, '0');
+
   while (
-    db.prepare('SELECT id FROM cash_book_vouchers WHERE voucher_no = ?').get(`CB-2026-${String(seq).padStart(4, '0')}`)
+    db
+      .prepare('SELECT id FROM cash_book_vouchers WHERE voucher_number = ? OR sequence_number = ?')
+      .get(formattedNo, nextSeq)
   ) {
-    seq++;
+    nextSeq++;
+    formattedNo = String(nextSeq).padStart(3, '0');
   }
-  return `CB-2026-${String(seq).padStart(4, '0')}`;
+
+  db.prepare(`
+    UPDATE cash_book_sequences
+    SET last_sequence = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE sequence_key = 'voucher_continuous'
+  `).run(nextSeq);
+
+  return { nextSequence: nextSeq, nextVoucherNumber: formattedNo };
 }
 
 function recordAudit(req: Request, action: string, details: string) {
@@ -269,7 +297,7 @@ supplyRouter.get('/dashboard', (req: Request, res: Response) => {
       .prepare(`
         SELECT COALESCE(SUM(CASE WHEN current_balance_type = 'Debit' THEN current_balance ELSE -current_balance END), 0) as total_outstanding
         FROM accounts
-        WHERE account_type = 'Customer' AND is_system_account = 0 AND status = 'Active'
+        WHERE account_type IN ('Customer', 'Customer & Supplier') AND is_system_account = 0 AND status = 'Active'
       `)
       .get() as { total_outstanding: number };
 
@@ -302,14 +330,14 @@ supplyRouter.get('/dashboard', (req: Request, res: Response) => {
           t.town_code,
           t.town_name,
           t.status,
-          COALESCE((SELECT COUNT(*) FROM accounts a WHERE a.account_type = 'Customer' AND a.is_system_account = 0 AND (a.town_id = t.id OR LOWER(a.town_name) = LOWER(t.town_name) OR LOWER(a.city) = LOWER(t.town_name))), 0) as total_parties,
+          COALESCE((SELECT COUNT(*) FROM accounts a WHERE a.account_type IN ('Customer', 'Customer & Supplier') AND a.is_system_account = 0 AND (a.town_id = t.id OR LOWER(a.town_name) = LOWER(t.town_name) OR LOWER(a.city) = LOWER(t.town_name))), 0) as total_parties,
           COALESCE((SELECT COUNT(*) FROM town_areas ta WHERE ta.town_id = t.id), 0) as total_areas,
           COALESCE((SELECT SUM(total_amount) FROM supply_bookings b WHERE (b.town_id = t.id OR LOWER(b.town_name) = LOWER(t.town_name)) AND b.status != 'Cancelled'), 0) as bookings_amount,
           COALESCE((SELECT SUM(total_supply_amount) FROM town_supplies ts WHERE (ts.town_id = t.id OR LOWER(ts.town_name) = LOWER(t.town_name)) AND ts.supply_status != 'Cancelled'), 0) as supply_amount,
           COALESCE((SELECT SUM(total_return_amount) FROM town_supplies ts WHERE (ts.town_id = t.id OR LOWER(ts.town_name) = LOWER(t.town_name)) AND ts.supply_status != 'Cancelled'), 0) as return_amount,
           COALESCE((SELECT SUM(total_billed_amount) FROM town_supplies ts WHERE (ts.town_id = t.id OR LOWER(ts.town_name) = LOWER(t.town_name)) AND ts.supply_status != 'Cancelled'), 0) as final_sales_amount,
           COALESCE((SELECT SUM(recovery_amount) FROM supply_recoveries r WHERE (r.town_id = t.id OR LOWER(r.town_name) = LOWER(t.town_name)) AND r.status = 'Posted'), 0) as recovery_amount,
-          COALESCE((SELECT SUM(CASE WHEN a.current_balance_type = 'Debit' THEN a.current_balance ELSE -a.current_balance END) FROM accounts a WHERE a.account_type = 'Customer' AND a.is_system_account = 0 AND (a.town_id = t.id OR LOWER(a.town_name) = LOWER(t.town_name) OR LOWER(a.city) = LOWER(t.town_name))), 0) as outstanding_amount
+          COALESCE((SELECT SUM(CASE WHEN a.current_balance_type = 'Debit' THEN a.current_balance ELSE -a.current_balance END) FROM accounts a WHERE a.account_type IN ('Customer', 'Customer & Supplier') AND a.is_system_account = 0 AND (a.town_id = t.id OR LOWER(a.town_name) = LOWER(t.town_name) OR LOWER(a.city) = LOWER(t.town_name))), 0) as outstanding_amount
         FROM towns t
         ORDER BY t.town_name ASC
       `)
@@ -880,13 +908,13 @@ supplyRouter.get('/towns', (_req: Request, res: Response) => {
 
     const customerParties = db
       .prepare(`
-        SELECT id, account_code, account_name, contact_person, phone, address,
+        SELECT id, account_code, account_name, account_group, account_type, contact_person, phone, address,
                town_id, COALESCE(NULLIF(town_name, ''), city, '') as town_name,
                area_id, COALESCE(area_name, '') as area_name,
                assigned_salesman_id, COALESCE(assigned_salesman_name, '') as assigned_salesman_name,
                current_balance, current_balance_type, status
         FROM accounts
-        WHERE account_type = 'Customer' AND is_system_account = 0
+        WHERE account_type IN ('Customer', 'Customer & Supplier') AND is_system_account = 0
         ORDER BY account_name ASC
       `)
       .all() as Array<Record<string, unknown>>;
@@ -2015,13 +2043,13 @@ supplyRouter.get('/town-pending-bookings', (req: Request, res: Response) => {
 
     let parties = db
       .prepare(`
-        SELECT id, account_code, account_name, phone, address,
+        SELECT id, account_code, account_name, account_group, account_type, phone, address,
                town_id, COALESCE(NULLIF(town_name, ''), city, '') as town_name,
                area_id, COALESCE(area_name, '') as area_name,
                assigned_salesman_id, COALESCE(assigned_salesman_name, '') as assigned_salesman_name,
                current_balance, current_balance_type
         FROM accounts
-        WHERE account_type = 'Customer' AND is_system_account = 0 AND status = 'Active'
+        WHERE account_type IN ('Customer', 'Customer & Supplier') AND is_system_account = 0 AND status = 'Active'
         ORDER BY account_name ASC
       `)
       .all() as Array<Record<string, unknown>>;
@@ -3002,26 +3030,44 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
     const insertDispItem = db.prepare(`
       INSERT INTO supply_dispatch_items (
         dispatch_id, town_supply_id, party_supply_id, party_supply_item_id,
-        party_account_id, party_name, item_id, inventory_id,
-        item_code, item_name, batch_number, dispatched_qty, bonus_qty, amount, delivery_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Dispatched')
+        supply_number, party_account_id, party_name, s_no, item_id, inventory_id,
+        item_code, company_name, item_name, packing, batch_number, expiry_date,
+        ordered_quantity, packed_quantity, packed_qty,
+        dispatched_quantity, dispatched_qty, bonus_quantity, bonus_qty,
+        trade_price, discount_percent, discount_amount, amount, delivery_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Dispatched')
     `);
 
     for (const line of items) {
+      const dispQty = round2(Number(line.supply_quantity || 0));
+      const bonusQty = round2(Number(line.bonus_quantity || 0));
       insertDispItem.run(
         dispatchId,
         townSupplyId,
         Number(line.party_supply_id),
         Number(line.id),
+        String(supply.supply_number || ''),
         Number(line.party_account_id),
         String(line.party_name || ''),
+        Number(line.s_no || 1),
         Number(line.item_id),
         line.inventory_id ? Number(line.inventory_id) : null,
         String(line.item_code || ''),
+        String(line.company_name || ''),
         String(line.item_name || ''),
+        String(line.packing || '1x1'),
         String(line.batch_number || ''),
-        round2(Number(line.supply_quantity || 0)),
-        round2(Number(line.bonus_quantity || 0)),
+        String(line.expiry_date || ''),
+        round2(Number(line.ordered_quantity || dispQty)),
+        dispQty,
+        dispQty,
+        dispQty,
+        dispQty,
+        bonusQty,
+        bonusQty,
+        round2(Number(line.trade_price || 0)),
+        round2(Number(line.discount_percent || 0)),
+        round2(Number(line.discount_amount || 0)),
         round2(Number(line.amount || 0))
       );
     }
@@ -3914,7 +3960,7 @@ supplyRouter.post('/supplies/:id/finalize-billing', (req: Request, res: Response
         UPDATE party_supplies
         SET billed_amount = ?,
             final_sale_id = COALESCE(final_sale_id, ?),
-            final_invoice_number = CASE WHEN final_invoice_number = '' THEN ? ELSE final_invoice_number || ', ' || ? END,
+            final_invoice_number = CASE WHEN COALESCE(TRIM(final_invoice_number), '') = '' THEN ? ELSE final_invoice_number || ', ' || ? END,
             delivery_status = 'Delivered',
             supply_status = ?,
             updated_at = CURRENT_TIMESTAMP
@@ -4049,7 +4095,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
 
       const partyRow = db
         .prepare(
-          'SELECT id, account_name, town_id, town_name, city, area_id, area_name, assigned_salesman_id, assigned_salesman_name FROM accounts WHERE id = ?'
+          'SELECT id, account_code, account_name, town_id, town_name, city, area_id, area_name, assigned_salesman_id, assigned_salesman_name FROM accounts WHERE id = ?'
         )
         .get(partyAccountId) as Record<string, unknown> | undefined;
       if (!partyRow) throw new Error(`Party account #${partyAccountId} not found.`);
@@ -4071,7 +4117,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
       );
       const receiptNumber =
         String(entry.recovery_receipt_number || '').trim() ||
-        getNextSeqNumber('supply_recoveries', 'recovery_receipt_number', 'REC');
+        getNextSeqNumber('supply_recoveries', 'receipt_number', 'REC');
 
       const salesmanId =
         Number(entry.salesman_id || body.salesman_id || partyRow.assigned_salesman_id || 0) || null;
@@ -4112,6 +4158,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
       const paymentMethod = (['Cash', 'Bank', 'Cheque', 'Online'].includes(String(entry.payment_method || body.payment_method))
         ? String(entry.payment_method || body.payment_method)
         : 'Cash') as string;
+      const pvPaymentMethod = paymentMethod === 'Bank' ? 'Bank Transfer' : paymentMethod;
 
       let paymentAccountId = entry.payment_account_id
         ? Number(entry.payment_account_id)
@@ -4124,8 +4171,9 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
       }
 
       const payAccRow = db
-        .prepare('SELECT account_name FROM accounts WHERE id = ?')
-        .get(paymentAccountId) as { account_name: string } | undefined;
+        .prepare('SELECT id, account_code, account_name FROM accounts WHERE id = ?')
+        .get(paymentAccountId) as { id: number; account_code: string; account_name: string } | undefined;
+      const paymentAccountCode = String(payAccRow?.account_code || (paymentMethod === 'Cash' ? 'FIN-1010' : 'FIN-1021'));
       const paymentAccountName = String(payAccRow?.account_name || (paymentMethod === 'Cash' ? 'Cash in Hand' : 'Bank Account'));
 
       const remarks = String(entry.remarks || body.remarks || '').trim();
@@ -4141,7 +4189,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
           INSERT INTO journal_entries (
             entry_number, entry_date, reference_type, reference_id, description,
             total_debit, total_credit, is_balanced, status
-          ) VALUES (?, ?, 'CUSTOMER_RECEIPT', ?, ?, ?, ?, 1, 'posted')
+          ) VALUES (?, ?, 'VOUCHER', ?, ?, ?, ?, 1, 'posted')
         `)
         .run(jeNumber, recoveryDate, partyAccountId, jeDesc, recoveryAmount, recoveryAmount);
       const journalEntryId = Number(jeRes.lastInsertRowid);
@@ -4160,70 +4208,76 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
       const pvRes = db
         .prepare(`
           INSERT INTO payment_vouchers (
-            voucher_number, voucher_date, voucher_type, account_id, payment_account_id,
-            payment_mode, reference_type, reference_id, reference_number,
-            amount, journal_entry_id, remarks
-          ) VALUES (?, ?, 'receipt', ?, ?, ?, 'SALE', ?, ?, ?, ?, ?)
+            voucher_number, voucher_date, voucher_type, party_account_id, financial_account_id,
+            amount, payment_method, reference_number, description, journal_entry_id, status
+          ) VALUES (?, ?, 'customer_receipt', ?, ?, ?, ?, ?, ?, ?, 'posted')
         `)
         .run(
           voucherNumber,
           recoveryDate,
           partyAccountId,
           paymentAccountId,
-          paymentMethod === 'Online' ? 'Bank' : paymentMethod,
-          saleId,
-          invoiceNumber || supplyNumber || receiptNumber,
           recoveryAmount,
-          journalEntryId,
-          jeDesc
+          pvPaymentMethod,
+          invoiceNumber || supplyNumber || receiptNumber,
+          jeDesc,
+          journalEntryId
         );
       const paymentVoucherId = Number(pvRes.lastInsertRowid);
 
       // 3. Create Cash Book Voucher if Cash
       let cashBookVoucherId: number | null = null;
       if (paymentMethod === 'Cash') {
-        const cbNo = getNextCashBookVoucherNo();
+        const { nextSequence, nextVoucherNumber } = allocateContinuousCashBookVoucherNo(db);
         const cbRes = db
           .prepare(`
             INSERT INTO cash_book_vouchers (
-              voucher_no, entry_date, entry_time, transaction_type,
-              account_id, account_name, account_type,
-              cash_account_id, reference_no, description,
-              receipt_amount, payment_amount,
-              source_module, is_system_generated, status, created_by, journal_entry_id
-            ) VALUES (?, ?, time('now'), 'Cash Receipt', ?, ?, 'Customer', ?, ?, ?, ?, 0, 'Supply Recovery', 1, 'Posted', ?, ?)
+              voucher_number, sequence_number, voucher_date, transaction_type, category,
+              head_account_id, head_account_code, head_account_name,
+              cash_bank_account_id, cash_bank_account_code, cash_bank_account_name,
+              receipt_amount, payment_amount, net_amount,
+              narration, reference_number, journal_entry_id, status, created_by
+            ) VALUES (?, ?, ?, 'Receipt', 'customer_receipt', ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, 'posted', ?)
           `)
           .run(
-            cbNo,
+            nextVoucherNumber,
+            nextSequence,
             recoveryDate,
             partyAccountId,
+            String(partyRow.account_code || ''),
             String(partyRow.account_name),
             paymentAccountId,
-            receiptNumber,
-            jeDesc,
+            paymentAccountCode,
+            paymentAccountName,
             recoveryAmount,
-            salesmanName || 'Recovery Officer',
-            journalEntryId
+            recoveryAmount,
+            jeDesc,
+            receiptNumber,
+            journalEntryId,
+            salesmanName || 'Recovery Officer'
           );
         cashBookVoucherId = Number(cbRes.lastInsertRowid);
       }
 
-      // 4. Insert supply_recoveries record
+      // 4. Insert supply_recoveries record (both canonical & UI alias columns)
+      const createdByUser = String((req as AuthenticatedRequest).user?.full_name || salesmanName || 'Recovery Officer');
       const recRes = db
         .prepare(`
           INSERT INTO supply_recoveries (
-            recovery_receipt_number, recovery_date,
+            receipt_number, recovery_receipt_number, recovery_date,
             salesman_id, salesman_name, town_id, town_name, area_id, area_name,
-            party_account_id, party_name,
+            party_account_id, party_code, party_name,
             town_supply_id, party_supply_id, supply_number,
             sale_id, invoice_number,
             previous_outstanding, recovery_amount, remaining_balance,
-            payment_method, payment_account_id, payment_account_name,
+            payment_method, financial_account_id, financial_account_name,
+            payment_account_id, payment_account_name,
             journal_entry_id, payment_voucher_id, cash_book_voucher_id,
-            is_settled, status, remarks
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Posted', ?)
+            is_settled, status, remarks, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Posted', ?, ?)
         `)
         .run(
+          receiptNumber,
           receiptNumber,
           recoveryDate,
           salesmanId,
@@ -4233,6 +4287,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
           areaId,
           areaName,
           partyAccountId,
+          String(partyRow.account_code || ''),
           String(partyRow.account_name),
           townSupplyId,
           partySupplyId,
@@ -4245,10 +4300,13 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
           paymentMethod,
           paymentAccountId,
           paymentAccountName,
+          paymentAccountId,
+          paymentAccountName,
           journalEntryId,
           paymentVoucherId,
           cashBookVoucherId,
-          remarks
+          remarks,
+          createdByUser
         );
 
       const recoveryId = Number(recRes.lastInsertRowid);
@@ -4379,7 +4437,7 @@ supplyRouter.get('/recovery-reports', (req: Request, res: Response) => {
             SELECT id, account_code, account_name, phone, area_name, assigned_salesman_name,
                    current_balance, current_balance_type
             FROM accounts
-            WHERE account_type = 'Customer' AND is_system_account = 0
+            WHERE account_type IN ('Customer', 'Customer & Supplier') AND is_system_account = 0
               AND (town_id = ? OR LOWER(town_name) = LOWER(?) OR LOWER(city) = LOWER(?))
             ORDER BY account_name ASC
           `)
@@ -4545,7 +4603,7 @@ supplyRouter.get('/settlements/preview', (req: Request, res: Response) => {
       .prepare(`
         SELECT COALESCE(SUM(CASE WHEN a.current_balance_type = 'Debit' THEN a.current_balance ELSE -a.current_balance END), 0) as out_bal
         FROM accounts a
-        WHERE a.assigned_salesman_id = ? AND a.account_type = 'Customer' AND a.is_system_account = 0
+        WHERE a.assigned_salesman_id = ? AND a.account_type IN ('Customer', 'Customer & Supplier') AND a.is_system_account = 0
       `)
       .get(salesmanId) as { out_bal: number };
 
@@ -4553,7 +4611,7 @@ supplyRouter.get('/settlements/preview', (req: Request, res: Response) => {
       success: true,
       preview: {
         salesman_id: salesmanId,
-        salesman_name: String(salesman.full_name),
+        salesman_name: String(salesman.full_name || salesman.name || ''),
         from_date: fromDate,
         to_date: toDate,
         total_supplies: round2(suppliesRow.sup_amt),
@@ -4611,16 +4669,19 @@ supplyRouter.post('/settlements', (req: Request, res: Response) => {
     const differenceAmount = round2(totalCashCollected - cashSubmittedToStore - remainingCashInHand);
     const remarks = String(body.remarks || '').trim();
 
+    const salesmanDisplayName = String(salesman.full_name || salesman.name || '');
+    const settledByUser = String((req as AuthenticatedRequest).user?.full_name || 'Super Admin');
+
     const insert = db
       .prepare(`
         INSERT INTO salesman_settlements (
           settlement_number, settlement_date, from_date, to_date,
-          salesman_id, salesman_name,
+          salesman_id, salesman_code, salesman_name,
           total_supplies, total_returns, total_final_billing,
           total_cash_collected, total_bank_collections, total_outstanding,
-          cash_submitted_to_store, remaining_cash_in_hand, difference_amount,
-          status, settled_by, remarks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Settled', ?, ?)
+          cash_submitted_to_store, remaining_cash_in_hand, difference, difference_amount,
+          status, created_by, settled_by, remarks
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Settled', ?, ?, ?)
       `)
       .run(
         settlementNumber,
@@ -4628,7 +4689,8 @@ supplyRouter.post('/settlements', (req: Request, res: Response) => {
         fromDate,
         toDate,
         salesmanId,
-        String(salesman.full_name),
+        String(salesman.salesman_code || ''),
+        salesmanDisplayName,
         totalSupplies,
         totalReturns,
         totalFinalBilling,
@@ -4638,7 +4700,9 @@ supplyRouter.post('/settlements', (req: Request, res: Response) => {
         cashSubmittedToStore,
         remainingCashInHand,
         differenceAmount,
-        String((req as AuthenticatedRequest).user?.full_name || 'Super Admin'),
+        differenceAmount,
+        settledByUser,
+        settledByUser,
         remarks
       );
 
@@ -4655,7 +4719,7 @@ supplyRouter.post('/settlements', (req: Request, res: Response) => {
     recordAudit(
       req,
       'SUPPLY_SALESMAN_SETTLED',
-      `Completed Salesman Settlement ${settlementNumber} for ${String(salesman.full_name)} (Cash Submitted: Rs. ${cashSubmittedToStore})`
+      `Completed Salesman Settlement ${settlementNumber} for ${salesmanDisplayName} (Cash Submitted: Rs. ${cashSubmittedToStore})`
     );
 
     return db.prepare('SELECT * FROM salesman_settlements WHERE id = ?').get(settlementId);
@@ -5033,7 +5097,7 @@ supplyRouter.get('/reports/:category/:reportKey', (req: Request, res: Response) 
                    assigned_salesman_id, town_id,
                    current_balance, current_balance_type
             FROM accounts
-            WHERE account_type = 'Customer' AND is_system_account = 0 AND current_balance > 0.01 AND current_balance_type = 'Debit'
+            WHERE account_type IN ('Customer', 'Customer & Supplier') AND is_system_account = 0 AND current_balance > 0.01 AND current_balance_type = 'Debit'
             ORDER BY current_balance DESC
           `)
           .all() as Array<Record<string, unknown>>;

@@ -366,21 +366,29 @@ accountingRouter.post('/coa', (req: Request, res: Response) => {
 
     const openBal = round2(Math.max(0, Number(opening_balance || 0)));
 
+    const resolvedAccountType =
+      String(account_group || '').trim().toLowerCase() === 'customers'
+        ? 'Customer'
+        : String(account_group || '').trim().toLowerCase() === 'suppliers'
+        ? 'Supplier'
+        : String(account_group || mainGroup).trim();
+
     const resInsert = db
       .prepare(
         `INSERT INTO accounts (
-           account_code, account_name, main_group, account_group, financial_category,
+           account_code, account_name, main_group, account_group, account_type, financial_category,
            parent_account_id, opening_balance, opening_balance_type,
            current_balance, current_balance_type, contact_person, phone,
            ntn, strn, filer_status, city, address, credit_limit,
            is_system_account, status, notes
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Active', ?)`
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Active', ?)`
       )
       .run(
         cleanCode,
         cleanName,
         mainGroup,
         account_group,
+        resolvedAccountType,
         pillar,
         parent_account_id ? Number(parent_account_id) : null,
         openBal,

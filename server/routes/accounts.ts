@@ -41,12 +41,33 @@ export const STANDARD_ACCOUNT_GROUPS: Record<string, string[]> = {
   ],
 };
 
+export function resolveCanonicalAccountType(
+  accountGroup?: string | null,
+  explicitType?: string | null,
+  mainGroup?: string | null
+): string {
+  const raw = String(explicitType || accountGroup || '').trim();
+  const lower = raw.toLowerCase();
+  if (lower === 'customer' || lower === 'customers') return 'Customer';
+  if (lower === 'supplier' || lower === 'suppliers') return 'Supplier';
+  if (
+    lower === 'customer & supplier' ||
+    lower === 'customer and supplier' ||
+    lower === 'both'
+  ) {
+    return 'Customer & Supplier';
+  }
+  if (raw) return raw;
+  return String(mainGroup || 'Customer').trim();
+}
+
 export interface AccountRow {
   id: number;
   account_code: string;
   account_name: string;
   main_group: 'PARTY ACCOUNTS' | 'FINANCIAL ACCOUNTS' | 'INCOME & EXPENSE ACCOUNTS';
   account_group: string;
+  account_type?: string;
   parent_account_id: number | null;
   parent_account_name?: string | null;
   parent_account_code?: string | null;
@@ -325,6 +346,7 @@ accountsRouter.get('/', (req: Request, res: Response) => {
       q,
       mainGroup,
       accountGroup,
+      accountType,
       parentAccountId,
       status,
       ledgerView, // 'all' | 'customer' | 'supplier'
@@ -342,9 +364,9 @@ accountsRouter.get('/', (req: Request, res: Response) => {
     if (q && typeof q === 'string' && q.trim().length > 0) {
       const term = `%${q.trim()}%`;
       conditions.push(
-        '(a.account_code LIKE ? OR a.account_name LIKE ? OR a.account_group LIKE ? OR a.contact_person LIKE ? OR a.phone LIKE ? OR a.address LIKE ? OR a.ntn_cnic LIKE ? OR a.town_name LIKE ? OR a.area_name LIKE ?)'
+        '(a.account_code LIKE ? OR a.account_name LIKE ? OR a.account_group LIKE ? OR a.account_type LIKE ? OR a.contact_person LIKE ? OR a.phone LIKE ? OR a.address LIKE ? OR a.ntn_cnic LIKE ? OR a.town_name LIKE ? OR a.area_name LIKE ?)'
       );
-      params.push(term, term, term, term, term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term, term);
     }
 
     if (townId && typeof townId === 'string' && townId !== 'all') {
@@ -371,6 +393,17 @@ accountsRouter.get('/', (req: Request, res: Response) => {
     if (accountGroup && typeof accountGroup === 'string' && accountGroup !== 'all') {
       conditions.push('a.account_group = ?');
       params.push(accountGroup);
+    }
+
+    if (accountType && typeof accountType === 'string' && accountType !== 'all') {
+      if (accountType === 'Customer') {
+        conditions.push("a.account_type IN ('Customer', 'Customer & Supplier')");
+      } else if (accountType === 'Supplier') {
+        conditions.push("a.account_type IN ('Supplier', 'Customer & Supplier')");
+      } else {
+        conditions.push('a.account_type = ?');
+        params.push(accountType);
+      }
     }
 
     if (parentAccountId && typeof parentAccountId === 'string' && parentAccountId !== 'all') {
@@ -891,22 +924,25 @@ accountsRouter.post('/', (req: Request, res: Response) => {
     const validFiler: 'Filer' | 'Non-Filer' | 'Exempt' =
       ['Filer', 'Non-Filer', 'Exempt'].includes(filer_status) ? filer_status : 'Filer';
 
+    const cleanAccountType = resolveCanonicalAccountType(cleanGroup, req.body.account_type, main_group);
+
     const insertStmt = db.prepare(`
       INSERT INTO accounts (
-        account_code, account_name, main_group, account_group, parent_account_id,
+        account_code, account_name, main_group, account_group, account_type, parent_account_id,
         opening_balance, opening_balance_type,
         total_debit, total_credit, current_balance, current_balance_type,
         contact_person, phone, email, ntn_cnic, ntn, strn, filer_status, tax_registration_details,
         address, city, credit_limit,
         is_system_account, status, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
     `);
 
     const result = insertStmt.run(
       cleanCode,
       String(account_name).trim(),
       main_group,
-      String(account_group).trim(),
+      cleanGroup,
+      cleanAccountType,
       parentId,
       openBal,
       openType,
@@ -1150,12 +1186,21 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
         ? String(city || '').trim()
         : String(existing.city || '');
 
+    const nextAccountGroup =
+      account_group !== undefined ? String(account_group).trim() : existing.account_group;
+    const nextAccountType = resolveCanonicalAccountType(
+      nextAccountGroup,
+      req.body.account_type,
+      nextMainGroup
+    );
+
     db.prepare(`
       UPDATE accounts SET
         account_code = ?,
         account_name = ?,
         main_group = ?,
         account_group = ?,
+        account_type = ?,
         parent_account_id = ?,
         opening_balance = ?,
         opening_balance_type = ?,
@@ -1179,7 +1224,8 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
       cleanCode,
       account_name !== undefined ? String(account_name).trim() : existing.account_name,
       nextMainGroup,
-      account_group !== undefined ? String(account_group).trim() : existing.account_group,
+      nextAccountGroup,
+      nextAccountType,
       nextParentId,
       openBal,
       openType,
@@ -1539,18 +1585,19 @@ accountsRouter.post('/bulk-import', (req: Request, res: Response) => {
       const findByCodeStmt = db.prepare('SELECT id FROM accounts WHERE UPPER(TRIM(account_code)) = UPPER(TRIM(?))');
       const insertStmt = db.prepare(`
         INSERT INTO accounts (
-          account_code, account_name, main_group, account_group, parent_account_id,
+          account_code, account_name, main_group, account_group, account_type, parent_account_id,
           opening_balance, opening_balance_type,
           total_debit, total_credit, current_balance, current_balance_type,
           contact_person, phone, email, ntn_cnic, address, city, credit_limit,
           is_system_account, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `);
       const updateStmt = db.prepare(`
         UPDATE accounts SET
           account_name = ?,
           main_group = ?,
           account_group = ?,
+          account_type = ?,
           parent_account_id = ?,
           opening_balance = ?,
           opening_balance_type = ?,
@@ -1583,13 +1630,16 @@ accountsRouter.post('/bulk-import', (req: Request, res: Response) => {
         const credLimit = Math.max(0, Math.round((parseFloat(acc.credit_limit) || 0) * 100) / 100);
         const status: 'Active' | 'Inactive' =
           String(acc.status || 'Active').toLowerCase() === 'inactive' ? 'Inactive' : 'Active';
+        const impGroup = String(acc.account_group).trim();
+        const impType = resolveCanonicalAccountType(impGroup, acc.account_type, acc.main_group);
 
         if (existing) {
           if (updateExisting) {
             updateStmt.run(
               String(acc.account_name).trim(),
               acc.main_group,
-              String(acc.account_group).trim(),
+              impGroup,
+              impType,
               parentId,
               openBal,
               openType,
@@ -1612,7 +1662,8 @@ accountsRouter.post('/bulk-import', (req: Request, res: Response) => {
             code,
             String(acc.account_name).trim(),
             acc.main_group,
-            String(acc.account_group).trim(),
+            impGroup,
+            impType,
             parentId,
             openBal,
             openType,

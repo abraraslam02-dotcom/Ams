@@ -611,6 +611,7 @@ syncRouter.post('/push', (req: Request, res: Response) => {
         } else if (action === 'CREATE_ACCOUNT') {
           const accountGroup = String(payload.account_group || 'Customer');
           const mainGroup = String(payload.main_group || 'PARTY ACCOUNTS');
+          const accountType = String(payload.account_type || accountGroup || mainGroup).trim();
           const generated = allocateNextAccountCode(db, accountGroup, mainGroup);
           const openBal = round2(payload.opening_balance || 0);
           const openType = payload.opening_balance_type === 'Credit' ? 'Credit' : 'Debit';
@@ -618,17 +619,18 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           const insertAcc = db
             .prepare(`
               INSERT INTO accounts (
-                account_code, account_name, main_group, account_group,
+                account_code, account_name, main_group, account_group, account_type,
                 opening_balance, opening_balance_type, current_balance, current_balance_type,
                 contact_person, phone, email, ntn, strn, filer_status, address, city, credit_limit,
                 status, is_system_account
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 0)
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 0)
             `)
             .run(
               generated.nextCode,
               String(payload.account_name || 'New Account').trim(),
               mainGroup,
               accountGroup,
+              accountType,
               openBal,
               openType,
               openBal,
@@ -661,9 +663,14 @@ syncRouter.post('/push', (req: Request, res: Response) => {
         } else if (action === 'UPDATE_ACCOUNT') {
           const accId = Number(payload.id || item.local_id);
           if (accId > 0) {
+            const nextSyncType =
+              payload.account_type ??
+              (payload.account_group ? String(payload.account_group).trim() : null);
             db.prepare(`
               UPDATE accounts
               SET account_name = COALESCE(?, account_name),
+                  account_group = COALESCE(?, account_group),
+                  account_type = COALESCE(?, account_type),
                   contact_person = COALESCE(?, contact_person),
                   phone = COALESCE(?, phone),
                   email = COALESCE(?, email),
@@ -677,6 +684,8 @@ syncRouter.post('/push', (req: Request, res: Response) => {
               WHERE id = ?
             `).run(
               payload.account_name ?? null,
+              payload.account_group ?? null,
+              nextSyncType,
               payload.contact_person ?? null,
               payload.phone ?? null,
               payload.email ?? null,

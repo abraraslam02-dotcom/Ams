@@ -189,14 +189,14 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
       const placeholders = townIds.map(() => '?').join(',');
       assignedParties = db
         .prepare(
-          `SELECT a.id, a.account_code, a.account_name, a.account_group, a.phone,
+          `SELECT a.id, a.account_code, a.account_name, a.account_group, a.account_type, a.phone,
                   a.address, COALESCE(NULLIF(a.town_name, ''), a.city, 'General Town') as town_name,
                   a.town_id, a.area_id, a.area_name, a.assigned_salesman_id,
                   a.credit_limit, a.current_balance, a.current_balance_type
            FROM accounts a
            WHERE a.status = 'Active'
              AND a.is_system_account = 0
-             AND (a.account_group = 'Customers' OR a.main_group = 'Assets' OR a.town_id IN (${placeholders}))
+             AND (a.account_type IN ('Customer', 'Customer & Supplier') OR a.account_group IN ('Customer', 'Customer & Supplier') OR a.town_id IN (${placeholders}))
            ORDER BY a.account_name ASC`
         )
         .all(...townIds) as Array<Record<string, unknown>>;
@@ -280,7 +280,7 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
 
   const settings = db
     .prepare(
-      'SELECT company_name, super_admin_recovery_email, discount_stacking_rule FROM company_settings LIMIT 1'
+      'SELECT store_name as company_name, super_admin_recovery_email, discount_stacking_rule FROM company_settings LIMIT 1'
     )
     .get() as
     | {
@@ -1518,9 +1518,14 @@ enhancementsRouter.put('/discount-stacking-rule', authenticateToken, (req, res) 
         : 'higher_only';
 
     db.prepare('UPDATE company_settings SET discount_stacking_rule = ?').run(rule);
-    db.prepare(
-      "INSERT INTO app_settings (setting_key, setting_value) VALUES ('discount_stacking_rule', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value"
-    ).run(rule);
+    const hasAppSettings = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'")
+      .get();
+    if (hasAppSettings) {
+      db.prepare(
+        "INSERT INTO app_settings (setting_key, setting_value) VALUES ('discount_stacking_rule', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value"
+      ).run(rule);
+    }
 
     writeProtectedAuditLog({
       userId: user.id,

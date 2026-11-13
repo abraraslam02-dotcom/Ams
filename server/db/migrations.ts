@@ -50,6 +50,7 @@ export function runMigrations(): MigrationResult {
   const migrationName20 = '020_master_enhancement_fifo_offers_discounts_mobile_reset_backup';
   const migrationName21 = '021_inventory_reports_idempotency_and_reference_columns';
   const migrationName22 = '022_salesman_monotonic_sequence_and_sync';
+  const migrationName23 = '023_supply_account_type_and_schema_alignment';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3166,6 +3167,137 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName22, 22);
     }
+
+    // 23. Migration 023: Add accounts.account_type + align Supply/Recovery/Settlement columns + ensure required GL heads
+    const existing23 = db.prepare('SELECT id FROM database_migrations WHERE migration_name = ?').get(migrationName23);
+    if (!existing23) {
+      const addColSafe = (table: string, colName: string, colDef: string) => {
+        const tblExists = db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+          .get(table);
+        if (!tblExists) return;
+        const cols = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>;
+        if (!cols.some((c) => c.name === colName)) {
+          db.exec(`ALTER TABLE "${table}" ADD COLUMN ${colName} ${colDef};`);
+        }
+      };
+
+      // A. Add account_type to accounts safely and backfill from account_group without modifying balances or existing rows
+      addColSafe('accounts', 'account_type', "TEXT NOT NULL DEFAULT ''");
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_accounts_account_type ON accounts(account_type);
+
+        UPDATE accounts
+        SET account_type = CASE
+          WHEN LOWER(TRIM(COALESCE(account_group, ''))) IN ('customer', 'customers') THEN 'Customer'
+          WHEN LOWER(TRIM(COALESCE(account_group, ''))) IN ('supplier', 'suppliers') THEN 'Supplier'
+          WHEN LOWER(TRIM(COALESCE(account_group, ''))) IN ('customer & supplier', 'customer and supplier', 'both') THEN 'Customer & Supplier'
+          WHEN TRIM(COALESCE(account_group, '')) != '' THEN TRIM(account_group)
+          ELSE TRIM(COALESCE(main_group, 'Customer'))
+        END
+        WHERE account_type IS NULL OR TRIM(account_type) = '';
+      `);
+
+      // B. Align Supply Order Forms, Town Supplies, Recoveries, and Salesman Settlements columns
+      addColSafe('supply_order_forms', 'print_layout', "TEXT DEFAULT '1-col'");
+      addColSafe('town_supplies', 'packed_by', "TEXT DEFAULT ''");
+      addColSafe('town_supplies', 'packed_at', 'DATETIME DEFAULT NULL');
+      addColSafe('town_supplies', 'dispatched_by', "TEXT DEFAULT ''");
+      addColSafe('town_supplies', 'dispatched_at', 'DATETIME DEFAULT NULL');
+      addColSafe('town_supplies', 'billed_by', "TEXT DEFAULT ''");
+      addColSafe('town_supplies', 'billed_at', 'DATETIME DEFAULT NULL');
+
+      addColSafe('supply_recoveries', 'recovery_receipt_number', "TEXT DEFAULT ''");
+      addColSafe('supply_recoveries', 'payment_account_id', 'INTEGER DEFAULT NULL');
+      addColSafe('supply_recoveries', 'payment_account_name', "TEXT DEFAULT ''");
+      db.exec(`
+        UPDATE supply_recoveries
+        SET recovery_receipt_number = COALESCE(NULLIF(TRIM(recovery_receipt_number), ''), receipt_number, ''),
+            payment_account_id = COALESCE(payment_account_id, financial_account_id),
+            payment_account_name = COALESCE(NULLIF(TRIM(payment_account_name), ''), financial_account_name, '')
+        WHERE TRIM(COALESCE(recovery_receipt_number, '')) = ''
+           OR payment_account_id IS NULL
+           OR TRIM(COALESCE(payment_account_name, '')) = '';
+      `);
+
+      addColSafe('salesman_settlements', 'difference_amount', 'REAL NOT NULL DEFAULT 0.0');
+      addColSafe('salesman_settlements', 'settled_by', "TEXT DEFAULT ''");
+      db.exec(`
+        UPDATE salesman_settlements
+        SET difference_amount = COALESCE(difference, 0.0)
+        WHERE difference_amount = 0.0 AND COALESCE(difference, 0.0) != 0.0;
+
+        UPDATE salesman_settlements
+        SET settled_by = COALESCE(NULLIF(TRIM(settled_by), ''), created_by, 'Super Admin')
+        WHERE settled_by IS NULL OR TRIM(settled_by) = '';
+      `);
+
+      // C. Ensure required Inventory & COGS GL system accounts exist idempotently
+      const ensureSystemAccount = (
+        code: string,
+        name: string,
+        mainGroup: string,
+        accountGroup: string,
+        accountType: string,
+        finCat: string,
+        balType: 'Debit' | 'Credit',
+        notes: string
+      ) => {
+        const found = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(code);
+        if (!found) {
+          db.prepare(`
+            INSERT INTO accounts (
+              account_code, account_name, main_group, account_group, account_type, financial_category,
+              opening_balance, opening_balance_type, current_balance, current_balance_type,
+              filer_status, status, is_system_account, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, ?, 'Filer', 'Active', 1, ?)
+          `).run(code, name, mainGroup, accountGroup, accountType, finCat, balType, balType, notes);
+        }
+      };
+
+      ensureSystemAccount(
+        'INV-1030',
+        'Medicine Inventory (Asset Control)',
+        'FINANCIAL ACCOUNTS',
+        'Assets',
+        'Assets',
+        'Assets',
+        'Debit',
+        'Dedicated double-entry asset control account for pharmacy inventory'
+      );
+      ensureSystemAccount(
+        'ADJ-5035',
+        'Stock Adjustment & Damage Expense',
+        'INCOME & EXPENSE ACCOUNTS',
+        'Other Expenses',
+        'Other Expenses',
+        'Expenses',
+        'Debit',
+        'Expense account for inventory shortages, write-offs, damages, and expired medicines'
+      );
+      ensureSystemAccount(
+        'ADJ-4035',
+        'Stock Adjustment Surplus Income',
+        'INCOME & EXPENSE ACCOUNTS',
+        'Other Income',
+        'Other Income',
+        'Income',
+        'Credit',
+        'Income account for physical stock surpluses and positive adjustments'
+      );
+      ensureSystemAccount(
+        'EXP-5005',
+        'Cost of Goods Sold (COGS)',
+        'INCOME & EXPENSE ACCOUNTS',
+        'Purchases',
+        'Purchases',
+        'Expenses',
+        'Debit',
+        'Direct cost of medicines sold calculated via weighted-average batch cost'
+      );
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName23, 23);
+    }
   });
 
   try {
@@ -3184,7 +3316,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,
