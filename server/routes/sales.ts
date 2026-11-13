@@ -344,38 +344,49 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
     const q = String(req.query.q || '').trim();
-    const limit = Math.min(10000, Math.max(5, Number(req.query.limit || 50)));
+    const limit = Math.min(20000, Math.max(5, Number(req.query.limit || 50)));
 
     let sql = `
       SELECT *
       FROM items
-      WHERE status = 'Active'
+      WHERE LOWER(COALESCE(status, 'Active')) = 'active'
     `;
     const params: Array<string | number> = [];
 
     if (q) {
+      const tokens = q.split(/\s+/).filter(Boolean);
+      for (const tok of tokens) {
+        const likeTok = `%${tok}%`;
+        sql += `
+          AND (
+            item_code LIKE ?
+            OR barcode LIKE ?
+            OR item_name LIKE ?
+            OR company_name LIKE ?
+            OR generic_name LIKE ?
+            OR category LIKE ?
+            OR packing LIKE ?
+          )
+        `;
+        params.push(likeTok, likeTok, likeTok, likeTok, likeTok, likeTok, likeTok);
+      }
+
       const exactTerm = q;
-      const likeTerm = `%${q}%`;
       const prefixTerm = `${q}%`;
       sql += `
-        AND (
-          item_code LIKE ?
-          OR barcode LIKE ?
-          OR item_name LIKE ?
-          OR company_name LIKE ?
-          OR generic_name LIKE ?
-        )
         ORDER BY
           CASE
             WHEN LOWER(item_code) = LOWER(?) THEN 0
             WHEN LOWER(barcode) = LOWER(?) THEN 1
-            WHEN LOWER(item_name) LIKE LOWER(?) THEN 2
-            ELSE 3
+            WHEN LOWER(item_name) = LOWER(?) THEN 2
+            WHEN LOWER(item_code) LIKE LOWER(?) THEN 3
+            WHEN LOWER(item_name) LIKE LOWER(?) THEN 4
+            ELSE 5
           END,
           item_name ASC
         LIMIT ?
       `;
-      params.push(likeTerm, likeTerm, likeTerm, likeTerm, likeTerm, exactTerm, exactTerm, prefixTerm, limit);
+      params.push(exactTerm, exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
     } else {
       sql += ` ORDER BY item_name ASC LIMIT ?`;
       params.push(limit);

@@ -426,6 +426,7 @@ CREATE TABLE IF NOT EXISTS purchase_items (
     bonus_quantity REAL NOT NULL DEFAULT 0.0,
     pack_quantity REAL NOT NULL DEFAULT 0.0,
     loose_quantity REAL NOT NULL DEFAULT 0.0,
+    loose_rate REAL NOT NULL DEFAULT 0.0,
     total_units REAL NOT NULL DEFAULT 0.0,
     purchase_rate REAL NOT NULL DEFAULT 0.0,
     mrp_rate REAL NOT NULL DEFAULT 0.0,

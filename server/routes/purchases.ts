@@ -300,12 +300,12 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
     const q = String(req.query.q || '').trim();
-    const limit = Math.min(10000, Math.max(5, Number(req.query.limit || 50)));
+    const limit = Math.min(20000, Math.max(5, Number(req.query.limit || 50)));
 
     let sql = `
       SELECT *
       FROM items
-      WHERE status = 'Active'
+      WHERE LOWER(COALESCE(status, 'Active')) = 'active'
     `;
     const params: Array<string | number> = [];
 
@@ -334,14 +334,15 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
           CASE
             WHEN LOWER(item_code) = LOWER(?) THEN 0
             WHEN LOWER(barcode) = LOWER(?) THEN 1
-            WHEN LOWER(item_name) LIKE LOWER(?) THEN 2
+            WHEN LOWER(item_name) = LOWER(?) THEN 2
             WHEN LOWER(item_code) LIKE LOWER(?) THEN 3
-            ELSE 4
+            WHEN LOWER(item_name) LIKE LOWER(?) THEN 4
+            ELSE 5
           END,
           item_name ASC
         LIMIT ?
       `;
-      params.push(exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
+      params.push(exactTerm, exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
     } else {
       sql += ` ORDER BY item_name ASC LIMIT ?`;
       params.push(limit);
@@ -1825,16 +1826,30 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       );
     }
 
-    const rawQty = round2(raw.quantity);
+    const packingStr = String(raw.packing || dbItem.packing || '1x1').trim();
+    const parsedPack = parsePacking(packingStr);
+    const rawQty = Math.max(0, round2(raw.quantity || 0));
     const bonusQty = Math.max(0, round2(raw.bonus_quantity || 0));
-    const qty = rawQty <= 0 && bonusQty <= 0 ? 1 : rawQty;
+    const looseQty = Math.max(0, round2(raw.loose_quantity || 0));
+
+    if (targetStatus === 'completed' && rawQty <= 0 && bonusQty <= 0 && looseQty <= 0) {
+      throw new Error(
+        `Row ${rowIdx} (${dbItem.item_name}): Quantity (Packs, Loose, or Bonus) must be greater than 0.`
+      );
+    }
+    const qty = rawQty;
 
     const purchaseRate = Math.max(0, round2(raw.purchase_rate ?? dbItem.purchase_price));
+    const defaultLooseRate = round2(purchaseRate / Math.max(1, parsedPack.unitsPerPack));
+    const looseRate =
+      raw.loose_rate !== undefined && Number(raw.loose_rate) > 0
+        ? round2(Number(raw.loose_rate))
+        : defaultLooseRate;
     const mrpRate = Math.max(0, round2(raw.mrp_rate ?? dbItem.retail_price));
     const discPct = Math.max(0, round2(raw.discount_percent ?? 0));
     const taxPct = Math.max(0, round2(raw.tax_percent ?? dbItem.tax_percent ?? 0));
 
-    const lineGross = round2(qty * purchaseRate);
+    const lineGross = round2(qty * purchaseRate + looseQty * looseRate);
     const lineItemDisc =
       raw.discount_amount !== undefined && Number(raw.discount_percent || 0) === 0
         ? Math.min(lineGross, Math.max(0, round2(raw.discount_amount)))
@@ -1842,10 +1857,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
     const lineAfterItemDisc = round2(lineGross - lineItemDisc);
 
-    const packingStr = String(raw.packing || dbItem.packing || '1x1').trim();
-    const parsedPack = parsePacking(packingStr);
-    const totalPacksAdded = round2(qty + bonusQty);
-    const totalLooseUnits = round2(totalPacksAdded * parsedPack.unitsPerPack);
+    const totalPacksAdded = round2(qty + bonusQty + looseQty / parsedPack.unitsPerPack);
+    const totalLooseUnits = round2((qty + bonusQty) * parsedPack.unitsPerPack + looseQty);
 
     grossTotal = round2(grossTotal + lineGross);
     itemDiscountTotal = round2(itemDiscountTotal + lineItemDisc);
@@ -1863,6 +1876,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       expiryDate,
       qty,
       bonusQty,
+      looseQty,
+      looseRate,
       totalPacksAdded,
       totalLooseUnits,
       purchaseRate,
@@ -2102,11 +2117,11 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       purchase_id, item_id, inventory_id,
       item_code, company_name, item_name, packing, units_per_pack,
       batch_number, manufacturing_date, expiry_date,
-      quantity, bonus_quantity, pack_quantity, loose_quantity, total_units,
+      quantity, bonus_quantity, pack_quantity, loose_quantity, loose_rate, total_units,
       purchase_rate, mrp_rate, gross_amount,
       discount_percent, discount_amount, taxable_amount,
       tax_percent, tax_amount, line_total, returned_quantity
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
 
   for (const line of processedLines) {
@@ -2223,9 +2238,10 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           performedBy: 'Super Admin',
         });
       } else {
-        const nextPackQty = line.totalPacksAdded;
+        const nextTotalUnits = line.totalLooseUnits;
+        const nextPackQty = round2(nextTotalUnits / line.parsedPack.unitsPerPack);
         const nextStripQty = round2(nextPackQty * line.parsedPack.stripsPerBox);
-        const nextTotalUnits = round2(nextPackQty * line.parsedPack.unitsPerPack);
+        const nextLooseRemainder = round2(nextTotalUnits % line.parsedPack.unitsPerPack);
         const nextStatus = computeBatchStatus(
           nextPackQty,
           line.expiryDate,
@@ -2264,7 +2280,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             line.bonusQty,
             nextPackQty,
             nextStripQty,
-            nextTotalUnits,
+            nextLooseRemainder,
             nextTotalUnits,
             line.dbItem.rack_number || null,
             purchaseId,
@@ -2346,7 +2362,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       line.qty,
       line.bonusQty,
       line.totalPacksAdded,
-      line.totalLooseUnits,
+      line.looseQty,
+      line.looseRate,
       line.totalLooseUnits,
       line.purchaseRate,
       line.mrpRate,

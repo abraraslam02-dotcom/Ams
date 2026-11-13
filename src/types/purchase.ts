@@ -51,6 +51,8 @@ export interface PurchaseLineItem {
   bonus_quantity: number;
   pack_quantity?: number;
   loose_quantity?: number;
+  loose_rate?: number;
+  is_loose_rate_manual?: boolean;
   total_units?: number;
   purchase_rate: number;
   mrp_rate: number;

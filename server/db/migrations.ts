@@ -54,6 +54,7 @@ export function runMigrations(): MigrationResult {
   const migrationName24 = '024_complete_closing_and_financial_period_management';
   const migrationName25 = '025_salesman_booking_pwa_and_working_days';
   const migrationName26 = '026_complete_payroll_and_hr_management';
+  const migrationName27 = '027_item_search_indexes_and_purchase_loose_rate';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3953,6 +3954,36 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName26, 26);
     }
+
+    // ------------------------------------------------------------------------
+    // MIGRATION 27: Case-insensitive Item Search Indexes & Purchase Loose Rate Column
+    // ------------------------------------------------------------------------
+    const applied27 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName27);
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_items_code_nocase ON items(item_code COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_items_name_nocase ON items(item_name COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_items_barcode_nocase ON items(barcode COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_items_status_name ON items(status, item_name COLLATE NOCASE);
+    `);
+
+    const purItemTableExists = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='purchase_items'")
+      .get();
+    if (purItemTableExists) {
+      const piCols = (db.prepare('PRAGMA table_info(purchase_items)').all() as Array<{ name: string }>).map(
+        (c) => c.name
+      );
+      if (!piCols.includes('loose_rate')) {
+        db.exec('ALTER TABLE purchase_items ADD COLUMN loose_rate REAL NOT NULL DEFAULT 0.0;');
+      }
+    }
+
+    if (!applied27) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName27, 27);
+    }
   });
 
   try {
@@ -3971,7 +4002,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

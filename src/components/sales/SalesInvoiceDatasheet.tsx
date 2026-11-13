@@ -372,12 +372,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [showSearchDropdown, setShowSearchDropdown] = useState<boolean>(false);
   const [activeSearchRowIdx, setActiveSearchRowIdx] = useState<number | null>(null);
   const [editingItemCode, setEditingItemCode] = useState<{ rowIdx: number; value: string } | null>(null);
+  const [editingItemName, setEditingItemName] = useState<{ rowIdx: number; value: string } | null>(null);
   const [showItemListModal, setShowItemListModal] = useState<boolean>(false);
   const [itemListQuery, setItemListQuery] = useState<string>('');
+  const [itemListHighlightIdx, setItemListHighlightIdx] = useState<number>(0);
   const [itemListTargetRowIdx, setItemListTargetRowIdx] = useState<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const posSearchInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdRef = useRef(0);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingFocusTargetRef = useRef<string | null>(null);
   const draftRestoredRef = useRef<boolean>(false);
   const cancelledCodeEditRef = useRef<boolean>(false);
@@ -435,7 +438,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           api.getAccounts({ status: 'Active' }),
           api.getAdvanceTaxSettings(),
           api.getNextSalesNumbers(invoiceDate),
-          api.fastSearchSalesItems('', 10000),
+          api.fastSearchSalesItems('', 20000),
           api.getSales({ status: 'held_or_draft', pageSize: 30 }),
           api.getSalesmen({ status: 'Active' }).catch(() => ({ data: [] })),
           api.getDeliverymen({ status: 'Active' }).catch(() => ({ data: [] })),
@@ -653,7 +656,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               item_id: itemId,
-              quantity: 1,
+              quantity: 0,
               party_account_id: custId || null,
             }),
           }).then((r) => r.json()).catch(() => null);
@@ -988,15 +991,70 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   // Pre-indexed catalog for sub-millisecond local search across 10,000+ items
   const indexedCatalog = useMemo(() => prepareItemIndex(catalogItems), [catalogItems]);
 
-  // Fast Item Search Handler - Instant in-memory search with zero network lag
+  // Fast Item Search Handler - Instant in-memory search + race-guarded live DB query for 10,000+ items
   const runFastSearch = useCallback(
     (query: string) => {
-      const results = searchItems(indexedCatalog, query, 50);
+      const cleanQuery = String(query || '').trim();
+      const results = searchItems(indexedCatalog, cleanQuery, 50);
       setSearchResults(results);
       setSearchHighlightIdx(0);
+
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+        searchDebounceRef.current = null;
+      }
+      if (!cleanQuery) return;
+
+      const reqId = ++searchRequestIdRef.current;
+      searchDebounceRef.current = setTimeout(() => {
+        api
+          .fastSearchSalesItems(cleanQuery, 50)
+          .then((res) => {
+            if (searchRequestIdRef.current !== reqId) return;
+            const fetched: FastSearchItem[] = res?.data || res?.items || [];
+            if (!Array.isArray(fetched) || fetched.length === 0) return;
+
+            setCatalogItems((prev) => {
+              const existingIds = new Set(prev.map((c) => Number(c.id)));
+              const merged = [...prev];
+              let changed = false;
+              for (const f of fetched) {
+                const fid = Number(f.id);
+                if (!existingIds.has(fid)) {
+                  merged.push(f);
+                  existingIds.add(fid);
+                  changed = true;
+                }
+              }
+              return changed ? merged : prev;
+            });
+
+            const combinedMap = new Map<number, FastSearchItem>();
+            for (const f of fetched) combinedMap.set(Number(f.id), f);
+            for (const r of results) {
+              if (!combinedMap.has(Number(r.id))) combinedMap.set(Number(r.id), r);
+            }
+            const ranked = searchItems(prepareItemIndex(Array.from(combinedMap.values())), cleanQuery, 50);
+            if (searchRequestIdRef.current === reqId) {
+              setSearchResults(ranked);
+              setSearchHighlightIdx(0);
+            }
+          })
+          .catch(() => {
+            // Keep instant local results on offline/network hiccup
+          });
+      }, 90);
     },
     [indexedCatalog]
   );
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+      }
+    };
+  }, []);
 
   // Execute pending focus after React commits newly appended rows
   useEffect(() => {
@@ -1054,7 +1112,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         expiry_date: batch.expiry_date,
         available_stock_packs: batch.available_packs,
         available_stock_units: batch.available_units,
-        quantity: targetRow.item_id === item.id && targetRow.quantity > 0 ? targetRow.quantity : 1,
+        quantity: targetRow.item_id === item.id && targetRow.quantity > 0 ? targetRow.quantity : 0,
         bonus_quantity: targetRow.item_id === item.id && Number(targetRow.bonus_quantity || 0) > 0 ? targetRow.bonus_quantity : 0,
         unit_price: effectivePrice,
         discount_percent: preserveManual ? targetRow.discount_percent : Number(item.discount_percent || 0),
@@ -1076,12 +1134,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       return ensureMinimumRows(updated);
     });
 
+    committedCodeEditRef.current = true;
     setSelectedRowIndex(rowIdx);
     setShowSearchDropdown(false);
     setQuickSearchQuery('');
     setSearchResults([]);
     setActiveSearchRowIdx(null);
     setEditingItemCode(null);
+    setEditingItemName(null);
 
     // Fetch Customer-Specific Last Sale Rate, Discount, Date, Invoice#, and Last Purchase Cost
     fetchAndApplyItemHistory(rowIdx, item.id, customerAccountId, invoiceType, true);
@@ -1089,15 +1149,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     if (focusQuantityAfter) {
       const targetId =
         invoiceViewMode === 'pos'
-          ? (document.getElementById(`pos_row_${rowIdx}_quantity`)
-              ? `pos_row_${rowIdx}_quantity`
-              : 'pos_active_quantity')
+          ? 'pos_active_quantity'
           : `cell_${rowIdx}_quantity`;
       pendingFocusTargetRef.current = targetId;
       setTimeout(() => {
         const qtyEl =
           (document.getElementById(targetId) as HTMLInputElement | null) ||
-          (document.getElementById('pos_active_quantity') as HTMLInputElement | null);
+          (invoiceViewMode === 'pos'
+            ? (document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null)
+            : null);
         if (qtyEl) {
           qtyEl.focus();
           qtyEl.select?.();
@@ -1166,17 +1226,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setShowSearchDropdown(false);
     setItemListTargetRowIdx(rowIdx);
     setItemListQuery('');
+    setItemListHighlightIdx(0);
     setShowItemListModal(true);
   };
 
-  // Add item from top Quick Search / Barcode Scanner Bar or Inline Cell Search (preventing unnecessary duplicates)
+  // Add item from top Quick Search / Barcode Scanner Bar or Inline Cell Search -> focus Qty immediately
   const handleSelectFromTopSearch = (item: FastSearchItem, targetRowOverride?: number) => {
     const existingDuplicateIdx = rows.findIndex((r) => r.item_id === item.id);
     const activeIdx = targetRowOverride !== undefined ? targetRowOverride : activeSearchRowIdx;
-    const isFromTopSearch = activeIdx === null;
 
     if (existingDuplicateIdx >= 0 && existingDuplicateIdx !== activeIdx) {
-      // If user was typing in an empty row and picked an item already on the invoice, clear the temporary typing and focus existing row
+      // If user was typing in an empty row and picked an item already on the invoice, clear temporary typing and focus existing row's Qty
       if (activeIdx !== null && rows[activeIdx] && rows[activeIdx].item_id === null) {
         setRows((prev) => {
           const next = [...prev];
@@ -1184,35 +1244,31 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           return next;
         });
       }
+      committedCodeEditRef.current = true;
       setSelectedRowIndex(existingDuplicateIdx);
       setShowSearchDropdown(false);
       setQuickSearchQuery('');
       setSearchResults([]);
       setActiveSearchRowIdx(null);
+      setEditingItemCode(null);
+      setEditingItemName(null);
 
-      if (isFromTopSearch) {
-        // Requirement 9: Automatically focus the search field for the next item
-        setTimeout(() => {
-          const inputEl = posSearchInputRef.current || searchInputRef.current;
-          inputEl?.focus();
-          inputEl?.select?.();
-        }, 20);
-      } else {
-        const qtyId =
-          invoiceViewMode === 'pos'
-            ? `pos_row_${existingDuplicateIdx}_quantity`
-            : `cell_${existingDuplicateIdx}_quantity`;
-        pendingFocusTargetRef.current = qtyId;
-        setTimeout(() => {
-          const qtyEl =
-            (document.getElementById(qtyId) as HTMLInputElement | null) ||
-            (document.getElementById('pos_active_quantity') as HTMLInputElement | null);
-          if (qtyEl) {
-            qtyEl.focus();
-            qtyEl.select?.();
-          }
-        }, 30);
-      }
+      const qtyId =
+        invoiceViewMode === 'pos'
+          ? 'pos_active_quantity'
+          : `cell_${existingDuplicateIdx}_quantity`;
+      pendingFocusTargetRef.current = qtyId;
+      setTimeout(() => {
+        const qtyEl =
+          (document.getElementById(qtyId) as HTMLInputElement | null) ||
+          (invoiceViewMode === 'pos'
+            ? (document.getElementById(`pos_row_${existingDuplicateIdx}_quantity`) as HTMLInputElement | null)
+            : null);
+        if (qtyEl) {
+          qtyEl.focus();
+          qtyEl.select?.();
+        }
+      }, 30);
       return;
     }
 
@@ -1226,19 +1282,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
 
     const rowIdxToFill = targetIdx >= 0 ? targetIdx : rows.length;
-    // For top search bar: add item, clear search, refocus search for next item (focusQuantityAfter = false)
-    // For inline row cell search: populate row and move to quantity (focusQuantityAfter = true)
-    populateRowWithItem(rowIdxToFill, item, !isFromTopSearch);
-
-    if (isFromTopSearch) {
-      setQuickSearchQuery('');
-      setShowSearchDropdown(false);
-      setTimeout(() => {
-        const inputEl = posSearchInputRef.current || searchInputRef.current;
-        inputEl?.focus();
-        inputEl?.select?.();
-      }, 25);
-    }
+    // Always populate row and automatically focus Qty (POS -> pos_active_quantity, Access -> cell_{rowIdx}_quantity)
+    populateRowWithItem(rowIdxToFill, item, true);
   };
 
   // Reusable Excel-Style Item Search Combobox Table (Item Name | Company Name | Purchase Price | Sale Price)
@@ -2415,34 +2460,82 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     const row = rows[rowIndex];
     const rowEditableCols = getEditableColsForRow(row, 'access');
 
-    // Explicit Item Code validation on Enter, Tab, or Escape (never auto-pick or silently replace)
-    if (colName === 'item_code') {
+    // Inline dropdown keyboard handling for item_code & item_name in MS Access Datasheet
+    if (colName === 'item_code' || colName === 'item_name') {
+      const isDropdownActive =
+        showSearchDropdown && activeSearchRowIdx === rowIndex;
+
       if (e.key === 'Escape') {
         e.preventDefault();
         cancelledCodeEditRef.current = true;
+        setShowSearchDropdown(false);
+        setActiveSearchRowIdx(null);
         setEditingItemCode((prev) => (prev?.rowIdx === rowIndex ? null : prev));
+        setEditingItemName((prev) => (prev?.rowIdx === rowIndex ? null : prev));
         return;
       }
+
+      if (e.key === 'ArrowDown' && isDropdownActive && searchResults.length > 0) {
+        e.preventDefault();
+        setSearchHighlightIdx((prev) => {
+          const next = Math.min(searchResults.length - 1, prev + 1);
+          setTimeout(() => {
+            document
+              .querySelector(`[data-sales-search-idx="${next}"]`)
+              ?.scrollIntoView({ block: 'nearest' });
+          }, 0);
+          return next;
+        });
+        return;
+      }
+
+      if (e.key === 'ArrowUp' && isDropdownActive && searchResults.length > 0) {
+        e.preventDefault();
+        setSearchHighlightIdx((prev) => {
+          const next = Math.max(0, prev - 1);
+          setTimeout(() => {
+            document
+              .querySelector(`[data-sales-search-idx="${next}"]`)
+              ?.scrollIntoView({ block: 'nearest' });
+          }, 0);
+          return next;
+        });
+        return;
+      }
+
       if (e.key === 'Enter') {
         e.preventDefault();
-        if (editingItemCode && editingItemCode.rowIdx === rowIndex) {
+        if (isDropdownActive && searchResults.length > 0) {
+          const chosen = searchResults[searchHighlightIdx] || searchResults[0];
+          if (chosen) {
+            committedCodeEditRef.current = true;
+            handleSelectFromTopSearch(chosen, rowIndex);
+            return;
+          }
+        }
+        if (colName === 'item_code' && editingItemCode && editingItemCode.rowIdx === rowIndex) {
           committedCodeEditRef.current = true;
           const committed = commitItemCodeChange(rowIndex, editingItemCode.value, true);
           if (!committed && row?.item_id) {
             focusCell(rowIndex, 'quantity', 'cell');
           }
-        } else {
+          return;
+        }
+        if (row?.item_id) {
           focusCell(rowIndex, 'quantity', 'cell');
+        } else {
+          openItemListForRow(rowIndex);
         }
         return;
       }
-      if (e.key === 'Tab' && editingItemCode && editingItemCode.rowIdx === rowIndex) {
+
+      if (colName === 'item_code' && e.key === 'Tab' && editingItemCode && editingItemCode.rowIdx === rowIndex) {
         committedCodeEditRef.current = true;
         commitItemCodeChange(rowIndex, editingItemCode.value, false);
       }
     }
 
-    // Enter key -> Move in exact sequence: 1. Quantity -> 2. Discount -> 3. Price -> 4. Loose Quantity -> 5. Loose Rate -> 6. New Row & Item Search
+    // Enter key -> Move in exact sequence: Item Selection -> Qty -> Discount -> Loose Qty -> Price -> Bonus Qty -> Loose Rate -> Next Row Item Search
     if (e.key === 'Enter') {
       e.preventDefault();
       setShowSearchDropdown(false);
@@ -2568,7 +2661,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
-  // Global Keyboard Shortcuts (F2 / Ctrl+S: Save, Ctrl+P: Print, Ctrl+N: New, F3: Search, F9: Hold)
+  // Global Keyboard Shortcuts (F2: Item Search, F3: Focus Search Bar, Ctrl+S: Save, Ctrl+P: Print, Ctrl+N: New, F9: Hold, Esc: Close Modals/Dropdown)
   useEffect(() => {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -2576,7 +2669,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         handleSaveInvoice('completed');
       } else if (e.key === 'F2') {
         e.preventDefault();
-        handleSaveInvoice('completed');
+        openItemListForRow(selectedRowIndex);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
         e.preventDefault();
         handleSaveInvoice('completed', 'a4');
@@ -2585,20 +2678,31 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         resetToNewInvoice();
       } else if (e.key === 'F3') {
         e.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select?.();
+        const targetSearch = posSearchInputRef.current || searchInputRef.current;
+        targetSearch?.focus();
+        targetSearch?.select?.();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
         setShowEditSearchModal(true);
       } else if (e.key === 'F9') {
         e.preventDefault();
         handleSaveInvoice('held');
+      } else if (e.key === 'Escape') {
+        if (showItemListModal) {
+          e.preventDefault();
+          setShowItemListModal(false);
+          setItemListTargetRowIdx(null);
+        } else if (showSearchDropdown) {
+          e.preventDefault();
+          setShowSearchDropdown(false);
+          setActiveSearchRowIdx(null);
+        }
       }
     };
 
     window.addEventListener('keydown', handleGlobalShortcuts);
     return () => window.removeEventListener('keydown', handleGlobalShortcuts);
-  }, [handleSaveInvoice, resetToNewInvoice]);
+  }, [handleSaveInvoice, resetToNewInvoice, selectedRowIndex, showItemListModal, showSearchDropdown]);
 
   const filteredCustomers = customers.filter((c) => {
     if (!customerSearchText.trim()) return true;
@@ -2647,7 +2751,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   const handleDecrementQty = (idx: number) => {
     const current = Number(rows[idx]?.quantity || 0);
-    if (current > 1 || (current === 1 && Number(rows[idx]?.loose_quantity || 0) > 0)) {
+    if (current > 0) {
       updateRowField(idx, 'quantity', Math.max(0, current - 1));
     }
   };
@@ -3392,12 +3496,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 )}
               </div>
 
-              {/* Fast Stepper Controls for Active Row — Ordered: 1. Quantity -> Bonus Qty -> 2. Discount -> 3. Price -> 4. Loose Quantity -> 5. Loose Rate -> Enter (Next Item) */}
+              {/* Fast Stepper Controls for Active Row — Ordered: 1. Qty -> 2. Discount -> 3. Loose Qty -> 4. Price -> 5. Bonus Qty -> 6. Loose Rate -> Enter (Next Item) */}
               <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-1.5 items-end">
                 {/* 1. Quantity */}
                 <div>
                   <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                    1. Quantity (Packs)
+                    1. Qty (Packs)
                   </label>
                   <div className="flex items-center border border-slate-300 rounded-lg bg-white overflow-hidden h-5">
                     <button
@@ -3424,21 +3528,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   </div>
                 </div>
 
-                {/* Bonus Qty */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-emerald-800 leading-none mb-0.5">
-                    Bonus Qty
-                  </label>
-                  <NumericInput
-                    id="pos_active_bonus_quantity"
-                    value={activeRow.bonus_quantity ?? 0}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'bonus_quantity', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'bonus_quantity', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-center rounded-lg border border-emerald-300 bg-emerald-50/50 focus:bg-white text-emerald-950 focus:border-emerald-600 outline-none h-5"
-                    title="Bonus Quantity (Free items deducted from stock)"
-                  />
-                </div>
-
                 {/* 2. Discount % */}
                 <div>
                   <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
@@ -3453,24 +3542,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   />
                 </div>
 
-                {/* 3. Price (PKR) */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                    3. Price (PKR)
-                  </label>
-                  <NumericInput
-                    id="pos_active_unit_price"
-                    value={activeRow.unit_price}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'unit_price', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'unit_price', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                  />
-                </div>
-
-                {/* 4. Loose Quantity */}
+                {/* 3. Loose Quantity */}
                 <div>
                   <label className="block text-[9px] font-bold uppercase text-teal-800 leading-none mb-0.5">
-                    {isSyrupItem(activeRow) ? '4. Loose Mode' : '4. Loose Qty'}
+                    {isSyrupItem(activeRow) ? '3. Loose Mode' : '3. Loose Qty'}
                   </label>
                   {isSyrupItem(activeRow) ? (
                     <div className="px-1.5 py-0 rounded-lg bg-amber-50/80 border border-amber-300 text-amber-900 text-[10px] font-bold text-center select-none h-5 flex items-center justify-center">
@@ -3497,10 +3572,39 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   )}
                 </div>
 
-                {/* 5. Loose Rate */}
+                {/* 4. Price (PKR) */}
+                <div>
+                  <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
+                    4. Price (PKR)
+                  </label>
+                  <NumericInput
+                    id="pos_active_unit_price"
+                    value={activeRow.unit_price}
+                    onChange={(e) => updateRowField(selectedRowIndex, 'unit_price', e.target.value)}
+                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'unit_price', false)}
+                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
+                  />
+                </div>
+
+                {/* 5. Bonus Qty */}
+                <div>
+                  <label className="block text-[9px] font-bold uppercase text-emerald-800 leading-none mb-0.5">
+                    5. Bonus Qty
+                  </label>
+                  <NumericInput
+                    id="pos_active_bonus_quantity"
+                    value={activeRow.bonus_quantity ?? 0}
+                    onChange={(e) => updateRowField(selectedRowIndex, 'bonus_quantity', e.target.value)}
+                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'bonus_quantity', false)}
+                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-center rounded-lg border border-emerald-300 bg-emerald-50/50 focus:bg-white text-emerald-950 focus:border-emerald-600 outline-none h-5"
+                    title="Bonus Quantity (Free items deducted from stock)"
+                  />
+                </div>
+
+                {/* 6. Loose Rate */}
                 <div>
                   <label className="block text-[9px] font-bold uppercase text-blue-800 leading-none mb-0.5">
-                    5. Loose Rate
+                    6. Loose Rate
                   </label>
                   <NumericInput
                     id="pos_active_loose_rate"
@@ -3980,10 +4084,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500'
                       : 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500'
                   } text-white font-black text-sm shadow-md flex items-center gap-1.5 cursor-pointer`}
-                  title={editingSaleId ? 'Update & Save Invoice (F2)' : 'Complete & Save Invoice (F2)'}
+                  title={editingSaleId ? 'Update & Save Invoice (Ctrl+S)' : 'Complete & Save Invoice (Ctrl+S)'}
                 >
                   <Save className="w-4 h-4" />
-                  <span>{editingSaleId ? 'Update Invoice (F2)' : 'Save Invoice (F2)'}</span>
+                  <span>{editingSaleId ? 'Update Invoice (Ctrl+S)' : 'Save Invoice (Ctrl+S)'}</span>
                 </button>
 
                 <button
@@ -4109,7 +4213,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </div>
               )}
               <span className="text-[10px] text-slate-400 hidden xl:inline ml-1">
-                (F2: Save · Ctrl+E: Edit · F3: Hold · Ctrl+P: Print · Tab/Enter: Next Cell · Arrows: Navigate)
+                (F2: Item Search · F3: Search Bar · Ctrl+S: Save · F9: Hold · Ctrl+P: Print · Esc: Close)
               </span>
             </div>
 
@@ -4826,7 +4930,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           )}
                         </td>
 
-                        {/* 1. Item Code (Explicit validation before updating existing item) */}
+                        {/* 1. Item Code (Searchable with live dropdown + explicit validation; never deletes item on click) */}
                         <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                           <input
                             id={`cell_${rIdx}_item_code`}
@@ -4843,21 +4947,34 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               committedCodeEditRef.current = false;
                             }}
                             onBlur={() => {
-                              if (cancelledCodeEditRef.current || committedCodeEditRef.current) {
-                                cancelledCodeEditRef.current = false;
-                                committedCodeEditRef.current = false;
-                                setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
-                                return;
-                              }
-                              if (editingItemCode && editingItemCode.rowIdx === rIdx) {
-                                commitItemCodeChange(rIdx, editingItemCode.value, false);
-                              }
+                              setTimeout(() => {
+                                setShowSearchDropdown(false);
+                                setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
+                                if (cancelledCodeEditRef.current || committedCodeEditRef.current) {
+                                  cancelledCodeEditRef.current = false;
+                                  committedCodeEditRef.current = false;
+                                  setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                  return;
+                                }
+                                if (editingItemCode && editingItemCode.rowIdx === rIdx) {
+                                  commitItemCodeChange(rIdx, editingItemCode.value, false);
+                                }
+                              }, 160);
                             }}
                             onChange={(e) => {
+                              const val = e.target.value;
                               setSelectedRowIndex(rIdx);
-                              setShowSearchDropdown(false);
                               committedCodeEditRef.current = false;
-                              setEditingItemCode({ rowIdx: rIdx, value: e.target.value });
+                              setEditingItemCode({ rowIdx: rIdx, value: val });
+                              if (val.trim().length > 0) {
+                                setActiveSearchRowIdx(rIdx);
+                                setShowSearchDropdown(true);
+                                runFastSearch(val);
+                              } else {
+                                setShowSearchDropdown(false);
+                                setSearchResults([]);
+                                setActiveSearchRowIdx(null);
+                              }
                             }}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_code')}
                             className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
@@ -4872,21 +4989,46 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           {row.company_name || ''}
                         </td>
 
-                        {/* 3. Item Name (Read-only display; selecting never triggers popups or clears items) */}
+                        {/* 3. Item Name (Live searchable while typing; clicking/focusing never opens popup or modifies/deletes item) */}
                         <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                           <input
                             id={`cell_${rIdx}_item_name`}
                             type="text"
-                            readOnly
-                            value={row.item_name}
+                            value={
+                              editingItemName?.rowIdx === rIdx
+                                ? editingItemName.value
+                                : row.item_name
+                            }
                             onFocus={() => {
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
                             }}
+                            onBlur={() => {
+                              setTimeout(() => {
+                                setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                setShowSearchDropdown(false);
+                                setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
+                              }, 160);
+                            }}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSelectedRowIndex(rIdx);
+                              setEditingItemName({ rowIdx: rIdx, value: val });
+                              if (val.trim().length > 0) {
+                                setActiveSearchRowIdx(rIdx);
+                                setShowSearchDropdown(true);
+                                runFastSearch(val);
+                              } else {
+                                setShowSearchDropdown(false);
+                                setSearchResults([]);
+                                setActiveSearchRowIdx(null);
+                              }
+                            }}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_name')}
-                            placeholder="Use Item Search, Item List, or Item Code..."
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none cursor-pointer"
+                            placeholder="Type Item Name / Code (or F2)..."
+                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                           />
+                          {renderSalesExcelItemCombobox('row', rIdx)}
                         </td>
 
                         {/* 4. Qty */}
@@ -5386,7 +5528,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   } text-white text-xs font-black flex items-center gap-1 cursor-pointer shadow-sm`}
                 >
                   <Save className="w-3.5 h-3.5" />
-                  {editingSaleId ? 'Update (F2)' : 'Save Invoice (F2)'}
+                  {editingSaleId ? 'Update (Ctrl+S)' : 'Save Invoice (Ctrl+S)'}
                 </button>
                 <button
                   type="button"
@@ -5432,7 +5574,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
                 >
                   <PauseCircle className="w-3.5 h-3.5" />
-                  Hold (F3)
+                  Hold (F9)
                 </button>
                 <button
                   type="button"
@@ -6216,77 +6358,111 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            <div className="relative shrink-0">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-              <input
-                type="text"
-                autoFocus
-                value={itemListQuery}
-                onChange={(e) => setItemListQuery(e.target.value)}
-                placeholder="Filter Item List by Item Code, Item Name, Company, or Barcode..."
-                className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-600"
-              />
-            </div>
+            {(() => {
+              const itemListResults = itemListQuery.trim()
+                ? searchItems(indexedCatalog, itemListQuery, 100)
+                : catalogItems.slice(0, 100);
+              const selectFromItemListModal = (chosen: FastSearchItem) => {
+                if (itemListTargetRowIdx !== null) {
+                  populateRowWithItem(itemListTargetRowIdx, chosen, true);
+                } else {
+                  handleSelectFromTopSearch(chosen);
+                }
+                setShowItemListModal(false);
+                setItemListTargetRowIdx(null);
+              };
+              return (
+                <>
+                  <div className="relative shrink-0">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      autoFocus
+                      value={itemListQuery}
+                      onChange={(e) => {
+                        setItemListQuery(e.target.value);
+                        setItemListHighlightIdx(0);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          setItemListHighlightIdx((prev) => Math.min(Math.max(0, itemListResults.length - 1), prev + 1));
+                        } else if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          setItemListHighlightIdx((prev) => Math.max(0, prev - 1));
+                        } else if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const chosen = itemListResults[itemListHighlightIdx] || itemListResults[0];
+                          if (chosen) selectFromItemListModal(chosen);
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setShowItemListModal(false);
+                          setItemListTargetRowIdx(null);
+                        }
+                      }}
+                      placeholder="Filter Item List by Item Code, Item Name, Company, or Barcode... (↑/↓ Navigate, Enter Select, Esc Close)"
+                      className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-600"
+                    />
+                  </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl">
-              <table className="w-full text-left border-collapse text-[11px]">
-                <thead className="bg-slate-900 text-white sticky top-0 z-10">
-                  <tr>
-                    <th className="px-3 py-2">Code</th>
-                    <th className="px-3 py-2">Item Name</th>
-                    <th className="px-3 py-2">Company</th>
-                    <th className="px-3 py-2">Packing</th>
-                    <th className="px-3 py-2 text-right">Stock</th>
-                    <th className="px-3 py-2 text-right">Rate</th>
-                    <th className="px-3 py-2 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {(itemListQuery.trim()
-                    ? searchItems(indexedCatalog, itemListQuery, 100)
-                    : catalogItems.slice(0, 100)
-                  ).map((it) => {
-                    const rate =
-                      invoiceType === 'Wholesale'
-                        ? round2(it.wholesale_price || it.trade_price || it.retail_price)
-                        : round2(it.retail_price);
-                    return (
-                      <tr key={it.id} className="hover:bg-emerald-50/60 transition-colors">
-                        <td className="px-3 py-2 font-mono font-bold text-emerald-700">
-                          {it.item_code}
-                        </td>
-                        <td className="px-3 py-2 font-semibold text-slate-900">{it.item_name}</td>
-                        <td className="px-3 py-2 text-slate-600">{it.company_name || '—'}</td>
-                        <td className="px-3 py-2 text-slate-500">{it.packing || '1x1'}</td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {it.total_available_packs ?? it.default_batch?.available_packs ?? 0}P
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">
-                          {formatPKR(rate)}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (itemListTargetRowIdx !== null) {
-                                populateRowWithItem(itemListTargetRowIdx, it, true);
-                              } else {
-                                handleSelectFromTopSearch(it);
-                              }
-                              setShowItemListModal(false);
-                              setItemListTargetRowIdx(null);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
-                          >
-                            Select
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-left border-collapse text-[11px]">
+                      <thead className="bg-slate-900 text-white sticky top-0 z-10">
+                        <tr>
+                          <th className="px-3 py-2">Code</th>
+                          <th className="px-3 py-2">Item Name</th>
+                          <th className="px-3 py-2">Company</th>
+                          <th className="px-3 py-2">Packing</th>
+                          <th className="px-3 py-2 text-right">Stock</th>
+                          <th className="px-3 py-2 text-right">Rate</th>
+                          <th className="px-3 py-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {itemListResults.map((it, idx) => {
+                          const rate =
+                            invoiceType === 'Wholesale'
+                              ? round2(it.wholesale_price || it.trade_price || it.retail_price)
+                              : round2(it.retail_price);
+                          const isHighlighted = idx === itemListHighlightIdx;
+                          return (
+                            <tr
+                              key={it.id}
+                              onMouseEnter={() => setItemListHighlightIdx(idx)}
+                              className={`transition-colors ${
+                                isHighlighted ? 'bg-emerald-100 font-semibold' : 'hover:bg-emerald-50/60'
+                              }`}
+                            >
+                              <td className="px-3 py-2 font-mono font-bold text-emerald-700">
+                                {it.item_code}
+                              </td>
+                              <td className="px-3 py-2 font-semibold text-slate-900">{it.item_name}</td>
+                              <td className="px-3 py-2 text-slate-600">{it.company_name || '—'}</td>
+                              <td className="px-3 py-2 text-slate-500">{it.packing || '1x1'}</td>
+                              <td className="px-3 py-2 text-right font-mono">
+                                {it.total_available_packs ?? it.default_batch?.available_packs ?? 0}P
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono font-bold">
+                                {formatPKR(rate)}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => selectFromItemListModal(it)}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
+                                >
+                                  Select
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

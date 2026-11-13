@@ -5,6 +5,7 @@
  */
 
 import { offlineStorage } from './offlineStorage';
+import { prepareItemIndex, searchItems } from '../utils/itemSearch';
 
 export type SyncStatusType = 'synced' | 'pending' | 'syncing' | 'failed' | 'offline';
 
@@ -1445,30 +1446,18 @@ class OfflineSyncManager {
   public async searchLocalItems(query = '', limit = 0): Promise<any[]> {
     try {
       const allItems = await offlineStorage.getAll<any>('items');
-      allItems.sort((a, b) =>
-        String(a.item_name || '').localeCompare(String(b.item_name || ''))
+      const activeItems = allItems.filter(
+        (it) => String(it?.status || 'Active').toLowerCase() === 'active'
       );
       if (!query.trim()) {
-        return limit > 0 ? allItems.slice(0, limit) : allItems;
+        activeItems.sort((a, b) =>
+          String(a.item_name || '').localeCompare(String(b.item_name || ''))
+        );
+        return limit > 0 ? activeItems.slice(0, limit) : activeItems;
       }
-      const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-      const matched = allItems.filter((item) => {
-        const searchCorpus = [
-          item.item_code,
-          item.barcode,
-          item.item_name,
-          item.generic_name,
-          item.company_name,
-          item.category,
-          item.packing,
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-
-        return tokens.every((token) => searchCorpus.includes(token));
-      });
-      return limit > 0 ? matched.slice(0, limit) : matched;
+      const indexed = prepareItemIndex(activeItems);
+      const effectiveLimit = limit > 0 ? limit : activeItems.length;
+      return searchItems(indexed, query, effectiveLimit);
     } catch {
       return [];
     }

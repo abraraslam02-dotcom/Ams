@@ -57,9 +57,10 @@ export function prepareItemIndex<T extends BaseSearchableItem>(items: T[]): Inde
 
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    if (!it || typeof it.id !== 'number') continue;
-    if (seenIds.has(it.id)) continue;
-    seenIds.add(it.id);
+    const numId = Number(it?.id);
+    if (!it || !Number.isFinite(numId) || numId <= 0) continue;
+    if (seenIds.has(numId)) continue;
+    seenIds.add(numId);
 
     const cleanName = String(it.item_name || '').toLowerCase().trim();
     const cleanCode = String(it.item_code || '').toLowerCase().trim();
@@ -74,7 +75,7 @@ export function prepareItemIndex<T extends BaseSearchableItem>(items: T[]): Inde
 
     indexed.push({
       item: it,
-      id: it.id,
+      id: numId,
       cleanName,
       cleanCode,
       cleanBarcode,
@@ -158,6 +159,12 @@ export function searchItems<T extends BaseSearchableItem>(
     }
 
     // 3. PARTIAL MATCHES
+    if (x.cleanCode.includes(q)) {
+      score += 35_000;
+    }
+    if (x.cleanBarcode && x.cleanBarcode.includes(q)) {
+      score += 30_000;
+    }
     if (x.cleanName.includes(q)) {
       score += 25_000;
     }
@@ -177,6 +184,6 @@ export function searchItems<T extends BaseSearchableItem>(
     matches.push({ item: x.item, score });
   }
 
-  matches.sort((a, b) => b.score - a.score || a.item.item_name.localeCompare(b.item.item_name));
+  matches.sort((a, b) => b.score - a.score || String(a.item.item_name || '').localeCompare(String(b.item.item_name || '')));
   return matches.slice(0, limit).map((m) => m.item);
 }
