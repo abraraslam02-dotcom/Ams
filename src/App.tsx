@@ -42,6 +42,10 @@ import {
   ClosingManagementWorkspace,
   ClosingTabId,
 } from './components/closing/ClosingManagementWorkspace';
+import {
+  PayrollHRWorkspace,
+  PayrollTabId,
+} from './components/payroll/PayrollHRWorkspace';
 import { api } from './services/api';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
@@ -196,6 +200,20 @@ function AppContent() {
           hasPermission('closing') ||
           hasPermission('accounts') ||
           hasPermission('reports')
+        );
+      }
+      if (tab.startsWith('payroll-')) {
+        return (
+          hasPermission('payroll') ||
+          hasPermission('payroll_employees') ||
+          hasPermission('payroll_attendance') ||
+          hasPermission('payroll_leave') ||
+          hasPermission('payroll_process') ||
+          hasPermission('payroll_approve') ||
+          hasPermission('payroll_payments') ||
+          hasPermission('payroll_advances_loans') ||
+          hasPermission('payroll_reports') ||
+          hasPermission('accounts')
         );
       }
       return true;
@@ -607,6 +625,58 @@ function AppContent() {
         return {
           title: 'Reopen Closed Period — Super Admin Period Lock Control & Audit Trail',
           crumbs: ['Closing Management', 'Reopen Closed Period'],
+        };
+
+      // K. PAYROLL & EMPLOYEE MANAGEMENT
+      case 'payroll-dashboard':
+        return {
+          title: 'Payroll & HR Dashboard — Workforce, Attendance & Salary KPIs',
+          crumbs: ['Payroll & HR', 'Dashboard'],
+        };
+      case 'payroll-employees':
+        return {
+          title: 'Employee Management — Staff Profiles, Auto EMP Codes & Ledgers',
+          crumbs: ['Payroll & HR', 'Employee Management'],
+        };
+      case 'payroll-attendance':
+        return {
+          title: 'Attendance Management — Daily Check-In/Out, Overtime & Monthly Calendar',
+          crumbs: ['Payroll & HR', 'Attendance Management'],
+        };
+      case 'payroll-leaves':
+        return {
+          title: 'Leave Management — Applications, Approvals & Annual Leave Balances',
+          crumbs: ['Payroll & HR', 'Leave Management'],
+        };
+      case 'payroll-structure':
+        return {
+          title: 'Salary Structure — Earnings, Allowances & Deduction Formulas',
+          crumbs: ['Payroll & HR', 'Salary Structure'],
+        };
+      case 'payroll-processing':
+        return {
+          title: 'Monthly Payroll Processing — Calculation, Finalization & Accounting Accruals',
+          crumbs: ['Payroll & HR', 'Monthly Payroll Processing'],
+        };
+      case 'payroll-payments':
+        return {
+          title: 'Salary Payment — Full & Partial Salary Disbursements (Cash / Bank)',
+          crumbs: ['Payroll & HR', 'Salary Payment'],
+        };
+      case 'payroll-advances-loans':
+        return {
+          title: 'Employee Advances & Loans — Disbursements & Monthly Installment Recoveries',
+          crumbs: ['Payroll & HR', 'Advances & Loans'],
+        };
+      case 'payroll-slips':
+        return {
+          title: 'Employee Salary Slips — Official A4 Printable & Exportable Payslips',
+          crumbs: ['Payroll & HR', 'Salary Slips'],
+        };
+      case 'payroll-reports':
+        return {
+          title: 'Payroll & HR Reports — Complete Suite of 25 Employee, Attendance & Salary Reports',
+          crumbs: ['Payroll & HR', '25 Reports'],
         };
 
       default:
@@ -1148,6 +1218,14 @@ function AppContent() {
               {activeTab.startsWith('closing-') && (
                 <ClosingManagementWorkspace
                   initialTab={activeTab as ClosingTabId}
+                  onNavigateTab={handleSelectTab}
+                />
+              )}
+
+              {/* PAYROLL & EMPLOYEE MANAGEMENT */}
+              {activeTab.startsWith('payroll-') && (
+                <PayrollHRWorkspace
+                  initialTab={activeTab as PayrollTabId}
                   onNavigateTab={handleSelectTab}
                 />
               )}

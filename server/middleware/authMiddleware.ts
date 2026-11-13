@@ -238,7 +238,18 @@ function hasAnyPerm(
  * Route-aware RBAC enforcement for domain routers
  */
 export function enforceModulePermissions(
-  domain: 'items' | 'accounts' | 'purchases' | 'sales' | 'inventory' | 'accounting' | 'settings' | 'users' | 'supply' | 'closing'
+  domain:
+    | 'items'
+    | 'accounts'
+    | 'purchases'
+    | 'sales'
+    | 'inventory'
+    | 'accounting'
+    | 'settings'
+    | 'users'
+    | 'supply'
+    | 'closing'
+    | 'payroll'
 ) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
@@ -397,6 +408,47 @@ export function enforceModulePermissions(
             { mod: 'accounts', action: 'create' },
           ]);
         requiredDesc = 'closing:create';
+      }
+    } else if (domain === 'payroll') {
+      if (method === 'GET') {
+        allowed =
+          req.user.role === 'Administrator' ||
+          req.user.role === 'Accountant' ||
+          hasAnyPerm(perms, [
+            { mod: 'payroll', action: 'view' },
+            { mod: 'payroll_employees', action: 'view' },
+            { mod: 'payroll_attendance', action: 'view' },
+            { mod: 'payroll_leave', action: 'view' },
+            { mod: 'payroll_process', action: 'view' },
+            { mod: 'payroll_approve', action: 'view' },
+            { mod: 'payroll_payments', action: 'view' },
+            { mod: 'payroll_advances_loans', action: 'view' },
+            { mod: 'payroll_reports', action: 'view' },
+            { mod: 'accounts', action: 'view' },
+          ]);
+        requiredDesc = 'payroll:view';
+      } else {
+        allowed =
+          req.user.role === 'Administrator' ||
+          req.user.role === 'Accountant' ||
+          hasAnyPerm(perms, [
+            { mod: 'payroll', action: 'create' },
+            { mod: 'payroll', action: 'edit' },
+            { mod: 'payroll_employees', action: 'create' },
+            { mod: 'payroll_employees', action: 'edit' },
+            { mod: 'payroll_attendance', action: 'create' },
+            { mod: 'payroll_attendance', action: 'edit' },
+            { mod: 'payroll_leave', action: 'create' },
+            { mod: 'payroll_leave', action: 'edit' },
+            { mod: 'payroll_process', action: 'create' },
+            { mod: 'payroll_process', action: 'edit' },
+            { mod: 'payroll_approve', action: 'create' },
+            { mod: 'payroll_approve', action: 'edit' },
+            { mod: 'payroll_payments', action: 'create' },
+            { mod: 'payroll_advances_loans', action: 'create' },
+            { mod: 'payroll_advances_loans', action: 'edit' },
+          ]);
+        requiredDesc = 'payroll:manage';
       }
     } else if (domain === 'supply') {
       if (method === 'GET') {

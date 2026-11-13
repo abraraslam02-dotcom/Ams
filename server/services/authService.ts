@@ -69,6 +69,15 @@ export const PERMISSION_MODULES: Array<{ key: string; label: string; description
   { key: 'supply_billing', label: 'Supply: Final Billing', description: 'Final sales invoice generation from delivered supplies' },
   { key: 'supply_recovery', label: 'Supply: Recovery & Settlement', description: 'Party/Town/Supply recovery receipts and salesman settlement' },
   { key: 'supply_reports', label: 'Supply: Distribution Reports', description: 'Booking, supply, return, billing, and recovery reports' },
+  { key: 'payroll', label: 'Payroll & HR Management', description: 'Payroll & HR dashboard, employee management, and salary operations' },
+  { key: 'payroll_employees', label: 'Payroll: Employee Management', description: 'Add, edit, view, and manage employees and salary structures' },
+  { key: 'payroll_attendance', label: 'Payroll: Attendance Management', description: 'Daily attendance, check-in/out, overtime, and attendance correction' },
+  { key: 'payroll_leave', label: 'Payroll: Leave Management', description: 'Employee leave requests, approvals, and annual leave quotas' },
+  { key: 'payroll_process', label: 'Payroll: Process Payroll', description: 'Calculate, preview, and process monthly payroll sheets' },
+  { key: 'payroll_approve', label: 'Payroll: Approve & Reopen Payroll', description: 'Finalize monthly payrolls, post accounting journals, and reopen payrolls' },
+  { key: 'payroll_payments', label: 'Payroll: Record Salary Payments', description: 'Record partial or full salary payments and print salary slips' },
+  { key: 'payroll_advances_loans', label: 'Payroll: Advances & Loans', description: 'Disburse employee salary advances/loans and manage installment recoveries' },
+  { key: 'payroll_reports', label: 'Payroll: HR & Payroll Reports', description: 'View, print, and export all 25 Employee, Attendance, and Payroll reports' },
 ];
 
 let tablesInitialized = false;

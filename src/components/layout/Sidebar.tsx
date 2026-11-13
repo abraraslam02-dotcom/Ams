@@ -194,7 +194,18 @@ export type NavTabId =
   | 'closing-yearly'
   | 'closing-stock'
   | 'closing-history'
-  | 'closing-reopen';
+  | 'closing-reopen'
+  // K. PAYROLL & EMPLOYEE MANAGEMENT
+  | 'payroll-dashboard'
+  | 'payroll-employees'
+  | 'payroll-attendance'
+  | 'payroll-leaves'
+  | 'payroll-structure'
+  | 'payroll-processing'
+  | 'payroll-payments'
+  | 'payroll-advances-loans'
+  | 'payroll-slips'
+  | 'payroll-reports';
 
 interface SidebarProps {
   activeTab: NavTabId;
@@ -644,6 +655,26 @@ const MENU: MenuNode[] = [
       { id: 'closing-stock', label: 'Stock Closing' },
       { id: 'closing-history', label: 'Closing History' },
       { id: 'closing-reopen', label: 'Reopen Closed Period', badge: 'Admin' },
+    ],
+  },
+  {
+    id: 'group-payroll-hr',
+    code: 'P',
+    label: 'Payroll & HR Management',
+    canSee: (p, isAdmin) =>
+      isAdmin || p.payroll?.view !== false || p.accounts?.view !== false,
+    icon: 'users',
+    children: [
+      { id: 'payroll-dashboard', label: 'Payroll Dashboard', badge: 'KPIs' },
+      { id: 'payroll-employees', label: 'Employee Management', badge: 'EMP' },
+      { id: 'payroll-attendance', label: 'Attendance Management' },
+      { id: 'payroll-leaves', label: 'Leave Management' },
+      { id: 'payroll-structure', label: 'Salary Structure' },
+      { id: 'payroll-processing', label: 'Monthly Payroll Processing' },
+      { id: 'payroll-payments', label: 'Salary Payment', badge: 'Pay' },
+      { id: 'payroll-advances-loans', label: 'Employee Advances & Loans' },
+      { id: 'payroll-slips', label: 'Salary Slips (Print/PDF)' },
+      { id: 'payroll-reports', label: 'Payroll & HR Reports (25)', badge: '25' },
     ],
   },
   {

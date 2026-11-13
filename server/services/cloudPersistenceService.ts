@@ -80,6 +80,17 @@ const PERSISTED_TABLES = [
   'sync_audit_log',
   'system_error_logs',
   'idempotency_keys',
+  'employee_sequences',
+  'employees',
+  'employee_salary_structures',
+  'employee_attendance',
+  'employee_leaves',
+  'employee_advances_loans',
+  'employee_advance_loan_recoveries',
+  'payroll_records',
+  'salary_payments',
+  'employee_financial_ledger',
+  'payroll_audit_logs',
 ];
 
 interface CloudSyncState {

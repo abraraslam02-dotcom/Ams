@@ -53,6 +53,7 @@ export function runMigrations(): MigrationResult {
   const migrationName23 = '023_supply_account_type_and_schema_alignment';
   const migrationName24 = '024_complete_closing_and_financial_period_management';
   const migrationName25 = '025_salesman_booking_pwa_and_working_days';
+  const migrationName26 = '026_complete_payroll_and_hr_management';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3561,6 +3562,397 @@ export function runMigrations(): MigrationResult {
     if (!applied25) {
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName25, 25);
     }
+
+    // =========================================================================
+    // MIGRATION 026: Complete Payroll & Employee Management Module
+    // =========================================================================
+    const applied26 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName26);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS employee_sequences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prefix TEXT NOT NULL UNIQUE,
+        last_number INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      INSERT OR IGNORE INTO employee_sequences (prefix, last_number, updated_at)
+      VALUES ('EMP', 0, CURRENT_TIMESTAMP);
+
+      CREATE TABLE IF NOT EXISTS employees (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_code TEXT NOT NULL UNIQUE,
+        full_name TEXT NOT NULL,
+        father_name TEXT DEFAULT '',
+        photo_url TEXT DEFAULT '',
+        cnic TEXT DEFAULT '',
+        phone TEXT DEFAULT '',
+        emergency_contact_name TEXT DEFAULT '',
+        emergency_contact_phone TEXT DEFAULT '',
+        address TEXT DEFAULT '',
+        department TEXT NOT NULL DEFAULT 'Pharmacy Operations',
+        designation TEXT NOT NULL DEFAULT 'Staff',
+        joining_date TEXT NOT NULL,
+        leaving_date TEXT DEFAULT '',
+        employment_status TEXT NOT NULL DEFAULT 'Active' CHECK(employment_status IN ('Active', 'Inactive')),
+        basic_salary REAL NOT NULL DEFAULT 0.0,
+        payment_method TEXT NOT NULL DEFAULT 'Cash' CHECK(payment_method IN ('Cash', 'Bank', 'Cheque', 'Online')),
+        bank_name TEXT DEFAULT '',
+        bank_account_title TEXT DEFAULT '',
+        bank_account_number TEXT DEFAULT '',
+        annual_casual_leave_quota INTEGER NOT NULL DEFAULT 12,
+        annual_sick_leave_quota INTEGER NOT NULL DEFAULT 10,
+        annual_earned_leave_quota INTEGER NOT NULL DEFAULT 14,
+        remarks TEXT DEFAULT '',
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_employees_code ON employees(employee_code);
+      CREATE INDEX IF NOT EXISTS idx_employees_status ON employees(employment_status);
+      CREATE INDEX IF NOT EXISTS idx_employees_dept ON employees(department);
+
+      CREATE TABLE IF NOT EXISTS employee_salary_structures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL UNIQUE,
+        basic_salary REAL NOT NULL DEFAULT 0.0,
+        house_allowance REAL NOT NULL DEFAULT 0.0,
+        house_allowance_type TEXT NOT NULL DEFAULT 'Fixed' CHECK(house_allowance_type IN ('Fixed', 'Percent')),
+        medical_allowance REAL NOT NULL DEFAULT 0.0,
+        medical_allowance_type TEXT NOT NULL DEFAULT 'Fixed' CHECK(medical_allowance_type IN ('Fixed', 'Percent')),
+        conveyance_allowance REAL NOT NULL DEFAULT 0.0,
+        conveyance_allowance_type TEXT NOT NULL DEFAULT 'Fixed' CHECK(conveyance_allowance_type IN ('Fixed', 'Percent')),
+        other_allowance REAL NOT NULL DEFAULT 0.0,
+        overtime_hourly_rate REAL NOT NULL DEFAULT 0.0,
+        overtime_calculation_method TEXT NOT NULL DEFAULT 'Auto_From_Basic' CHECK(overtime_calculation_method IN ('Auto_From_Basic', 'Fixed_Rate')),
+        default_bonus REAL NOT NULL DEFAULT 0.0,
+        absent_deduction_method TEXT NOT NULL DEFAULT 'Per_Day_Basic' CHECK(absent_deduction_method IN ('Per_Day_Basic', 'Per_Day_Gross', 'Fixed_Rate', 'None')),
+        absent_deduction_rate REAL NOT NULL DEFAULT 0.0,
+        late_deduction_method TEXT NOT NULL DEFAULT 'Per_3_Lates_1_Day' CHECK(late_deduction_method IN ('Per_3_Lates_1_Day', 'Fixed_Per_Late', 'None')),
+        late_deduction_rate REAL NOT NULL DEFAULT 0.0,
+        other_deduction REAL NOT NULL DEFAULT 0.0,
+        updated_by TEXT DEFAULT 'Super Admin',
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emp_sal_struct_emp ON employee_salary_structures(employee_id);
+
+      CREATE TABLE IF NOT EXISTS employee_attendance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL,
+        attendance_date TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Present' CHECK(status IN ('Present', 'Absent', 'Half Day', 'Leave', 'Holiday')),
+        leave_type TEXT DEFAULT '',
+        check_in_time TEXT DEFAULT '',
+        check_out_time TEXT DEFAULT '',
+        is_late INTEGER NOT NULL DEFAULT 0,
+        late_minutes INTEGER NOT NULL DEFAULT 0,
+        is_early_departure INTEGER NOT NULL DEFAULT 0,
+        early_departure_minutes INTEGER NOT NULL DEFAULT 0,
+        overtime_hours REAL NOT NULL DEFAULT 0.0,
+        remarks TEXT DEFAULT '',
+        recorded_by TEXT DEFAULT 'Super Admin',
+        corrected_by TEXT DEFAULT '',
+        correction_reason TEXT DEFAULT '',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(employee_id, attendance_date),
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emp_attendance_date ON employee_attendance(attendance_date);
+      CREATE INDEX IF NOT EXISTS idx_emp_attendance_emp_date ON employee_attendance(employee_id, attendance_date);
+
+      CREATE TABLE IF NOT EXISTS employee_leaves (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        leave_code TEXT NOT NULL UNIQUE,
+        employee_id INTEGER NOT NULL,
+        leave_type TEXT NOT NULL CHECK(leave_type IN ('Casual Leave', 'Sick Leave', 'Annual Leave', 'Unpaid Leave')),
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        total_days REAL NOT NULL DEFAULT 1.0,
+        is_paid INTEGER NOT NULL DEFAULT 1,
+        reason TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'Pending' CHECK(status IN ('Pending', 'Approved', 'Rejected')),
+        approved_by TEXT DEFAULT '',
+        approved_at DATETIME DEFAULT NULL,
+        rejection_reason TEXT DEFAULT '',
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emp_leaves_emp ON employee_leaves(employee_id);
+      CREATE INDEX IF NOT EXISTS idx_emp_leaves_status ON employee_leaves(status);
+      CREATE INDEX IF NOT EXISTS idx_emp_leaves_dates ON employee_leaves(start_date, end_date);
+
+      CREATE TABLE IF NOT EXISTS employee_advances_loans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_code TEXT NOT NULL UNIQUE,
+        employee_id INTEGER NOT NULL,
+        transaction_type TEXT NOT NULL CHECK(transaction_type IN ('Advance', 'Loan')),
+        disbursement_date TEXT NOT NULL,
+        principal_amount REAL NOT NULL DEFAULT 0.0,
+        monthly_installment REAL NOT NULL DEFAULT 0.0,
+        recovered_amount REAL NOT NULL DEFAULT 0.0,
+        remaining_balance REAL NOT NULL DEFAULT 0.0,
+        auto_recover_in_payroll INTEGER NOT NULL DEFAULT 1,
+        payment_mode TEXT NOT NULL DEFAULT 'Cash' CHECK(payment_mode IN ('Cash', 'Bank', 'Cheque', 'Online', 'Other')),
+        financial_account_id INTEGER NOT NULL,
+        financial_account_code TEXT NOT NULL DEFAULT '',
+        financial_account_name TEXT NOT NULL DEFAULT '',
+        reference_number TEXT DEFAULT '',
+        journal_entry_id INTEGER DEFAULT NULL,
+        cash_book_voucher_id INTEGER DEFAULT NULL,
+        status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Completed', 'Cancelled')),
+        remarks TEXT DEFAULT '',
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emp_adv_loans_emp ON employee_advances_loans(employee_id);
+      CREATE INDEX IF NOT EXISTS idx_emp_adv_loans_type ON employee_advances_loans(transaction_type, status);
+
+      CREATE TABLE IF NOT EXISTS employee_advance_loan_recoveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        advance_loan_id INTEGER NOT NULL,
+        employee_id INTEGER NOT NULL,
+        payroll_id INTEGER DEFAULT NULL,
+        recovery_date TEXT NOT NULL,
+        recovery_month INTEGER NOT NULL,
+        recovery_year INTEGER NOT NULL,
+        amount REAL NOT NULL DEFAULT 0.0,
+        recovery_method TEXT NOT NULL DEFAULT 'Payroll_Deduction' CHECK(recovery_method IN ('Payroll_Deduction', 'Direct_Receipt')),
+        financial_account_id INTEGER DEFAULT NULL,
+        journal_entry_id INTEGER DEFAULT NULL,
+        remarks TEXT DEFAULT '',
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (advance_loan_id) REFERENCES employee_advances_loans (id) ON DELETE CASCADE,
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emp_adv_rec_loan ON employee_advance_loan_recoveries(advance_loan_id);
+      CREATE INDEX IF NOT EXISTS idx_emp_adv_rec_payroll ON employee_advance_loan_recoveries(payroll_id);
+
+      CREATE TABLE IF NOT EXISTS payroll_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        payroll_code TEXT NOT NULL UNIQUE,
+        employee_id INTEGER NOT NULL,
+        payroll_month INTEGER NOT NULL CHECK(payroll_month BETWEEN 1 AND 12),
+        payroll_year INTEGER NOT NULL,
+        period_label TEXT NOT NULL,
+        working_days REAL NOT NULL DEFAULT 30.0,
+        present_days REAL NOT NULL DEFAULT 0.0,
+        half_days REAL NOT NULL DEFAULT 0.0,
+        absent_days REAL NOT NULL DEFAULT 0.0,
+        paid_leaves REAL NOT NULL DEFAULT 0.0,
+        unpaid_leaves REAL NOT NULL DEFAULT 0.0,
+        holidays REAL NOT NULL DEFAULT 0.0,
+        late_count INTEGER NOT NULL DEFAULT 0,
+        overtime_hours REAL NOT NULL DEFAULT 0.0,
+        basic_salary REAL NOT NULL DEFAULT 0.0,
+        house_allowance REAL NOT NULL DEFAULT 0.0,
+        medical_allowance REAL NOT NULL DEFAULT 0.0,
+        conveyance_allowance REAL NOT NULL DEFAULT 0.0,
+        other_allowances REAL NOT NULL DEFAULT 0.0,
+        overtime_amount REAL NOT NULL DEFAULT 0.0,
+        bonus_amount REAL NOT NULL DEFAULT 0.0,
+        gross_salary REAL NOT NULL DEFAULT 0.0,
+        absent_deduction REAL NOT NULL DEFAULT 0.0,
+        late_deduction REAL NOT NULL DEFAULT 0.0,
+        unpaid_leave_deduction REAL NOT NULL DEFAULT 0.0,
+        advance_recovery REAL NOT NULL DEFAULT 0.0,
+        loan_recovery REAL NOT NULL DEFAULT 0.0,
+        other_deductions REAL NOT NULL DEFAULT 0.0,
+        total_deductions REAL NOT NULL DEFAULT 0.0,
+        net_salary REAL NOT NULL DEFAULT 0.0,
+        paid_amount REAL NOT NULL DEFAULT 0.0,
+        remaining_amount REAL NOT NULL DEFAULT 0.0,
+        payment_status TEXT NOT NULL DEFAULT 'Unpaid' CHECK(payment_status IN ('Unpaid', 'Partially Paid', 'Paid')),
+        status TEXT NOT NULL DEFAULT 'Draft' CHECK(status IN ('Draft', 'Processed', 'Finalized', 'Reopened')),
+        journal_entry_id INTEGER DEFAULT NULL,
+        finalized_by TEXT DEFAULT '',
+        finalized_at DATETIME DEFAULT NULL,
+        reopened_by TEXT DEFAULT '',
+        reopened_at DATETIME DEFAULT NULL,
+        reopen_reason TEXT DEFAULT '',
+        remarks TEXT DEFAULT '',
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(employee_id, payroll_month, payroll_year),
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_payroll_rec_period ON payroll_records(payroll_year, payroll_month);
+      CREATE INDEX IF NOT EXISTS idx_payroll_rec_emp ON payroll_records(employee_id);
+      CREATE INDEX IF NOT EXISTS idx_payroll_rec_status ON payroll_records(status, payment_status);
+
+      CREATE TABLE IF NOT EXISTS salary_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        payment_code TEXT NOT NULL UNIQUE,
+        payroll_id INTEGER NOT NULL,
+        employee_id INTEGER NOT NULL,
+        payroll_month INTEGER NOT NULL,
+        payroll_year INTEGER NOT NULL,
+        payment_date TEXT NOT NULL,
+        total_payable_before REAL NOT NULL DEFAULT 0.0,
+        previously_paid_amount REAL NOT NULL DEFAULT 0.0,
+        payment_amount REAL NOT NULL DEFAULT 0.0,
+        remaining_balance_after REAL NOT NULL DEFAULT 0.0,
+        payment_mode TEXT NOT NULL DEFAULT 'Cash' CHECK(payment_mode IN ('Cash', 'Bank', 'Cheque', 'Online', 'Other')),
+        financial_account_id INTEGER NOT NULL,
+        financial_account_code TEXT NOT NULL DEFAULT '',
+        financial_account_name TEXT NOT NULL DEFAULT '',
+        reference_number TEXT DEFAULT '',
+        journal_entry_id INTEGER DEFAULT NULL,
+        cash_book_voucher_id INTEGER DEFAULT NULL,
+        remarks TEXT DEFAULT '',
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (payroll_id) REFERENCES payroll_records (id) ON DELETE RESTRICT,
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sal_payments_payroll ON salary_payments(payroll_id);
+      CREATE INDEX IF NOT EXISTS idx_sal_payments_emp ON salary_payments(employee_id);
+      CREATE INDEX IF NOT EXISTS idx_sal_payments_date ON salary_payments(payment_date);
+
+      CREATE TABLE IF NOT EXISTS employee_financial_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL,
+        transaction_date TEXT NOT NULL,
+        transaction_type TEXT NOT NULL,
+        reference_code TEXT NOT NULL DEFAULT '',
+        reference_id INTEGER DEFAULT NULL,
+        description TEXT DEFAULT '',
+        debit_amount REAL NOT NULL DEFAULT 0.0,
+        credit_amount REAL NOT NULL DEFAULT 0.0,
+        running_balance REAL NOT NULL DEFAULT 0.0,
+        journal_entry_id INTEGER DEFAULT NULL,
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emp_fin_ledger_emp ON employee_financial_ledger(employee_id, transaction_date);
+
+      CREATE TABLE IF NOT EXISTS payroll_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        module_section TEXT NOT NULL,
+        record_reference TEXT DEFAULT '',
+        employee_id INTEGER DEFAULT NULL,
+        performed_by TEXT NOT NULL,
+        performed_by_role TEXT DEFAULT 'Super Admin',
+        details_json TEXT DEFAULT '{}',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_payroll_audit_emp ON payroll_audit_logs(employee_id);
+    `);
+
+    // Ensure dedicated Payroll Financial Accounts exist in Chart of Accounts
+    const ensurePayrollAccount = (
+      code: string,
+      name: string,
+      mainGroup: string,
+      accountGroup: string,
+      accountType: string,
+      financialCategory: string,
+      balType: 'Debit' | 'Credit',
+      notes: string
+    ) => {
+      const existingAcc = db.prepare('SELECT id FROM accounts WHERE account_code = ?').get(code);
+      if (!existingAcc) {
+        db.prepare(`
+          INSERT INTO accounts (
+            account_code, account_name, main_group, account_group, account_type, financial_category,
+            opening_balance, opening_balance_type, current_balance, current_balance_type,
+            filer_status, status, is_system_account, notes
+          ) VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, ?, 'Filer', 'Active', 1, ?)
+        `).run(code, name, mainGroup, accountGroup, accountType, financialCategory, balType, balType, notes);
+      }
+    };
+
+    ensurePayrollAccount(
+      'EXP-5030',
+      'Staff Salaries & Wages',
+      'INCOME & EXPENSE ACCOUNTS',
+      'Salaries',
+      'Expense',
+      'Expenses',
+      'Debit',
+      'Pharmacist and store staff monthly salary expense account'
+    );
+    ensurePayrollAccount(
+      'LIA-2030',
+      'Staff Salary Payable',
+      'FINANCIAL ACCOUNTS',
+      'Liabilities',
+      'Liability',
+      'Liabilities',
+      'Credit',
+      'Accrued staff salaries payable liability account'
+    );
+    ensurePayrollAccount(
+      'AST-1060',
+      'Employee Salary Advances',
+      'FINANCIAL ACCOUNTS',
+      'Assets',
+      'Asset',
+      'Assets',
+      'Debit',
+      'Short-term salary advances disbursed to employees receivable'
+    );
+    ensurePayrollAccount(
+      'AST-1070',
+      'Employee Loans Receivable',
+      'FINANCIAL ACCOUNTS',
+      'Assets',
+      'Asset',
+      'Assets',
+      'Debit',
+      'Employee loans receivable recovered through monthly payroll installments'
+    );
+
+    if (!applied26) {
+      // Seed role permissions for Payroll & HR modules
+      const payrollPermKeys = [
+        'payroll',
+        'payroll_employees',
+        'payroll_attendance',
+        'payroll_leave',
+        'payroll_process',
+        'payroll_approve',
+        'payroll_payments',
+        'payroll_advances_loans',
+        'payroll_reports',
+      ];
+      const insertPayrollRolePerm = db.prepare(`
+        INSERT OR IGNORE INTO role_permissions (
+          role, module_key, can_view, can_create, can_edit, can_delete, can_export
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const pKey of payrollPermKeys) {
+        insertPayrollRolePerm.run('Super Admin', pKey, 1, 1, 1, 1, 1);
+        insertPayrollRolePerm.run('Administrator', pKey, 1, 1, 1, 0, 1);
+        insertPayrollRolePerm.run('Accountant', pKey, 1, 1, 1, 0, 1);
+        insertPayrollRolePerm.run('Salesman', pKey, 0, 0, 0, 0, 0);
+        insertPayrollRolePerm.run('Purchase Operator', pKey, 0, 0, 0, 0, 0);
+        insertPayrollRolePerm.run('Viewer', pKey, 1, 0, 0, 0, 1);
+      }
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName26, 26);
+    }
   });
 
   try {
@@ -3579,7 +3971,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

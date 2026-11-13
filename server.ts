@@ -17,6 +17,7 @@ import { cashBookRouter } from './server/routes/cashBook.ts';
 import { supplyRouter } from './server/routes/supply.ts';
 import { enhancementsRouter } from './server/routes/enhancements.ts';
 import { closingRouter } from './server/routes/closing.ts';
+import { payrollRouter } from './server/routes/payroll.ts';
 import { authenticateToken, enforceModulePermissions } from './server/middleware/authMiddleware.ts';
 import { runMigrations } from './server/db/migrations.ts';
 import { checkDatabaseConnection, getDatabase } from './server/db/connection.ts';
@@ -79,6 +80,7 @@ async function startServer() {
   app.use('/api/cash-book', cashBookRouter);
   app.use('/api/supply', authenticateToken, enforceModulePermissions('supply'), supplyRouter);
   app.use('/api/closing', authenticateToken, enforceModulePermissions('closing'), closingRouter);
+  app.use('/api/payroll', authenticateToken, enforceModulePermissions('payroll'), payrollRouter);
   app.use('/api/enhancements', enhancementsRouter);
 
   // Prevent browser/proxy HTTP caching on HTML shell and Service Worker scripts
