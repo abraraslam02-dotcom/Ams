@@ -82,7 +82,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
       setIsSettingsOpen(false);
       await fetchData();
     } catch (err: unknown) {
-      alert(`Failed to save settings: ${err instanceof Error ? err.message : String(err)}`);
+      setError(`Failed to save settings: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUpdatingSettings(false);
     }
@@ -99,9 +99,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
       'Expiry Date': item.expiry_date,
       'Days to Expiry': item.days_to_expiry,
       'Expiry Tier': item.expiry_tier,
-      'Available Packs': item.current_pack_qty,
-      'Available Loose': item.current_loose_qty,
-      'Total Units': item.total_units,
+      'Available Packs': Number((item.current_pack_qty || 0).toFixed(2)),
       'Purchase Rate (Rs)': item.purchase_rate,
       'Retail Price (Rs)': item.retail_price,
       'Cost Value at Risk (Rs)': item.total_cost_at_risk,
@@ -386,10 +384,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
                         </span>
                       </td>
                       <td className="px-3 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right font-black text-emerald-300">
-                        {item.current_pack_qty} <span className="text-[10px] text-slate-400 font-sans font-normal">pk</span>
-                        {item.current_loose_qty > 0 && (
-                          <span className="text-sky-400 font-mono text-[9px] ml-1">+{item.current_loose_qty}u</span>
-                        )}
+                        {Number((item.current_pack_qty || 0).toFixed(2))} <span className="text-[10px] text-slate-400 font-sans font-normal">pk</span>
                       </td>
                       <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-slate-300">
                         {formatPKR(item.purchase_rate, false)}

@@ -187,8 +187,23 @@ export interface StockLedgerEntry {
   type: 'OPENING' | 'PURCHASE' | 'PURCHASE_BONUS' | 'SALE' | 'PURCHASE_RETURN' | 'SALES_RETURN' | 'ADJUSTMENT_IN' | 'ADJUSTMENT_OUT' | 'TRANSFER_IN' | 'TRANSFER_OUT';
   type_label: string;
   ref_no: string;
+  party_name?: string;
+  item_id?: number;
+  item_code?: string;
+  item_name?: string;
+  company_name?: string;
+  item_group?: string;
   batch_number: string;
   expiry_date: string;
+  opening_packs?: number;
+  purchase_packs?: number;
+  purchase_bonus_packs?: number;
+  purchase_return_packs?: number;
+  sale_packs?: number;
+  sale_bonus_packs?: number;
+  sale_return_packs?: number;
+  transfer_in_packs?: number;
+  transfer_out_packs?: number;
   in_packs: number;
   in_loose: number;
   out_packs: number;
@@ -197,6 +212,9 @@ export interface StockLedgerEntry {
   running_pack_balance: number;
   running_loose_balance: number;
   unit_cost: number;
+  discount_amount?: number;
+  debit_amount?: number;
+  credit_amount?: number;
   remarks: string;
   user_name: string;
 }
@@ -226,6 +244,8 @@ export interface PhysicalVerificationItem {
   expiry_date: string;
   item_name?: string;
   item_code?: string;
+  company_name?: string;
+  item_group?: string;
   packing?: string;
   units_per_pack?: number;
   system_pack_qty: number;
@@ -237,4 +257,151 @@ export interface PhysicalVerificationItem {
   unit_cost: number;
   diff_cost_impact: number;
   reason_note: string | null;
+}
+
+export interface ReportMetaCompany {
+  company_name: string;
+  item_count: number;
+}
+
+export interface ReportMetaItem {
+  id: number;
+  item_code: string;
+  item_name: string;
+  company_name: string;
+  item_group: string;
+  packing: string;
+  units_per_pack: number;
+  trade_price: number;
+  purchase_price: number;
+  retail_price: number;
+}
+
+export interface CompanyItemMetaResponse {
+  success: boolean;
+  companies: ReportMetaCompany[];
+  itemGroups: string[];
+  items: ReportMetaItem[];
+}
+
+export interface ItemStockReportRow {
+  s_no: number;
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  company_name: string;
+  item_group: string;
+  packing: string;
+  units_per_pack: number;
+  opening_stock: number;
+  purchase_qty: number;
+  purchase_bonus: number;
+  purchase_return: number;
+  sale_qty: number;
+  sale_paid_qty: number;
+  sale_bonus: number;
+  sale_return: number;
+  transfer_in: number;
+  transfer_out: number;
+  physical_adjustment: number;
+  closing_stock: number;
+  trade_price: number;
+  stock_value: number;
+}
+
+export interface StockStatementRow {
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  company_name: string;
+  item_group: string;
+  trade_price: number;
+  opening: number;
+  rcvd: number;
+  total: number;
+  today: number;
+  last_month_qty: number;
+  last_month_bonus: number;
+  sales_qty: number;
+  sales_bonus: number;
+  return_qty: number;
+  return_bonus: number;
+  net_sales_qty: number;
+  net_sales_bonus: number;
+  net_sales_amount: number;
+  closing_qty: number;
+  closing_amount: number;
+}
+
+export interface StockStatementSubtotal {
+  opening: number;
+  rcvd: number;
+  total: number;
+  today: number;
+  last_month_qty: number;
+  last_month_bonus: number;
+  sales_qty: number;
+  sales_bonus: number;
+  return_qty: number;
+  return_bonus: number;
+  net_sales_qty: number;
+  net_sales_bonus: number;
+  net_sales_amount: number;
+  closing_qty: number;
+  closing_amount: number;
+}
+
+export interface StockStatementGroup {
+  company_name: string;
+  items: StockStatementRow[];
+  subtotal: StockStatementSubtotal;
+}
+
+export interface StockStatementResponse {
+  success: boolean;
+  store?: {
+    store_name?: string;
+    address?: string;
+    phone?: string;
+    drug_license_number?: string;
+    ntn_tax_number?: string;
+  };
+  fromDate: string;
+  toDate: string;
+  prevMonthRange?: { prevStart: string; prevEnd: string };
+  companies: StockStatementGroup[];
+  grandTotal: StockStatementSubtotal;
+}
+
+export interface DetailedItemStockRow {
+  s_no: number;
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  company_name: string;
+  item_group: string;
+  trade_price: number;
+  last_month_sale: number;
+  opening_stock: number;
+  opening_bonus: number;
+  purchase_qty: number;
+  purchase_bonus: number;
+  purchase_return: number;
+  sale_qty: number;
+  sale_paid_qty: number;
+  sale_bonus_qty: number;
+  sale_return: number;
+  transfer_in: number;
+  transfer_out: number;
+  physical_adjustment: number;
+  closing_stock: number;
+  purchase_rate: number;
+  sale_rate: number;
+  total_purchase_value: number;
+  total_sales_value: number;
+  discount_amount: number;
+  batch_number: string;
+  expiry_date: string;
+  packing: string;
+  stock_value: number;
 }

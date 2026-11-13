@@ -47,6 +47,7 @@ export function runMigrations(): MigrationResult {
   const migrationName18 = '018_cash_book_sequences_and_audit';
   const migrationName19 = '019_supply_and_distribution_management_system';
   const migrationName20 = '020_master_enhancement_fifo_offers_discounts_mobile_reset_backup';
+  const migrationName21 = '021_inventory_reports_idempotency_and_reference_columns';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3102,6 +3103,29 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName20, 20);
     }
+
+    // 21. Migration 021: Safe additive reference_no and idempotency_key columns for Adjustments, Transfers, and Verifications
+    const existing21 = db.prepare('SELECT id FROM database_migrations WHERE migration_name = ?').get(migrationName21);
+    if (!existing21) {
+      const addColSafe = (table: string, colName: string, colDef: string) => {
+        const cols = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>;
+        if (!cols.some((c) => c.name === colName)) {
+          db.exec(`ALTER TABLE "${table}" ADD COLUMN ${colName} ${colDef};`);
+        }
+      };
+
+      addColSafe('stock_adjustments', 'reference_no', 'TEXT DEFAULT NULL');
+      addColSafe('stock_adjustments', 'idempotency_key', 'TEXT DEFAULT NULL');
+      addColSafe('stock_transfers', 'reference_no', 'TEXT DEFAULT NULL');
+      addColSafe('physical_verifications', 'idempotency_key', 'TEXT DEFAULT NULL');
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_stock_adj_idemp ON stock_adjustments(idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_stock_ver_idemp ON physical_verifications(idempotency_key);
+      `);
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName21, 21);
+    }
   });
 
   try {
@@ -3120,7 +3144,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

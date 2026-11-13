@@ -11,6 +11,7 @@ export type NavTabId =
   | 'item-groups'
   | 'item-search'
   | 'stock-datasheet'
+  | 'stock-statement'
   | 'batch-expiry'
   | 'item-offers'
   | 'item-claims'
@@ -122,6 +123,8 @@ export type NavTabId =
   | 'physical-verification'
   | 'inv-overview'
   | 'inv-current'
+  | 'inv-stock-statement'
+  | 'inv-detailed-stock'
   | 'inv-datasheet'
   | 'inv-expiry'
   | 'inv-near-expiry'
@@ -133,6 +136,7 @@ export type NavTabId =
   | 'inv-verification'
   // G. REPORTS & ANALYTICS
   | 'report-item-reports'
+  | 'detailed-stock-report'
   | 'sales-item-wise'
   | 'report-item-purchases'
   | 'sales-profit-report'
@@ -305,6 +309,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'item-groups': 'layers',
   'item-search': 'search',
   'stock-datasheet': 'clipboard',
+  'stock-statement': 'doc',
   'batch-expiry': 'clock',
   'item-offers': 'gift',
   'item-claims': 'alert',
@@ -389,6 +394,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'expired-items': 'ban',
   'physical-verification': 'checkClipboard',
   'report-item-reports': 'box',
+  'detailed-stock-report': 'clipboard',
   'sales-item-wise': 'box',
   'report-item-purchases': 'bag',
   'sales-profit-report': 'trendUp',
@@ -448,6 +454,7 @@ const MENU: MenuNode[] = [
       { id: 'item-groups', label: 'Item Groups', canSee: (p) => p.items?.view !== false },
       { id: 'item-search', label: 'Item Search', canSee: (p) => p.items?.view !== false },
       { id: 'stock-datasheet', label: 'Item Stock', canSee: (p) => p.inventory?.view !== false },
+      { id: 'stock-statement', label: 'Company Stock Statement', canSee: (p) => p.inventory?.view !== false },
       { id: 'batch-expiry', label: 'Batch & Expiry', canSee: (p) => p.inventory?.view !== false },
       { id: 'fifo-batch-control', label: 'Batch-Wise FIFO Queue', badge: 'FIFO', canSee: (p) => p.inventory?.view !== false },
       { id: 'item-offers', label: 'Trade Deals & Offers', badge: 'Deals', canSee: (p) => p.items?.view !== false },
@@ -591,7 +598,7 @@ const MENU: MenuNode[] = [
     canSee: (p) => p.reports?.sales !== false || p.reports?.financial !== false || p.sales?.view !== false,
     icon: 'chart',
     children: [
-      { id: 'report-item-reports', label: 'Item Reports' },
+      { id: 'report-item-reports', label: 'Detailed Item Stock Report' },
       { id: 'sales-item-wise', label: 'Item Sales Reports' },
       { id: 'report-item-purchases', label: 'Item Purchase Reports' },
       { id: 'sales-profit-report', label: 'Item Profit Reports' },
@@ -640,7 +647,6 @@ const LEGACY_TAB_MAP: Partial<Record<NavTabId, NavTabId>> = {
   'sales-new': 'sales-pos',
   sales: 'sales-pos',
   'sale-returns': 'sales-return',
-  'staff-salesmen': 'sales-salesman-wise',
   'staff-deliverymen': 'deliveryman-master',
   'staff-deliveries': 'delivery-tracking',
   purchases: 'purchases-bill',
@@ -667,6 +673,9 @@ const LEGACY_TAB_MAP: Partial<Record<NavTabId, NavTabId>> = {
   inventory: 'batch-expiry',
   'inv-overview': 'inventory-overview',
   'inv-current': 'stock-datasheet',
+  'inv-stock-statement': 'stock-statement',
+  'inv-detailed-stock': 'report-item-reports',
+  'detailed-stock-report': 'report-item-reports',
   'inv-datasheet': 'batch-expiry',
   'inv-expiry': 'expiry-alerts',
   'inv-near-expiry': 'near-expiry',

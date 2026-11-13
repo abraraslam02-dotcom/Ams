@@ -3095,11 +3095,16 @@ salesRouter.get('/ledgers', (req: Request, res: Response) => {
 
 /**
  * GET /api/sales/reports/:reportType
- * 7 Sales & Billing Reports + Tax Summary:
- * - daily-sales
+ * Comprehensive Sales, Return, Profit, Discount & Tax Analytics Suite:
+ * - company-group-sales
+ * - yearly-sales
  * - monthly-sales
- * - item-wise-sales
- * - customer-wise-sales
+ * - customer-wise-sales (Party-wise Sales)
+ * - party-monthly-sales
+ * - yearly-party-comparison
+ * - item-wise-sales (Full Pack Equivalent)
+ * - salesman-wise-sales
+ * - daily-sales
  * - profit-report
  * - discount-report
  * - sales-return-report
@@ -3109,24 +3114,1344 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
     const { reportType } = req.params;
-    const { startDate, endDate, customerId, itemId } = req.query;
+    const rawStart = req.query.startDate || req.query.fromDate;
+    const rawEnd = req.query.endDate || req.query.toDate;
+    const startDate = rawStart ? String(rawStart).trim() : '';
+    const endDate = rawEnd ? String(rawEnd).trim() : '';
+    const customerId = req.query.customerId ? String(req.query.customerId).trim() : '';
+    const itemId = req.query.itemId ? String(req.query.itemId).trim() : '';
+    const salesmanId = req.query.salesmanId ? String(req.query.salesmanId).trim() : '';
+    const itemGroup = req.query.itemGroup ? String(req.query.itemGroup).trim() : '';
+    const townName = req.query.townName ? String(req.query.townName).trim() : '';
+    const areaName = req.query.areaName ? String(req.query.areaName).trim() : '';
 
+    const parseStrList = (val: unknown): string[] => {
+      if (!val) return [];
+      const arr = Array.isArray(val) ? val : [val];
+      return arr
+        .flatMap((v) => String(v).split(','))
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && s.toUpperCase() !== 'ALL');
+    };
+    const parseNumList = (val: unknown): number[] =>
+      parseStrList(val)
+        .map((n) => Number(n))
+        .filter((n) => Number.isFinite(n) && n > 0);
+
+    const companiesFilter = parseStrList(req.query.companies || req.query.companyNames);
+    const itemIdsFilter = parseNumList(req.query.itemIds || (itemId && itemId !== 'All' ? itemId : ''));
+    const hasItemScopeFilter =
+      companiesFilter.length > 0 ||
+      itemIdsFilter.length > 0 ||
+      (Boolean(itemGroup) && itemGroup.toUpperCase() !== 'ALL');
+
+    const buildSalesHeaderFilter = () => {
+      let where = " WHERE s.status = 'completed' ";
+      const params: Array<string | number> = [];
+      if (startDate) {
+        where += ' AND s.invoice_date >= ? ';
+        params.push(startDate);
+      }
+      if (endDate) {
+        where += ' AND s.invoice_date <= ? ';
+        params.push(endDate);
+      }
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        where += ' AND s.customer_account_id = ? ';
+        params.push(Number(customerId));
+      }
+      if (salesmanId && salesmanId.toUpperCase() !== 'ALL') {
+        where += ' AND s.salesman_id = ? ';
+        params.push(Number(salesmanId));
+      }
+      if (townName && townName.toUpperCase() !== 'ALL') {
+        where += " AND COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+        params.push(townName);
+      }
+      if (areaName && areaName.toUpperCase() !== 'ALL') {
+        where += " AND COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '') = ? ";
+        params.push(areaName);
+      }
+      return { where, params };
+    };
+
+    const buildItemScopeClause = () => {
+      let clause = '';
+      const params: Array<string | number> = [];
+      if (itemIdsFilter.length > 0) {
+        clause += ` AND si.item_id IN (${itemIdsFilter.map(() => '?').join(',')}) `;
+        params.push(...itemIdsFilter);
+      } else if (companiesFilter.length > 0) {
+        clause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') IN (${companiesFilter.map(() => '?').join(',')}) `;
+        params.push(...companiesFilter);
+      }
+      if (itemGroup && itemGroup.toUpperCase() !== 'ALL') {
+        clause += ` AND COALESCE(NULLIF(TRIM(i.category), ''), 'General') = ? `;
+        params.push(itemGroup);
+      }
+      return { clause, params };
+    };
+
+    const buildReturnScopeClause = () => {
+      let clause = '';
+      const params: Array<string | number> = [];
+      if (itemIdsFilter.length > 0) {
+        clause += ` AND sri.item_id IN (${itemIdsFilter.map(() => '?').join(',')}) `;
+        params.push(...itemIdsFilter);
+      } else if (companiesFilter.length > 0) {
+        clause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(sri.company_name), ''), 'General') IN (${companiesFilter.map(() => '?').join(',')}) `;
+        params.push(...companiesFilter);
+      }
+      if (itemGroup && itemGroup.toUpperCase() !== 'ALL') {
+        clause += ` AND COALESCE(NULLIF(TRIM(i.category), ''), 'General') = ? `;
+        params.push(itemGroup);
+      }
+      return { clause, params };
+    };
+
+    // Helper: aggregate Full Pack quantities + returns cleanly without inflating invoice totals
+    const fullPackSaleExpr =
+      'COALESCE(si.quantity, 0) + (COALESCE(si.loose_quantity, 0) / CASE WHEN COALESCE(si.units_per_pack, 1) > 0 THEN si.units_per_pack ELSE 1 END)';
+    const fullPackRetExpr =
+      'COALESCE(sri.return_pack_qty, 0) + (COALESCE(sri.return_loose_qty, 0) / CASE WHEN COALESCE(sri.units_per_pack, 1) > 0 THEN sri.units_per_pack ELSE 1 END)';
+
+    // Simple header filter without accounts join for simple routes
     let dateFilterSales = " WHERE s.status = 'completed' ";
     const salesParams: Array<string | number> = [];
-
     if (startDate) {
       dateFilterSales += ' AND s.invoice_date >= ? ';
-      salesParams.push(String(startDate));
+      salesParams.push(startDate);
     }
     if (endDate) {
       dateFilterSales += ' AND s.invoice_date <= ? ';
-      salesParams.push(String(endDate));
+      salesParams.push(endDate);
     }
-    if (customerId && customerId !== 'All') {
+    if (customerId && customerId.toUpperCase() !== 'ALL') {
       dateFilterSales += ' AND s.customer_account_id = ? ';
       salesParams.push(Number(customerId));
     }
+    if (salesmanId && salesmanId.toUpperCase() !== 'ALL') {
+      dateFilterSales += ' AND s.salesman_id = ? ';
+      salesParams.push(Number(salesmanId));
+    }
 
+    // -----------------------------------------------------------------------
+    // 1. COMPANY-WISE ITEM GROUP SALES REPORT
+    // -----------------------------------------------------------------------
+    if (reportType === 'company-group-sales') {
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      const saleRows = db
+        .prepare(`
+          SELECT
+            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') AS company_name,
+            COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+            COUNT(DISTINCT s.id) AS invoice_count,
+            ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+            ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+            ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_sales,
+            ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+            ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS line_net_sales
+          FROM sale_items si
+          JOIN sales s ON si.sale_id = s.id
+          LEFT JOIN items i ON si.item_id = i.id
+          LEFT JOIN accounts a ON s.customer_account_id = a.id
+          ${where} ${itemScope.clause}
+          GROUP BY company_name, item_group
+          ORDER BY company_name ASC, line_net_sales DESC
+        `)
+        .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+
+      let retWhere = " WHERE sr.status = 'completed' ";
+      const retParams: Array<string | number> = [];
+      if (startDate) {
+        retWhere += ' AND sr.return_date >= ? ';
+        retParams.push(startDate);
+      }
+      if (endDate) {
+        retWhere += ' AND sr.return_date <= ? ';
+        retParams.push(endDate);
+      }
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND sr.customer_account_id = ? ';
+        retParams.push(Number(customerId));
+      }
+
+      const retRows = db
+        .prepare(`
+          SELECT
+            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(sri.company_name), ''), 'General') AS company_name,
+            COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+            ROUND(SUM(${fullPackRetExpr}), 2) AS return_qty,
+            ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return
+          FROM sale_return_items sri
+          JOIN sale_returns sr ON sri.sale_return_id = sr.id
+          LEFT JOIN items i ON sri.item_id = i.id
+          ${retWhere} ${retScope.clause}
+          GROUP BY company_name, item_group
+        `)
+        .all(...retParams, ...retScope.params) as Array<Record<string, unknown>>;
+
+      const retMap = new Map<string, { return_qty: number; sales_return: number }>();
+      for (const r of retRows) {
+        retMap.set(`${r.company_name}::${r.item_group}`, {
+          return_qty: round2(r.return_qty),
+          sales_return: round2(r.sales_return),
+        });
+      }
+
+      const merged = saleRows.map((r) => {
+        const key = `${r.company_name}::${r.item_group}`;
+        const ret = retMap.get(key) || { return_qty: 0, sales_return: 0 };
+        const gross = round2(r.gross_sales);
+        const disc = round2(r.discount_amount);
+        const lineNet = round2(r.line_net_sales);
+        const netAfterReturn = round2(lineNet - ret.sales_return);
+        return {
+          company_name: String(r.company_name || 'General'),
+          item_group: String(r.item_group || 'General'),
+          invoice_count: Number(r.invoice_count || 0),
+          sale_qty: round2(r.sale_qty),
+          bonus_qty: round2(r.bonus_qty),
+          return_qty: ret.return_qty,
+          gross_sales: gross,
+          sales_return: ret.sales_return,
+          discount_amount: disc,
+          net_sales: netAfterReturn,
+        };
+      });
+
+      const companySubtotalsMap = new Map<string, Record<string, number>>();
+      for (const row of merged) {
+        const cur = companySubtotalsMap.get(row.company_name) || {
+          invoice_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          return_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales: 0,
+        };
+        cur.invoice_count += row.invoice_count;
+        cur.sale_qty = round2(cur.sale_qty + row.sale_qty);
+        cur.bonus_qty = round2(cur.bonus_qty + row.bonus_qty);
+        cur.return_qty = round2(cur.return_qty + row.return_qty);
+        cur.gross_sales = round2(cur.gross_sales + row.gross_sales);
+        cur.sales_return = round2(cur.sales_return + row.sales_return);
+        cur.discount_amount = round2(cur.discount_amount + row.discount_amount);
+        cur.net_sales = round2(cur.net_sales + row.net_sales);
+        companySubtotalsMap.set(row.company_name, cur);
+      }
+
+      const companySubtotals = Array.from(companySubtotalsMap.entries()).map(([company_name, s]) => ({
+        company_name,
+        ...s,
+      }));
+
+      const totals = merged.reduce(
+        (acc, r) => ({
+          invoice_count: acc.invoice_count + r.invoice_count,
+          sale_qty: round2(acc.sale_qty + r.sale_qty),
+          bonus_qty: round2(acc.bonus_qty + r.bonus_qty),
+          return_qty: round2(acc.return_qty + r.return_qty),
+          gross_sales: round2(acc.gross_sales + r.gross_sales),
+          sales_return: round2(acc.sales_return + r.sales_return),
+          discount_amount: round2(acc.discount_amount + r.discount_amount),
+          net_sales: round2(acc.net_sales + r.net_sales),
+        }),
+        {
+          invoice_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          return_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales: 0,
+        }
+      );
+
+      return res.json({ success: true, reportType, data: merged, companySubtotals, totals });
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. YEARLY SALES REPORT & 3. MONTH-WISE SALES REPORT
+    // -----------------------------------------------------------------------
+    if (reportType === 'yearly-sales' || reportType === 'monthly-sales') {
+      const periodExpr =
+        reportType === 'yearly-sales' ? 'SUBSTR(s.invoice_date, 1, 4)' : 'SUBSTR(s.invoice_date, 1, 7)';
+      const retPeriodExpr =
+        reportType === 'yearly-sales' ? 'SUBSTR(sr.return_date, 1, 4)' : 'SUBSTR(sr.return_date, 1, 7)';
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      let qtyByPeriod = new Map<string, { sale_qty: number; bonus_qty: number }>();
+      let rows: Array<Record<string, unknown>> = [];
+
+      if (hasItemScopeFilter) {
+        rows = db
+          .prepare(`
+            SELECT
+              ${periodExpr} AS period_key,
+              COUNT(DISTINCT s.id) AS invoice_count,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_sales,
+              ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS total_discount,
+              ROUND(SUM(COALESCE(si.tax_amount, 0)), 2) AS total_tax,
+              ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS net_sales,
+              ROUND(SUM(
+                CASE WHEN s.net_total > 0 THEN COALESCE(si.line_total, 0) * (COALESCE(s.paid_amount, 0) / s.net_total) ELSE 0 END
+              ), 2) AS received_amount
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where} ${itemScope.clause}
+            GROUP BY period_key
+            ORDER BY period_key DESC
+          `)
+          .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+      } else {
+        rows = db
+          .prepare(`
+            SELECT
+              ${periodExpr} AS period_key,
+              COUNT(s.id) AS invoice_count,
+              ROUND(SUM(s.gross_total), 2) AS gross_sales,
+              ROUND(SUM(s.discount_amount), 2) AS total_discount,
+              ROUND(SUM(s.tax_amount), 2) AS total_tax,
+              ROUND(SUM(s.net_total), 2) AS net_sales,
+              ROUND(SUM(s.paid_amount), 2) AS received_amount,
+              ROUND(SUM(s.net_total - s.paid_amount), 2) AS outstanding_balance
+            FROM sales s
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where}
+            GROUP BY period_key
+            ORDER BY period_key DESC
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+
+        const qtyRows = db
+          .prepare(`
+            SELECT
+              ${periodExpr} AS period_key,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where}
+            GROUP BY period_key
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+        qtyByPeriod = new Map(
+          qtyRows.map((q) => [
+            String(q.period_key),
+            { sale_qty: round2(q.sale_qty), bonus_qty: round2(q.bonus_qty) },
+          ])
+        );
+      }
+
+      let retWhere = " WHERE sr.status = 'completed' ";
+      const retParams: Array<string | number> = [];
+      if (startDate) {
+        retWhere += ' AND sr.return_date >= ? ';
+        retParams.push(startDate);
+      }
+      if (endDate) {
+        retWhere += ' AND sr.return_date <= ? ';
+        retParams.push(endDate);
+      }
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND sr.customer_account_id = ? ';
+        retParams.push(Number(customerId));
+      }
+
+      const retRows = hasItemScopeFilter
+        ? (db
+            .prepare(`
+              SELECT ${retPeriodExpr} AS period_key, ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return
+              FROM sale_return_items sri
+              JOIN sale_returns sr ON sri.sale_return_id = sr.id
+              LEFT JOIN items i ON sri.item_id = i.id
+              ${retWhere} ${retScope.clause}
+              GROUP BY period_key
+            `)
+            .all(...retParams, ...retScope.params) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(`
+              SELECT ${retPeriodExpr} AS period_key, ROUND(SUM(COALESCE(sr.total_refund_amount, 0)), 2) AS sales_return
+              FROM sale_returns sr
+              ${retWhere}
+              GROUP BY period_key
+            `)
+            .all(...retParams) as Array<Record<string, unknown>>);
+
+      const retByPeriod = new Map(retRows.map((r) => [String(r.period_key), round2(r.sales_return)]));
+
+      const enriched = rows.map((r) => {
+        const key = String(r.period_key || '');
+        const qty = hasItemScopeFilter
+          ? { sale_qty: round2(r.sale_qty), bonus_qty: round2(r.bonus_qty) }
+          : qtyByPeriod.get(key) || { sale_qty: 0, bonus_qty: 0 };
+        const salesReturn = retByPeriod.get(key) || 0;
+        const gross = round2(r.gross_sales);
+        const disc = round2(r.total_discount);
+        const netRaw = round2(r.net_sales);
+        const netAfterReturn = round2(netRaw - salesReturn);
+        const received = round2(r.received_amount);
+        const outstanding = round2(Math.max(0, netRaw - received));
+        return {
+          ...(reportType === 'yearly-sales' ? { sale_year: key } : { sale_month: key }),
+          invoice_count: Number(r.invoice_count || 0),
+          sale_qty: qty.sale_qty,
+          bonus_qty: qty.bonus_qty,
+          gross_sales: gross,
+          sales_return: salesReturn,
+          total_discount: disc,
+          discount_amount: disc,
+          total_tax: round2(r.total_tax),
+          net_sales: netAfterReturn,
+          gross_net_sales: netRaw,
+          received_amount: received,
+          cash_collected: received,
+          outstanding_balance: outstanding,
+          credit_extended: outstanding,
+        };
+      });
+
+      const totals = enriched.reduce(
+        (acc, r) => ({
+          invoice_count: acc.invoice_count + r.invoice_count,
+          sale_qty: round2(acc.sale_qty + r.sale_qty),
+          bonus_qty: round2(acc.bonus_qty + r.bonus_qty),
+          gross_sales: round2(acc.gross_sales + r.gross_sales),
+          sales_return: round2(acc.sales_return + r.sales_return),
+          discount_amount: round2(acc.discount_amount + r.discount_amount),
+          total_tax: round2(acc.total_tax + r.total_tax),
+          net_sales: round2(acc.net_sales + r.net_sales),
+          received_amount: round2(acc.received_amount + r.received_amount),
+          outstanding_balance: round2(acc.outstanding_balance + r.outstanding_balance),
+        }),
+        {
+          invoice_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          total_tax: 0,
+          net_sales: 0,
+          received_amount: 0,
+          outstanding_balance: 0,
+        }
+      );
+
+      return res.json({ success: true, reportType, data: enriched, totals });
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. PARTY-WISE SALES REPORT (customer-wise-sales)
+    // -----------------------------------------------------------------------
+    if (reportType === 'customer-wise-sales') {
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      let partyRows: Array<Record<string, unknown>> = [];
+      let qtyByParty = new Map<string, { sale_qty: number; bonus_qty: number }>();
+
+      if (hasItemScopeFilter) {
+        partyRows = db
+          .prepare(`
+            SELECT
+              s.customer_account_id,
+              COALESCE(a.account_code, 'WALK-IN') AS customer_code,
+              s.customer_name,
+              COALESCE(a.phone, '') AS customer_phone,
+              COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+              COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+              COALESCE(NULLIF(TRIM(a.assigned_salesman_name), ''), MAX(NULLIF(TRIM(s.salesman), '')), 'Counter') AS salesman_name,
+              s.customer_filer_status,
+              COUNT(DISTINCT s.id) AS invoice_count,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_sales,
+              ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(si.tax_amount, 0)), 2) AS advance_tax_amount,
+              ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS net_sales,
+              ROUND(SUM(
+                CASE WHEN s.net_total > 0 THEN COALESCE(si.line_total, 0) * (COALESCE(s.paid_amount, 0) / s.net_total) ELSE 0 END
+              ), 2) AS paid_amount,
+              ROUND(COALESCE(a.current_balance, 0), 2) AS current_ledger_balance,
+              COALESCE(a.current_balance_type, 'Debit') AS current_balance_type
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where} ${itemScope.clause}
+            GROUP BY s.customer_account_id, s.customer_name
+            ORDER BY net_sales DESC
+          `)
+          .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+      } else {
+        partyRows = db
+          .prepare(`
+            SELECT
+              s.customer_account_id,
+              COALESCE(a.account_code, 'WALK-IN') AS customer_code,
+              s.customer_name,
+              COALESCE(a.phone, '') AS customer_phone,
+              COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+              COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+              COALESCE(NULLIF(TRIM(a.assigned_salesman_name), ''), MAX(NULLIF(TRIM(s.salesman), '')), 'Counter') AS salesman_name,
+              s.customer_filer_status,
+              COUNT(s.id) AS invoice_count,
+              ROUND(SUM(s.gross_total), 2) AS gross_sales,
+              ROUND(SUM(s.discount_amount), 2) AS discount_amount,
+              ROUND(SUM(s.advance_tax_amount), 2) AS advance_tax_amount,
+              ROUND(SUM(s.net_total), 2) AS net_sales,
+              ROUND(SUM(s.paid_amount), 2) AS paid_amount,
+              ROUND(COALESCE(a.current_balance, 0), 2) AS current_ledger_balance,
+              COALESCE(a.current_balance_type, 'Debit') AS current_balance_type
+            FROM sales s
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where}
+            GROUP BY s.customer_account_id, s.customer_name
+            ORDER BY net_sales DESC
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+
+        const qtyRows = db
+          .prepare(`
+            SELECT
+              COALESCE(CAST(s.customer_account_id AS TEXT), s.customer_name) AS pkey,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where}
+            GROUP BY pkey
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+        qtyByParty = new Map(
+          qtyRows.map((q) => [
+            String(q.pkey),
+            { sale_qty: round2(q.sale_qty), bonus_qty: round2(q.bonus_qty) },
+          ])
+        );
+      }
+
+      let retWhere = " WHERE sr.status = 'completed' ";
+      const retParams: Array<string | number> = [];
+      if (startDate) {
+        retWhere += ' AND sr.return_date >= ? ';
+        retParams.push(startDate);
+      }
+      if (endDate) {
+        retWhere += ' AND sr.return_date <= ? ';
+        retParams.push(endDate);
+      }
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND sr.customer_account_id = ? ';
+        retParams.push(Number(customerId));
+      }
+
+      const retRows = hasItemScopeFilter
+        ? (db
+            .prepare(`
+              SELECT COALESCE(CAST(sr.customer_account_id AS TEXT), sr.customer_name) AS pkey, ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return
+              FROM sale_return_items sri
+              JOIN sale_returns sr ON sri.sale_return_id = sr.id
+              LEFT JOIN items i ON sri.item_id = i.id
+              ${retWhere} ${retScope.clause}
+              GROUP BY pkey
+            `)
+            .all(...retParams, ...retScope.params) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(`
+              SELECT COALESCE(CAST(sr.customer_account_id AS TEXT), sr.customer_name) AS pkey, ROUND(SUM(COALESCE(sr.total_refund_amount, 0)), 2) AS sales_return
+              FROM sale_returns sr
+              ${retWhere}
+              GROUP BY pkey
+            `)
+            .all(...retParams) as Array<Record<string, unknown>>);
+
+      const retMap = new Map(retRows.map((r) => [String(r.pkey), round2(r.sales_return)]));
+
+      const enriched = partyRows.map((r) => {
+        const pkey = r.customer_account_id ? String(r.customer_account_id) : String(r.customer_name);
+        const qty = hasItemScopeFilter
+          ? { sale_qty: round2(r.sale_qty), bonus_qty: round2(r.bonus_qty) }
+          : qtyByParty.get(pkey) || { sale_qty: 0, bonus_qty: 0 };
+        const salesReturn = retMap.get(pkey) || 0;
+        const netRaw = round2(r.net_sales);
+        const netAfterRet = round2(netRaw - salesReturn);
+        const paid = round2(r.paid_amount);
+        return {
+          ...r,
+          party_code: String(r.customer_code || ''),
+          party_name: String(r.customer_name || ''),
+          sale_qty: qty.sale_qty,
+          bonus_qty: qty.bonus_qty,
+          sales_return: salesReturn,
+          net_sales: netAfterRet,
+          received_amount: paid,
+          outstanding_balance: round2(r.current_ledger_balance),
+        };
+      });
+
+      const totals = enriched.reduce(
+        (acc, r: any) => ({
+          invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+          sale_qty: round2(acc.sale_qty + Number(r.sale_qty || 0)),
+          bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+          gross_sales: round2(acc.gross_sales + Number(r.gross_sales || 0)),
+          sales_return: round2(acc.sales_return + Number(r.sales_return || 0)),
+          discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+          net_sales: round2(acc.net_sales + Number(r.net_sales || 0)),
+          received_amount: round2(acc.received_amount + Number(r.received_amount || 0)),
+          outstanding_balance: round2(acc.outstanding_balance + Number(r.outstanding_balance || 0)),
+        }),
+        {
+          invoice_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales: 0,
+          received_amount: 0,
+          outstanding_balance: 0,
+        }
+      );
+
+      return res.json({ success: true, reportType, data: enriched, totals });
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. PARTY-WISE MONTHLY SALES REPORT
+    // -----------------------------------------------------------------------
+    if (reportType === 'party-monthly-sales') {
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      let rows: Array<Record<string, unknown>> = [];
+      let qtyMap = new Map<string, { sale_qty: number; bonus_qty: number }>();
+
+      if (hasItemScopeFilter) {
+        rows = db
+          .prepare(`
+            SELECT
+              s.customer_account_id,
+              COALESCE(a.account_code, 'WALK-IN') AS party_code,
+              s.customer_name AS party_name,
+              COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+              COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+              COALESCE(NULLIF(TRIM(a.assigned_salesman_name), ''), MAX(NULLIF(TRIM(s.salesman), '')), 'Counter') AS salesman_name,
+              SUBSTR(s.invoice_date, 1, 7) AS sale_month,
+              COUNT(DISTINCT s.id) AS invoice_count,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_sales,
+              ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS net_sales,
+              ROUND(SUM(
+                CASE WHEN s.net_total > 0 THEN COALESCE(si.line_total, 0) * (COALESCE(s.paid_amount, 0) / s.net_total) ELSE 0 END
+              ), 2) AS received_amount,
+              ROUND(COALESCE(a.current_balance, 0), 2) AS outstanding_balance
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where} ${itemScope.clause}
+            GROUP BY s.customer_account_id, s.customer_name, sale_month
+            ORDER BY party_name ASC, sale_month DESC
+          `)
+          .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+      } else {
+        rows = db
+          .prepare(`
+            SELECT
+              s.customer_account_id,
+              COALESCE(a.account_code, 'WALK-IN') AS party_code,
+              s.customer_name AS party_name,
+              COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+              COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+              COALESCE(NULLIF(TRIM(a.assigned_salesman_name), ''), MAX(NULLIF(TRIM(s.salesman), '')), 'Counter') AS salesman_name,
+              SUBSTR(s.invoice_date, 1, 7) AS sale_month,
+              COUNT(s.id) AS invoice_count,
+              ROUND(SUM(s.gross_total), 2) AS gross_sales,
+              ROUND(SUM(s.discount_amount), 2) AS discount_amount,
+              ROUND(SUM(s.net_total), 2) AS net_sales,
+              ROUND(SUM(s.paid_amount), 2) AS received_amount,
+              ROUND(COALESCE(a.current_balance, 0), 2) AS outstanding_balance
+            FROM sales s
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where}
+            GROUP BY s.customer_account_id, s.customer_name, sale_month
+            ORDER BY party_name ASC, sale_month DESC
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+
+        const qtyRows = db
+          .prepare(`
+            SELECT
+              COALESCE(CAST(s.customer_account_id AS TEXT), s.customer_name) || '::' || SUBSTR(s.invoice_date, 1, 7) AS pm_key,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            ${where}
+            GROUP BY pm_key
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+        qtyMap = new Map(
+          qtyRows.map((q) => [String(q.pm_key), { sale_qty: round2(q.sale_qty), bonus_qty: round2(q.bonus_qty) }])
+        );
+      }
+
+      let retWhere = " WHERE sr.status = 'completed' ";
+      const retParams: Array<string | number> = [];
+      if (startDate) {
+        retWhere += ' AND sr.return_date >= ? ';
+        retParams.push(startDate);
+      }
+      if (endDate) {
+        retWhere += ' AND sr.return_date <= ? ';
+        retParams.push(endDate);
+      }
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND sr.customer_account_id = ? ';
+        retParams.push(Number(customerId));
+      }
+
+      const retRows = hasItemScopeFilter
+        ? (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(sr.customer_account_id AS TEXT), sr.customer_name) || '::' || SUBSTR(sr.return_date, 1, 7) AS pm_key,
+                ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return
+              FROM sale_return_items sri
+              JOIN sale_returns sr ON sri.sale_return_id = sr.id
+              LEFT JOIN items i ON sri.item_id = i.id
+              ${retWhere} ${retScope.clause}
+              GROUP BY pm_key
+            `)
+            .all(...retParams, ...retScope.params) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(sr.customer_account_id AS TEXT), sr.customer_name) || '::' || SUBSTR(sr.return_date, 1, 7) AS pm_key,
+                ROUND(SUM(COALESCE(sr.total_refund_amount, 0)), 2) AS sales_return
+              FROM sale_returns sr
+              ${retWhere}
+              GROUP BY pm_key
+            `)
+            .all(...retParams) as Array<Record<string, unknown>>);
+
+      const retMap = new Map(retRows.map((r) => [String(r.pm_key), round2(r.sales_return)]));
+
+      const enriched = rows.map((r) => {
+        const pmKey = `${r.customer_account_id ? String(r.customer_account_id) : String(r.party_name)}::${r.sale_month}`;
+        const qty = hasItemScopeFilter
+          ? { sale_qty: round2(r.sale_qty), bonus_qty: round2(r.bonus_qty) }
+          : qtyMap.get(pmKey) || { sale_qty: 0, bonus_qty: 0 };
+        const salesReturn = retMap.get(pmKey) || 0;
+        const netAfterRet = round2(Number(r.net_sales || 0) - salesReturn);
+        return {
+          ...r,
+          sale_qty: qty.sale_qty,
+          bonus_qty: qty.bonus_qty,
+          sales_return: salesReturn,
+          net_sales: netAfterRet,
+          received_amount: round2(r.received_amount),
+          outstanding_balance: round2(r.outstanding_balance),
+        };
+      });
+
+      const partySubtotalsMap = new Map<string, Record<string, any>>();
+      for (const r of enriched as any[]) {
+        const pKey = String(r.party_name || 'Walk-in');
+        const cur = partySubtotalsMap.get(pKey) || {
+          party_code: r.party_code,
+          party_name: pKey,
+          invoice_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales: 0,
+          received_amount: 0,
+        };
+        cur.invoice_count += Number(r.invoice_count || 0);
+        cur.sale_qty = round2(cur.sale_qty + Number(r.sale_qty || 0));
+        cur.bonus_qty = round2(cur.bonus_qty + Number(r.bonus_qty || 0));
+        cur.gross_sales = round2(cur.gross_sales + Number(r.gross_sales || 0));
+        cur.sales_return = round2(cur.sales_return + Number(r.sales_return || 0));
+        cur.discount_amount = round2(cur.discount_amount + Number(r.discount_amount || 0));
+        cur.net_sales = round2(cur.net_sales + Number(r.net_sales || 0));
+        cur.received_amount = round2(cur.received_amount + Number(r.received_amount || 0));
+        partySubtotalsMap.set(pKey, cur);
+      }
+
+      const totals = enriched.reduce(
+        (acc, r: any) => ({
+          invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+          sale_qty: round2(acc.sale_qty + Number(r.sale_qty || 0)),
+          bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+          gross_sales: round2(acc.gross_sales + Number(r.gross_sales || 0)),
+          sales_return: round2(acc.sales_return + Number(r.sales_return || 0)),
+          discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+          net_sales: round2(acc.net_sales + Number(r.net_sales || 0)),
+          received_amount: round2(acc.received_amount + Number(r.received_amount || 0)),
+        }),
+        {
+          invoice_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales: 0,
+          received_amount: 0,
+        }
+      );
+
+      return res.json({
+        success: true,
+        reportType,
+        data: enriched,
+        partySubtotals: Array.from(partySubtotalsMap.values()),
+        totals,
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. YEARLY PARTY COMPARISON
+    // -----------------------------------------------------------------------
+    if (reportType === 'yearly-party-comparison') {
+      const currentYear = new Date().getFullYear();
+      const year2 = req.query.year2 ? String(req.query.year2).trim() : String(currentYear);
+      const year1 = req.query.year1 ? String(req.query.year1).trim() : String(Number(year2) - 1);
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      let baseWhere = " WHERE s.status = 'completed' AND SUBSTR(s.invoice_date, 1, 4) IN (?, ?) ";
+      const baseParams: Array<string | number> = [year1, year2];
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        baseWhere += ' AND s.customer_account_id = ? ';
+        baseParams.push(Number(customerId));
+      }
+      if (townName && townName.toUpperCase() !== 'ALL') {
+        baseWhere += " AND COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+        baseParams.push(townName);
+      }
+
+      const rawRows = hasItemScopeFilter
+        ? (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(s.customer_account_id AS TEXT), s.customer_name) AS pkey,
+                s.customer_account_id,
+                COALESCE(a.account_code, 'WALK-IN') AS party_code,
+                s.customer_name AS party_name,
+                COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+                COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+                SUBSTR(s.invoice_date, 1, 4) AS yr,
+                COUNT(DISTINCT s.id) AS invoice_count,
+                ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+                ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS net_sales
+              FROM sale_items si
+              JOIN sales s ON si.sale_id = s.id
+              LEFT JOIN items i ON si.item_id = i.id
+              LEFT JOIN accounts a ON s.customer_account_id = a.id
+              ${baseWhere} ${itemScope.clause}
+              GROUP BY pkey, yr
+            `)
+            .all(...baseParams, ...itemScope.params) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(s.customer_account_id AS TEXT), s.customer_name) AS pkey,
+                s.customer_account_id,
+                COALESCE(a.account_code, 'WALK-IN') AS party_code,
+                s.customer_name AS party_name,
+                COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+                COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+                SUBSTR(s.invoice_date, 1, 4) AS yr,
+                COUNT(s.id) AS invoice_count,
+                0 AS sale_qty,
+                ROUND(SUM(s.net_total), 2) AS net_sales
+              FROM sales s
+              LEFT JOIN accounts a ON s.customer_account_id = a.id
+              ${baseWhere}
+              GROUP BY pkey, yr
+            `)
+            .all(...baseParams) as Array<Record<string, unknown>>);
+
+      const qtyYearRows = hasItemScopeFilter
+        ? []
+        : (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(s.customer_account_id AS TEXT), s.customer_name) AS pkey,
+                SUBSTR(s.invoice_date, 1, 4) AS yr,
+                ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty
+              FROM sale_items si
+              JOIN sales s ON si.sale_id = s.id
+              LEFT JOIN accounts a ON s.customer_account_id = a.id
+              ${baseWhere}
+              GROUP BY pkey, yr
+            `)
+            .all(...baseParams) as Array<Record<string, unknown>>);
+      const qtyYearMap = new Map(qtyYearRows.map((q) => [`${q.pkey}::${q.yr}`, round2(q.sale_qty)]));
+
+      // Subtract returns for accurate net comparison
+      const retCompRows = hasItemScopeFilter
+        ? (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(sr.customer_account_id AS TEXT), sr.customer_name) AS pkey,
+                SUBSTR(sr.return_date, 1, 4) AS yr,
+                ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS ret_amt
+              FROM sale_return_items sri
+              JOIN sale_returns sr ON sri.sale_return_id = sr.id
+              LEFT JOIN items i ON sri.item_id = i.id
+              WHERE sr.status = 'completed' AND SUBSTR(sr.return_date, 1, 4) IN (?, ?) ${retScope.clause}
+              GROUP BY pkey, yr
+            `)
+            .all(year1, year2, ...retScope.params) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(`
+              SELECT
+                COALESCE(CAST(sr.customer_account_id AS TEXT), sr.customer_name) AS pkey,
+                SUBSTR(sr.return_date, 1, 4) AS yr,
+                ROUND(SUM(COALESCE(sr.total_refund_amount, 0)), 2) AS ret_amt
+              FROM sale_returns sr
+              WHERE sr.status = 'completed' AND SUBSTR(sr.return_date, 1, 4) IN (?, ?)
+              GROUP BY pkey, yr
+            `)
+            .all(year1, year2) as Array<Record<string, unknown>>);
+      const retCompMap = new Map(retCompRows.map((r) => [`${r.pkey}::${r.yr}`, round2(r.ret_amt)]));
+
+      const partyCompMap = new Map<string, any>();
+      for (const r of rawRows) {
+        const pkey = String(r.pkey);
+        if (!partyCompMap.has(pkey)) {
+          partyCompMap.set(pkey, {
+            customer_account_id: r.customer_account_id,
+            party_code: String(r.party_code || ''),
+            party_name: String(r.party_name || ''),
+            town_name: String(r.town_name || '—'),
+            area_name: String(r.area_name || '—'),
+            year1,
+            year2,
+            year1_invoices: 0,
+            year1_qty: 0,
+            year1_net_sales: 0,
+            year2_invoices: 0,
+            year2_qty: 0,
+            year2_net_sales: 0,
+          });
+        }
+        const entry = partyCompMap.get(pkey);
+        const yr = String(r.yr);
+        const qty = hasItemScopeFilter ? round2(r.sale_qty) : qtyYearMap.get(`${pkey}::${yr}`) || 0;
+        const retAmt = retCompMap.get(`${pkey}::${yr}`) || 0;
+        const net = round2(Number(r.net_sales || 0) - retAmt);
+        if (yr === year1) {
+          entry.year1_invoices = Number(r.invoice_count || 0);
+          entry.year1_qty = qty;
+          entry.year1_net_sales = net;
+        } else if (yr === year2) {
+          entry.year2_invoices = Number(r.invoice_count || 0);
+          entry.year2_qty = qty;
+          entry.year2_net_sales = net;
+        }
+      }
+
+      const comparisonRows = Array.from(partyCompMap.values())
+        .map((c) => {
+          const diffAmt = round2(c.year2_net_sales - c.year1_net_sales);
+          const diffQty = round2(c.year2_qty - c.year1_qty);
+          const growthPct =
+            c.year1_net_sales > 0
+              ? round2((diffAmt / c.year1_net_sales) * 100)
+              : c.year2_net_sales > 0
+              ? 100
+              : 0;
+          return {
+            ...c,
+            variance_qty: diffQty,
+            variance_amount: diffAmt,
+            growth_percent: growthPct,
+          };
+        })
+        .sort((a, b) => b.year2_net_sales - a.year2_net_sales);
+
+      const totals = comparisonRows.reduce(
+        (acc, r) => ({
+          year1_qty: round2(acc.year1_qty + r.year1_qty),
+          year1_net_sales: round2(acc.year1_net_sales + r.year1_net_sales),
+          year2_qty: round2(acc.year2_qty + r.year2_qty),
+          year2_net_sales: round2(acc.year2_net_sales + r.year2_net_sales),
+          variance_qty: round2(acc.variance_qty + r.variance_qty),
+          variance_amount: round2(acc.variance_amount + r.variance_amount),
+        }),
+        {
+          year1_qty: 0,
+          year1_net_sales: 0,
+          year2_qty: 0,
+          year2_net_sales: 0,
+          variance_qty: 0,
+          variance_amount: 0,
+        }
+      );
+
+      return res.json({ success: true, reportType, year1, year2, data: comparisonRows, totals });
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. ITEM-WISE SALES REPORT (Enforces Compulsory Full Pack Rule, NO Loose Qty!)
+    // -----------------------------------------------------------------------
+    if (reportType === 'item-wise-sales') {
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      const saleRows = db
+        .prepare(`
+          SELECT
+            si.item_id,
+            si.item_code,
+            si.item_name,
+            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') AS company_name,
+            COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+            si.packing,
+            COUNT(DISTINCT s.id) AS invoice_count,
+            ROUND(SUM(${fullPackSaleExpr}), 2) AS total_pack_qty,
+            ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS total_bonus_qty,
+            ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_amount,
+            ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+            ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS line_net_sales
+          FROM sale_items si
+          JOIN sales s ON si.sale_id = s.id
+          LEFT JOIN items i ON si.item_id = i.id
+          LEFT JOIN accounts a ON s.customer_account_id = a.id
+          ${where} ${itemScope.clause}
+          GROUP BY si.item_id, si.item_code, si.item_name, company_name, item_group, si.packing
+          ORDER BY company_name ASC, line_net_sales DESC
+        `)
+        .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+
+      let retWhere = " WHERE sr.status = 'completed' ";
+      const retParams: Array<string | number> = [];
+      if (startDate) {
+        retWhere += ' AND sr.return_date >= ? ';
+        retParams.push(startDate);
+      }
+      if (endDate) {
+        retWhere += ' AND sr.return_date <= ? ';
+        retParams.push(endDate);
+      }
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND sr.customer_account_id = ? ';
+        retParams.push(Number(customerId));
+      }
+
+      const retRows = db
+        .prepare(`
+          SELECT
+            sri.item_id,
+            ROUND(SUM(${fullPackRetExpr}), 2) AS return_pack_qty,
+            ROUND(SUM(COALESCE(sri.return_bonus_qty, 0)), 2) AS return_bonus_qty,
+            ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return_amount
+          FROM sale_return_items sri
+          JOIN sale_returns sr ON sri.sale_return_id = sr.id
+          LEFT JOIN items i ON sri.item_id = i.id
+          ${retWhere} ${retScope.clause}
+          GROUP BY sri.item_id
+        `)
+        .all(...retParams, ...retScope.params) as Array<Record<string, unknown>>;
+
+      const retByItem = new Map(
+        retRows.map((r) => [
+          Number(r.item_id),
+          {
+            return_pack_qty: round2(r.return_pack_qty),
+            return_bonus_qty: round2(r.return_bonus_qty),
+            sales_return_amount: round2(r.sales_return_amount),
+          },
+        ])
+      );
+
+      const enriched = saleRows.map((r) => {
+        const ret = retByItem.get(Number(r.item_id)) || {
+          return_pack_qty: 0,
+          return_bonus_qty: 0,
+          sales_return_amount: 0,
+        };
+        const netSales = round2(Number(r.line_net_sales || 0) - ret.sales_return_amount);
+        return {
+          ...r,
+          sale_qty: round2(r.total_pack_qty),
+          bonus_qty: round2(r.total_bonus_qty),
+          return_qty: ret.return_pack_qty,
+          sales_return: ret.sales_return_amount,
+          net_sales_amount: netSales,
+        };
+      });
+
+      const companySubtotalsMap = new Map<string, Record<string, number>>();
+      for (const r of enriched as any[]) {
+        const comp = String(r.company_name || 'General');
+        const cur = companySubtotalsMap.get(comp) || {
+          invoice_count: 0,
+          total_pack_qty: 0,
+          total_bonus_qty: 0,
+          return_qty: 0,
+          gross_amount: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales_amount: 0,
+        };
+        cur.invoice_count += Number(r.invoice_count || 0);
+        cur.total_pack_qty = round2(cur.total_pack_qty + Number(r.total_pack_qty || 0));
+        cur.total_bonus_qty = round2(cur.total_bonus_qty + Number(r.total_bonus_qty || 0));
+        cur.return_qty = round2(cur.return_qty + Number(r.return_qty || 0));
+        cur.gross_amount = round2(cur.gross_amount + Number(r.gross_amount || 0));
+        cur.sales_return = round2(cur.sales_return + Number(r.sales_return || 0));
+        cur.discount_amount = round2(cur.discount_amount + Number(r.discount_amount || 0));
+        cur.net_sales_amount = round2(cur.net_sales_amount + Number(r.net_sales_amount || 0));
+        companySubtotalsMap.set(comp, cur);
+      }
+
+      const totals = enriched.reduce(
+        (acc, r: any) => ({
+          invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+          total_pack_qty: round2(acc.total_pack_qty + Number(r.total_pack_qty || 0)),
+          total_bonus_qty: round2(acc.total_bonus_qty + Number(r.total_bonus_qty || 0)),
+          return_qty: round2(acc.return_qty + Number(r.return_qty || 0)),
+          gross_amount: round2(acc.gross_amount + Number(r.gross_amount || 0)),
+          sales_return: round2(acc.sales_return + Number(r.sales_return || 0)),
+          discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+          net_sales_amount: round2(acc.net_sales_amount + Number(r.net_sales_amount || 0)),
+        }),
+        {
+          invoice_count: 0,
+          total_pack_qty: 0,
+          total_bonus_qty: 0,
+          return_qty: 0,
+          gross_amount: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales_amount: 0,
+        }
+      );
+
+      return res.json({
+        success: true,
+        reportType,
+        data: enriched,
+        companySubtotals: Array.from(companySubtotalsMap.entries()).map(([company_name, sub]) => ({
+          company_name,
+          ...sub,
+        })),
+        totals,
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. SALESMAN-WISE SALES REPORT
+    // -----------------------------------------------------------------------
+    if (reportType === 'salesman-wise-sales') {
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
+      const retScope = buildReturnScopeClause();
+
+      let salRows: Array<Record<string, unknown>> = [];
+      let qtyBySalesman = new Map<string, { sale_qty: number; bonus_qty: number }>();
+
+      if (hasItemScopeFilter) {
+        salRows = db
+          .prepare(`
+            SELECT
+              COALESCE(s.salesman_id, 0) AS salesman_id,
+              COALESCE(sal.salesman_code, 'COUNTER') AS salesman_code,
+              COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS salesman_name,
+              COUNT(DISTINCT s.id) AS invoice_count,
+              COUNT(DISTINCT s.customer_account_id) AS party_count,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty,
+              ROUND(SUM(COALESCE(si.gross_amount, 0)), 2) AS gross_sales,
+              ROUND(SUM(COALESCE(si.discount_amount, 0)), 2) AS discount_amount,
+              ROUND(SUM(COALESCE(si.line_total, 0)), 2) AS net_sales,
+              ROUND(SUM(
+                CASE WHEN s.net_total > 0 THEN COALESCE(si.line_total, 0) * (COALESCE(s.paid_amount, 0) / s.net_total) ELSE 0 END
+              ), 2) AS received_amount
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN items i ON si.item_id = i.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            LEFT JOIN salesmen sal ON s.salesman_id = sal.id
+            ${where} ${itemScope.clause}
+            GROUP BY salesman_id, salesman_name
+            ORDER BY net_sales DESC
+          `)
+          .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+      } else {
+        salRows = db
+          .prepare(`
+            SELECT
+              COALESCE(s.salesman_id, 0) AS salesman_id,
+              COALESCE(sal.salesman_code, 'COUNTER') AS salesman_code,
+              COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS salesman_name,
+              COUNT(s.id) AS invoice_count,
+              COUNT(DISTINCT s.customer_account_id) AS party_count,
+              ROUND(SUM(s.gross_total), 2) AS gross_sales,
+              ROUND(SUM(s.discount_amount), 2) AS discount_amount,
+              ROUND(SUM(s.net_total), 2) AS net_sales,
+              ROUND(SUM(s.paid_amount), 2) AS received_amount,
+              ROUND(SUM(s.net_total - s.paid_amount), 2) AS outstanding_balance
+            FROM sales s
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            LEFT JOIN salesmen sal ON s.salesman_id = sal.id
+            ${where}
+            GROUP BY salesman_id, salesman_name
+            ORDER BY net_sales DESC
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+
+        const qtyRows = db
+          .prepare(`
+            SELECT
+              COALESCE(s.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter Sales') AS skey,
+              ROUND(SUM(${fullPackSaleExpr}), 2) AS sale_qty,
+              ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS bonus_qty
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            LEFT JOIN salesmen sal ON s.salesman_id = sal.id
+            ${where}
+            GROUP BY skey
+          `)
+          .all(...params) as Array<Record<string, unknown>>;
+        qtyBySalesman = new Map(
+          qtyRows.map((q) => [String(q.skey), { sale_qty: round2(q.sale_qty), bonus_qty: round2(q.bonus_qty) }])
+        );
+      }
+
+      // Link returns back to original invoice salesman
+      let retWhere = " WHERE sr.status = 'completed' ";
+      const retParams: Array<string | number> = [];
+      if (startDate) {
+        retWhere += ' AND sr.return_date >= ? ';
+        retParams.push(startDate);
+      }
+      if (endDate) {
+        retWhere += ' AND sr.return_date <= ? ';
+        retParams.push(endDate);
+      }
+      if (salesmanId && salesmanId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND orig.salesman_id = ? ';
+        retParams.push(Number(salesmanId));
+      }
+
+      const retRows = hasItemScopeFilter
+        ? (db
+            .prepare(`
+              SELECT
+                COALESCE(orig.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(orig.salesman), ''), 'Counter Sales') AS skey,
+                ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return
+              FROM sale_return_items sri
+              JOIN sale_returns sr ON sri.sale_return_id = sr.id
+              LEFT JOIN sales orig ON sr.original_sale_id = orig.id
+              LEFT JOIN salesmen sal ON orig.salesman_id = sal.id
+              LEFT JOIN items i ON sri.item_id = i.id
+              ${retWhere} ${retScope.clause}
+              GROUP BY skey
+            `)
+            .all(...retParams, ...retScope.params) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(`
+              SELECT
+                COALESCE(orig.salesman_id, 0) || '::' || COALESCE(NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(orig.salesman), ''), 'Counter Sales') AS skey,
+                ROUND(SUM(COALESCE(sr.total_refund_amount, 0)), 2) AS sales_return
+              FROM sale_returns sr
+              LEFT JOIN sales orig ON sr.original_sale_id = orig.id
+              LEFT JOIN salesmen sal ON orig.salesman_id = sal.id
+              ${retWhere}
+              GROUP BY skey
+            `)
+            .all(...retParams) as Array<Record<string, unknown>>);
+      const retBySalesman = new Map(retRows.map((r) => [String(r.skey), round2(r.sales_return)]));
+
+      const enriched: Array<Record<string, any>> = salRows.map((r) => {
+        const skey = `${r.salesman_id}::${r.salesman_name}`;
+        const qty = hasItemScopeFilter
+          ? { sale_qty: round2(r.sale_qty), bonus_qty: round2(r.bonus_qty) }
+          : qtyBySalesman.get(skey) || { sale_qty: 0, bonus_qty: 0 };
+        const salesReturn = retBySalesman.get(skey) || 0;
+        const netRaw = round2(r.net_sales);
+        const netAfterRet = round2(netRaw - salesReturn);
+        const received = round2(r.received_amount);
+        const outstanding = hasItemScopeFilter
+          ? round2(Math.max(0, netRaw - received))
+          : round2(Math.max(0, Number(r.outstanding_balance || 0)));
+        return {
+          ...r,
+          sale_qty: qty.sale_qty,
+          bonus_qty: qty.bonus_qty,
+          sales_return: salesReturn,
+          net_sales: netAfterRet,
+          received_amount: received,
+          outstanding_balance: outstanding,
+        };
+      });
+
+      const totals = enriched.reduce(
+        (acc, r) => ({
+          invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+          party_count: acc.party_count + Number(r.party_count || 0),
+          sale_qty: round2(acc.sale_qty + Number(r.sale_qty || 0)),
+          bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+          gross_sales: round2(acc.gross_sales + Number(r.gross_sales || 0)),
+          sales_return: round2(acc.sales_return + Number(r.sales_return || 0)),
+          discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+          net_sales: round2(acc.net_sales + Number(r.net_sales || 0)),
+          received_amount: round2(acc.received_amount + Number(r.received_amount || 0)),
+          outstanding_balance: round2(acc.outstanding_balance + Number(r.outstanding_balance || 0)),
+        }),
+        {
+          invoice_count: 0,
+          party_count: 0,
+          sale_qty: 0,
+          bonus_qty: 0,
+          gross_sales: 0,
+          sales_return: 0,
+          discount_amount: 0,
+          net_sales: 0,
+          received_amount: 0,
+          outstanding_balance: 0,
+        }
+      );
+
+      return res.json({ success: true, reportType, data: enriched, totals });
+    }
+
+    // -----------------------------------------------------------------------
+    // EXISTING REPORTS (Preserved & Full Pack Standardized)
+    // -----------------------------------------------------------------------
     if (reportType === 'daily-sales') {
       const rows = db
         .prepare(`
@@ -3149,101 +4474,17 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
       return res.json({ success: true, reportType, data: rows });
     }
 
-    if (reportType === 'monthly-sales') {
-      const rows = db
-        .prepare(`
-          SELECT
-            SUBSTR(s.invoice_date, 1, 7) as sale_month,
-            COUNT(s.id) as invoice_count,
-            ROUND(SUM(s.gross_total), 2) as gross_sales,
-            ROUND(SUM(s.discount_amount), 2) as total_discount,
-            ROUND(SUM(s.tax_amount), 2) as total_tax,
-            ROUND(SUM(s.net_total), 2) as net_sales,
-            ROUND(SUM(s.paid_amount), 2) as cash_collected,
-            ROUND(SUM(s.net_total - s.paid_amount), 2) as credit_extended
-          FROM sales s
-          ${dateFilterSales}
-          GROUP BY SUBSTR(s.invoice_date, 1, 7)
-          ORDER BY sale_month DESC
-        `)
-        .all(...salesParams);
-
-      return res.json({ success: true, reportType, data: rows });
-    }
-
-    if (reportType === 'item-wise-sales') {
-      let itemWhere = dateFilterSales;
-      const itemParams = [...salesParams];
-      if (itemId && itemId !== 'All') {
-        itemWhere += ' AND si.item_id = ? ';
-        itemParams.push(Number(itemId));
-      }
-
-      const rows = db
-        .prepare(`
-          SELECT
-            si.item_id,
-            si.item_code,
-            si.item_name,
-            si.company_name,
-            si.packing,
-            COUNT(DISTINCT s.id) as invoice_count,
-            ROUND(SUM(si.quantity), 2) as total_pack_qty,
-            ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) as total_bonus_qty,
-            ROUND(SUM(si.loose_quantity), 2) as total_loose_qty,
-            ROUND(SUM(si.total_units), 2) as total_units_sold,
-            ROUND(SUM(si.returned_total_units), 2) as total_units_returned,
-            ROUND(SUM(si.gross_amount), 2) as gross_amount,
-            ROUND(SUM(si.discount_amount), 2) as discount_amount,
-            ROUND(SUM(si.line_total), 2) as net_sales_amount
-          FROM sale_items si
-          JOIN sales s ON si.sale_id = s.id
-          ${itemWhere}
-          GROUP BY si.item_id, si.item_code, si.item_name, si.company_name, si.packing
-          ORDER BY net_sales_amount DESC
-        `)
-        .all(...itemParams);
-
-      return res.json({ success: true, reportType, data: rows });
-    }
-
-    if (reportType === 'customer-wise-sales') {
-      const rows = db
-        .prepare(`
-          SELECT
-            s.customer_account_id,
-            COALESCE(a.account_code, 'CUS-1001') as customer_code,
-            s.customer_name,
-            COALESCE(a.phone, '') as customer_phone,
-            s.customer_filer_status,
-            COUNT(s.id) as invoice_count,
-            ROUND(SUM(s.gross_total), 2) as gross_sales,
-            ROUND(SUM(s.discount_amount), 2) as discount_amount,
-            ROUND(SUM(s.advance_tax_amount), 2) as advance_tax_amount,
-            ROUND(SUM(s.net_total), 2) as net_sales,
-            ROUND(SUM(s.paid_amount), 2) as paid_amount,
-            ROUND(COALESCE(a.current_balance, 0), 2) as current_ledger_balance,
-            COALESCE(a.current_balance_type, 'Debit') as current_balance_type
-          FROM sales s
-          LEFT JOIN accounts a ON s.customer_account_id = a.id
-          ${dateFilterSales}
-          GROUP BY s.customer_account_id, s.customer_name
-          ORDER BY net_sales DESC
-        `)
-        .all(...salesParams);
-
-      return res.json({ success: true, reportType, data: rows });
-    }
-
     if (reportType === 'profit-report') {
+      const { where, params } = buildSalesHeaderFilter();
+      const itemScope = buildItemScopeClause();
       const rows = db
         .prepare(`
           SELECT
             si.item_code,
             si.item_name,
-            si.company_name,
+            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') as company_name,
             si.packing,
-            ROUND(SUM(si.total_units - si.returned_total_units), 2) as net_units_sold,
+            ROUND(SUM((si.total_units - si.returned_total_units) / CASE WHEN COALESCE(si.units_per_pack, 1) > 0 THEN si.units_per_pack ELSE 1 END), 2) as net_packs_sold,
             ROUND(SUM((si.total_units - si.returned_total_units) * si.cost_price_per_unit), 2) as total_cost_amount,
             ROUND(SUM(
               CASE
@@ -3254,11 +4495,13 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             ), 2) as net_revenue_amount
           FROM sale_items si
           JOIN sales s ON si.sale_id = s.id
-          ${dateFilterSales}
-          GROUP BY si.item_id, si.item_code, si.item_name, si.company_name, si.packing
+          LEFT JOIN items i ON si.item_id = i.id
+          LEFT JOIN accounts a ON s.customer_account_id = a.id
+          ${where} ${itemScope.clause}
+          GROUP BY si.item_id, si.item_code, si.item_name, company_name, si.packing
           ORDER BY net_revenue_amount DESC
         `)
-        .all(...salesParams) as Array<Record<string, unknown>>;
+        .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
 
       const enriched = rows.map((r) => {
         const rev = round2(r.net_revenue_amount);
@@ -3267,6 +4510,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         const marginPercent = rev > 0 ? round2((profit / rev) * 100) : 0;
         return {
           ...r,
+          net_units_sold: round2(r.net_packs_sold),
           gross_profit: profit,
           profit_margin_percent: marginPercent,
         };
@@ -3308,13 +4552,13 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
       const retParams: Array<string | number> = [];
       if (startDate) {
         retWhere += ' AND sr.return_date >= ? ';
-        retParams.push(String(startDate));
+        retParams.push(startDate);
       }
       if (endDate) {
         retWhere += ' AND sr.return_date <= ? ';
-        retParams.push(String(endDate));
+        retParams.push(endDate);
       }
-      if (customerId && customerId !== 'All') {
+      if (customerId && customerId.toUpperCase() !== 'ALL') {
         retWhere += ' AND sr.customer_account_id = ? ';
         retParams.push(Number(customerId));
       }
@@ -3329,14 +4573,15 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             sr.refund_mode,
             sri.item_code,
             sri.item_name,
+            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(sri.company_name), ''), 'General') as company_name,
             sri.batch_number,
-            sri.return_pack_qty,
-            sri.return_loose_qty,
-            sri.returned_units,
+            ROUND(${fullPackRetExpr}, 2) as return_pack_qty,
+            ROUND(COALESCE(sri.return_bonus_qty, 0), 2) as return_bonus_qty,
             sri.line_total,
             sr.return_reason
           FROM sale_return_items sri
           JOIN sale_returns sr ON sri.sale_return_id = sr.id
+          LEFT JOIN items i ON sri.item_id = i.id
           ${retWhere}
           ORDER BY sr.return_date DESC, sr.id DESC
         `)

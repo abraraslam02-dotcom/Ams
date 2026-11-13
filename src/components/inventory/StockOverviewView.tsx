@@ -151,7 +151,7 @@ export const StockOverviewView: React.FC<StockOverviewViewProps> = ({
             <span className="text-xs text-slate-400 font-normal">Packs</span>
           </div>
           <div className="mt-1 text-[11px] text-slate-400 flex items-center justify-between">
-            <span>Loose Units:</span>
+            <span>Total Units Equivalent:</span>
             <span className="text-sky-300 font-mono font-bold">
               {(overview?.total_units_in_stock || 0).toLocaleString()} Units
             </span>

@@ -20,10 +20,14 @@ import { StockAdjustmentView } from './StockAdjustmentView';
 import { StockTransferView } from './StockTransferView';
 import { StockLedgerView } from './StockLedgerView';
 import { PhysicalVerificationView } from './PhysicalVerificationView';
+import { CompanyStockStatementView } from './CompanyStockStatementView';
+import { DetailedItemStockReportView } from './DetailedItemStockReportView';
 
 export type InventorySubTab =
   | 'inv-overview'
   | 'inv-current'
+  | 'inv-stock-statement'
+  | 'inv-detailed-stock'
   | 'inv-datasheet'
   | 'inv-expiry'
   | 'inv-near-expiry'
@@ -59,7 +63,9 @@ export const InventoryWorkspaceView: React.FC<InventoryWorkspaceViewProps> = ({
 
   const tabs: Array<{ id: InventorySubTab; label: string; icon: React.FC<{ className?: string }> }> = [
     { id: 'inv-overview', label: 'Stock Overview', icon: Boxes },
-    { id: 'inv-current', label: 'Current Stock', icon: Layers },
+    { id: 'inv-current', label: 'Item Stock Report', icon: Layers },
+    { id: 'inv-stock-statement', label: 'Company Stock Statement', icon: FileSpreadsheet },
+    { id: 'inv-detailed-stock', label: 'Detailed Stock & Txns', icon: FileSpreadsheet },
     { id: 'inv-datasheet', label: 'Batch-wise Stock', icon: FileSpreadsheet },
     { id: 'inv-expiry', label: 'Expiry Management', icon: Clock },
     { id: 'inv-near-expiry', label: 'Near Expiry Items', icon: Clock },
@@ -67,8 +73,8 @@ export const InventoryWorkspaceView: React.FC<InventoryWorkspaceViewProps> = ({
     { id: 'inv-low-stock', label: 'Low Stock', icon: AlertTriangle },
     { id: 'inv-adjustment', label: 'Stock Adjustment', icon: Sliders },
     { id: 'inv-transfer', label: 'Stock Transfer', icon: ArrowRightLeft },
-    { id: 'inv-ledger', label: 'Stock Ledger', icon: Calendar },
-    { id: 'inv-verification', label: 'Physical Stock Verification', icon: CheckCircle2 },
+    { id: 'inv-ledger', label: 'Item Log / Ledger', icon: Calendar },
+    { id: 'inv-verification', label: 'Physical Stock Adjustment', icon: CheckCircle2 },
   ];
 
   return (
@@ -101,6 +107,8 @@ export const InventoryWorkspaceView: React.FC<InventoryWorkspaceViewProps> = ({
         <StockOverviewView onNavigateSubTab={(id) => handleSelectTab(id as InventorySubTab)} />
       )}
       {activeSubTab === 'inv-current' && <CurrentStockView />}
+      {activeSubTab === 'inv-stock-statement' && <CompanyStockStatementView />}
+      {activeSubTab === 'inv-detailed-stock' && <DetailedItemStockReportView />}
       {activeSubTab === 'inv-datasheet' && <StockDatasheetView />}
       {activeSubTab === 'inv-expiry' && <ExpiryManagementView initialFilter="ALL" />}
       {activeSubTab === 'inv-near-expiry' && (

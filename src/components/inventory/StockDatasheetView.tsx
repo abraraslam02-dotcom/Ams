@@ -171,9 +171,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
         'Purchase Return Qty': item.purchase_return_qty,
         'Sales Return Qty': item.sales_return_qty,
         'Adjusted Qty': item.adjusted_qty,
-        'Current Stock (Packs)': item.current_stock,
-        'Current Loose': item.current_loose_qty,
-        'Total Units': item.total_stock_units,
+        'Current Stock (Full Packs)': Number(((item.total_stock_units || 0) / Math.max(1, item.units_per_pack || 1)).toFixed(2)),
         'Stock Value (Cost Rs)': item.stock_value,
         'Retail Value (Rs)': item.retail_value,
         'Rack Location': item.rack_location || '—',
@@ -199,9 +197,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
         'Purchase Return Qty': 0,
         'Sales Return Qty': 0,
         'Adjusted Qty': 0,
-        'Current Stock (Packs)': res.summary.total_packs,
-        'Current Loose': 0,
-        'Total Units': res.summary.total_units,
+        'Current Stock (Full Packs)': res.summary.total_packs,
         'Stock Value (Cost Rs)': res.summary.total_cost_valuation,
         'Retail Value (Rs)': res.summary.total_retail_valuation,
         'Rack Location': '',
@@ -215,7 +211,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
       const dateStr = new Date().toISOString().split('T')[0];
       XLSX.writeFile(workbook, `AMS_Stock_Datasheet_${dateStr}.xlsx`);
     } catch (err: unknown) {
-      alert(`Excel Export Failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(`Excel Export Failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -245,7 +241,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
           </div>
         </div>
         <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
-          <div className="text-[10px] uppercase font-semibold text-slate-400">Total Loose Units</div>
+          <div className="text-[10px] uppercase font-semibold text-slate-400">Total Units Eq.</div>
           <div className="text-sm font-bold text-sky-400 mt-0.5">
             {summary.total_units.toLocaleString()}
           </div>
@@ -716,16 +712,12 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
                         </span>
                       </td>
 
-                      {/* 17. Current Stock */}
+                      {/* 17. Current Stock (Full Pack Equivalent) */}
                       <td className="px-3 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right">
                         <div className="font-black text-emerald-300">
-                          {item.current_stock} <span className="text-[10px] font-normal text-slate-400 font-sans">pk</span>
+                          {Number(((item.total_stock_units || 0) / Math.max(1, item.units_per_pack || 1)).toFixed(2))}{' '}
+                          <span className="text-[10px] font-normal text-slate-400 font-sans">pk</span>
                         </div>
-                        {item.current_loose_qty > 0 && (
-                          <div className="text-[9px] text-sky-400 font-mono">
-                            +{item.current_loose_qty} loose
-                          </div>
-                        )}
                       </td>
 
                       {/* 18. Stock Value */}

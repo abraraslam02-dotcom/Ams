@@ -5,15 +5,10 @@ import {
   RefreshCw,
   AlertTriangle,
   CheckCircle2,
-  Calendar,
-  Layers,
-  MapPin,
   X,
-  Package,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StockTransfer, StockDatasheetItem } from '../../types/inventory';
-import { NumericInput } from '../common/NumericInput';
 
 interface TransferFormItem {
   inventory_id: number;
@@ -22,7 +17,6 @@ interface TransferFormItem {
   batch_number: string;
   available_packs: number;
   quantity_packs: number;
-  quantity_loose: number;
   from_rack: string;
   to_rack: string;
 }
@@ -31,10 +25,12 @@ export const StockTransferView: React.FC = () => {
   const [transfers, setTransfers] = useState<StockTransfer[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   // New transfer modal
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [availableBatches, setAvailableBatches] = useState<StockDatasheetItem[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string>('');
 
@@ -53,7 +49,7 @@ export const StockTransferView: React.FC = () => {
     setError(null);
     try {
       const res = await api.getStockTransfers();
-      setTransfers(res.transfers);
+      setTransfers(res.transfers || []);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to fetch stock transfers');
     } finally {
@@ -64,9 +60,9 @@ export const StockTransferView: React.FC = () => {
   const loadBatchesForPicker = async () => {
     try {
       const res = await api.getStockDatasheet({ limit: 500 });
-      setAvailableBatches(res.data);
-    } catch (err) {
-      console.error('Failed to load batches:', err);
+      setAvailableBatches(res.data || []);
+    } catch {
+      // ignore
     }
   };
 
@@ -83,18 +79,23 @@ export const StockTransferView: React.FC = () => {
     setRemarks('');
     setFormItems([]);
     setSelectedBatchId('');
+    setModalError(null);
     setIsModalOpen(true);
   };
 
   const handleAddBatch = () => {
+    setModalError(null);
     if (!selectedBatchId) return;
     const batch = availableBatches.find((b) => b.id === Number(selectedBatchId));
     if (!batch) return;
 
     if (formItems.some((i) => i.inventory_id === batch.id)) {
-      alert('Batch already added to transfer.');
+      setModalError('Batch already added to transfer.');
       return;
     }
+
+    const upp = Math.max(1, Number(batch.units_per_pack || 1));
+    const availableFullPack = Number(((batch.total_stock_units || 0) / upp).toFixed(2));
 
     setFormItems((prev) => [
       ...prev,
@@ -103,9 +104,8 @@ export const StockTransferView: React.FC = () => {
         item_name: batch.item_name,
         item_code: batch.item_code,
         batch_number: batch.batch_number,
-        available_packs: batch.current_stock,
-        quantity_packs: Math.min(1, batch.current_stock),
-        quantity_loose: 0,
+        available_packs: availableFullPack,
+        quantity_packs: Math.min(1, availableFullPack),
         from_rack: batch.rack_location || 'Warehouse Rack',
         to_rack: 'Front Counter Rack',
       },
@@ -125,14 +125,15 @@ export const StockTransferView: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setModalError(null);
     if (formItems.length === 0) {
-      alert('Please add at least one batch to transfer.');
+      setModalError('Please add at least one batch to transfer.');
       return;
     }
 
     setSubmitting(true);
     try {
-      await api.createStockTransfer({
+      const res = await api.createStockTransfer({
         transfer_date: transferDate,
         from_location: fromLocation,
         to_location: toLocation,
@@ -140,17 +141,18 @@ export const StockTransferView: React.FC = () => {
         remarks: remarks.trim() || undefined,
         items: formItems.map((i) => ({
           inventory_id: i.inventory_id,
-          quantity_packs: i.quantity_packs,
-          quantity_loose: i.quantity_loose,
+          quantity_packs: Number(i.quantity_packs || 0),
+          quantity_loose: 0,
           from_rack: i.from_rack,
           to_rack: i.to_rack,
         })),
       });
 
       setIsModalOpen(false);
+      setStatusNotice(`Stock Transfer ${res.transfer_no} recorded.`);
       await fetchTransfers();
     } catch (err: unknown) {
-      alert(`Transfer failed: ${err instanceof Error ? err.message : String(err)}`);
+      setModalError(`Transfer failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSubmitting(false);
     }
@@ -166,7 +168,7 @@ export const StockTransferView: React.FC = () => {
           </div>
           <div>
             <h2 className="text-sm font-bold text-white tracking-tight">
-              Stock Transfer &amp; Location Movement
+              Stock Transfer &amp; Location Movement (Full Pack Equivalent)
             </h2>
             <p className="text-[11px] text-slate-400">
               Track physical movements between main warehouse racks, cold storage, and retail dispensing counters
@@ -176,6 +178,7 @@ export const StockTransferView: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={openNewModal}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded text-xs font-semibold shadow-xs cursor-pointer transition-colors"
           >
@@ -183,6 +186,7 @@ export const StockTransferView: React.FC = () => {
             <span>New Stock Transfer</span>
           </button>
           <button
+            type="button"
             onClick={fetchTransfers}
             disabled={loading}
             className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 cursor-pointer"
@@ -191,6 +195,15 @@ export const StockTransferView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {statusNotice && (
+        <div className="p-3 bg-emerald-950/50 border border-emerald-700 text-emerald-200 rounded text-xs flex items-center justify-between">
+          <span className="font-semibold">{statusNotice}</span>
+          <button type="button" onClick={() => setStatusNotice(null)} className="cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="p-3 bg-rose-950/40 border border-rose-800 text-rose-300 rounded text-xs flex items-center gap-2">
@@ -267,7 +280,7 @@ export const StockTransferView: React.FC = () => {
 
       {/* New Transfer Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50 animate-fadeIn overflow-y-auto">
+        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-3xl w-full shadow-2xl space-y-4 my-8">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
@@ -275,17 +288,25 @@ export const StockTransferView: React.FC = () => {
                 <div>
                   <h3 className="text-sm font-bold text-white">Record Internal Stock Transfer</h3>
                   <p className="text-[11px] text-slate-400">
-                    Shift batches between warehouse shelves, rooms, or POS dispensing stations
+                    Shift batches between warehouse shelves, rooms, or POS dispensing stations (Full Packs)
                   </p>
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setIsModalOpen(false)}
                 className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {modalError && (
+              <div className="p-2.5 bg-rose-950/50 border border-rose-700 text-rose-200 rounded text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -346,7 +367,7 @@ export const StockTransferView: React.FC = () => {
                     <option value="">-- Choose Medicine Batch --</option>
                     {availableBatches.map((b) => (
                       <option key={b.id} value={b.id}>
-                        {b.item_code} | {b.item_name} | Batch: {b.batch_number} | Available: {b.current_stock} pk (Rack: {b.rack_location || 'None'})
+                        {b.item_code} | {b.item_name} | Batch: {b.batch_number} | Available: {b.current_stock} pk
                       </option>
                     ))}
                   </select>
@@ -361,7 +382,6 @@ export const StockTransferView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Items List */}
               {formItems.length > 0 && (
                 <div className="border border-slate-800 rounded-lg overflow-hidden">
                   <table className="w-full text-[11px] text-left border-collapse">
@@ -369,8 +389,7 @@ export const StockTransferView: React.FC = () => {
                       <tr>
                         <th className="px-2.5 py-2">Medicine / Batch</th>
                         <th className="px-2 py-2 text-center">Available</th>
-                        <th className="px-2 py-2 text-right">Transfer Packs</th>
-                        <th className="px-2 py-2 text-right">Transfer Loose</th>
+                        <th className="px-2 py-2 text-right">Transfer Qty (Full Pack)</th>
                         <th className="px-2.5 py-2">Target Rack</th>
                         <th className="px-2 py-2 text-center">Action</th>
                       </tr>
@@ -388,20 +407,16 @@ export const StockTransferView: React.FC = () => {
                             {item.available_packs} pk
                           </td>
                           <td className="px-2 py-2 text-right">
-                            <NumericInput
+                            <input
+                              type="number"
                               min={0}
+                              step="0.01"
                               max={item.available_packs}
                               value={item.quantity_packs}
-                              onChange={(e) => handleUpdateItem(idx, { quantity_packs: Number(e.target.value) })}
-                              className="w-16 px-1.5 py-1 bg-slate-950 border border-slate-700 rounded text-right text-white font-bold"
-                            />
-                          </td>
-                          <td className="px-2 py-2 text-right">
-                            <NumericInput
-                              min={0}
-                              value={item.quantity_loose}
-                              onChange={(e) => handleUpdateItem(idx, { quantity_loose: Number(e.target.value) })}
-                              className="w-14 px-1.5 py-1 bg-slate-950 border border-slate-700 rounded text-right text-sky-400"
+                              onChange={(e) =>
+                                handleUpdateItem(idx, { quantity_packs: Math.max(0, Number(e.target.value) || 0) })
+                              }
+                              className="w-20 px-1.5 py-1 bg-slate-950 border border-slate-700 rounded text-right text-white font-bold"
                             />
                           </td>
                           <td className="px-2.5 py-2 font-sans">

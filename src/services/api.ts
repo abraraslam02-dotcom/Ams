@@ -2466,6 +2466,14 @@ export const api = {
       endDate?: string;
       customerId?: string;
       itemId?: string;
+      companies?: string[];
+      itemIds?: number[];
+      itemGroup?: string;
+      salesmanId?: string;
+      townName?: string;
+      areaName?: string;
+      year1?: string;
+      year2?: string;
     }
   ) {
     const query = new URLSearchParams();
@@ -2473,6 +2481,26 @@ export const api = {
     if (params?.endDate) query.append('endDate', params.endDate);
     if (params?.customerId) query.append('customerId', params.customerId);
     if (params?.itemId) query.append('itemId', params.itemId);
+    if (params?.companies && params.companies.length > 0) {
+      query.append('companies', params.companies.join(','));
+    }
+    if (params?.itemIds && params.itemIds.length > 0) {
+      query.append('itemIds', params.itemIds.join(','));
+    }
+    if (params?.itemGroup && params.itemGroup !== 'ALL') {
+      query.append('itemGroup', params.itemGroup);
+    }
+    if (params?.salesmanId && params.salesmanId !== 'ALL') {
+      query.append('salesmanId', params.salesmanId);
+    }
+    if (params?.townName && params.townName !== 'ALL') {
+      query.append('townName', params.townName);
+    }
+    if (params?.areaName && params.areaName !== 'ALL') {
+      query.append('areaName', params.areaName);
+    }
+    if (params?.year1) query.append('year1', params.year1);
+    if (params?.year2) query.append('year2', params.year2);
 
     try {
       const res = await authFetch(`/api/sales/reports/${reportType}?${query.toString()}`);
@@ -3461,6 +3489,7 @@ export const api = {
     reason_category: 'INCREASE' | 'DECREASE' | 'DAMAGE' | 'EXPIRED' | 'PHYSICAL_DIFFERENCE' | 'CORRECTION';
     description: string;
     reference_no?: string;
+    idempotency_key?: string;
     items: Array<{
       inventory_id: number;
       direction: 'INCREASE' | 'DECREASE';
@@ -3517,6 +3546,7 @@ export const api = {
     to_location: string;
     reference_no?: string;
     remarks?: string;
+    idempotency_key?: string;
     items: Array<{
       inventory_id: number;
       quantity_packs: number;
@@ -3671,6 +3701,7 @@ export const api = {
   async createPhysicalVerification(payload: {
     verification_date: string;
     remarks?: string;
+    idempotency_key?: string;
     items: Array<{
       inventory_id: number;
       physical_pack_qty: number;
@@ -3736,6 +3767,95 @@ export const api = {
     const data = await res.json();
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to update inventory settings');
+    }
+    return data;
+  },
+
+  async getInventoryCompaniesItemsMeta(): Promise<import('../types/inventory').CompanyItemMetaResponse> {
+    const res = await authFetch('/api/inventory/companies-items-meta');
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load company & item metadata');
+    }
+    return data;
+  },
+
+  async getItemStockReport(params?: {
+    fromDate?: string;
+    toDate?: string;
+    companies?: string[];
+    itemIds?: number[];
+    itemGroup?: string;
+    search?: string;
+  }): Promise<{
+    success: boolean;
+    count: number;
+    data: import('../types/inventory').ItemStockReportRow[];
+    totals: Record<string, number>;
+  }> {
+    const query = new URLSearchParams();
+    if (params?.fromDate) query.append('fromDate', params.fromDate);
+    if (params?.toDate) query.append('toDate', params.toDate);
+    if (params?.companies && params.companies.length > 0) query.append('companies', params.companies.join(','));
+    if (params?.itemIds && params.itemIds.length > 0) query.append('itemIds', params.itemIds.join(','));
+    if (params?.itemGroup && params.itemGroup !== 'ALL') query.append('itemGroup', params.itemGroup);
+    if (params?.search) query.append('search', params.search);
+
+    const res = await authFetch(`/api/inventory/item-stock-report?${query.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load item stock report');
+    }
+    return data;
+  },
+
+  async getCompanyStockStatement(params?: {
+    fromDate?: string;
+    toDate?: string;
+    companies?: string[];
+    itemIds?: number[];
+    itemGroup?: string;
+  }): Promise<import('../types/inventory').StockStatementResponse> {
+    const query = new URLSearchParams();
+    if (params?.fromDate) query.append('fromDate', params.fromDate);
+    if (params?.toDate) query.append('toDate', params.toDate);
+    if (params?.companies && params.companies.length > 0) query.append('companies', params.companies.join(','));
+    if (params?.itemIds && params.itemIds.length > 0) query.append('itemIds', params.itemIds.join(','));
+    if (params?.itemGroup && params.itemGroup !== 'ALL') query.append('itemGroup', params.itemGroup);
+
+    const res = await authFetch(`/api/inventory/stock-statement?${query.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load company stock statement');
+    }
+    return data;
+  },
+
+  async getDetailedItemStockReport(params?: {
+    fromDate?: string;
+    toDate?: string;
+    companies?: string[];
+    itemIds?: number[];
+    itemGroup?: string;
+    search?: string;
+  }): Promise<{
+    success: boolean;
+    count: number;
+    data: import('../types/inventory').DetailedItemStockRow[];
+    totals: Record<string, number>;
+  }> {
+    const query = new URLSearchParams();
+    if (params?.fromDate) query.append('fromDate', params.fromDate);
+    if (params?.toDate) query.append('toDate', params.toDate);
+    if (params?.companies && params.companies.length > 0) query.append('companies', params.companies.join(','));
+    if (params?.itemIds && params.itemIds.length > 0) query.append('itemIds', params.itemIds.join(','));
+    if (params?.itemGroup && params.itemGroup !== 'ALL') query.append('itemGroup', params.itemGroup);
+    if (params?.search) query.append('search', params.search);
+
+    const res = await authFetch(`/api/inventory/detailed-stock-report?${query.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load detailed item stock report');
     }
     return data;
   },

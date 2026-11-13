@@ -1,24 +1,15 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Clock,
   Search,
-  Calendar,
-  Filter,
   RefreshCw,
   Download,
   AlertTriangle,
-  Package,
-  Layers,
-  ArrowDownLeft,
-  ArrowUpRight,
-  RotateCcw,
-  ShoppingCart,
-  Boxes,
   Printer,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
-import { StockLedgerEntry, StockDatasheetItem } from '../../types/inventory';
+import { StockLedgerEntry, ReportMetaItem } from '../../types/inventory';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -29,8 +20,9 @@ export const StockLedgerView: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const ledgerPrintRef = useRef<HTMLDivElement>(null);
 
-  // Filter items master list for selector
-  const [itemsList, setItemsList] = useState<StockDatasheetItem[]>([]);
+  // Item catalog for selector
+  const [itemsList, setItemsList] = useState<ReportMetaItem[]>([]);
+  const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
   const [selectedItemId, setSelectedItemId] = useState<string>('');
   const [batchNumberFilter, setBatchNumberFilter] = useState<string>('');
 
@@ -40,129 +32,206 @@ export const StockLedgerView: React.FC = () => {
 
   // Summary
   const [summary, setSummary] = useState({
+    opening_pack_balance: 0,
     total_in_packs: 0,
     total_out_packs: 0,
     net_change_packs: 0,
     closing_pack_balance: 0,
   });
 
-  const loadItems = async () => {
+  const loadItems = useCallback(async () => {
     try {
-      const res = await api.getStockDatasheet({ limit: 500 });
-      setItemsList(res.data);
-      if (res.data.length > 0 && !selectedItemId) {
-        setSelectedItemId(String(res.data[0].item_id));
+      const res = await api.getInventoryCompaniesItemsMeta();
+      const items = res.items || [];
+      setItemsList(items);
+      if (items.length > 0 && !selectedItemId) {
+        setSelectedItemId(String(items[0].id));
       }
-    } catch (err) {
-      console.error('Failed to load items:', err);
+    } catch {
+      // ignore fallback
     }
-  };
+  }, [selectedItemId]);
 
-  const fetchLedger = async () => {
+  const fetchLedger = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.getStockLedger({
+      const res = (await api.getStockLedger({
         item_id: selectedItemId ? Number(selectedItemId) : undefined,
         batch_number: batchNumberFilter.trim() || undefined,
         from_date: fromDate || undefined,
         to_date: toDate || undefined,
+      })) as any;
+      setLedger(res.ledger || []);
+      setSummary({
+        opening_pack_balance: Number(res.summary?.opening_pack_balance || 0),
+        total_in_packs: Number(res.summary?.total_in_packs || 0),
+        total_out_packs: Number(res.summary?.total_out_packs || 0),
+        net_change_packs: Number(res.summary?.net_change_packs || 0),
+        closing_pack_balance: Number(res.summary?.closing_pack_balance || 0),
       });
-      setLedger(res.ledger);
-      setSummary(res.summary);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch stock ledger');
+      setError(err instanceof Error ? err.message : 'Failed to fetch item log / stock ledger');
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedItemId, batchNumberFilter, fromDate, toDate]);
 
   useEffect(() => {
     loadItems();
-  }, []);
+  }, [loadItems]);
 
   useEffect(() => {
     fetchLedger();
-  }, [selectedItemId, batchNumberFilter, fromDate, toDate]);
+  }, [fetchLedger]);
 
-  // Unique item options
-  const uniqueItemOptions = useMemo(() => {
-    const map = new Map<number, { id: number; code: string; name: string }>();
-    itemsList.forEach((it) => {
-      if (!map.has(it.item_id)) {
-        map.set(it.item_id, {
-          id: it.item_id,
-          code: it.item_code,
-          name: it.item_name,
-        });
-      }
-    });
-    return Array.from(map.values());
-  }, [itemsList]);
+  const filteredItems = useMemo(() => {
+    const q = itemSearchQuery.trim().toLowerCase();
+    if (!q) return itemsList;
+    return itemsList.filter(
+      (it) =>
+        it.item_name.toLowerCase().includes(q) ||
+        it.item_code.toLowerCase().includes(q) ||
+        it.company_name.toLowerCase().includes(q)
+    );
+  }, [itemsList, itemSearchQuery]);
 
   const selectedItemObj = useMemo(() => {
-    return uniqueItemOptions.find((i) => i.id === Number(selectedItemId));
-  }, [uniqueItemOptions, selectedItemId]);
+    return itemsList.find((i) => i.id === Number(selectedItemId));
+  }, [itemsList, selectedItemId]);
 
   const exportToExcel = () => {
-    const rows = ledger.map((entry, idx) => ({
-      'Sr #': idx + 1,
-      'Date': entry.date,
-      'Transaction Type': entry.type_label,
-      'Ref / Invoice #': entry.ref_no,
-      'Batch Number': entry.batch_number,
-      'Expiry Date': entry.expiry_date,
-      'In (Packs)': entry.in_packs,
-      'In (Loose)': entry.in_loose,
-      'Out (Packs)': entry.out_packs,
-      'Out (Loose)': entry.out_loose,
-      'Net Pack Change': entry.net_pack_change,
-      'Running Balance (Packs)': entry.running_pack_balance,
-      'Running Loose': entry.running_loose_balance,
-      'Unit Cost (Rs)': entry.unit_cost,
-      'Remarks': entry.remarks,
-      'User': entry.user_name,
-    }));
+    const rows: Array<Record<string, string | number>> = [];
+
+    if (fromDate) {
+      rows.push({
+        Date: fromDate,
+        'Transaction Type': 'OPENING BALANCE (PRIOR TO PERIOD)',
+        'Invoice / Voucher #': 'B/F',
+        'Party Name': '—',
+        Company: selectedItemObj?.company_name || '—',
+        'Item Group': selectedItemObj?.item_group || '—',
+        'Opening Stock': summary.opening_pack_balance,
+        Purchase: 0,
+        'Purchase Bonus': 0,
+        'Purchase Return': 0,
+        Sale: 0,
+        'Sale Return': 0,
+        'Transfer In': 0,
+        'Transfer Out': 0,
+        Rate: 0,
+        Discount: 0,
+        Debit: 0,
+        Credit: 0,
+        'Running Stock Balance': summary.opening_pack_balance,
+        'Batch Number': '—',
+      });
+    }
+
+    for (const entry of ledger) {
+      rows.push({
+        Date: entry.date,
+        'Transaction Type': entry.type_label,
+        'Invoice / Voucher #': entry.ref_no,
+        'Party Name': entry.party_name || '—',
+        Company: entry.company_name || selectedItemObj?.company_name || '—',
+        'Item Group': entry.item_group || selectedItemObj?.item_group || '—',
+        'Opening Stock': entry.opening_packs || 0,
+        Purchase: entry.purchase_packs || 0,
+        'Purchase Bonus': entry.purchase_bonus_packs || 0,
+        'Purchase Return': entry.purchase_return_packs || 0,
+        Sale: entry.sale_packs || 0,
+        'Sale Return': entry.sale_return_packs || 0,
+        'Transfer In': entry.transfer_in_packs || 0,
+        'Transfer Out': entry.transfer_out_packs || 0,
+        Rate: entry.unit_cost || 0,
+        Discount: entry.discount_amount || 0,
+        Debit: entry.debit_amount || 0,
+        Credit: entry.credit_amount || 0,
+        'Running Stock Balance': entry.running_pack_balance,
+        'Batch Number': entry.batch_number || '—',
+      });
+    }
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Stock Ledger');
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Item Log Ledger');
     XLSX.writeFile(
       workbook,
-      `AMS_Stock_Ledger_${selectedItemObj?.code || 'All'}_${new Date().toISOString().split('T')[0]}.xlsx`
+      `AMS_Item_Log_${selectedItemObj?.item_code || 'All'}_${new Date().toISOString().split('T')[0]}.xlsx`
     );
   };
 
   const getTransTypeBadge = (type: StockLedgerEntry['type']) => {
     switch (type) {
       case 'OPENING':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-300 border border-slate-700">OPENING</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+            OPENING
+          </span>
+        );
       case 'PURCHASE':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">+PURCHASE</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+            PURCHASE
+          </span>
+        );
       case 'PURCHASE_BONUS':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-teal-500/20 text-teal-300 border border-teal-500/40">+BONUS</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-teal-500/20 text-teal-300 border border-teal-500/40">
+            PUR. BONUS
+          </span>
+        );
       case 'SALE':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">-SALE</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+            SALE
+          </span>
+        );
       case 'PURCHASE_RETURN':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">-PUR. RETURN</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+            PUR. RETURN
+          </span>
+        );
       case 'SALES_RETURN':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">+SALE RETURN</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+            SALE RETURN
+          </span>
+        );
       case 'ADJUSTMENT_IN':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">+ADJUSTMENT</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+            ADJ (+)
+          </span>
+        );
       case 'ADJUSTMENT_OUT':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/40">-ADJUSTMENT</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/40">
+            ADJ (-)
+          </span>
+        );
       case 'TRANSFER_IN':
       case 'TRANSFER_OUT':
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">TRANSFER</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
+            {type === 'TRANSFER_IN' ? 'TRF IN' : 'TRF OUT'}
+          </span>
+        );
       default:
-        return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-400">OTHER</span>;
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-400">
+            OTHER
+          </span>
+        );
     }
   };
 
   return (
     <div className="space-y-3 font-sans">
       {/* Control Filter Bar */}
-      <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 space-y-2.5 shadow-xs">
+      <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 space-y-2.5 shadow-xs print:hidden">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <div className="p-1.5 bg-emerald-500/10 text-emerald-400 rounded border border-emerald-500/20">
@@ -170,42 +239,45 @@ export const StockLedgerView: React.FC = () => {
             </div>
             <div>
               <h2 className="text-sm font-bold text-white tracking-tight">
-                Stock Movement Ledger &amp; Running Audit Card
+                Item Log &amp; Chronological Transaction History (Full Pack Equivalent)
               </h2>
               <p className="text-[11px] text-slate-400">
-                Complete chronological transaction history: Purchases (+), Sales (-), Returns, Bonus, and Adjustments
+                Complete chronological audit trail with Opening Balance, Purchases, Bonus, Returns, Sales, Transfers &amp; Running Stock Balance
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 print:hidden">
+          <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => {
                 if (ledgerPrintRef.current) {
                   printReportDocument(
                     ledgerPrintRef.current,
-                    `Abrar Medical Store - Stock Ledger (${selectedItemObj ? selectedItemObj.name : 'Consolidated'})`,
-                    { orientation: 'landscape', paperSize: 'a4' }
+                    `Abrar Medical Store - Item Log (${selectedItemObj ? selectedItemObj.item_name : 'All Items'})`,
+                    { orientation: 'landscape', paperSize: 'a4', margin: 'minimum', fontSizeScale: 'small' }
                   );
                 } else {
                   window.print();
                 }
               }}
-              disabled={ledger.length === 0}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded text-xs font-semibold shadow-xs cursor-pointer transition-colors border border-slate-700"
+              disabled={ledger.length === 0 && !fromDate}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white rounded text-xs font-semibold shadow-xs cursor-pointer transition-colors border border-slate-700"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print Ledger</span>
+              <span>Print Item Log</span>
             </button>
             <button
+              type="button"
               onClick={exportToExcel}
-              disabled={ledger.length === 0}
+              disabled={ledger.length === 0 && !fromDate}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white rounded text-xs font-semibold shadow-xs cursor-pointer transition-colors"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Excel Export</span>
             </button>
             <button
+              type="button"
               onClick={fetchLedger}
               disabled={loading}
               className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 cursor-pointer"
@@ -216,19 +288,38 @@ export const StockLedgerView: React.FC = () => {
         </div>
 
         {/* Filter Inputs */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs pt-1 print:hidden">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-2 text-xs pt-1">
+          {/* Quick search item */}
+          <div>
+            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">
+              Search Item
+            </label>
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
+              <input
+                type="text"
+                value={itemSearchQuery}
+                onChange={(e) => setItemSearchQuery(e.target.value)}
+                placeholder="Filter item dropdown..."
+                className="w-full pl-8 pr-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-200 text-xs focus:outline-hidden focus:border-emerald-500"
+              />
+            </div>
+          </div>
+
           {/* Select Item */}
           <div>
-            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Select Medicine Item:</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">
+              Select Medicine Item
+            </label>
             <select
               value={selectedItemId}
               onChange={(e) => setSelectedItemId(e.target.value)}
               className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-200 text-xs focus:outline-hidden focus:border-emerald-500 font-semibold"
             >
               <option value="">-- All Inventory Items --</option>
-              {uniqueItemOptions.map((it) => (
+              {filteredItems.map((it) => (
                 <option key={it.id} value={it.id}>
-                  {it.code} — {it.name}
+                  {it.item_code} — {it.item_name} ({it.company_name})
                 </option>
               ))}
             </select>
@@ -236,19 +327,23 @@ export const StockLedgerView: React.FC = () => {
 
           {/* Batch Number Filter */}
           <div>
-            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Batch # Filter (Optional):</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">
+              Batch # Filter
+            </label>
             <input
               type="text"
               value={batchNumberFilter}
               onChange={(e) => setBatchNumberFilter(e.target.value)}
-              placeholder="Filter specific batch..."
+              placeholder="Specific batch..."
               className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-slate-200 text-xs font-mono focus:outline-hidden focus:border-emerald-500"
             />
           </div>
 
           {/* From Date */}
           <div>
-            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">From Date:</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">
+              Date From
+            </label>
             <input
               type="date"
               value={fromDate}
@@ -259,7 +354,9 @@ export const StockLedgerView: React.FC = () => {
 
           {/* To Date */}
           <div>
-            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">To Date:</label>
+            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">
+              Date To
+            </label>
             <input
               type="date"
               value={toDate}
@@ -273,156 +370,241 @@ export const StockLedgerView: React.FC = () => {
       {/* Printable Area */}
       <div ref={ledgerPrintRef} className="space-y-4">
         <PrintDocumentHeader
-          title="STOCK MOVEMENT LEDGER & AUDIT TRAIL"
-          subtitle={selectedItemObj ? `${selectedItemObj.code} — ${selectedItemObj.name}` : 'All Stock Movement Transactions'}
+          title="ITEM LOG / ITEM TRANSACTION HISTORY (FULL PACK EQUIVALENT)"
+          subtitle={
+            selectedItemObj
+              ? `${selectedItemObj.item_code} — ${selectedItemObj.item_name} | ${selectedItemObj.company_name} (${selectedItemObj.item_group})`
+              : 'Consolidated Chronological Stock Movement Ledger'
+          }
           dateRange={{ fromDate: fromDate || 'Start', toDate: toDate || 'Present' }}
           metaFields={[
-            { label: 'Item Code', value: selectedItemObj?.code || 'All Items' },
-            { label: 'Batch Filter', value: batchNumberFilter || 'All Batches' },
-            { label: 'Total IN', value: `${summary.total_in_packs} pk` },
-            { label: 'Total OUT', value: `${summary.total_out_packs} pk` },
+            { label: 'Item Code', value: selectedItemObj?.item_code || 'All Items' },
+            { label: 'Company', value: selectedItemObj?.company_name || 'All Companies' },
+            { label: 'Opening Balance', value: `${summary.opening_pack_balance} pk` },
+            { label: 'Total IN', value: `+${summary.total_in_packs} pk` },
+            { label: 'Total OUT', value: `-${summary.total_out_packs} pk` },
             { label: 'Closing Balance', value: `${summary.closing_pack_balance} pk` },
           ]}
         />
 
         {/* Summary KPI Ribbon */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-xs shadow-xs">
-        <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
-          <div className="text-[10px] uppercase font-bold text-slate-400">Period Total IN</div>
-          <div className="text-sm font-bold text-emerald-400 mt-0.5">
-            +{summary.total_in_packs} <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-xs shadow-xs">
+          <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
+            <div className="text-[10px] uppercase font-bold text-slate-400">Opening Balance</div>
+            <div className="text-sm font-bold text-slate-200 mt-0.5">
+              {summary.opening_pack_balance}{' '}
+              <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
+            </div>
+          </div>
+          <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
+            <div className="text-[10px] uppercase font-bold text-slate-400">Period Total IN</div>
+            <div className="text-sm font-bold text-emerald-400 mt-0.5">
+              +{summary.total_in_packs}{' '}
+              <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
+            </div>
+          </div>
+          <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
+            <div className="text-[10px] uppercase font-bold text-slate-400">Period Total OUT</div>
+            <div className="text-sm font-bold text-rose-400 mt-0.5">
+              -{summary.total_out_packs}{' '}
+              <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
+            </div>
+          </div>
+          <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
+            <div className="text-[10px] uppercase font-bold text-slate-400">Net Flow Change</div>
+            <div className="text-sm font-bold text-amber-300 mt-0.5">
+              {summary.net_change_packs > 0
+                ? `+${summary.net_change_packs}`
+                : summary.net_change_packs}{' '}
+              pk
+            </div>
+          </div>
+          <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
+            <div className="text-[10px] uppercase font-bold text-slate-400">Closing Balance</div>
+            <div className="text-sm font-black text-emerald-300 mt-0.5">
+              {summary.closing_pack_balance}{' '}
+              <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
+            </div>
           </div>
         </div>
-        <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
-          <div className="text-[10px] uppercase font-bold text-slate-400">Period Total OUT</div>
-          <div className="text-sm font-bold text-rose-400 mt-0.5">
-            -{summary.total_out_packs} <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
-          </div>
-        </div>
-        <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
-          <div className="text-[10px] uppercase font-bold text-slate-400">Net Flow Change</div>
-          <div className="text-sm font-bold text-amber-300 mt-0.5">
-            {summary.net_change_packs > 0 ? `+${summary.net_change_packs}` : summary.net_change_packs} pk
-          </div>
-        </div>
-        <div className="bg-slate-800/80 p-2 rounded border border-slate-700/60">
-          <div className="text-[10px] uppercase font-bold text-slate-400">Closing Stock Balance</div>
-          <div className="text-sm font-black text-emerald-300 mt-0.5">
-            {summary.closing_pack_balance} <span className="text-[10px] font-normal text-slate-400 font-sans">packs</span>
-          </div>
-        </div>
-      </div>
 
-      {error && (
-        <div className="p-3 bg-rose-950/40 border border-rose-800 text-rose-300 rounded text-xs flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
+        {error && (
+          <div className="p-3 bg-rose-950/40 border border-rose-800 text-rose-300 rounded text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
 
-      {/* Ledger Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden shadow-xs">
-        <div className="overflow-x-auto">
-          <table className="w-full text-[11px] text-left border-collapse">
-            <thead className="bg-slate-950 text-slate-300 uppercase tracking-wider text-[10px] font-bold border-b border-slate-800">
-              <tr>
-                <th className="px-2.5 py-2 border-r border-slate-850 text-center">Date</th>
-                <th className="px-2.5 py-2 border-r border-slate-850">Type</th>
-                <th className="px-2.5 py-2 border-r border-slate-850">Ref / Doc #</th>
-                <th className="px-2.5 py-2 border-r border-slate-850">Batch #</th>
-                <th className="px-2 py-2 border-r border-slate-850 text-center">Expiry</th>
-                <th className="px-2.5 py-2 border-r border-slate-850 text-right text-emerald-400 font-bold">In (Packs)</th>
-                <th className="px-2 py-2 border-r border-slate-850 text-right text-teal-400">In (Loose)</th>
-                <th className="px-2.5 py-2 border-r border-slate-850 text-right text-rose-400 font-bold">Out (Packs)</th>
-                <th className="px-2 py-2 border-r border-slate-850 text-right text-rose-300">Out (Loose)</th>
-                <th className="px-2.5 py-2 border-r border-slate-850 text-right font-bold">Net Change</th>
-                <th className="px-3 py-2 border-r border-slate-850 text-right font-black text-emerald-300">Running Bal (Packs)</th>
-                <th className="px-2.5 py-2 border-r border-slate-850 text-right text-sky-300 font-bold">Running Loose</th>
-                <th className="px-2.5 py-2 border-r border-slate-850 text-right">Cost Rate</th>
-                <th className="px-3 py-2 border-r border-slate-850 min-w-[150px]">Remarks</th>
-                <th className="px-2.5 py-2">User</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/80 font-mono">
-              {loading && ledger.length === 0 ? (
+        {/* Ledger Table (Zero Loose Columns) */}
+        <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden shadow-xs">
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] text-left border-collapse">
+              <thead className="bg-slate-950 text-slate-300 uppercase tracking-wider text-[10px] font-bold border-b border-slate-800">
                 <tr>
-                  <td colSpan={15} className="py-10 text-center text-slate-400 font-sans">
-                    <RefreshCw className="w-5 h-5 animate-spin mx-auto text-emerald-500 mb-1" />
-                    <span>Compiling complete stock transaction ledger...</span>
-                  </td>
+                  <th className="px-2 py-2 border-r border-slate-850 text-center">Date</th>
+                  <th className="px-2 py-2 border-r border-slate-850">Type</th>
+                  <th className="px-2 py-2 border-r border-slate-850">Inv / Voucher #</th>
+                  <th className="px-2.5 py-2 border-r border-slate-850 min-w-[130px]">Party Name</th>
+                  <th className="px-2 py-2 border-r border-slate-850">Company</th>
+                  <th className="px-2 py-2 border-r border-slate-850">Item Group</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right">Opening</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-emerald-400">Purchase</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-teal-300">Pur. Bonus</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-amber-300">Pur. Ret</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-rose-400">Sale</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-cyan-300">Sale Ret</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-sky-300">Trf In</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right text-sky-400">Trf Out</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right">Rate</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right">Discount</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right">Debit</th>
+                  <th className="px-2 py-2 border-r border-slate-850 text-right">Credit</th>
+                  <th className="px-2.5 py-2 border-r border-slate-850 text-right font-black text-emerald-300">
+                    Running Bal (Pk)
+                  </th>
+                  <th className="px-2 py-2">Batch #</th>
                 </tr>
-              ) : ledger.length === 0 ? (
-                <tr>
-                  <td colSpan={15} className="py-8 text-center text-slate-400 font-sans">
-                    No transactions recorded for this item in the selected date range.
-                  </td>
-                </tr>
-              ) : (
-                ledger.map((entry) => (
-                  <tr key={entry.transaction_id} className="hover:bg-slate-800/60 transition-colors">
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-center text-slate-300">
-                      {entry.date}
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-sans">
-                      {getTransTypeBadge(entry.type)}
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-bold text-white">
-                      {entry.ref_no}
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-slate-300 font-bold">
-                      {entry.batch_number}
-                    </td>
-                    <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-center text-slate-400">
-                      {entry.expiry_date}
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-emerald-400 font-bold">
-                      {entry.in_packs > 0 ? `+${entry.in_packs}` : '—'}
-                    </td>
-                    <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-teal-400">
-                      {entry.in_loose > 0 ? `+${entry.in_loose}` : '—'}
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-rose-400 font-bold">
-                      {entry.out_packs > 0 ? `-${entry.out_packs}` : '—'}
-                    </td>
-                    <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-rose-300">
-                      {entry.out_loose > 0 ? `-${entry.out_loose}` : '—'}
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right font-bold">
-                      <span
-                        className={
-                          entry.net_pack_change > 0
-                            ? 'text-emerald-400'
-                            : entry.net_pack_change < 0
-                            ? 'text-rose-400'
-                            : 'text-slate-500'
-                        }
-                      >
-                        {entry.net_pack_change > 0 ? `+${entry.net_pack_change}` : entry.net_pack_change}
+              </thead>
+              <tbody className="divide-y divide-slate-800/80 font-mono">
+                {fromDate && (
+                  <tr className="bg-slate-950/60 text-slate-300 font-semibold">
+                    <td className="px-2 py-1.5 border-r border-slate-800 text-center">{fromDate}</td>
+                    <td className="px-2 py-1.5 border-r border-slate-800 font-sans">
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-300">
+                        OPENING B/F
                       </span>
                     </td>
-                    <td className="px-3 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right font-black text-emerald-300">
-                      {entry.running_pack_balance} pk
+                    <td className="px-2 py-1.5 border-r border-slate-800">B/F</td>
+                    <td colSpan={3} className="px-2.5 py-1.5 border-r border-slate-800 font-sans text-slate-400">
+                      Opening Balance prior to {fromDate}
                     </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-sky-400 font-bold">
-                      {entry.running_loose_balance} u
+                    <td className="px-2 py-1.5 border-r border-slate-800 text-right font-bold">
+                      {summary.opening_pack_balance}
                     </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right text-slate-300">
-                      {formatPKR(entry.unit_cost, false)}
+                    <td colSpan={11} className="border-r border-slate-800"></td>
+                    <td className="px-2.5 py-1.5 border-r border-slate-800 text-right font-black text-emerald-300">
+                      {summary.opening_pack_balance} pk
                     </td>
-                    <td className="px-3 py-1.5 border-r border-slate-800/80 font-sans text-slate-400">
-                      <div className="truncate max-w-[200px]">{entry.remarks || '—'}</div>
-                    </td>
-                    <td className="px-2.5 py-1.5 whitespace-nowrap font-sans text-slate-300">
-                      {entry.user_name}
+                    <td className="px-2 py-1.5">—</td>
+                  </tr>
+                )}
+
+                {loading && ledger.length === 0 ? (
+                  <tr>
+                    <td colSpan={20} className="py-10 text-center text-slate-400 font-sans">
+                      <RefreshCw className="w-5 h-5 animate-spin mx-auto text-emerald-500 mb-1" />
+                      <span>Compiling complete chronological item log...</span>
                     </td>
                   </tr>
-                ))
+                ) : ledger.length === 0 ? (
+                  <tr>
+                    <td colSpan={20} className="py-8 text-center text-slate-400 font-sans">
+                      No transactions recorded for this item in the selected date range.
+                    </td>
+                  </tr>
+                ) : (
+                  ledger.map((entry) => (
+                    <tr key={entry.transaction_id} className="hover:bg-slate-800/60 transition-colors">
+                      <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-center text-slate-300">
+                        {entry.date}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-sans">
+                        {getTransTypeBadge(entry.type)}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-bold text-white">
+                        {entry.ref_no}
+                      </td>
+                      <td className="px-2.5 py-1.5 border-r border-slate-800/80 font-sans text-slate-200">
+                        <div className="truncate max-w-[160px]" title={entry.party_name || ''}>
+                          {entry.party_name || '—'}
+                        </div>
+                        {!selectedItemId && entry.item_name && (
+                          <div className="text-[10px] text-emerald-400 truncate max-w-[160px]">
+                            {entry.item_code} — {entry.item_name}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-sans text-slate-300 truncate max-w-[110px]">
+                        {entry.company_name || selectedItemObj?.company_name || '—'}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-sans text-slate-400">
+                        {entry.item_group || selectedItemObj?.item_group || '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-slate-300">
+                        {entry.opening_packs ? entry.opening_packs : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-emerald-400 font-bold">
+                        {entry.purchase_packs ? `+${entry.purchase_packs}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-teal-300">
+                        {entry.purchase_bonus_packs ? `+${entry.purchase_bonus_packs}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-amber-300">
+                        {entry.purchase_return_packs ? `-${entry.purchase_return_packs}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-rose-400 font-bold">
+                        {entry.sale_packs
+                          ? `-${entry.sale_packs}${
+                              entry.sale_bonus_packs ? ` (+${entry.sale_bonus_packs}B)` : ''
+                            }`
+                          : entry.sale_bonus_packs
+                          ? `-${entry.sale_bonus_packs}B`
+                          : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-cyan-300">
+                        {entry.sale_return_packs ? `+${entry.sale_return_packs}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-sky-300">
+                        {entry.transfer_in_packs ? `+${entry.transfer_in_packs}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-sky-400">
+                        {entry.transfer_out_packs ? `-${entry.transfer_out_packs}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-slate-300">
+                        {entry.unit_cost ? formatPKR(entry.unit_cost, false) : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-slate-400">
+                        {entry.discount_amount ? formatPKR(entry.discount_amount, false) : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-emerald-300">
+                        {entry.debit_amount ? formatPKR(entry.debit_amount, false) : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right border-r border-slate-800/80 text-rose-300">
+                        {entry.credit_amount ? formatPKR(entry.credit_amount, false) : '—'}
+                      </td>
+                      <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-right font-black text-emerald-300">
+                        {entry.running_pack_balance} pk
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap text-slate-300 font-bold">
+                        {entry.batch_number || '—'}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              {(ledger.length > 0 || fromDate) && (
+                <tfoot className="bg-slate-950 font-mono text-white border-t-2 border-slate-700 font-black text-[11px]">
+                  <tr>
+                    <td colSpan={6} className="px-3 py-2 font-sans uppercase text-emerald-300 border-r border-slate-800">
+                      Closing Balance Summary ({ledger.length} Transactions)
+                    </td>
+                    <td className="px-2 py-2 text-right border-r border-slate-800">
+                      {summary.opening_pack_balance}
+                    </td>
+                    <td colSpan={11} className="px-2 py-2 text-right border-r border-slate-800 text-slate-300 font-sans text-[10px]">
+                      Period Total In: +{summary.total_in_packs} pk | Total Out: -{summary.total_out_packs} pk
+                    </td>
+                    <td className="px-2.5 py-2 text-right border-r border-slate-800 text-emerald-300">
+                      {summary.closing_pack_balance} pk
+                    </td>
+                    <td></td>
+                  </tr>
+                </tfoot>
               )}
-            </tbody>
-          </table>
+            </table>
+          </div>
         </div>
       </div>
     </div>
-  </div>
-);
+  );
 };

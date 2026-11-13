@@ -136,6 +136,7 @@ function AppContent() {
         tab === 'item-claims' ||
         tab.startsWith('inv-') ||
         tab.startsWith('stock-') ||
+        tab === 'detailed-stock-report' ||
         tab === 'inventory' ||
         tab === 'batch-expiry'
       ) {
@@ -299,7 +300,10 @@ function AppContent() {
         return { title: 'Item Search — Fast Multi-Field Medicine Lookup', crumbs: ['Item Management', 'Item Search'] };
       case 'stock-datasheet':
       case 'inv-current':
-        return { title: 'Item Stock — Consolidated Item-Level Inventory Summary', crumbs: ['Item Management', 'Item Stock'] };
+        return { title: 'Item Stock Report — Consolidated Stock Movement & Valuation', crumbs: ['Item Management', 'Item Stock Report'] };
+      case 'stock-statement':
+      case 'inv-stock-statement':
+        return { title: 'Company-Wise Stock Statement — Multi-Company Print & Export', crumbs: ['Item Management', 'Company Stock Statement'] };
       case 'batch-expiry':
       case 'inventory':
       case 'inv-datasheet':
@@ -366,8 +370,9 @@ function AppContent() {
       case 'report-customer-sales':
         return { title: 'Customer Sales Report — Party-Wise Sales & Recovery', crumbs: ['Sales Management', 'Customer Sales Report'] };
       case 'sales-salesman-wise':
+        return { title: 'Salesman Sales Report — Full Pack Performance & Outstanding', crumbs: ['Sales Management', 'Salesman Sales Report'] };
       case 'staff-salesmen':
-        return { title: 'Salesman Sales Report — Commissions & Performance', crumbs: ['Sales Management', 'Salesman Sales Report'] };
+        return { title: 'Salesman Directory & Commission Profiles', crumbs: ['Sales Management', 'Salesman Directory'] };
       case 'sales-held':
         return { title: 'Held & Draft Invoices — Resume or Discard Pending Bills', crumbs: ['Sales Management', 'Held / Draft Invoices'] };
       case 'sales-return-register':
@@ -490,7 +495,9 @@ function AppContent() {
 
       // G. REPORTS & ANALYTICS
       case 'report-item-reports':
-        return { title: 'Item Reports — Comprehensive Medicine Sales & Stock Analytics', crumbs: ['Reports & Analytics', 'Item Reports'] };
+      case 'detailed-stock-report':
+      case 'inv-detailed-stock':
+        return { title: 'Detailed Item Stock & Transaction Report — Opening, Movement & Closing', crumbs: ['Reports & Analytics', 'Detailed Item Stock Report'] };
       case 'sales-item-wise':
       case 'report-item-sales':
         return { title: 'Item Sales Reports — Item-Wise Quantity & Revenue Breakdown', crumbs: ['Reports & Analytics', 'Item Sales Reports'] };
@@ -557,6 +564,11 @@ function AppContent() {
     'stock-valuation': 'inv-overview',
     'stock-datasheet': 'inv-current',
     'inv-current': 'inv-current',
+    'stock-statement': 'inv-stock-statement',
+    'inv-stock-statement': 'inv-stock-statement',
+    'detailed-stock-report': 'inv-detailed-stock',
+    'inv-detailed-stock': 'inv-detailed-stock',
+    'report-item-reports': 'inv-detailed-stock',
     'batch-expiry': 'inv-datasheet',
     'inv-datasheet': 'inv-datasheet',
     'expiry-alerts': 'inv-expiry',
@@ -780,8 +792,11 @@ function AppContent() {
               {activeTab === 'sales-return-register' && <SalesReturnView initialMode="register" />}
 
               {/* SALESMAN & DELIVERYMAN */}
-              {(activeTab === 'staff-salesmen' || activeTab === 'sales-salesman-wise') && (
+              {activeTab === 'staff-salesmen' && (
                 <StaffAndDeliveryWorkspaceView initialTab="salesmen" />
+              )}
+              {activeTab === 'sales-salesman-wise' && (
+                <SalesReportsView initialReport="salesman-wise-sales" />
               )}
               {(activeTab === 'staff-deliverymen' || activeTab === 'deliveryman-master') && (
                 <StaffAndDeliveryWorkspaceView initialTab="deliverymen" />
@@ -912,8 +927,7 @@ function AppContent() {
                 <SalesReportsView initialReport="monthly-sales" />
               )}
               {(activeTab === 'report-item-sales' ||
-                activeTab === 'sales-item-wise' ||
-                activeTab === 'report-item-reports') && (
+                activeTab === 'sales-item-wise') && (
                 <SalesReportsView initialReport="item-wise-sales" />
               )}
               {(activeTab === 'report-customer-sales' ||
