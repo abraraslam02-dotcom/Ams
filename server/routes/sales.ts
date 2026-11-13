@@ -3140,6 +3140,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
 
     const companiesFilter = parseStrList(req.query.companies || req.query.companyNames);
     const itemIdsFilter = parseNumList(req.query.itemIds || (itemId && itemId !== 'All' ? itemId : ''));
+    const partyIdsFilter = parseNumList(req.query.partyIds || req.query.customerIds);
     const hasItemScopeFilter =
       companiesFilter.length > 0 ||
       itemIdsFilter.length > 0 ||
@@ -3156,7 +3157,10 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         where += ' AND s.invoice_date <= ? ';
         params.push(endDate);
       }
-      if (customerId && customerId.toUpperCase() !== 'ALL') {
+      if (partyIdsFilter.length > 0) {
+        where += ` AND s.customer_account_id IN (${partyIdsFilter.map(() => '?').join(',')}) `;
+        params.push(...partyIdsFilter);
+      } else if (customerId && customerId.toUpperCase() !== 'ALL') {
         where += ' AND s.customer_account_id = ? ';
         params.push(Number(customerId));
       }
@@ -3178,12 +3182,13 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
     const buildItemScopeClause = () => {
       let clause = '';
       const params: Array<string | number> = [];
+      if (companiesFilter.length > 0) {
+        clause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') IN (${companiesFilter.map(() => '?').join(',')}) `;
+        params.push(...companiesFilter);
+      }
       if (itemIdsFilter.length > 0) {
         clause += ` AND si.item_id IN (${itemIdsFilter.map(() => '?').join(',')}) `;
         params.push(...itemIdsFilter);
-      } else if (companiesFilter.length > 0) {
-        clause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') IN (${companiesFilter.map(() => '?').join(',')}) `;
-        params.push(...companiesFilter);
       }
       if (itemGroup && itemGroup.toUpperCase() !== 'ALL') {
         clause += ` AND COALESCE(NULLIF(TRIM(i.category), ''), 'General') = ? `;
@@ -3195,12 +3200,13 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
     const buildReturnScopeClause = () => {
       let clause = '';
       const params: Array<string | number> = [];
+      if (companiesFilter.length > 0) {
+        clause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(sri.company_name), ''), 'General') IN (${companiesFilter.map(() => '?').join(',')}) `;
+        params.push(...companiesFilter);
+      }
       if (itemIdsFilter.length > 0) {
         clause += ` AND sri.item_id IN (${itemIdsFilter.map(() => '?').join(',')}) `;
         params.push(...itemIdsFilter);
-      } else if (companiesFilter.length > 0) {
-        clause += ` AND COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(sri.company_name), ''), 'General') IN (${companiesFilter.map(() => '?').join(',')}) `;
-        params.push(...companiesFilter);
       }
       if (itemGroup && itemGroup.toUpperCase() !== 'ALL') {
         clause += ` AND COALESCE(NULLIF(TRIM(i.category), ''), 'General') = ? `;
@@ -4133,11 +4139,11 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         .prepare(`
           SELECT
             si.item_id,
-            si.item_code,
-            si.item_name,
+            COALESCE(NULLIF(TRIM(i.item_code), ''), si.item_code) AS item_code,
+            COALESCE(NULLIF(TRIM(i.item_name), ''), si.item_name) AS item_name,
             COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') AS company_name,
             COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
-            si.packing,
+            COALESCE(NULLIF(TRIM(i.packing), ''), si.packing) AS packing,
             COUNT(DISTINCT s.id) AS invoice_count,
             ROUND(SUM(${fullPackSaleExpr}), 2) AS total_pack_qty,
             ROUND(SUM(COALESCE(si.bonus_quantity, 0)), 2) AS total_bonus_qty,
@@ -4149,7 +4155,7 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
           LEFT JOIN items i ON si.item_id = i.id
           LEFT JOIN accounts a ON s.customer_account_id = a.id
           ${where} ${itemScope.clause}
-          GROUP BY si.item_id, si.item_code, si.item_name, company_name, item_group, si.packing
+          GROUP BY COALESCE(si.item_id, si.item_code)
           ORDER BY company_name ASC, line_net_sales DESC
         `)
         .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
@@ -4164,9 +4170,24 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
         retWhere += ' AND sr.return_date <= ? ';
         retParams.push(endDate);
       }
-      if (customerId && customerId.toUpperCase() !== 'ALL') {
-        retWhere += ' AND sr.customer_account_id = ? ';
+      if (partyIdsFilter.length > 0) {
+        retWhere += ` AND COALESCE(sr.customer_account_id, orig_s.customer_account_id) IN (${partyIdsFilter.map(() => '?').join(',')}) `;
+        retParams.push(...partyIdsFilter);
+      } else if (customerId && customerId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND COALESCE(sr.customer_account_id, orig_s.customer_account_id) = ? ';
         retParams.push(Number(customerId));
+      }
+      if (salesmanId && salesmanId.toUpperCase() !== 'ALL') {
+        retWhere += ' AND COALESCE(orig_s.salesman_id, a.assigned_salesman_id) = ? ';
+        retParams.push(Number(salesmanId));
+      }
+      if (townName && townName.toUpperCase() !== 'ALL') {
+        retWhere += " AND COALESCE(NULLIF(TRIM(orig_s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '') = ? ";
+        retParams.push(townName);
+      }
+      if (areaName && areaName.toUpperCase() !== 'ALL') {
+        retWhere += " AND COALESCE(NULLIF(TRIM(orig_s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '') = ? ";
+        retParams.push(areaName);
       }
 
       const retRows = db
@@ -4178,7 +4199,9 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             ROUND(SUM(COALESCE(sri.line_total, 0)), 2) AS sales_return_amount
           FROM sale_return_items sri
           JOIN sale_returns sr ON sri.sale_return_id = sr.id
+          LEFT JOIN sales orig_s ON sr.original_sale_id = orig_s.id
           LEFT JOIN items i ON sri.item_id = i.id
+          LEFT JOIN accounts a ON COALESCE(sr.customer_account_id, orig_s.customer_account_id) = a.id
           ${retWhere} ${retScope.clause}
           GROUP BY sri.item_id
         `)

@@ -57,6 +57,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
   const [selectedCompanies, setSelectedCompanies] = useState<string[]>([]);
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [selectedItemGroup, setSelectedItemGroup] = useState<string>('ALL');
+  const [selectedPartyIds, setSelectedPartyIds] = useState<number[]>([]);
   const [customerId, setCustomerId] = useState<string>('ALL');
   const [salesmanId, setSalesmanId] = useState<string>('ALL');
   const [townName, setTownName] = useState<string>('ALL');
@@ -157,6 +158,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
     setSelectedCompanies([]);
     setSelectedItemIds([]);
     setSelectedItemGroup('ALL');
+    setSelectedPartyIds([]);
     setCustomerId('ALL');
     setSalesmanId('ALL');
     setTownName('ALL');
@@ -168,10 +170,12 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
       setLoading(true);
       setError(null);
       const apiReportKey = reportKey === 'tax-history' ? 'tax-summary' : reportKey;
+      const useMultiParty = reportKey === 'item-wise-sales' && selectedPartyIds.length > 0;
       const res = await api.getSalesReport(apiReportKey, {
         startDate: startDate || undefined,
         endDate: endDate || undefined,
-        customerId: customerId !== 'ALL' ? customerId : undefined,
+        customerId: !useMultiParty && customerId !== 'ALL' ? customerId : undefined,
+        partyIds: useMultiParty ? selectedPartyIds : undefined,
         companies: selectedCompanies.length > 0 ? selectedCompanies : undefined,
         itemIds: selectedItemIds.length > 0 ? selectedItemIds : undefined,
         itemGroup: selectedItemGroup !== 'ALL' ? selectedItemGroup : undefined,
@@ -195,6 +199,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
     startDate,
     endDate,
     customerId,
+    selectedPartyIds,
     selectedCompanies,
     selectedItemIds,
     selectedItemGroup,
@@ -572,7 +577,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
           </div>
         )}
 
-        {/* Reusable Advanced Multi-Company & Multi-Item Selection */}
+        {/* Reusable Advanced Multi-Company & Multi-Item Selection (+ Party Selection on Item Sales Report) */}
         {showCompanyItemFilter && (
           <CompanyItemSelector
             theme="light"
@@ -583,6 +588,9 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
             onChangeItemIds={setSelectedItemIds}
             selectedItemGroup={selectedItemGroup}
             onChangeItemGroup={setSelectedItemGroup}
+            enablePartySelection={reportKey === 'item-wise-sales'}
+            selectedPartyIds={selectedPartyIds}
+            onChangePartyIds={setSelectedPartyIds}
             title="Filter by Multiple Companies, Item Group, or Specific Items"
           />
         )}

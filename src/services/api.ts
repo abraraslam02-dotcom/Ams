@@ -2380,6 +2380,7 @@ export const api = {
       startDate?: string;
       endDate?: string;
       customerId?: string;
+      partyIds?: number[];
       itemId?: string;
       companies?: string[];
       itemIds?: number[];
@@ -2395,6 +2396,9 @@ export const api = {
     if (params?.startDate) query.append('startDate', params.startDate);
     if (params?.endDate) query.append('endDate', params.endDate);
     if (params?.customerId) query.append('customerId', params.customerId);
+    if (params?.partyIds && params.partyIds.length > 0) {
+      query.append('partyIds', params.partyIds.join(','));
+    }
     if (params?.itemId) query.append('itemId', params.itemId);
     if (params?.companies && params.companies.length > 0) {
       query.append('companies', params.companies.join(','));
