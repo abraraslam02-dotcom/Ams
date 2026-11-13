@@ -1254,14 +1254,15 @@ closingRouter.post('/daily/execute', (req: Request, res: Response) => {
       .trim()
       .slice(0, 10);
 
-    if (body.actual_physical_cash === undefined || body.actual_physical_cash === null || body.actual_physical_cash === '') {
+    const rawActualCash = body.actual_physical_cash ?? body.actualPhysicalCash;
+    if (rawActualCash === undefined || rawActualCash === null || rawActualCash === '') {
       return res.status(400).json({
         success: false,
         error: 'Actual Physical Cash count is required to complete Daily Closing.',
       });
     }
 
-    const actualPhysicalCash = round2(Number(body.actual_physical_cash));
+    const actualPhysicalCash = round2(Number(rawActualCash));
     if (!Number.isFinite(actualPhysicalCash) || actualPhysicalCash < 0) {
       return res.status(400).json({
         success: false,
@@ -1269,7 +1270,9 @@ closingRouter.post('/daily/execute', (req: Request, res: Response) => {
       });
     }
 
-    const discrepancyExplanation = String(body.discrepancy_explanation || '').trim();
+    const discrepancyExplanation = String(
+      body.discrepancy_explanation || body.cash_discrepancy_reason || body.discrepancyExplanation || ''
+    ).trim();
     const notes = String(body.notes || '').trim();
     const postDiscrepancyAdjustment = Boolean(body.post_discrepancy_adjustment);
     const username = req.user?.username || 'Super Admin';
