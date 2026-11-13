@@ -1168,9 +1168,19 @@ function AppContent() {
 }
 
 export default function App() {
+  const isStandaloneSalesmanPWA =
+    typeof window !== 'undefined' &&
+    (window.location.pathname.startsWith('/salesman') ||
+      new URLSearchParams(window.location.search).get('app') === 'salesman');
+
+  if (isStandaloneSalesmanPWA) {
+    return <SalesmanMobileBookingApp isStandalonePWA={true} />;
+  }
+
   return (
     <AuthProvider>
       <AppContent />
     </AuthProvider>
   );
 }
+

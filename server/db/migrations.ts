@@ -52,6 +52,7 @@ export function runMigrations(): MigrationResult {
   const migrationName22 = '022_salesman_monotonic_sequence_and_sync';
   const migrationName23 = '023_supply_account_type_and_schema_alignment';
   const migrationName24 = '024_complete_closing_and_financial_period_management';
+  const migrationName25 = '025_salesman_booking_pwa_and_working_days';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -3516,6 +3517,50 @@ export function runMigrations(): MigrationResult {
 
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName24, 24);
     }
+
+    // =========================================================================
+    // MIGRATION 025: Salesman Booking PWA, Working Days & Submitted Batches
+    // =========================================================================
+    const applied25 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName25);
+
+    const salesmanCols25 = (db.prepare('PRAGMA table_info("salesmen")').all() as Array<{ name: string }>).map(
+      (c) => c.name
+    );
+    if (!salesmanCols25.includes('working_days_json')) {
+      db.exec(
+        `ALTER TABLE salesmen ADD COLUMN working_days_json TEXT NOT NULL DEFAULT '["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]';`
+      );
+    }
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS mobile_submitted_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_hash TEXT NOT NULL UNIQUE,
+        file_name TEXT NOT NULL,
+        excel_file_name TEXT DEFAULT '',
+        salesman_id INTEGER NOT NULL,
+        salesman_code TEXT NOT NULL,
+        salesman_name TEXT NOT NULL,
+        recipient_email TEXT NOT NULL DEFAULT 'abrar.aslam02@gmail.com',
+        total_bookings INTEGER NOT NULL DEFAULT 0,
+        total_amount REAL NOT NULL DEFAULT 0.0,
+        payload_json TEXT NOT NULL,
+        email_mode TEXT NOT NULL DEFAULT 'queued',
+        email_message TEXT DEFAULT '',
+        import_status TEXT NOT NULL DEFAULT 'Pending Import' CHECK(import_status IN ('Pending Import', 'Partially Imported', 'Imported')),
+        imported_count INTEGER NOT NULL DEFAULT 0,
+        submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        imported_at DATETIME DEFAULT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mobile_sub_batches_salesman ON mobile_submitted_batches(salesman_id);
+      CREATE INDEX IF NOT EXISTS idx_mobile_sub_batches_status ON mobile_submitted_batches(import_status);
+    `);
+
+    if (!applied25) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName25, 25);
+    }
   });
 
   try {
@@ -3534,7 +3579,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

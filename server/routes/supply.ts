@@ -465,6 +465,16 @@ supplyRouter.get('/salesmen', (req: Request, res: Response) => {
         Math.max(0, signedOpening + Number(stats.sales_amount || 0) - Number(stats.recoveries_amount || 0))
       );
 
+      let workingDays: string[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      try {
+        const parsedDays = JSON.parse(String(s.working_days_json || '[]'));
+        if (Array.isArray(parsedDays) && parsedDays.length > 0) {
+          workingDays = parsedDays.map(String);
+        }
+      } catch {
+        // fallback to default working days
+      }
+
       return {
         ...s,
         name: canonicalName,
@@ -473,6 +483,7 @@ supplyRouter.get('/salesmen', (req: Request, res: Response) => {
         phone: canonicalPhone,
         opening_balance: openingBalance,
         opening_balance_type: openingType,
+        working_days: workingDays,
         assigned_towns: assignedTowns,
         assigned_areas: assignedAreas,
         assigned_parties: assignedParties,
@@ -623,17 +634,22 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
     const openingBalanceType = body.opening_balance_type === 'Credit' ? 'Credit' : 'Debit';
     const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
     const notes = String(body.notes || '').trim();
+    const workingDaysJson = JSON.stringify(
+      Array.isArray(body.working_days) && body.working_days.length > 0
+        ? body.working_days.map(String)
+        : ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+    );
 
     const insert = db
       .prepare(`
         INSERT INTO salesmen (
           salesman_code, name, full_name, mobile, phone, address, joining_date,
           commission_type, commission_rate,
-          username, password_hash, permitted_items_json,
+          username, password_hash, permitted_items_json, working_days_json,
           assigned_area, commission_percent, monthly_target,
           opening_balance, opening_balance_type,
           status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
       `)
       .run(
         code,
@@ -648,6 +664,7 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
         username,
         passwordHash,
         permittedItemsJson,
+        workingDaysJson,
         commissionPercent,
         monthlyTarget,
         openingBalance,
@@ -753,6 +770,9 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
           : 'Active'
         : String(existing.status || 'Active');
     const notes = body.notes !== undefined ? String(body.notes).trim() : String(existing.notes || '');
+    const workingDaysJson = Array.isArray(body.working_days)
+      ? JSON.stringify(body.working_days.map(String))
+      : String(existing.working_days_json || '["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]');
 
     db.prepare(`
       UPDATE salesmen
@@ -769,6 +789,7 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
           username = ?,
           password_hash = ?,
           permitted_items_json = ?,
+          working_days_json = ?,
           opening_balance = ?,
           opening_balance_type = ?,
           status = ?,
@@ -789,6 +810,7 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
       username,
       passwordHash,
       permittedItemsJson,
+      workingDaysJson,
       openingBalance,
       openingBalanceType,
       status,

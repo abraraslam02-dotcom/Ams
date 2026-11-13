@@ -15,11 +15,29 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" id="app-pwa-manifest" href="/salesman-manifest.json" />
     <script>
+      // Dynamically adjust title & manifest when opened on /salesman standalone PWA route
+      (function () {
+        try {
+          var isSalesmanRoute =
+            window.location.pathname.indexOf('/salesman') === 0 ||
+            window.location.search.indexOf('app=salesman') !== -1;
+          if (isSalesmanRoute) {
+            document.title = 'AMS Salesman Booking App - Abrar Medical Store';
+          }
+          if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+              navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
+            });
+          }
+        } catch (e) {}
+      })();
+
       // Automatic stale Service Worker & CacheStorage invalidation when app build updates
       (function () {
         try {
-          var BUILD_STAMP = '2026-11-10-prod-sync-v7';
+          var BUILD_STAMP = '2026-11-13-salesman-pwa-v8';
           var prevStamp = localStorage.getItem('ams_app_build_stamp');
           if (prevStamp !== BUILD_STAMP) {
             localStorage.setItem('ams_app_build_stamp', BUILD_STAMP);
@@ -35,21 +53,8 @@
                 })
               );
             }
-            if ('serviceWorker' in navigator) {
-              tasks.push(
-                navigator.serviceWorker.getRegistrations().then(function (regs) {
-                  return Promise.all(
-                    regs.map(function (r) {
-                      return r.unregister().catch(function () {});
-                    })
-                  );
-                })
-              );
-            }
             if (tasks.length > 0) {
-              Promise.all(tasks).finally(function () {
-                window.location.reload();
-              });
+              Promise.all(tasks).catch(function () {});
             }
           }
           if ('serviceWorker' in navigator) {

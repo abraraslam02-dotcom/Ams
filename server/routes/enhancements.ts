@@ -122,7 +122,18 @@ function generateBookingNumber(db: ReturnType<typeof getDatabase>, offset = 0): 
 function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesmanRow: Record<string, unknown>) {
   const salesmanId = Number(salesmanRow.id);
 
-  // Assigned towns
+  // Working days assigned to salesman
+  let workingDays: string[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  try {
+    const parsedDays = JSON.parse(String(salesmanRow.working_days_json || '[]'));
+    if (Array.isArray(parsedDays) && parsedDays.length > 0) {
+      workingDays = parsedDays.map(String);
+    }
+  } catch {
+    workingDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  }
+
+  // Assigned towns (strict territory filtering when assignments exist)
   let assignedTowns = db
     .prepare(
       `SELECT t.*
@@ -134,9 +145,28 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
     .all(salesmanId) as Array<Record<string, unknown>>;
 
   if (assignedTowns.length === 0) {
-    assignedTowns = db
-      .prepare("SELECT * FROM towns WHERE status = 'Active' ORDER BY town_name ASC")
-      .all() as Array<Record<string, unknown>>;
+    // Check if salesman has parties assigned in specific towns
+    const partyTowns = db
+      .prepare(
+        `SELECT DISTINCT t.*
+         FROM towns t
+         JOIN accounts a ON (a.town_id = t.id OR LOWER(a.town_name) = LOWER(t.town_name))
+         WHERE t.status = 'Active'
+           AND (
+             a.assigned_salesman_id = ?
+             OR a.id IN (SELECT party_account_id FROM salesman_parties WHERE salesman_id = ?)
+           )
+         ORDER BY t.town_name ASC`
+      )
+      .all(salesmanId, salesmanId) as Array<Record<string, unknown>>;
+
+    if (partyTowns.length > 0) {
+      assignedTowns = partyTowns;
+    } else {
+      assignedTowns = db
+        .prepare("SELECT * FROM towns WHERE status = 'Active' ORDER BY town_name ASC")
+        .all() as Array<Record<string, unknown>>;
+    }
   }
 
   // Assigned areas
@@ -151,7 +181,7 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
     .all(salesmanId) as Array<Record<string, unknown>>;
 
   if (assignedAreas.length === 0) {
-    const townIds = assignedTowns.map((t) => Number(t.id));
+    const townIds = assignedTowns.map((t) => Number(t.id)).filter(Boolean);
     if (townIds.length > 0) {
       const placeholders = townIds.map(() => '?').join(',');
       assignedAreas = db
@@ -165,10 +195,10 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
     }
   }
 
-  // Assigned parties (customers)
+  // Assigned parties (customers) — strictly prioritized by direct assignment, then assigned towns (excluding other salesmen's parties)
   let assignedParties = db
     .prepare(
-      `SELECT a.id, a.account_code, a.account_name, a.account_group, a.phone,
+      `SELECT a.id, a.account_code, a.account_name, a.account_group, a.account_type, a.phone,
               a.address, COALESCE(NULLIF(a.town_name, ''), a.city, 'General Town') as town_name,
               a.town_id, a.area_id, a.area_name, a.assigned_salesman_id,
               a.credit_limit, a.current_balance, a.current_balance_type
@@ -184,9 +214,11 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
     .all(salesmanId, salesmanId) as Array<Record<string, unknown>>;
 
   if (assignedParties.length === 0) {
-    const townIds = assignedTowns.map((t) => Number(t.id));
+    const townIds = assignedTowns.map((t) => Number(t.id)).filter(Boolean);
+    const townNamesLower = assignedTowns.map((t) => String(t.town_name || '').toLowerCase()).filter(Boolean);
     if (townIds.length > 0) {
-      const placeholders = townIds.map(() => '?').join(',');
+      const idPlaceholders = townIds.map(() => '?').join(',');
+      const namePlaceholders = townNamesLower.map(() => '?').join(',');
       assignedParties = db
         .prepare(
           `SELECT a.id, a.account_code, a.account_name, a.account_group, a.account_type, a.phone,
@@ -196,10 +228,16 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
            FROM accounts a
            WHERE a.status = 'Active'
              AND a.is_system_account = 0
-             AND (a.account_type IN ('Customer', 'Customer & Supplier') OR a.account_group IN ('Customer', 'Customer & Supplier') OR a.town_id IN (${placeholders}))
+             AND (a.assigned_salesman_id IS NULL OR a.assigned_salesman_id = 0 OR a.assigned_salesman_id = ?)
+             AND (
+               a.town_id IN (${idPlaceholders})
+               ${townNamesLower.length > 0 ? `OR LOWER(COALESCE(NULLIF(a.town_name, ''), a.city, '')) IN (${namePlaceholders})` : ''}
+               OR a.account_type IN ('Customer', 'Customer & Supplier')
+               OR a.account_group IN ('Customer', 'Customer & Supplier')
+             )
            ORDER BY a.account_name ASC`
         )
-        .all(...townIds) as Array<Record<string, unknown>>;
+        .all(salesmanId, ...townIds, ...townNamesLower) as Array<Record<string, unknown>>;
     }
   }
 
@@ -300,7 +338,10 @@ function buildSalesmanCatalogPayload(db: ReturnType<typeof getDatabase>, salesma
       mobile: String(salesmanRow.phone || salesmanRow.mobile || ''),
       address: String(salesmanRow.address || ''),
       status: String(salesmanRow.status || 'Active'),
+      working_days: workingDays,
+      assigned_area: String(salesmanRow.assigned_area || ''),
     },
+    working_days: workingDays,
     assigned_towns: assignedTowns,
     towns: assignedTowns.map((t) => ({
       ...t,
@@ -544,8 +585,67 @@ enhancementsRouter.post('/mobile/send-bookings', async (req, res) => {
       bookings: normalizedBookings,
     };
 
+    // Prevent duplicate submission: compute deterministic hash of bookings content
+    const canonicalBatchContent = JSON.stringify(
+      normalizedBookings.map((b) => ({
+        booking_uuid: b.booking_uuid,
+        booking_no: b.booking_no,
+        booking_date: b.booking_date,
+        salesman_id: b.salesman_id,
+        party_id: b.party_id,
+        items: b.items.map((it) => ({
+          item_id: it.item_id,
+          quantity: it.quantity,
+          bonus_qty: it.bonus_qty,
+        })),
+      }))
+    );
+    const batchHash = crypto.createHash('sha256').update(canonicalBatchContent).digest('hex');
+
+    const existingBatch = db
+      .prepare('SELECT * FROM mobile_submitted_batches WHERE batch_hash = ? LIMIT 1')
+      .get(batchHash) as Record<string, unknown> | undefined;
+
+    if (existingBatch) {
+      return res.status(409).json({
+        success: false,
+        is_duplicate_submission: true,
+        error: `Duplicate submission prevented: This finalized booking batch (${existingBatch.file_name}) was already submitted on ${existingBatch.submitted_at}.`,
+        existing_file_name: existingBatch.file_name,
+        submitted_at: existingBatch.submitted_at,
+      });
+    }
+
+    // Also check if all bookings in this payload are already imported into supply_bookings
+    const alreadyImportedBookings: string[] = [];
+    for (const nb of normalizedBookings) {
+      const foundInSupply = db
+        .prepare(
+          `SELECT booking_number FROM supply_bookings
+           WHERE (mobile_booking_uuid = ? AND ? != '')
+              OR (booking_number = ? AND ? != '')
+           LIMIT 1`
+        )
+        .get(nb.booking_uuid, nb.booking_uuid, nb.booking_no, nb.booking_no) as
+        | { booking_number: string }
+        | undefined;
+      if (foundInSupply) {
+        alreadyImportedBookings.push(nb.booking_no);
+      }
+    }
+
+    if (alreadyImportedBookings.length === normalizedBookings.length && normalizedBookings.length > 0) {
+      return res.status(409).json({
+        success: false,
+        is_duplicate_submission: true,
+        error: `Duplicate submission prevented: All ${normalizedBookings.length} booking(s) (${alreadyImportedBookings.join(', ')}) have already been imported into Supply & Distribution.`,
+      });
+    }
+
     const jsonString = JSON.stringify(structuredExport, null, 2);
-    const filename = `AMS_Booking_${salesmanCode}_${todayStr}_${Date.now().toString().slice(-4)}.json`;
+    const suffix = Date.now().toString().slice(-4);
+    const filename = `AMS_Booking_${salesmanCode}_${todayStr}_${suffix}.json`;
+    const excelFilename = `AMS_Booking_${salesmanCode}_${todayStr}_${suffix}.xlsx`;
     const superAdminEmail = getSuperAdminRecoveryEmail(db);
 
     const emailResult = await sendSuperAdminBookingEmail({
@@ -559,6 +659,28 @@ enhancementsRouter.post('/mobile/send-bookings', async (req, res) => {
       filename,
       jsonPayload: jsonString,
     });
+
+    // Save in mobile_submitted_batches so Super Admin can also 1-click import from Import Booking screen
+    db.prepare(
+      `INSERT INTO mobile_submitted_batches (
+        batch_hash, file_name, excel_file_name, salesman_id, salesman_code, salesman_name,
+        recipient_email, total_bookings, total_amount, payload_json,
+        email_mode, email_message, import_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Import')`
+    ).run(
+      batchHash,
+      filename,
+      excelFilename,
+      Number(salesman.id),
+      salesmanCode,
+      salesmanName,
+      String(superAdminEmail || 'abrar.aslam02@gmail.com'),
+      normalizedBookings.length,
+      round2(totalAmount),
+      jsonString,
+      String((emailResult as unknown as Record<string, unknown>).mode || (emailResult as unknown as Record<string, unknown>).deliveryMode || 'sent'),
+      String((emailResult as unknown as Record<string, unknown>).message || '')
+    );
 
     writeProtectedAuditLog({
       action: 'SEND_BOOKING_TO_SUPER_ADMIN',
@@ -579,9 +701,12 @@ enhancementsRouter.post('/mobile/send-bookings', async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Booking file "${filename}" sent to Super Admin (${emailResult.maskedEmail}) and ready for import.`,
+      message: `Booking files "${filename}" & "${excelFilename}" finalized, sent to Super Admin (${emailResult.maskedEmail}), and queued in Supply & Distribution -> Import Booking.`,
       filename,
+      excel_filename: excelFilename,
+      batch_hash: batchHash,
       masked_email: emailResult.maskedEmail,
+      recipient_email: superAdminEmail,
       status: 'Submitted',
       export_payload: structuredExport,
     });
@@ -1866,10 +1991,37 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
     }
 
     const importBatchNo = generateImportBatchNumber(db);
-    const fileHash = crypto
-      .createHash('sha256')
-      .update(JSON.stringify(bookings) + Date.now())
-      .digest('hex');
+    const canonicalCommitJson = JSON.stringify(
+      bookings.map((b: Record<string, unknown>) => ({
+        booking_uuid: b.booking_uuid || b.booking_no,
+        party_id: b.party_id,
+        booking_date: b.booking_date,
+      }))
+    );
+    const fileHash = crypto.createHash('sha256').update(canonicalCommitJson).digest('hex');
+
+    // Check if all bookings in this commit were already imported
+    const nonDuplicateBookings = bookings.filter((b: Record<string, unknown>) => {
+      if (b.is_duplicate || (Array.isArray(b.errors) && b.errors.length > 0)) return false;
+      const bNo = String(b.booking_no || b.booking_number || '').trim();
+      const bUuid = String(b.booking_uuid || b.mobile_booking_uuid || '').trim();
+      const existsInDb = db
+        .prepare(
+          `SELECT id FROM supply_bookings
+           WHERE (booking_number = ? AND ? != '')
+              OR (mobile_booking_uuid = ? AND ? != '')
+           LIMIT 1`
+        )
+        .get(bNo, bNo, bUuid, bUuid);
+      return !existsInDb;
+    });
+
+    if (nonDuplicateBookings.length === 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'Duplicate import prevented: All bookings in this file/batch have already been imported into Supply & Distribution.',
+      });
+    }
 
     const createdBookings: Array<{
       id: number;
@@ -1887,7 +2039,7 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
     const createdSupplies: Array<{ id: number; supply_number: string; town_name: string; salesman_name: string }> = [];
 
     const tx = db.transaction(() => {
-      const firstBk = bookings[0] || {};
+      const firstBk = nonDuplicateBookings[0] || bookings[0] || {};
       const importInsert = db
         .prepare(
           `INSERT INTO mobile_booking_imports (
@@ -1896,7 +2048,7 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
             imported_booking_ids_json, imported_booking_numbers,
             generated_supply_ids_json, generated_supply_numbers,
             status, remarks, imported_by
-          ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, '[]', '', '[]', '', ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, '[]', '', '[]', '', ?, ?, ?)`
         )
         .run(
           importBatchNo,
@@ -1905,6 +2057,7 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
           Number(firstBk.salesman_id || 0) || null,
           String(firstBk.salesman_name || ''),
           bookings.length,
+          bookings.length - nonDuplicateBookings.length,
           generate_supply ? 'Supply Generated' : 'Imported',
           `Imported by ${user.username}`,
           user.username
@@ -1912,11 +2065,8 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
 
       const importBatchId = Number(importInsert.lastInsertRowid);
 
-      for (let idx = 0; idx < bookings.length; idx++) {
-        const b = bookings[idx];
-        if (b.is_duplicate || (Array.isArray(b.errors) && b.errors.length > 0)) {
-          continue;
-        }
+      for (let idx = 0; idx < nonDuplicateBookings.length; idx++) {
+        const b = nonDuplicateBookings[idx];
 
         const bookingNumber = generateBookingNumber(db, idx);
         const items = Array.isArray(b.items) ? b.items : [];
@@ -2281,6 +2431,29 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
         createdSupplies.map((s) => s.supply_number).join(', '),
         importBatchId
       );
+
+      // Mark mobile_submitted_batches as Imported if matched by filename or submitted_batch_id
+      try {
+        if (body.submitted_batch_id) {
+          db.prepare(
+            `UPDATE mobile_submitted_batches
+             SET import_status = 'Imported',
+                 imported_count = ?,
+                 imported_at = CURRENT_TIMESTAMP
+             WHERE id = ?`
+          ).run(createdBookings.length, Number(body.submitted_batch_id));
+        } else if (filename) {
+          db.prepare(
+            `UPDATE mobile_submitted_batches
+             SET import_status = 'Imported',
+                 imported_count = ?,
+                 imported_at = CURRENT_TIMESTAMP
+             WHERE file_name = ? OR excel_file_name = ?`
+          ).run(createdBookings.length, String(filename), String(filename));
+        }
+      } catch {
+        // ignore if table not present
+      }
     });
 
     tx();
@@ -2363,6 +2536,41 @@ enhancementsRouter.get('/booking-imports/history', authenticateToken, (_req, res
       .prepare('SELECT * FROM mobile_booking_imports ORDER BY id DESC LIMIT 100')
       .all();
     return res.json({ success: true, imports: rows });
+  } catch (err: unknown) {
+    return res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+enhancementsRouter.get('/booking-imports/submitted-batches', authenticateToken, (_req, res) => {
+  try {
+    const db = getDatabase();
+    const hasTable = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mobile_submitted_batches'")
+      .get();
+    if (!hasTable) {
+      return res.json({ success: true, batches: [] });
+    }
+    const rows = db
+      .prepare('SELECT * FROM mobile_submitted_batches ORDER BY id DESC LIMIT 100')
+      .all() as Array<Record<string, unknown>>;
+
+    const batches = rows.map((r) => {
+      let parsedPayload = null;
+      try {
+        parsedPayload = JSON.parse(String(r.payload_json || '{}'));
+      } catch {
+        parsedPayload = null;
+      }
+      return {
+        ...r,
+        payload: parsedPayload,
+      };
+    });
+
+    return res.json({ success: true, batches });
   } catch (err: unknown) {
     return res.status(500).json({
       success: false,

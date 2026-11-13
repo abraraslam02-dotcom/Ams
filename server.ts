@@ -85,10 +85,14 @@ async function startServer() {
   app.use((req, res, next) => {
     if (
       req.path === '/' ||
+      req.path === '/salesman' ||
+      req.path === '/salesman/' ||
       req.path === '/index.html' ||
       req.path === '/sw.js' ||
       req.path === '/dev-sw.js' ||
       req.path === '/registerSW.js' ||
+      req.path === '/manifest.json' ||
+      req.path === '/salesman-manifest.json' ||
       req.path === '/manifest.webmanifest'
     ) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -98,13 +102,71 @@ async function startServer() {
     next();
   });
 
-  // Serve unified Network-First Service Worker that immediately purges legacy caches and refreshes stale tabs
-  const networkFirstSwScript = `// AMS Service Worker v7 (Network-First, Auto-Purge Legacy Caches)
-const SW_VERSION = 'ams-sw-v7-2026-11-10-prod-sync';
-const RUNTIME_CACHE = 'ams-runtime-v7';
+  const salesmanManifestPayload = {
+    id: '/salesman',
+    name: 'Abrar Medical Store - Salesman Booking App',
+    short_name: 'AMS Booking',
+    description: 'Offline-First Mobile Salesman Order Booking & Sync PWA for Abrar Medical Store',
+    start_url: '/salesman',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'portrait',
+    background_color: '#022c22',
+    theme_color: '#065f46',
+    categories: ['business', 'productivity', 'medical'],
+    icons: [
+      {
+        src: '/pwa-192x192.png',
+        sizes: '192x192',
+        type: 'image/png',
+        purpose: 'any',
+      },
+      {
+        src: '/pwa-512x512.png',
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'any',
+      },
+      {
+        src: '/pwa-maskable-512x512.png',
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'maskable',
+      },
+    ],
+  };
+
+  app.get(['/salesman-manifest.json', '/manifest.json', '/manifest.webmanifest'], (_req, res) => {
+    res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.json(salesmanManifestPayload);
+  });
+
+  // Serve unified Network-First Service Worker with Offline App Shell Pre-Cache for /salesman PWA
+  const networkFirstSwScript = `// AMS Service Worker v8 (Offline Salesman Booking PWA + Network-First)
+const SW_VERSION = 'ams-sw-v8-salesman-pwa';
+const RUNTIME_CACHE = 'ams-runtime-v8';
+const PRECACHE_URLS = [
+  '/',
+  '/salesman',
+  '/index.html',
+  '/salesman-manifest.json',
+  '/manifest.json',
+  '/pwa-192x192.png',
+  '/pwa-512x512.png',
+  '/pwa-maskable-512x512.png',
+  '/apple-touch-icon.png',
+  '/icon.svg'
+];
 
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(RUNTIME_CACHE);
+      await Promise.allSettled(PRECACHE_URLS.map((u) => cache.add(u)));
+    } catch (e) {}
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
@@ -122,11 +184,6 @@ self.addEventListener('activate', (event) => {
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
         client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, deletedLegacy });
-        if (deletedLegacy && 'navigate' in client) {
-          try {
-            await client.navigate(client.url);
-          } catch (e) {}
-        }
       }
     } catch (err) {}
   })());
@@ -156,9 +213,13 @@ self.addEventListener('fetch', (event) => {
     } catch (err) {
       const cached = await caches.match(req);
       if (cached) return cached;
-      if (req.mode === 'navigate') {
-        const fallback = await caches.match('/index.html');
-        if (fallback) return fallback;
+      if (req.mode === 'navigate' || url.pathname.startsWith('/salesman')) {
+        const fallbackSalesman = await caches.match('/salesman');
+        if (fallbackSalesman) return fallbackSalesman;
+        const fallbackIndex = await caches.match('/index.html');
+        if (fallbackIndex) return fallbackIndex;
+        const fallbackRoot = await caches.match('/');
+        if (fallbackRoot) return fallbackRoot;
       }
       throw err;
     }

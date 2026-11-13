@@ -200,6 +200,14 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   const [smSelectedTownIds, setSmSelectedTownIds] = useState<number[]>([]);
   const [smSelectedAreaIds, setSmSelectedAreaIds] = useState<number[]>([]);
   const [smSelectedPartyIds, setSmSelectedPartyIds] = useState<number[]>([]);
+  const [smWorkingDays, setSmWorkingDays] = useState<string[]>([
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ]);
 
   const handleEditSalesman = (s: SupplySalesman) => {
     setEditingSalesmanId(s.id);
@@ -214,6 +222,12 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
     setSmSelectedTownIds(s.assigned_towns.map((t) => t.town_id));
     setSmSelectedAreaIds(s.assigned_areas.map((a) => a.area_id));
     setSmSelectedPartyIds(s.assigned_parties.map((p) => p.party_account_id));
+    const sAny = s as any;
+    if (Array.isArray(sAny.working_days) && sAny.working_days.length > 0) {
+      setSmWorkingDays(sAny.working_days);
+    } else {
+      setSmWorkingDays(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']);
+    }
   };
 
   const resetSalesmanForm = () => {
@@ -229,6 +243,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
     setSmSelectedTownIds([]);
     setSmSelectedAreaIds([]);
     setSmSelectedPartyIds([]);
+    setSmWorkingDays(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']);
   };
 
   const handleSaveSalesman = async (e: React.FormEvent) => {
@@ -250,6 +265,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
           town_ids: smSelectedTownIds,
           area_ids: smSelectedAreaIds,
           party_account_ids: smSelectedPartyIds,
+          working_days: smWorkingDays,
         } as any,
         editingSalesmanId || undefined
       );
@@ -1194,6 +1210,39 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
 
             <div>
               <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                Assigned Working Days ({smWorkingDays.length} Days)
+              </label>
+              <div className="flex flex-wrap gap-1.5 p-2 border border-slate-200 rounded-lg bg-slate-50">
+                {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map((day) => {
+                  const checked = smWorkingDays.includes(day);
+                  return (
+                    <label
+                      key={day}
+                      className={`px-2 py-1 rounded text-[11px] font-bold cursor-pointer border select-none ${
+                        checked
+                          ? 'bg-emerald-600 text-white border-emerald-600'
+                          : 'bg-white text-slate-600 border-slate-200'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={checked}
+                        onChange={() =>
+                          setSmWorkingDays((prev) =>
+                            checked ? prev.filter((d) => d !== day) : [...prev, day]
+                          )
+                        }
+                      />
+                      {day.slice(0, 3)}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">
                 Assigned Parties ({smSelectedPartyIds.length} Selected)
               </label>
               <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 space-y-1 bg-slate-50">
@@ -1218,9 +1267,9 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
 
             <button
               type="submit"
-              className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow"
+              className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow cursor-pointer"
             >
-              {editingSalesmanId ? 'Update Salesman' : 'Save Salesman'}
+              {editingSalesmanId ? 'Update Salesman & Sync to Mobile PWA' : 'Save Salesman & Sync to Mobile PWA'}
             </button>
           </form>
 
@@ -1260,6 +1309,9 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                         </div>
                         <div className="text-[10px] text-slate-500 truncate">
                           {s.assigned_areas.map((a) => a.area_name).join(', ')}
+                        </div>
+                        <div className="text-[10px] text-emerald-700 font-semibold truncate">
+                          Days: {((s as any).working_days || ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']).map((d: string) => d.slice(0, 3)).join(', ')}
                         </div>
                       </td>
                       <td className="p-2 text-right font-mono">{s.assigned_parties.length}</td>

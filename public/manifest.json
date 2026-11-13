@@ -1,0 +1,33 @@
+{
+  "id": "/salesman",
+  "name": "Abrar Medical Store - Salesman Booking App",
+  "short_name": "AMS Booking",
+  "description": "Offline-First Mobile Salesman Order Booking & Sync PWA for Abrar Medical Store",
+  "start_url": "/salesman",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#022c22",
+  "theme_color": "#065f46",
+  "categories": ["business", "productivity", "medical"],
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
