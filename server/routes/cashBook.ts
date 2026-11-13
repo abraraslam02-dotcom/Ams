@@ -842,7 +842,8 @@ cashBookRouter.post('/vouchers', authenticateToken, (req: Request, res: Response
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
-    return res.status(500).json({ success: false, error: msg });
+    const status = (error as any)?.status === 423 || msg.includes('Period Locked') ? 423 : 500;
+    return res.status(status).json({ success: false, error: msg });
   }
 });
 
@@ -1036,7 +1037,8 @@ cashBookRouter.put('/vouchers/:id', authenticateToken, (req: Request, res: Respo
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
-    return res.status(500).json({ success: false, error: msg });
+    const status = (error as any)?.status === 423 || msg.includes('Period Locked') ? 423 : 500;
+    return res.status(status).json({ success: false, error: msg });
   }
 });
 
@@ -1116,7 +1118,8 @@ cashBookRouter.delete('/vouchers/:id', authenticateToken, (req: Request, res: Re
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
-    return res.status(500).json({ success: false, error: msg });
+    const status = (error as any)?.status === 423 || msg.includes('Period Locked') ? 423 : 500;
+    return res.status(status).json({ success: false, error: msg });
   }
 });
 

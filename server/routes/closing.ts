@@ -228,6 +228,14 @@ export function computePeriodStockClosing(startDate: string, endDate: string): {
     closingInventoryQty: number;
     closingInventoryValue: number;
     costingMethod: string;
+    opening_quantity: number;
+    purchased_quantity: number;
+    sold_quantity: number;
+    purchase_return_quantity: number;
+    sales_return_quantity: number;
+    adjustment_quantity: number;
+    closing_quantity: number;
+    closing_valuation: number;
   };
 } {
   const db = getDatabase();
@@ -763,18 +771,18 @@ export function computeFinancialPeriodClosingPreview(
     nextPeriodStartDate,
     alreadyClosed: Boolean(existingClosing && existingClosing.status === 'CLOSED'),
     existingClosing: existingClosing
-      ? {
+      ? ({
           ...existingClosing,
           closed_by_username: existingClosing.closed_by,
           cash_discrepancy_reason: existingClosing.discrepancy_explanation,
-        }
+        } as Record<string, any>)
       : null,
     existing_closing: existingClosing
-      ? {
+      ? ({
           ...existingClosing,
           closed_by_username: existingClosing.closed_by,
           cash_discrepancy_reason: existingClosing.discrepancy_explanation,
-        }
+        } as Record<string, any>)
       : null,
     isPeriodLocked: Boolean(lockedPeriod),
     lockedPeriod: lockedPeriod || null,
@@ -2434,9 +2442,9 @@ closingRouter.get('/history/:id', (req: Request, res: Response) => {
 
     const rawAccountSnapshots = db
       .prepare('SELECT * FROM closing_account_snapshots WHERE closing_id = ? ORDER BY account_code ASC')
-      .all(id) as Array<Record<string, unknown>>;
+      .all(id) as Array<Record<string, any>>;
 
-    const accountSnapshots = rawAccountSnapshots.map((a) => {
+    const accountSnapshots: Array<Record<string, any>> = rawAccountSnapshots.map((a) => {
       const grp = String(a.account_group || '');
       const typ = String(a.account_type || '');
       let snapshotGroup = 'FINANCIAL';
