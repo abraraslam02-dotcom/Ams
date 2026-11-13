@@ -18,15 +18,148 @@ import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const salesRouter = Router();
 
+const SYSTEM_ACCOUNT_DEFINITIONS: Record<
+  string,
+  { name: string; mainGroup: string; subGroup: string; balType: 'Debit' | 'Credit'; notes: string }
+> = {
+  'CUS-1001': {
+    name: 'Walk-in Cash Customer',
+    mainGroup: 'PARTY ACCOUNTS',
+    subGroup: 'Customer',
+    balType: 'Debit',
+    notes: 'Default counter retail walk-in customer account',
+  },
+  'FIN-1010': {
+    name: 'Cash in Hand (Main Counter)',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Cash in Hand',
+    balType: 'Debit',
+    notes: 'Default counter cash account',
+  },
+  'FIN-1021': {
+    name: 'Main Bank Account (HBL)',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Bank Account',
+    balType: 'Debit',
+    notes: 'Default bank account',
+  },
+  'INV-1030': {
+    name: 'Medicine Inventory Asset',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Assets',
+    balType: 'Debit',
+    notes: 'Inventory asset valuation account',
+  },
+  'INC-4010': {
+    name: 'Medicine Sales Revenue',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Sales Income',
+    balType: 'Credit',
+    notes: 'Primary medicine sales revenue account',
+  },
+  'INC-4020': {
+    name: 'Purchase Discount Received',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Other Income',
+    balType: 'Credit',
+    notes: 'Discounts received on supplier purchases',
+  },
+  'SAL-4015': {
+    name: 'Medicine Sales Returns Account',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Sales Income',
+    balType: 'Debit',
+    notes: 'Contra-revenue account for confirmed customer sale returns',
+  },
+  'PUR-5001': {
+    name: 'Medicine Purchases Account',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Purchase Account',
+    balType: 'Debit',
+    notes: 'Primary medicine purchases account',
+  },
+  'PUR-5002': {
+    name: 'Medicine Purchase Returns Account',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Purchase Account',
+    balType: 'Credit',
+    notes: 'Contra-purchase account for supplier purchase returns',
+  },
+  'EXP-5005': {
+    name: 'Cost of Goods Sold (COGS)',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Cost of Goods Sold',
+    balType: 'Debit',
+    notes: 'Cost of goods sold account',
+  },
+  'DIS-5015': {
+    name: 'Sales Discount Allowed',
+    mainGroup: 'INCOME & EXPENSE ACCOUNTS',
+    subGroup: 'Other Expenses',
+    balType: 'Debit',
+    notes: 'Account for item & invoice discounts allowed on sales',
+  },
+  'TAX-1040': {
+    name: 'Advance Tax Paid on Purchases (u/s 236H)',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Assets',
+    balType: 'Debit',
+    notes: 'Asset account for Advance Tax paid on purchases',
+  },
+  'TAX-1045': {
+    name: 'Input GST Receivable',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Assets',
+    balType: 'Debit',
+    notes: 'Asset account for Input GST paid on purchases',
+  },
+  'TAX-2040': {
+    name: 'Advance Tax Collected on Sales (u/s 236G/H)',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Liabilities',
+    balType: 'Credit',
+    notes: 'Liability account for Advance Tax collected on applicable sales',
+  },
+  'TAX-2045': {
+    name: 'GST / Output Sales Tax Payable',
+    mainGroup: 'FINANCIAL ACCOUNTS',
+    subGroup: 'Liabilities',
+    balType: 'Credit',
+    notes: 'Liability account for GST / Output Tax collected on sales',
+  },
+};
+
 function getSystemAccountId(accountCode: string): number {
   const db = getDatabase();
   const row = db
     .prepare('SELECT id FROM accounts WHERE account_code = ?')
     .get(accountCode) as { id: number } | undefined;
-  if (!row) {
-    throw new Error(`Required Chart of Accounts head "${accountCode}" is missing.`);
+  if (row) {
+    return row.id;
   }
-  return row.id;
+  const def = SYSTEM_ACCOUNT_DEFINITIONS[accountCode];
+  if (def) {
+    const res = db
+      .prepare(`
+        INSERT INTO accounts (
+          account_code, account_name, main_group, account_group, account_type,
+          opening_balance, opening_balance_type, current_balance, current_balance_type,
+          filer_status, status, is_system_account, notes
+        ) VALUES (?, ?, ?, ?, ?, 0.0, ?, 0.0, ?, 'Filer', 'Active', 1, ?)
+      `)
+      .run(
+        accountCode,
+        def.name,
+        def.mainGroup,
+        def.subGroup,
+        def.subGroup,
+        def.balType,
+        def.balType,
+        def.notes
+      );
+    return Number(res.lastInsertRowid);
+  }
+  throw new Error(`Required Chart of Accounts head "${accountCode}" is missing.`);
 }
 
 function computeBatchStatus(packQty: number, expiryDate: string, minStock: number = 0): string {

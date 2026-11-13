@@ -452,7 +452,7 @@ class OfflineStorage {
     return { restoredStores, totalRecords };
   }
 
-  // --- META & DEVICE ID ---
+  // --- META, TABLE SYNC TRACKING & DEVICE ID ---
 
   async getMeta(key: string): Promise<any> {
     const rec = await this.get<OfflineMetaRecord>('sync_meta', key);
@@ -465,6 +465,55 @@ class OfflineStorage {
       value,
       updated_at: new Date().toISOString(),
     });
+  }
+
+  async getTableSyncMeta(): Promise<
+    Record<
+      string,
+      {
+        lastSyncedAt: string;
+        rowCount: number;
+        latestUpdatedAt: string;
+        maxId: number;
+        status: 'synced' | 'failed';
+      }
+    >
+  > {
+    const meta = await this.getMeta('table_sync_status');
+    return meta && typeof meta === 'object' ? meta : {};
+  }
+
+  async setTableSyncMeta(
+    tableName: string,
+    info: {
+      lastSyncedAt: string;
+      rowCount: number;
+      latestUpdatedAt: string;
+      maxId: number;
+      status: 'synced' | 'failed';
+    }
+  ): Promise<void> {
+    const current = await this.getTableSyncMeta();
+    current[tableName] = info;
+    await this.setMeta('table_sync_status', current);
+  }
+
+  /**
+   * Invalidates cached API response blobs that would otherwise shadow fresh IndexedDB records
+   */
+  async invalidateDynamicApiCache(prefixes?: string[]): Promise<void> {
+    try {
+      const allCached = await this.getAll<{ key: string }>('api_cache');
+      const preserveKeys = new Set(['supply_snapshot', 'payroll_snapshot', 'advance_tax_settings']);
+      for (const entry of allCached) {
+        if (!entry?.key || preserveKeys.has(entry.key)) continue;
+        if (!prefixes || prefixes.length === 0 || prefixes.some((p) => entry.key.startsWith(p))) {
+          await this.delete('api_cache', entry.key);
+        }
+      }
+    } catch {
+      // ignore cache cleanup errors
+    }
   }
 
   /**

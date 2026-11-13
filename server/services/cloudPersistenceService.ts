@@ -78,6 +78,7 @@ const PERSISTED_TABLES = [
   'whatsapp_settings',
   'backup_history',
   'sync_audit_log',
+  'sync_tombstones',
   'system_error_logs',
   'idempotency_keys',
   'employee_sequences',
@@ -125,6 +126,11 @@ let pendingSync = false;
 let lastUploadedChecksum: string | null = null;
 let firestoreWriteQuotaExhausted = false;
 let firestoreQuotaResetAt = 0;
+let initPersistencePromise: Promise<{
+  provider: string;
+  restored: boolean;
+  rowsRestored: number;
+}> | null = null;
 
 interface FirestoreRestConfig {
   projectId: string;
@@ -377,7 +383,16 @@ interface DatabaseActivityMetrics {
   maxAccountingVoucherId: number;
   accountsCount: number;
   itemsCount: number;
+  inventoryCount: number;
+  usersCount: number;
+  tombstonesCount: number;
   latestTimestamp: string;
+}
+
+function normalizeDbTimestamp(ts: unknown): string {
+  const clean = String(ts || '').trim();
+  if (!clean) return '';
+  return clean.replace(' ', 'T');
 }
 
 function getLocalActivityMetrics(): DatabaseActivityMetrics {
@@ -399,7 +414,7 @@ function getLocalActivityMetrics(): DatabaseActivityMetrics {
   const safeMaxTs = (table: string, col = 'updated_at'): string => {
     try {
       const r = db.prepare(`SELECT COALESCE(MAX("${col}"), '') as ts FROM "${table}"`).get() as { ts: string };
-      return String(r?.ts || '');
+      return normalizeDbTimestamp(r?.ts);
     } catch {
       return '';
     }
@@ -416,6 +431,7 @@ function getLocalActivityMetrics(): DatabaseActivityMetrics {
     'journal_entries',
     'sale_returns',
     'purchase_returns',
+    'stock_adjustments',
   ];
   const txRowCount = txTables.reduce((sum, t) => sum + safeCount(t), 0);
 
@@ -427,7 +443,14 @@ function getLocalActivityMetrics(): DatabaseActivityMetrics {
     safeMaxTs('cash_book_vouchers', 'updated_at'),
     safeMaxTs('journal_entries', 'created_at'),
     safeMaxTs('accounts', 'updated_at'),
+    safeMaxTs('accounts', 'created_at'),
     safeMaxTs('items', 'updated_at'),
+    safeMaxTs('items', 'created_at'),
+    safeMaxTs('inventory', 'updated_at'),
+    safeMaxTs('inventory', 'created_at'),
+    safeMaxTs('users', 'updated_at'),
+    safeMaxTs('company_settings', 'updated_at'),
+    safeMaxTs('sync_tombstones', 'deleted_at'),
   ].filter(Boolean);
   timestamps.sort();
 
@@ -441,6 +464,9 @@ function getLocalActivityMetrics(): DatabaseActivityMetrics {
     maxAccountingVoucherId: safeMaxId('accounting_vouchers'),
     accountsCount: safeCount('accounts'),
     itemsCount: safeCount('items'),
+    inventoryCount: safeCount('inventory'),
+    usersCount: safeCount('users'),
+    tombstonesCount: safeCount('sync_tombstones'),
     latestTimestamp: timestamps[timestamps.length - 1] || '',
   };
 }
@@ -451,7 +477,7 @@ function getRemoteActivityMetrics(tables: Record<string, any[]>): DatabaseActivi
     arr(t).reduce((m, r) => Math.max(m, Number(r?.id || 0)), 0);
   const maxTs = (t: string, col: string): string =>
     arr(t).reduce((m, r) => {
-      const val = String(r?.[col] || '');
+      const val = normalizeDbTimestamp(r?.[col]);
       return val > m ? val : m;
     }, '');
 
@@ -466,6 +492,7 @@ function getRemoteActivityMetrics(tables: Record<string, any[]>): DatabaseActivi
     'journal_entries',
     'sale_returns',
     'purchase_returns',
+    'stock_adjustments',
   ];
   const txRowCount = txTables.reduce((sum, t) => sum + arr(t).length, 0);
 
@@ -477,7 +504,14 @@ function getRemoteActivityMetrics(tables: Record<string, any[]>): DatabaseActivi
     maxTs('cash_book_vouchers', 'updated_at'),
     maxTs('journal_entries', 'created_at'),
     maxTs('accounts', 'updated_at'),
+    maxTs('accounts', 'created_at'),
     maxTs('items', 'updated_at'),
+    maxTs('items', 'created_at'),
+    maxTs('inventory', 'updated_at'),
+    maxTs('inventory', 'created_at'),
+    maxTs('users', 'updated_at'),
+    maxTs('company_settings', 'updated_at'),
+    maxTs('sync_tombstones', 'deleted_at'),
   ].filter(Boolean);
   timestamps.sort();
 
@@ -491,6 +525,9 @@ function getRemoteActivityMetrics(tables: Record<string, any[]>): DatabaseActivi
     maxAccountingVoucherId: maxId('accounting_vouchers'),
     accountsCount: arr('accounts').length,
     itemsCount: arr('items').length,
+    inventoryCount: arr('inventory').length,
+    usersCount: arr('users').length,
+    tombstonesCount: arr('sync_tombstones').length,
     latestTimestamp: timestamps[timestamps.length - 1] || '',
   };
 }
@@ -505,13 +542,19 @@ function shouldRestoreFromRemoteSnapshot(remoteTables: Record<string, any[]>): b
   // Never overwrite local if remote has fewer items/accounts AND fewer transactions
   if (remote.itemsCount === 0 && local.itemsCount > 0) return false;
 
+  // Never downgrade local data if local has newer timestamps than remote
+  if (local.latestTimestamp && remote.latestTimestamp && local.latestTimestamp > remote.latestTimestamp) {
+    return false;
+  }
+
   // Never downgrade local transactions if local has newer/more transactions than remote
   const localHasNewerTx =
     local.txRowCount > remote.txRowCount ||
     local.maxSaleId > remote.maxSaleId ||
     local.maxPurchaseId > remote.maxPurchaseId ||
     local.maxJournalId > remote.maxJournalId ||
-    local.maxCashBookId > remote.maxCashBookId;
+    local.maxCashBookId > remote.maxCashBookId ||
+    local.tombstonesCount > remote.tombstonesCount;
 
   if (localHasNewerTx) {
     return false;
@@ -525,7 +568,8 @@ function shouldRestoreFromRemoteSnapshot(remoteTables: Record<string, any[]>): b
     remote.maxJournalId > local.maxJournalId ||
     remote.maxCashBookId > local.maxCashBookId ||
     remote.maxPaymentVoucherId > local.maxPaymentVoucherId ||
-    remote.maxAccountingVoucherId > local.maxAccountingVoucherId;
+    remote.maxAccountingVoucherId > local.maxAccountingVoucherId ||
+    remote.tombstonesCount > local.tombstonesCount;
 
   if (remoteHasMoreTx) {
     return true;
@@ -535,6 +579,8 @@ function shouldRestoreFromRemoteSnapshot(remoteTables: Record<string, any[]>): b
     remote.txRowCount === local.txRowCount &&
     (remote.accountsCount > local.accountsCount ||
       remote.itemsCount > local.itemsCount ||
+      remote.inventoryCount > local.inventoryCount ||
+      remote.usersCount > local.usersCount ||
       (remote.latestTimestamp && remote.latestTimestamp > local.latestTimestamp))
   ) {
     return true;
@@ -756,7 +802,31 @@ async function loadSnapshotFromFirestore(): Promise<{
  * Initializes persistent Cloud SQL / Firestore storage on startup.
  * Runs non-blocking after the HTTP server starts listening so container health probes never time out.
  */
+export async function ensureCloudPersistenceReady(timeoutMs = 3500): Promise<void> {
+  if (!initPersistencePromise) return;
+  try {
+    await Promise.race([
+      initPersistencePromise,
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  } catch {
+    // ignore init error
+  }
+}
+
 export async function initCloudPersistence(): Promise<{
+  provider: string;
+  restored: boolean;
+  rowsRestored: number;
+}> {
+  if (initPersistencePromise) {
+    return initPersistencePromise;
+  }
+  initPersistencePromise = runInitCloudPersistence();
+  return initPersistencePromise;
+}
+
+async function runInitCloudPersistence(): Promise<{
   provider: string;
   restored: boolean;
   rowsRestored: number;

@@ -247,8 +247,10 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   if (!headers.has('X-Device-Name')) {
     headers.set('X-Device-Name', getClientDeviceName());
   }
+  const method = String(init?.method || 'GET').toUpperCase();
   const res = await fetch(url, {
     ...init,
+    cache: init?.cache ?? 'no-store',
     credentials: init?.credentials ?? 'include',
     headers,
   });
@@ -261,6 +263,20 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     purgeLegacyAuthStorage();
     window.dispatchEvent(new CustomEvent('ams-session-expired'));
   }
+
+  // Whenever an online mutation succeeds, schedule a fast background sync so IndexedDB always holds the latest records
+  if (
+    res.ok &&
+    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
+    url.startsWith('/api/') &&
+    !url.startsWith('/api/sync/') &&
+    !url.startsWith('/api/auth/logout')
+  ) {
+    setTimeout(() => {
+      offlineSyncManager.syncNow().catch(() => {});
+    }, 200);
+  }
+
   return res;
 }
 
@@ -906,10 +922,87 @@ export const api = {
         return data;
       }
     } catch {
-      // Offline fallback: serve directly from IndexedDB
+      // Offline fallback: serve directly from latest synchronized IndexedDB
     }
-    const localItems = await offlineSyncManager.searchLocalItems(params?.q || '', 100);
-    return { success: true, items: localItems, offline: true };
+    const [allLocalItems, allBatches] = await Promise.all([
+      offlineSyncManager.searchLocalItems(params?.q || '', 0),
+      offlineStorage.getAll<any>('inventory'),
+    ]);
+
+    const packStockByItemId = new Map<number, number>();
+    for (const b of allBatches) {
+      const iid = Number(b.item_id || 0);
+      if (iid <= 0) continue;
+      const upp = Math.max(1, Number(b.units_per_pack || 1));
+      const units = Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0);
+      const packs = b.current_pack_qty !== undefined ? Number(b.current_pack_qty) : units / upp;
+      packStockByItemId.set(iid, (packStockByItemId.get(iid) || 0) + packs);
+    }
+
+    const categoriesSet = new Set<string>();
+    const companiesSet = new Set<string>();
+    for (const it of allLocalItems) {
+      if (it.category) categoriesSet.add(String(it.category));
+      if (it.company_name) companiesSet.add(String(it.company_name));
+    }
+
+    let filtered = allLocalItems.map((it) => {
+      const livePacks = packStockByItemId.has(Number(it.id))
+        ? round2Local(packStockByItemId.get(Number(it.id))!)
+        : Number(it.opening_stock ?? it.current_stock ?? 0);
+      return {
+        ...it,
+        opening_stock: livePacks,
+        current_stock: livePacks,
+      };
+    });
+
+    if (params?.category && params.category !== 'all') {
+      filtered = filtered.filter((i) => String(i.category || '') === params.category);
+    }
+    if (params?.company && params.company !== 'all') {
+      filtered = filtered.filter((i) => String(i.company_name || '') === params.company);
+    }
+    if (params?.status && params.status !== 'all') {
+      filtered = filtered.filter(
+        (i) => String(i.status || 'Active').toLowerCase() === params.status!.toLowerCase()
+      );
+    }
+    if (params?.lowStock) {
+      filtered = filtered.filter(
+        (i) =>
+          Number(i.opening_stock || 0) <=
+          Number(i.minimum_stock ?? i.reorder_level ?? 10)
+      );
+    }
+
+    const stats = {
+      totalItems: allLocalItems.length,
+      activeItems: allLocalItems.filter((i) => String(i.status || 'Active') === 'Active').length,
+      lowStockItems: allLocalItems.filter((i) => {
+        const st = packStockByItemId.has(Number(i.id))
+          ? packStockByItemId.get(Number(i.id))!
+          : Number(i.opening_stock || 0);
+        return st <= Number(i.minimum_stock ?? i.reorder_level ?? 10);
+      }).length,
+      totalStockValue: round2Local(
+        allLocalItems.reduce((sum, i) => {
+          const st = packStockByItemId.has(Number(i.id))
+            ? packStockByItemId.get(Number(i.id))!
+            : Number(i.opening_stock || 0);
+          return sum + Math.max(0, st) * Number(i.purchase_price || 0);
+        }, 0)
+      ),
+    };
+
+    return {
+      success: true,
+      items: filtered,
+      stats,
+      categories: Array.from(categoriesSet).sort(),
+      companies: Array.from(companiesSet).sort(),
+      offline: true,
+    };
   },
 
   /**
@@ -1204,6 +1297,7 @@ export const api = {
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to delete item');
     }
+    await offlineStorage.delete('items', Number(id)).catch(() => {});
     return data;
   },
 
@@ -1265,9 +1359,58 @@ export const api = {
         return data;
       }
     } catch {
-      // Offline fallback: serve directly from IndexedDB
+      // Offline fallback: serve directly from latest synchronized IndexedDB
     }
-    const localAccounts = await offlineSyncManager.searchLocalAccounts(params?.q || '', 100);
+    let localAccounts = await offlineSyncManager.searchLocalAccounts(params?.q || '', 0);
+    if (params?.mainGroup && params.mainGroup !== 'all') {
+      localAccounts = localAccounts.filter((a) => String(a.main_group || '') === params.mainGroup);
+    }
+    if (params?.accountGroup && params.accountGroup !== 'all') {
+      localAccounts = localAccounts.filter(
+        (a) => String(a.account_group || '') === params.accountGroup
+      );
+    }
+    if (params?.parentAccountId && params.parentAccountId !== 'all') {
+      localAccounts = localAccounts.filter(
+        (a) => String(a.parent_account_id || '') === String(params.parentAccountId)
+      );
+    }
+    if (params?.status && params.status !== 'all') {
+      localAccounts = localAccounts.filter(
+        (a) => String(a.status || 'Active').toLowerCase() === params.status!.toLowerCase()
+      );
+    }
+    if (params?.ledgerView === 'customer') {
+      localAccounts = localAccounts.filter(
+        (a) =>
+          a.account_group === 'Customer' ||
+          a.account_group === 'Customer & Supplier' ||
+          Number(a.enable_customer_ledger) === 1
+      );
+    } else if (params?.ledgerView === 'supplier') {
+      localAccounts = localAccounts.filter(
+        (a) =>
+          a.account_group === 'Supplier' ||
+          a.account_group === 'Customer & Supplier' ||
+          Number(a.enable_supplier_ledger) === 1
+      );
+    }
+    if (params?.townId && params.townId !== 'all') {
+      localAccounts = localAccounts.filter((a) => String(a.town_id || '') === String(params.townId));
+    }
+    if (params?.town && params.town !== 'all') {
+      localAccounts = localAccounts.filter(
+        (a) => String(a.town_name || a.city || '').toLowerCase() === params.town!.toLowerCase()
+      );
+    }
+    if (params?.areaId && params.areaId !== 'all') {
+      localAccounts = localAccounts.filter((a) => String(a.area_id || '') === String(params.areaId));
+    }
+    if (params?.area && params.area !== 'all') {
+      localAccounts = localAccounts.filter(
+        (a) => String(a.area_name || '').toLowerCase() === params.area!.toLowerCase()
+      );
+    }
     return { success: true, accounts: localAccounts, offline: true };
   },
 
@@ -1553,6 +1696,7 @@ export const api = {
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to delete account');
     }
+    await offlineStorage.delete('accounts', Number(id)).catch(() => {});
     return data;
   },
 
@@ -1737,21 +1881,80 @@ export const api = {
     } catch {
       // Offline fallback from IndexedDB
     }
-    const localPurchases = await offlineStorage.getAll<any>('purchases');
+    let localPurchases = await offlineStorage.getAll<any>('purchases');
+    if (params?.status && params.status !== 'all') {
+      localPurchases = localPurchases.filter(
+        (p) => String(p.status || '').toLowerCase() === params.status!.toLowerCase()
+      );
+    }
+    if (params?.supplierId && params.supplierId !== 'all') {
+      localPurchases = localPurchases.filter(
+        (p) => String(p.supplier_account_id || '') === String(params.supplierId)
+      );
+    }
+    if (params?.paymentMode && params.paymentMode !== 'all') {
+      localPurchases = localPurchases.filter(
+        (p) => String(p.payment_mode || '').toLowerCase() === params.paymentMode!.toLowerCase()
+      );
+    }
+    if (params?.startDate) {
+      localPurchases = localPurchases.filter(
+        (p) => String(p.bill_date || p.invoice_date || '') >= params.startDate!
+      );
+    }
+    if (params?.endDate) {
+      localPurchases = localPurchases.filter(
+        (p) => String(p.bill_date || p.invoice_date || '') <= params.endDate!
+      );
+    }
+    if (params?.q) {
+      const qLower = params.q.toLowerCase();
+      localPurchases = localPurchases.filter(
+        (p) =>
+          String(p.bill_number || p.invoice_number || '').toLowerCase().includes(qLower) ||
+          String(p.supplier_name || '').toLowerCase().includes(qLower) ||
+          String(p.supplier_invoice_no || '').toLowerCase().includes(qLower)
+      );
+    }
+    localPurchases.sort((a, b) => {
+      const da = String(a.bill_date || a.invoice_date || '');
+      const db = String(b.bill_date || b.invoice_date || '');
+      if (da !== db) return db.localeCompare(da);
+      return Number(b.id || 0) - Number(a.id || 0);
+    });
     return {
       success: true,
       purchases: localPurchases,
       data: localPurchases,
       summary: {
         totalPurchases: localPurchases.length,
-        totalGrossAmount: 0,
-        totalDiscount: 0,
-        totalTaxableAmount: 0,
-        totalAdvanceTax: 0,
-        totalGstAmount: 0,
-        totalPayableAmount: 0,
-        totalPaidAmount: 0,
-        totalBalanceDue: 0,
+        totalGrossAmount: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.gross_amount ?? p.subtotal_gross ?? 0), 0)
+        ),
+        totalDiscount: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.discount_amount ?? p.total_discount ?? 0), 0)
+        ),
+        totalTaxableAmount: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.taxable_amount ?? 0), 0)
+        ),
+        totalAdvanceTax: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.advance_tax_amount ?? 0), 0)
+        ),
+        totalGstAmount: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.gst_amount ?? p.tax_total ?? 0), 0)
+        ),
+        totalPayableAmount: round2Local(
+          localPurchases.reduce(
+            (s, p) => s + Number(p.total_payable ?? p.net_total ?? p.total_amount ?? 0),
+            0
+          )
+        ),
+        totalPaidAmount: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.paid_amount ?? 0), 0)
+        ),
+        totalBalanceDue: round2Local(
+          localPurchases.reduce((s, p) => s + Number(p.balance_due ?? p.balance_amount ?? 0), 0)
+        ),
       },
       offline: true,
     };
@@ -1769,13 +1972,14 @@ export const api = {
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: read from synchronized IndexedDB purchases store first
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`purchase_details_${id}`);
-    if (cached) return { ...cached, offline: true };
     const allPurchases = await offlineStorage.getAll<any>('purchases');
     const found = allPurchases.find(
-      (p) => String(p.id) === String(id) || String(p.client_tx_id) === String(id)
+      (p) =>
+        String(p.id) === String(id) ||
+        String(p.server_id) === String(id) ||
+        String(p.client_tx_id) === String(id)
     );
     if (found) {
       return {
@@ -1786,6 +1990,8 @@ export const api = {
         journalLines: [],
       };
     }
+    const cached = await offlineStorage.getCachedApiData<any>(`purchase_details_${id}`);
+    if (cached) return { ...cached, offline: true };
     throw new Error('Purchase invoice details not found in local storage');
   },
 
@@ -2138,20 +2344,31 @@ export const api = {
     const localItems = await offlineSyncManager.searchLocalItems(q, limit);
     const localBatches = await offlineStorage.getAll<any>('inventory');
     const enriched = localItems.map((item) => {
-      const upp = Math.max(1, Number(item.units_per_pack) || 1);
+      const packingStr = String(item.packing || item.pack_size || '1x1').trim();
+      const multMatch = packingStr.match(/^(\d+)\s*[xX*]\s*(\d+)$/);
+      const numMatch = packingStr.match(/(\d+)/);
+      const parsedUpp = multMatch
+        ? Math.max(1, parseInt(multMatch[1], 10) * parseInt(multMatch[2], 10))
+        : numMatch
+        ? Math.max(1, parseInt(numMatch[1], 10))
+        : 1;
+      const upp = Math.max(1, Number(item.units_per_pack) || parsedUpp);
       const itemBatches = localBatches
         .filter((b) => Number(b.item_id) === Number(item.id))
         .map((b) => {
           const bUpp = Math.max(1, Number(b.units_per_pack) || upp);
-          const qtyUnits = Number(b.quantity) || 0;
-          const packSale = Number(b.sale_price ?? item.sale_price ?? 0);
-          const packPurchase = Number(b.purchase_price ?? item.purchase_price ?? 0);
+          const qtyUnits = Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0);
+          const packSale = Number(
+            b.pack_retail ?? b.retail_price ?? b.sale_price ?? item.retail_price ?? item.sale_price ?? 0
+          );
+          const packPurchase = Number(b.pack_cost ?? b.purchase_price ?? item.purchase_price ?? 0);
           return {
             ...b,
             units_per_pack: bUpp,
             available_units: qtyUnits,
             available_packs: Number((qtyUnits / bUpp).toFixed(2)),
             sale_price: packSale,
+            retail_price: packSale,
             purchase_price: packPurchase,
             loose_sale_price: Number((packSale / bUpp).toFixed(2)),
             loose_purchase_price: Number((packPurchase / bUpp).toFixed(2)),
@@ -2160,14 +2377,14 @@ export const api = {
       const totalUnits =
         itemBatches.length > 0
           ? itemBatches.reduce((sum, b) => sum + (Number(b.available_units) || 0), 0)
-          : (Number(item.current_stock) || 0) * upp;
-      const salePrice = Number(item.sale_price) || 0;
-      const retailPrice = Number(item.retail_price || item.mrp || salePrice) || 0;
+          : (Number(item.opening_stock ?? item.current_stock ?? 0) || 0) * upp;
+      const salePrice = Number(item.retail_price ?? item.sale_price ?? item.wholesale_price ?? 0);
+      const retailPrice = Number(item.retail_price ?? item.mrp ?? salePrice);
       const defaultBatch = itemBatches.find((b) => b.available_units > 0) || itemBatches[0] || null;
       return {
         ...item,
         units_per_pack: upp,
-        loose_rate: Number((salePrice / upp).toFixed(2)),
+        loose_rate: Number(item.loose_rate || (salePrice / upp).toFixed(2)),
         retail_loose_rate: Number((retailPrice / upp).toFixed(2)),
         total_available_units: totalUnits,
         total_available_packs: Number((totalUnits / upp).toFixed(2)),
@@ -2195,7 +2412,7 @@ export const api = {
     exportAll?: boolean;
   }) {
     const query = new URLSearchParams();
-    if (params?.q) query.append('q', params.q);
+    if (params?.q) query.append('q', qParam(params.q));
     if (params?.customerId) query.append('customerId', params.customerId);
     if (params?.paymentMode) query.append('paymentMode', params.paymentMode);
     if (params?.invoiceType) query.append('invoiceType', params.invoiceType);
@@ -2207,6 +2424,10 @@ export const api = {
     if (params?.pageSize) query.append('pageSize', String(params.pageSize));
     if (params?.exportAll) query.append('exportAll', 'true');
 
+    function qParam(v: string) {
+      return v;
+    }
+
     try {
       const res = await authFetch(`/api/sales?${query.toString()}`);
       if (res.ok) {
@@ -2214,7 +2435,7 @@ export const api = {
         if (data.success) return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from latest synchronized IndexedDB
     }
     let localSales = await offlineStorage.getAll<any>('sales');
     if (params?.status && params.status !== 'all') {
@@ -2222,27 +2443,67 @@ export const api = {
         (s) => String(s.status || '').toLowerCase() === params.status!.toLowerCase()
       );
     }
+    if (params?.customerId && params.customerId !== 'all') {
+      localSales = localSales.filter(
+        (s) => String(s.customer_account_id || '') === String(params.customerId)
+      );
+    }
+    if (params?.paymentMode && params.paymentMode !== 'all') {
+      localSales = localSales.filter(
+        (s) => String(s.payment_mode || '').toLowerCase() === params.paymentMode!.toLowerCase()
+      );
+    }
+    if (params?.startDate) {
+      localSales = localSales.filter(
+        (s) => String(s.invoice_date || s.sale_date || '') >= params.startDate!
+      );
+    }
+    if (params?.endDate) {
+      localSales = localSales.filter(
+        (s) => String(s.invoice_date || s.sale_date || '') <= params.endDate!
+      );
+    }
     if (params?.q) {
       const qLower = params.q.toLowerCase();
       localSales = localSales.filter(
         (s) =>
-          (s.invoice_number || '').toLowerCase().includes(qLower) ||
-          (s.customer_name || '').toLowerCase().includes(qLower)
+          String(s.invoice_number || '').toLowerCase().includes(qLower) ||
+          String(s.customer_name || '').toLowerCase().includes(qLower)
       );
     }
+    localSales.sort((a, b) => {
+      const da = String(a.invoice_date || a.sale_date || '');
+      const db = String(b.invoice_date || b.sale_date || '');
+      if (da !== db) return db.localeCompare(da);
+      return Number(b.id || 0) - Number(a.id || 0);
+    });
     return {
       success: true,
       sales: localSales,
       data: localSales,
       summary: {
         totalInvoices: localSales.length,
-        totalGrossAmount: localSales.reduce((acc, s) => acc + (Number(s.subtotal_gross) || 0), 0),
-        totalDiscountAmount: localSales.reduce((acc, s) => acc + (Number(s.total_discount) || 0), 0),
-        totalTaxAmount: localSales.reduce((acc, s) => acc + (Number(s.total_tax) || 0), 0),
-        totalNetPayable: localSales.reduce((acc, s) => acc + (Number(s.total_amount) || 0), 0),
-        totalReceivedAmount: localSales.reduce((acc, s) => acc + (Number(s.received_amount) || 0), 0),
-        totalBalanceDue: localSales.reduce((acc, s) => acc + (Number(s.balance_due) || 0), 0),
-        totalProfitAmount: localSales.reduce((acc, s) => acc + (Number(s.invoice_profit) || 0), 0),
+        totalGrossAmount: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.gross_total ?? s.subtotal_gross ?? 0), 0)
+        ),
+        totalDiscountAmount: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.discount_total ?? s.total_discount ?? 0), 0)
+        ),
+        totalTaxAmount: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.tax_total ?? s.total_tax ?? 0), 0)
+        ),
+        totalNetPayable: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.net_total ?? s.total_amount ?? 0), 0)
+        ),
+        totalReceivedAmount: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.paid_amount ?? s.received_amount ?? 0), 0)
+        ),
+        totalBalanceDue: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.balance_amount ?? s.balance_due ?? 0), 0)
+        ),
+        totalProfitAmount: round2Local(
+          localSales.reduce((acc, s) => acc + Number(s.total_profit ?? s.invoice_profit ?? 0), 0)
+        ),
       },
       offline: true,
     };
@@ -2260,13 +2521,14 @@ export const api = {
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: read from synchronized IndexedDB sales store first
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`sale_details_${id}`);
-    if (cached) return { ...cached, offline: true };
     const allSales = await offlineStorage.getAll<any>('sales');
     const found = allSales.find(
-      (s) => String(s.id) === String(id) || String(s.client_tx_id) === String(id)
+      (s) =>
+        String(s.id) === String(id) ||
+        String(s.server_id) === String(id) ||
+        String(s.client_tx_id) === String(id)
     );
     if (found) {
       return {
@@ -2274,10 +2536,12 @@ export const api = {
         offline: true,
         invoice: found,
         sale: found,
-        items: found.items || [],
+        items: found.items || found.lines || [],
         journalLines: [],
       };
     }
+    const cached = await offlineStorage.getCachedApiData<any>(`sale_details_${id}`);
+    if (cached) return { ...cached, offline: true };
     throw new Error('Sales invoice details not found in local storage');
   },
 
@@ -3016,12 +3280,20 @@ export const api = {
    * More Options - Fetch Sales Invoice headings, footer notes & 4-scope visibility
    */
   async getSalesInvoiceMoreOptions(): Promise<{ success: boolean; data: any }> {
-    const res = await authFetch('/api/system/sales-invoice-more-options');
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to fetch Sales Invoice More Options');
+    try {
+      const res = await authFetch('/api/system/sales-invoice-more-options');
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+    } catch {
+      // Offline fallback from synchronized company_settings
     }
-    return data;
+    const allSettings = await offlineStorage.getAll<any>('company_settings');
+    return {
+      success: true,
+      data: allSettings[0] || {},
+    };
   },
 
   /**
@@ -3044,12 +3316,20 @@ export const api = {
    * User Management - Fetch all staff users (Super Admin only)
    */
   async getUsers(): Promise<{ success: boolean; users: User[] }> {
-    const res = await authFetch('/api/auth/users');
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to fetch users');
+    try {
+      const res = await authFetch('/api/auth/users');
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+    } catch {
+      // Offline fallback: load latest synchronized users from auth_vault
     }
-    return data;
+    const localUsers = await loadOfflineAuthVault();
+    return {
+      success: true,
+      users: localUsers as User[],
+    };
   },
 
   /**
@@ -3277,48 +3557,68 @@ export const api = {
       const res = await authFetch('/api/inventory/overview');
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData('inventory_overview', data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: always compute from latest synchronized IndexedDB items & inventory
     }
-    const cached = await offlineStorage.getCachedApiData<any>('inventory_overview');
-    if (cached) return { ...cached, offline: true };
 
-    const items = await offlineStorage.getAll<any>('items');
-    const batches = await offlineStorage.getAll<any>('inventory');
+    const [items, batches] = await Promise.all([
+      offlineStorage.getAll<any>('items'),
+      offlineStorage.getAll<any>('inventory'),
+    ]);
     const now = new Date().toISOString().split('T')[0];
     let totalCostVal = 0;
     let totalRetailVal = 0;
     let expiredCount = 0;
     let totalUnits = 0;
     let totalPacks = 0;
+    const itemPacksMap = new Map<number, number>();
+
     for (const b of batches) {
       const upp = Math.max(1, Number(b.units_per_pack) || 1);
-      const qty = Math.max(0, Number(b.quantity) || 0);
-      const packs = qty / upp;
-      totalUnits += qty;
+      const qtyUnits = Math.max(
+        0,
+        Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0)
+      );
+      const packs =
+        b.current_pack_qty !== undefined && Number(b.current_pack_qty) >= 0
+          ? Number(b.current_pack_qty)
+          : qtyUnits / upp;
+      const pCost = Number(b.pack_cost ?? b.purchase_price ?? 0);
+      const pRetail = Number(b.pack_retail ?? b.retail_price ?? b.sale_price ?? 0);
+      totalUnits += qtyUnits;
       totalPacks += packs;
-      totalCostVal += packs * (Number(b.purchase_price) || 0);
-      totalRetailVal += packs * (Number(b.sale_price) || 0);
-      if (b.expiry_date && b.expiry_date < now && qty > 0) expiredCount++;
+      totalCostVal += packs * pCost;
+      totalRetailVal += packs * pRetail;
+      if (b.expiry_date && b.expiry_date < now && qtyUnits > 0) expiredCount++;
+      const iid = Number(b.item_id || 0);
+      if (iid > 0) itemPacksMap.set(iid, (itemPacksMap.get(iid) || 0) + packs);
     }
-    const outOfStock = items.filter((i) => (Number(i.current_stock) || 0) <= 0).length;
-    const lowStock = items.filter(
-      (i) => (Number(i.current_stock) || 0) > 0 && (Number(i.current_stock) || 0) <= (Number(i.reorder_level) || 10)
-    ).length;
+
+    let outOfStock = 0;
+    let lowStock = 0;
+    for (const it of items) {
+      const st = itemPacksMap.has(Number(it.id))
+        ? itemPacksMap.get(Number(it.id))!
+        : Number(it.opening_stock ?? it.current_stock ?? 0);
+      const minSt = Number(it.minimum_stock ?? it.reorder_level ?? 10);
+      if (st <= 0) outOfStock++;
+      else if (st <= minSt) lowStock++;
+    }
 
     return {
       success: true,
       overview: {
         total_items: items.length,
-        active_batches: batches.filter((b) => (Number(b.quantity) || 0) > 0).length,
-        total_packs: Math.round(totalPacks),
+        active_batches: batches.filter(
+          (b) => Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0) > 0
+        ).length,
+        total_packs: round2Local(totalPacks),
         total_loose_units: totalUnits,
-        cost_valuation: Math.round(totalCostVal),
-        retail_valuation: Math.round(totalRetailVal),
-        potential_profit: Math.round(totalRetailVal - totalCostVal),
+        cost_valuation: round2Local(totalCostVal),
+        retail_valuation: round2Local(totalRetailVal),
+        potential_profit: round2Local(totalRetailVal - totalCostVal),
         low_stock_count: lowStock,
         out_of_stock_count: outOfStock,
         expired_batches_count: expiredCount,
@@ -3375,35 +3675,43 @@ export const api = {
       const res = await authFetch(`/api/inventory/datasheet?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`stock_datasheet_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: always compute from latest synchronized IndexedDB items & inventory
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`stock_datasheet_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
 
-    const items = await offlineStorage.getAll<any>('items');
-    const batches = await offlineStorage.getAll<any>('inventory');
-    const rows: StockDatasheetItem[] = batches.map((b) => {
-      const it = items.find((i) => Number(i.id) === Number(b.item_id)) || {};
+    const [items, batches] = await Promise.all([
+      offlineStorage.getAll<any>('items'),
+      offlineStorage.getAll<any>('inventory'),
+    ]);
+    const itemById = new Map<number, any>();
+    for (const it of items) {
+      itemById.set(Number(it.id), it);
+    }
+
+    let rows: StockDatasheetItem[] = batches.map((b) => {
+      const it = itemById.get(Number(b.item_id)) || {};
       const upp = Math.max(1, Number(b.units_per_pack || it.units_per_pack || 1));
-      const qtyUnits = Number(b.quantity) || 0;
+      const qtyUnits = Number(
+        b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0
+      );
       const packs = Math.floor(qtyUnits / upp);
       const loose = qtyUnits % upp;
-      const pRate = Number(b.purchase_price || it.purchase_price || 0);
-      const sRate = Number(b.sale_price || it.sale_price || 0);
+      const pRate = Number(b.pack_cost ?? b.purchase_price ?? it.purchase_price ?? 0);
+      const sRate = Number(
+        b.pack_retail ?? b.retail_price ?? b.sale_price ?? it.retail_price ?? it.sale_price ?? 0
+      );
       return {
         inventory_id: b.id,
         item_id: b.item_id,
-        item_code: it.item_code || '',
+        item_code: it.item_code || b.item_code || '',
         barcode: it.barcode || '',
         item_name: it.item_name || b.item_name || 'Item',
         generic_name: it.generic_name || '',
         company_name: it.company_name || b.company_name || '',
         category: it.category || '',
-        pack_size: it.pack_size || `${upp}'s`,
+        pack_size: it.packing || it.pack_size || b.packing || `${upp}'s`,
         units_per_pack: upp,
         batch_number: b.batch_number || 'DEFAULT',
         expiry_date: b.expiry_date || '2027-12-31',
@@ -3413,13 +3721,30 @@ export const api = {
         purchase_price: pRate,
         sale_price: sRate,
         mrp: Number(b.mrp || it.mrp || sRate),
-        cost_valuation: Number(((qtyUnits / upp) * pRate).toFixed(2)),
-        retail_valuation: Number(((qtyUnits / upp) * sRate).toFixed(2)),
+        cost_valuation: round2Local((qtyUnits / upp) * pRate),
+        retail_valuation: round2Local((qtyUnits / upp) * sRate),
         rack_location: b.rack_no || it.rack_location || '',
         expiry_status: 'SAFE',
         days_to_expiry: 365,
       } as any;
     });
+
+    if (params?.search) {
+      const qLower = params.search.toLowerCase();
+      rows = rows.filter(
+        (r: any) =>
+          String(r.item_name || '').toLowerCase().includes(qLower) ||
+          String(r.item_code || '').toLowerCase().includes(qLower) ||
+          String(r.company_name || '').toLowerCase().includes(qLower) ||
+          String(r.batch_number || '').toLowerCase().includes(qLower)
+      );
+    }
+    if (params?.company && params.company !== 'ALL') {
+      rows = rows.filter((r: any) => String(r.company_name || '') === params.company);
+    }
+    if (params?.category && params.category !== 'ALL') {
+      rows = rows.filter((r: any) => String(r.category || '') === params.category);
+    }
 
     return {
       success: true,
@@ -3432,10 +3757,14 @@ export const api = {
       },
       summary: {
         total_items: items.length,
-        total_packs: rows.reduce((s, r: any) => s + (Number(r.quantity_packs) || 0), 0),
-        total_units: rows.reduce((s, r: any) => s + (Number(r.total_units) || 0), 0),
-        total_cost_valuation: rows.reduce((s, r: any) => s + (Number(r.cost_valuation) || 0), 0),
-        total_retail_valuation: rows.reduce((s, r: any) => s + (Number(r.retail_valuation) || 0), 0),
+        total_packs: round2Local(rows.reduce((s, r: any) => s + (Number(r.quantity_packs) || 0), 0)),
+        total_units: round2Local(rows.reduce((s, r: any) => s + (Number(r.total_units) || 0), 0)),
+        total_cost_valuation: round2Local(
+          rows.reduce((s, r: any) => s + (Number(r.cost_valuation) || 0), 0)
+        ),
+        total_retail_valuation: round2Local(
+          rows.reduce((s, r: any) => s + (Number(r.retail_valuation) || 0), 0)
+        ),
       },
     };
   },
@@ -3456,21 +3785,47 @@ export const api = {
       const res = await authFetch(`/api/inventory/current-stock?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`current_stock_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: compute directly from synchronized IndexedDB items & inventory
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`current_stock_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
 
-    const items = await offlineStorage.getAll<any>('items');
-    const data: CurrentStockSummary[] = items.map((it) => {
-      const upp = Math.max(1, Number(it.units_per_pack) || 1);
-      const packs = Number(it.current_stock) || 0;
-      const pRate = Number(it.purchase_price) || 0;
-      const sRate = Number(it.sale_price) || 0;
+    const [items, batches] = await Promise.all([
+      offlineStorage.getAll<any>('items'),
+      offlineStorage.getAll<any>('inventory'),
+    ]);
+    const batchesByItem = new Map<number, any[]>();
+    for (const b of batches) {
+      const iid = Number(b.item_id || 0);
+      if (iid <= 0) continue;
+      if (!batchesByItem.has(iid)) batchesByItem.set(iid, []);
+      batchesByItem.get(iid)!.push(b);
+    }
+
+    let data: CurrentStockSummary[] = items.map((it) => {
+      const packingStr = String(it.packing || it.pack_size || '1x1').trim();
+      const multMatch = packingStr.match(/^(\d+)\s*[xX*]\s*(\d+)$/);
+      const numMatch = packingStr.match(/(\d+)/);
+      const parsedUpp = multMatch
+        ? Math.max(1, parseInt(multMatch[1], 10) * parseInt(multMatch[2], 10))
+        : numMatch
+        ? Math.max(1, parseInt(numMatch[1], 10))
+        : 1;
+      const upp = Math.max(1, Number(it.units_per_pack) || parsedUpp);
+      const itemBatches = batchesByItem.get(Number(it.id)) || [];
+      const totalUnits =
+        itemBatches.length > 0
+          ? itemBatches.reduce(
+              (sum, b) =>
+                sum + Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0),
+              0
+            )
+          : Number(it.opening_stock ?? it.current_stock ?? 0) * upp;
+      const packs = round2Local(totalUnits / upp);
+      const pRate = Number(it.purchase_price || 0);
+      const sRate = Number(it.retail_price ?? it.sale_price ?? 0);
+      const minSt = Number(it.minimum_stock ?? it.reorder_level ?? 10);
       return {
         item_id: it.id,
         item_code: it.item_code || '',
@@ -3478,19 +3833,41 @@ export const api = {
         generic_name: it.generic_name || '',
         company_name: it.company_name || '',
         category: it.category || '',
-        pack_size: it.pack_size || `${upp}'s`,
+        pack_size: it.packing || it.pack_size || `${upp}'s`,
         units_per_pack: upp,
         total_packs: packs,
-        total_loose_units: packs * upp,
-        active_batches_count: 1,
+        total_loose_units: totalUnits,
+        active_batches_count: itemBatches.filter(
+          (b) => Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0) > 0
+        ).length,
         avg_purchase_price: pRate,
         sale_price: sRate,
-        cost_valuation: Number((packs * pRate).toFixed(2)),
-        retail_valuation: Number((packs * sRate).toFixed(2)),
-        reorder_level: Number(it.reorder_level) || 10,
-        stock_status: packs <= 0 ? 'OUT_OF_STOCK' : packs <= (Number(it.reorder_level) || 10) ? 'LOW_STOCK' : 'IN_STOCK',
+        cost_valuation: round2Local(packs * pRate),
+        retail_valuation: round2Local(packs * sRate),
+        reorder_level: minSt,
+        stock_status: packs <= 0 ? 'OUT_OF_STOCK' : packs <= minSt ? 'LOW_STOCK' : 'IN_STOCK',
       } as any;
     });
+
+    if (params?.search) {
+      const qLower = params.search.toLowerCase();
+      data = data.filter(
+        (d: any) =>
+          String(d.item_name || '').toLowerCase().includes(qLower) ||
+          String(d.item_code || '').toLowerCase().includes(qLower) ||
+          String(d.company_name || '').toLowerCase().includes(qLower)
+      );
+    }
+    if (params?.company && params.company !== 'ALL') {
+      data = data.filter((d: any) => String(d.company_name || '') === params.company);
+    }
+    if (params?.category && params.category !== 'ALL') {
+      data = data.filter((d: any) => String(d.category || '') === params.category);
+    }
+    if (params?.status && params.status !== 'ALL') {
+      data = data.filter((d: any) => String(d.stock_status || '') === params.status);
+    }
+
     return { success: true, data, count: data.length };
   },
 
@@ -3516,14 +3893,11 @@ export const api = {
       const res = await authFetch(`/api/inventory/expiry-alerts?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`expiry_alerts_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from IndexedDB inventory
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`expiry_alerts_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
     return {
       success: true,
       data: [],
@@ -3551,22 +3925,24 @@ export const api = {
       const res = await authFetch(`/api/inventory/low-stock?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`low_stock_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from synchronized IndexedDB items & inventory
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`low_stock_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
-    const items = await offlineStorage.getAll<any>('items');
-    const lowItems = items.filter((i) => (Number(i.current_stock) || 0) <= (Number(i.reorder_level) || 10));
+    const currentRes = await this.getCurrentStock({
+      search: params?.search,
+      company: params?.company,
+    });
+    const lowItems = currentRes.data.filter(
+      (i: any) => i.stock_status === 'OUT_OF_STOCK' || i.stock_status === 'LOW_STOCK'
+    );
     return {
       success: true,
       data: lowItems as any,
       summary: {
-        out_of_stock_count: lowItems.filter((i) => (Number(i.current_stock) || 0) <= 0).length,
-        low_stock_count: lowItems.filter((i) => (Number(i.current_stock) || 0) > 0).length,
+        out_of_stock_count: lowItems.filter((i: any) => i.stock_status === 'OUT_OF_STOCK').length,
+        low_stock_count: lowItems.filter((i: any) => i.stock_status === 'LOW_STOCK').length,
         total_reorder_cost_estimate: 0,
       },
     };
@@ -3584,15 +3960,13 @@ export const api = {
       const res = await authFetch(`/api/inventory/adjustments?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData('stock_adjustments', data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from IndexedDB stock_adjustments
     }
-    const cached = await offlineStorage.getCachedApiData<any>('stock_adjustments');
-    if (cached) return { ...cached, offline: true };
-    return { success: true, adjustments: [] };
+    const localAdj = await offlineStorage.getAll<any>('stock_adjustments');
+    return { success: true, adjustments: localAdj as StockAdjustment[] };
   },
 
   async getStockAdjustmentById(id: number): Promise<{ success: boolean; adjustment: StockAdjustment }> {
@@ -3930,24 +4304,27 @@ export const api = {
       const res = await authFetch('/api/inventory/companies-items-meta');
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData('inventory_companies_items_meta', data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from latest synchronized IndexedDB items
     }
-    const cached = await offlineStorage.getCachedApiData<any>('inventory_companies_items_meta');
-    if (cached) return { ...cached, offline: true };
     const items = await offlineStorage.getAll<any>('items');
-    const companiesSet = new Set<string>();
+    const companiesMap = new Map<string, number>();
     const categoriesSet = new Set<string>();
     for (const it of items) {
-      if (it.company_name) companiesSet.add(String(it.company_name));
+      if (it.company_name) {
+        const c = String(it.company_name);
+        companiesMap.set(c, (companiesMap.get(c) || 0) + 1);
+      }
       if (it.category) categoriesSet.add(String(it.category));
     }
     return {
       success: true,
-      companies: Array.from(companiesSet).map((c) => ({ company_name: c, item_count: 1 })),
+      companies: Array.from(companiesMap.entries()).map(([company_name, item_count]) => ({
+        company_name,
+        item_count,
+      })),
       categories: Array.from(categoriesSet),
       items: items.map((it) => ({
         id: it.id,
@@ -3987,33 +4364,46 @@ export const api = {
       const res = await authFetch(`/api/inventory/item-stock-report?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`item_stock_report_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from latest synchronized IndexedDB items & inventory
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`item_stock_report_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
-    const items = await offlineStorage.getAll<any>('items');
+    const [items, batches] = await Promise.all([
+      offlineStorage.getAll<any>('items'),
+      offlineStorage.getAll<any>('inventory'),
+    ]);
+    const packsByItem = new Map<number, number>();
+    for (const b of batches) {
+      const iid = Number(b.item_id || 0);
+      if (iid <= 0) continue;
+      const upp = Math.max(1, Number(b.units_per_pack || 1));
+      const units = Number(b.total_stock_units ?? b.quantity_in_stock ?? b.quantity ?? 0);
+      packsByItem.set(iid, (packsByItem.get(iid) || 0) + units / upp);
+    }
     return {
       success: true,
       count: items.length,
-      data: items.map((it) => ({
-        item_id: it.id,
-        item_code: it.item_code || '',
-        item_name: it.item_name || '',
-        company_name: it.company_name || '',
-        category: it.category || '',
-        pack_size: it.packing || '1x1',
-        opening_qty: Number(it.opening_stock || 0),
-        purchased_qty: 0,
-        sold_qty: 0,
-        closing_qty: Number(it.opening_stock || 0),
-        purchase_price: Number(it.purchase_price || 0),
-        sale_price: Number(it.retail_price || 0),
-        stock_value: round2Local(Number(it.opening_stock || 0) * Number(it.purchase_price || 0)),
-      })) as any,
+      data: items.map((it) => {
+        const closingQty = packsByItem.has(Number(it.id))
+          ? round2Local(packsByItem.get(Number(it.id))!)
+          : Number(it.opening_stock || 0);
+        return {
+          item_id: it.id,
+          item_code: it.item_code || '',
+          item_name: it.item_name || '',
+          company_name: it.company_name || '',
+          category: it.category || '',
+          pack_size: it.packing || '1x1',
+          opening_qty: Number(it.opening_stock || 0),
+          purchased_qty: 0,
+          sold_qty: 0,
+          closing_qty: closingQty,
+          purchase_price: Number(it.purchase_price || 0),
+          sale_price: Number(it.retail_price || 0),
+          stock_value: round2Local(closingQty * Number(it.purchase_price || 0)),
+        };
+      }) as any,
       totals: {},
     };
   },
@@ -4247,19 +4637,26 @@ export const api = {
       const res = await authFetch(`/api/accounting/ledgers/customer?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`customer_ledger_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: compute directly from latest synchronized IndexedDB accounts, sales & cash_book
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`customer_ledger_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
 
     const localAccs = await offlineStorage.getAll<any>('accounts');
-    const customerAccs = localAccs.filter((a) =>
-      ['Customer', 'Customers'].includes(a.account_group) || ['Customer', 'Customers'].includes(a.account_type)
+    const customerAccs = localAccs.filter(
+      (a) =>
+        ['Customer', 'Customers', 'Customer & Supplier'].includes(a.account_group) ||
+        ['Customer', 'Customers'].includes(a.account_type)
     );
+    const selectedAcc = params?.accountId
+      ? localAccs.find((a) => String(a.id) === String(params.accountId))
+      : null;
+    const openingBal = selectedAcc
+      ? (selectedAcc.opening_balance_type === 'Credit' ? -1 : 1) *
+        Number(selectedAcc.opening_balance || 0)
+      : 0;
+
     const localSales = await offlineStorage.getAll<any>('sales');
     const localVouchers = await offlineStorage.getAll<any>('cash_book');
     const entries: any[] = [];
@@ -4267,28 +4664,29 @@ export const api = {
     let totalCredit = 0;
 
     for (const s of localSales) {
+      if (s.status === 'cancelled' || s.status === 'held' || s.status === 'draft') continue;
       if (params?.accountId && String(s.customer_account_id) !== String(params.accountId)) continue;
-      const amt = Number(s.total_amount) || 0;
-      const rcv = Number(s.received_amount) || 0;
+      const amt = Number(s.net_total ?? s.total_amount ?? 0);
+      const rcv = Number(s.paid_amount ?? s.received_amount ?? 0);
       totalDebit += amt;
       totalCredit += rcv;
       entries.push({
         id: s.id || s.client_tx_id,
-        entry_date: s.sale_date || (s.created_at || '').split('T')[0],
+        entry_date: s.invoice_date || s.sale_date || (s.created_at || '').split('T')[0],
         voucher_number: s.invoice_number,
         voucher_type: 'Sales Invoice',
         narration: `Sales Invoice ${s.invoice_number}`,
         debit: amt,
         credit: rcv,
-        running_balance: totalDebit - totalCredit,
+        running_balance: openingBal + totalDebit - totalCredit,
       });
     }
 
     for (const v of localVouchers) {
-      if (v.status === 'Cancelled') continue;
+      if (v.status === 'cancelled' || v.status === 'Cancelled') continue;
       if (params?.accountId && String(v.head_account_id) !== String(params.accountId)) continue;
-      const dr = Number(v.payment_amount) || 0;
-      const cr = Number(v.receipt_amount) || 0;
+      const dr = Number(v.payment_amount || 0);
+      const cr = Number(v.receipt_amount || 0);
       totalDebit += dr;
       totalCredit += cr;
       entries.push({
@@ -4296,10 +4694,10 @@ export const api = {
         entry_date: v.voucher_date,
         voucher_number: v.voucher_number,
         voucher_type: v.transaction_type,
-        narration: v.narration || v.transaction_category,
+        narration: v.narration || v.category || v.transaction_category,
         debit: dr,
         credit: cr,
-        running_balance: totalDebit - totalCredit,
+        running_balance: openingBal + totalDebit - totalCredit,
       });
     }
 
@@ -4309,10 +4707,10 @@ export const api = {
       accounts: customerAccs,
       entries,
       summary: {
-        openingBalance: 0,
-        totalDebit,
-        totalCredit,
-        closingBalance: totalDebit - totalCredit,
+        openingBalance: openingBal,
+        totalDebit: round2Local(totalDebit),
+        totalCredit: round2Local(totalCredit),
+        closingBalance: round2Local(openingBal + totalDebit - totalCredit),
       },
     };
   },
@@ -4333,19 +4731,26 @@ export const api = {
       const res = await authFetch(`/api/accounting/ledgers/supplier?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`supplier_ledger_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback: compute directly from latest synchronized IndexedDB accounts, purchases & cash_book
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`supplier_ledger_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
 
     const localAccs = await offlineStorage.getAll<any>('accounts');
-    const supplierAccs = localAccs.filter((a) =>
-      ['Supplier', 'Suppliers'].includes(a.account_group) || ['Supplier', 'Suppliers'].includes(a.account_type)
+    const supplierAccs = localAccs.filter(
+      (a) =>
+        ['Supplier', 'Suppliers', 'Customer & Supplier'].includes(a.account_group) ||
+        ['Supplier', 'Suppliers'].includes(a.account_type)
     );
+    const selectedAcc = params?.accountId
+      ? localAccs.find((a) => String(a.id) === String(params.accountId))
+      : null;
+    const openingBal = selectedAcc
+      ? (selectedAcc.opening_balance_type === 'Debit' ? -1 : 1) *
+        Number(selectedAcc.opening_balance || 0)
+      : 0;
+
     const localPurchases = await offlineStorage.getAll<any>('purchases');
     const localVouchers = await offlineStorage.getAll<any>('cash_book');
     const entries: any[] = [];
@@ -4353,28 +4758,29 @@ export const api = {
     let totalCredit = 0;
 
     for (const p of localPurchases) {
+      if (p.status === 'cancelled' || p.status === 'held' || p.status === 'draft') continue;
       if (params?.accountId && String(p.supplier_account_id) !== String(params.accountId)) continue;
-      const amt = Number(p.net_amount || p.total_amount) || 0;
-      const paid = Number(p.paid_amount) || 0;
+      const amt = Number(p.total_payable ?? p.net_total ?? p.net_amount ?? p.total_amount ?? 0);
+      const paid = Number(p.paid_amount ?? 0);
       totalCredit += amt;
       totalDebit += paid;
       entries.push({
         id: p.id || p.client_tx_id,
-        entry_date: p.invoice_date || (p.created_at || '').split('T')[0],
-        voucher_number: p.invoice_number,
+        entry_date: p.bill_date || p.invoice_date || (p.created_at || '').split('T')[0],
+        voucher_number: p.bill_number || p.invoice_number,
         voucher_type: 'Purchase Invoice',
-        narration: `Purchase Invoice ${p.invoice_number}`,
+        narration: `Purchase Invoice ${p.bill_number || p.invoice_number}`,
         debit: paid,
         credit: amt,
-        running_balance: totalCredit - totalDebit,
+        running_balance: openingBal + totalCredit - totalDebit,
       });
     }
 
     for (const v of localVouchers) {
-      if (v.status === 'Cancelled') continue;
+      if (v.status === 'cancelled' || v.status === 'Cancelled') continue;
       if (params?.accountId && String(v.head_account_id) !== String(params.accountId)) continue;
-      const dr = Number(v.payment_amount) || 0;
-      const cr = Number(v.receipt_amount) || 0;
+      const dr = Number(v.payment_amount || 0);
+      const cr = Number(v.receipt_amount || 0);
       totalDebit += dr;
       totalCredit += cr;
       entries.push({
@@ -4382,10 +4788,10 @@ export const api = {
         entry_date: v.voucher_date,
         voucher_number: v.voucher_number,
         voucher_type: v.transaction_type,
-        narration: v.narration || v.transaction_category,
+        narration: v.narration || v.category || v.transaction_category,
         debit: dr,
         credit: cr,
-        running_balance: totalCredit - totalDebit,
+        running_balance: openingBal + totalCredit - totalDebit,
       });
     }
 
@@ -4395,10 +4801,10 @@ export const api = {
       accounts: supplierAccs,
       entries,
       summary: {
-        openingBalance: 0,
-        totalDebit,
-        totalCredit,
-        closingBalance: totalCredit - totalDebit,
+        openingBalance: openingBal,
+        totalDebit: round2Local(totalDebit),
+        totalCredit: round2Local(totalCredit),
+        closingBalance: round2Local(openingBal + totalCredit - totalDebit),
       },
     };
   },
@@ -4419,14 +4825,11 @@ export const api = {
       const res = await authFetch(`/api/accounting/ledgers/general?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`general_ledger_${query.toString()}`, data);
         return data;
       }
     } catch {
-      // Offline fallback
+      // Offline fallback from latest synchronized IndexedDB accounts
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`general_ledger_${query.toString()}`);
-    if (cached) return { ...cached, offline: true };
     const localAccs = await offlineStorage.getAll<any>('accounts');
     return {
       success: true,

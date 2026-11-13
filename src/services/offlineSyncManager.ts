@@ -80,6 +80,10 @@ class OfflineSyncManager {
   }
 
   private async init() {
+    // Step 1: Initialize IndexedDB immediately
+    await offlineStorage.getDb().catch(() => {});
+
+    // Step 2: Load locally stored metadata & pending transactions immediately
     this.deviceId = await offlineStorage.getOrCreateDeviceId();
     const savedCounterName = await offlineStorage.getMeta('counter_name');
     const savedTerminalType = await offlineStorage.getMeta('terminal_type');
@@ -108,10 +112,14 @@ class OfflineSyncManager {
       }
     }, 15000);
 
-    // Initial sync
-    setTimeout(() => {
+    // Step 3: Startup Procedure (Online vs Offline)
+    if (this.isOnline) {
+      // Connect to cloud database immediately and synchronize changes safely into IndexedDB
       this.syncNow();
-    }, 600);
+    } else {
+      this.syncStatus = 'offline';
+      this.notify();
+    }
   }
 
   public async setTerminalDesignation(
@@ -206,6 +214,238 @@ class OfflineSyncManager {
     return this.syncNow();
   }
 
+  private normalizeTimestamp(ts: unknown): string {
+    const clean = String(ts || '').trim();
+    if (!clean) return '';
+    return clean.replace(' ', 'T');
+  }
+
+  /**
+   * Merges incoming server records with existing local IndexedDB records for ID-keyed tables
+   * (items, accounts, inventory, salesmen) while protecting newer local changes and pending mutations.
+   */
+  private async mergeIdKeyedTable(
+    storeName: string,
+    remoteRows: any[],
+    protectedIds: Set<number>,
+    serverSyncTime: string
+  ): Promise<void> {
+    if (!Array.isArray(remoteRows)) return;
+
+    const localRows = await offlineStorage.getAll<any>(storeName);
+    if (remoteRows.length === 0 && localRows.length > 0) {
+      // Never wipe a non-empty local dataset if an incomplete/empty response arrives
+      return;
+    }
+
+    const localById = new Map<number, any>();
+    for (const loc of localRows) {
+      const id = Number(loc?.id);
+      if (!Number.isNaN(id) && id > 0) {
+        localById.set(id, loc);
+      }
+    }
+
+    const toUpsert: any[] = [];
+    let maxId = 0;
+    let latestUpdatedAt = '';
+
+    for (const remote of remoteRows) {
+      const id = Number(remote?.id);
+      if (Number.isNaN(id) || id <= 0) continue;
+      if (id > maxId) maxId = id;
+
+      const remoteTs = this.normalizeTimestamp(remote.updated_at || remote.created_at);
+      if (remoteTs > latestUpdatedAt) latestUpdatedAt = remoteTs;
+
+      if (protectedIds.has(id)) {
+        continue;
+      }
+
+      const existing = localById.get(id);
+      if (existing) {
+        if (existing.sync_status === 'pending') {
+          continue;
+        }
+        const localTs = this.normalizeTimestamp(existing.updated_at || existing.created_at);
+        // If local record has a strictly newer timestamp and was modified locally, preserve it
+        if (localTs && remoteTs && localTs > remoteTs && existing.local_modified === true) {
+          continue;
+        }
+      }
+
+      toUpsert.push({
+        ...remote,
+        sync_status: 'synced',
+        local_modified: false,
+      });
+    }
+
+    if (toUpsert.length > 0) {
+      await offlineStorage.bulkPut(storeName, toUpsert);
+    }
+
+    await offlineStorage.setTableSyncMeta(storeName, {
+      lastSyncedAt: serverSyncTime,
+      rowCount: Math.max(remoteRows.length, localById.size),
+      latestUpdatedAt: latestUpdatedAt || serverSyncTime,
+      maxId,
+      status: 'synced',
+    });
+  }
+
+  /**
+   * Merges incoming server transaction records (sales, purchases, cash_book, sale_returns, purchase_returns)
+   * keyed by client_tx_id while reconciling server_id / id to prevent duplicates and protect local pending records.
+   */
+  private async mergeTxKeyedTable(
+    storeName: string,
+    remoteRows: any[],
+    pendingTxIds: Set<string>,
+    serverSyncTime: string
+  ): Promise<void> {
+    if (!Array.isArray(remoteRows)) return;
+
+    const localRows = await offlineStorage.getAll<any>(storeName);
+    if (remoteRows.length === 0 && localRows.length > 0) {
+      return;
+    }
+
+    const localByTxId = new Map<string, any>();
+    const localByServerId = new Map<number, any>();
+    for (const loc of localRows) {
+      if (loc?.client_tx_id) {
+        localByTxId.set(String(loc.client_tx_id), loc);
+      }
+      const srvId = Number(loc?.server_id || loc?.id || 0);
+      if (srvId > 0 && srvId < 1_000_000_000_000) {
+        localByServerId.set(srvId, loc);
+      }
+    }
+
+    const toUpsert: any[] = [];
+    let maxId = 0;
+    let latestUpdatedAt = '';
+
+    for (const remote of remoteRows) {
+      const remoteTxId = String(remote?.client_tx_id || '');
+      if (!remoteTxId) continue;
+      if (pendingTxIds.has(remoteTxId)) continue;
+
+      const srvId = Number(remote?.server_id || remote?.id || 0);
+      if (srvId > maxId) maxId = srvId;
+
+      const remoteTs = this.normalizeTimestamp(remote.updated_at || remote.created_at);
+      if (remoteTs > latestUpdatedAt) latestUpdatedAt = remoteTs;
+
+      // Check if this server transaction already exists locally under a different client_tx_id
+      const existingByServerId = srvId > 0 ? localByServerId.get(srvId) : undefined;
+      if (existingByServerId && String(existingByServerId.client_tx_id) !== remoteTxId) {
+        if (pendingTxIds.has(String(existingByServerId.client_tx_id))) {
+          continue;
+        }
+        // Remove the old local duplicate key before inserting the canonical record
+        await offlineStorage.delete(storeName, String(existingByServerId.client_tx_id)).catch(() => {});
+      }
+
+      const existingByTx = localByTxId.get(remoteTxId);
+      if (existingByTx && existingByTx.sync_status === 'pending') {
+        continue;
+      }
+
+      toUpsert.push({
+        ...remote,
+        sync_status: 'synced',
+      });
+    }
+
+    if (toUpsert.length > 0) {
+      await offlineStorage.bulkPut(storeName, toUpsert);
+    }
+
+    await offlineStorage.setTableSyncMeta(storeName, {
+      lastSyncedAt: serverSyncTime,
+      rowCount: Math.max(remoteRows.length, localByTxId.size),
+      latestUpdatedAt: latestUpdatedAt || serverSyncTime,
+      maxId,
+      status: 'synced',
+    });
+  }
+
+  /**
+   * Applies server deletion tombstones to local IndexedDB stores so deleted records never reappear offline.
+   */
+  private async applyTombstones(
+    tombstones: Array<{
+      id: number;
+      table_name: string;
+      record_id: string;
+      client_tx_id?: string | null;
+      deleted_at: string;
+    }>,
+    pendingItemIds: Set<number>,
+    pendingAccountIds: Set<number>,
+    pendingTxIds: Set<string>
+  ): Promise<void> {
+    if (!Array.isArray(tombstones) || tombstones.length === 0) return;
+
+    const txStoreMap: Record<string, string> = {
+      sales: 'sales',
+      purchases: 'purchases',
+      cash_book_vouchers: 'cash_book',
+      sale_returns: 'sale_returns',
+      purchase_returns: 'purchase_returns',
+    };
+
+    for (const tomb of tombstones) {
+      const table = String(tomb.table_name || '');
+      const numId = Number(tomb.record_id || 0);
+      const txId = tomb.client_tx_id ? String(tomb.client_tx_id) : '';
+
+      try {
+        if (table === 'items' && numId > 0 && !pendingItemIds.has(numId)) {
+          await offlineStorage.delete('items', numId);
+          // Also remove any orphaned inventory batches for this deleted item
+          const invRows = await offlineStorage.getAll<any>('inventory');
+          for (const b of invRows) {
+            if (Number(b.item_id) === numId) {
+              await offlineStorage.delete('inventory', Number(b.id));
+            }
+          }
+        } else if (table === 'accounts' && numId > 0 && !pendingAccountIds.has(numId)) {
+          await offlineStorage.delete('accounts', numId);
+        } else if (table === 'inventory' && numId > 0) {
+          const b = await offlineStorage.get<any>('inventory', numId);
+          if (!b || !pendingItemIds.has(Number(b.item_id))) {
+            await offlineStorage.delete('inventory', numId);
+          }
+        } else if (table === 'salesmen' && numId > 0) {
+          await offlineStorage.delete('salesmen', numId);
+        } else if (table === 'users' && numId > 0) {
+          await offlineStorage.delete('auth_vault', numId);
+        } else if (txStoreMap[table]) {
+          const targetStore = txStoreMap[table];
+          if (txId && !pendingTxIds.has(txId)) {
+            await offlineStorage.delete(targetStore, txId);
+          }
+          if (numId > 0) {
+            const allRows = await offlineStorage.getAll<any>(targetStore);
+            for (const row of allRows) {
+              if (
+                (Number(row.id) === numId || Number(row.server_id) === numId) &&
+                !pendingTxIds.has(String(row.client_tx_id))
+              ) {
+                await offlineStorage.delete(targetStore, String(row.client_tx_id));
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore single tombstone error
+      }
+    }
+  }
+
   /**
    * Main sync method: Pushes pending local items to server and pulls latest canonical updates.
    */
@@ -224,10 +464,13 @@ class OfflineSyncManager {
     this.notify();
 
     try {
+      await offlineStorage.getDb();
+
       // Register terminal heartbeat with LAN / Cloud server
       fetch('/api/sync/register-terminal', {
         method: 'POST',
         headers: getStoredAuthHeaders(),
+        cache: 'no-store',
         body: JSON.stringify({
           deviceId: this.deviceId,
           counterName: this.counterName,
@@ -237,6 +480,8 @@ class OfflineSyncManager {
 
       // Step 1: Push any pending offline transactions in chronological order
       const pendingItems = await offlineStorage.getPendingSyncItems();
+      const pendingByTxId = new Map(pendingItems.map((p) => [p.client_tx_id, p]));
+
       if (pendingItems.length > 0) {
         this.syncProgress = { current: 0, total: pendingItems.length };
         this.notify();
@@ -244,6 +489,7 @@ class OfflineSyncManager {
         const res = await fetch('/api/sync/push', {
           method: 'POST',
           headers: getStoredAuthHeaders(),
+          cache: 'no-store',
           body: JSON.stringify({
             deviceId: this.deviceId,
             counterName: this.counterName,
@@ -267,97 +513,259 @@ class OfflineSyncManager {
               server_invoice_number: resItem.invoice_number,
               error: resItem.error,
             });
+
+            // Reconcile local IndexedDB record on successful push to prevent duplicate temporary IDs
+            if (resItem.status === 'synced') {
+              const origQueueItem = pendingByTxId.get(resItem.client_tx_id);
+              if (origQueueItem) {
+                const { entity, local_id } = origQueueItem;
+                const srvId = Number(resItem.server_id || 0);
+                try {
+                  if (entity === 'items' && Number(local_id) > 0 && srvId > 0 && Number(local_id) !== srvId) {
+                    await offlineStorage.delete('items', Number(local_id));
+                  } else if (
+                    entity === 'accounts' &&
+                    Number(local_id) > 0 &&
+                    srvId > 0 &&
+                    Number(local_id) !== srvId
+                  ) {
+                    await offlineStorage.delete('accounts', Number(local_id));
+                  } else if (
+                    entity === 'sales' ||
+                    entity === 'purchases' ||
+                    entity === 'cash_book' ||
+                    entity === 'sale_returns' ||
+                    entity === 'purchase_returns'
+                  ) {
+                    const existingTx = await offlineStorage.get<any>(entity, resItem.client_tx_id);
+                    if (existingTx) {
+                      existingTx.sync_status = 'synced';
+                      if (srvId > 0) {
+                        existingTx.id = srvId;
+                        existingTx.server_id = srvId;
+                      }
+                      if (resItem.invoice_number) {
+                        existingTx.invoice_number = resItem.invoice_number;
+                        if (entity === 'purchases') existingTx.bill_number = resItem.invoice_number;
+                        if (entity === 'cash_book') existingTx.voucher_number = resItem.invoice_number;
+                      }
+                      await offlineStorage.put(entity, existingTx);
+                    }
+                  }
+                } catch {
+                  // ignore reconciliation warning
+                }
+              }
+            }
           }
         }
       }
 
-      // Step 2: Pull latest items, accounts, inventory, sales, purchases, cash_book, settings to IndexedDB
+      // Step 2: Pull latest items, accounts, inventory, sales, purchases, cash_book, users, settings to IndexedDB
       // Never overwrite local records that still have pending unsynced changes
       const remainingPending = await offlineStorage.getPendingSyncItems();
       const pendingTxIds = new Set(remainingPending.map((p) => p.client_tx_id));
       const pendingItemIds = new Set(
         remainingPending
-          .filter((p) => p.entity === 'items')
-          .map((p) => Number(p.local_id || p.payload?.id))
+          .filter(
+            (p) =>
+              p.entity === 'items' ||
+              p.entity === 'inventory' ||
+              p.action === 'STOCK_ADJUSTMENT'
+          )
+          .map((p) => Number(p.local_id || p.payload?.item_id || p.payload?.id))
+          .filter((id) => !Number.isNaN(id) && id > 0)
       );
+      // Also protect items referenced in pending offline sales or purchases
+      for (const p of remainingPending) {
+        if (p.entity === 'sales' || p.entity === 'purchases') {
+          const lines = Array.isArray(p.payload?.items)
+            ? p.payload.items
+            : Array.isArray(p.payload?.lines)
+            ? p.payload.lines
+            : [];
+          for (const ln of lines) {
+            const iid = Number(ln?.item_id || 0);
+            if (iid > 0) pendingItemIds.add(iid);
+          }
+        }
+      }
+
       const pendingAccountIds = new Set(
         remainingPending
           .filter((p) => p.entity === 'accounts')
           .map((p) => Number(p.local_id || p.payload?.id))
+          .filter((id) => !Number.isNaN(id) && id > 0)
       );
+      for (const p of remainingPending) {
+        const custId = Number(p.payload?.customer_account_id || 0);
+        const supId = Number(p.payload?.supplier_account_id || 0);
+        const headId = Number(p.payload?.head_account_id || 0);
+        const cbId = Number(p.payload?.cash_bank_account_id || 0);
+        if (custId > 0) pendingAccountIds.add(custId);
+        if (supId > 0) pendingAccountIds.add(supId);
+        if (headId > 0) pendingAccountIds.add(headId);
+        if (cbId > 0) pendingAccountIds.add(cbId);
+      }
+
+      const lastTombstoneId = Number((await offlineStorage.getMeta('last_tombstone_id')) || 0);
 
       const pullRes = await fetch(
-        `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(this.counterName)}`,
-        { headers: getStoredAuthHeaders() }
+        `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(this.counterName)}&last_tombstone_id=${lastTombstoneId}&_t=${Date.now()}`,
+        {
+          headers: getStoredAuthHeaders(),
+          cache: 'no-store',
+        }
       );
       if (!pullRes.ok) {
         throw new Error(`Pull failed with HTTP ${pullRes.status}`);
       }
 
       const pullData = await pullRes.json();
-      if (pullData.success) {
-        if (Array.isArray(pullData.items) && pullData.items.length > 0) {
-          const safeItems = pullData.items.filter((it: any) => !pendingItemIds.has(Number(it.id)));
-          await offlineStorage.bulkPut('items', safeItems);
-        }
-        if (Array.isArray(pullData.accounts) && pullData.accounts.length > 0) {
-          const safeAccounts = pullData.accounts.filter(
-            (acc: any) => !pendingAccountIds.has(Number(acc.id))
-          );
-          await offlineStorage.bulkPut('accounts', safeAccounts);
-        }
-        if (Array.isArray(pullData.inventory) && pullData.inventory.length > 0 && remainingPending.length === 0) {
-          await offlineStorage.bulkPut('inventory', pullData.inventory);
-        }
-        if (Array.isArray(pullData.sales) && pullData.sales.length > 0) {
-          const safeSales = pullData.sales.filter(
-            (s: any) => !pendingTxIds.has(String(s.client_tx_id))
-          );
-          await offlineStorage.bulkPut('sales', safeSales);
-        }
-        if (Array.isArray(pullData.purchases) && pullData.purchases.length > 0) {
-          const safePurchases = pullData.purchases.filter(
-            (p: any) => !pendingTxIds.has(String(p.client_tx_id))
-          );
-          await offlineStorage.bulkPut('purchases', safePurchases);
-        }
-        if (Array.isArray(pullData.cashBookVouchers) && pullData.cashBookVouchers.length > 0) {
-          const safeCb = pullData.cashBookVouchers.filter(
-            (cb: any) => !pendingTxIds.has(String(cb.client_tx_id))
-          );
-          await offlineStorage.bulkPut('cash_book', safeCb);
-        }
-        if (Array.isArray(pullData.saleReturns) && pullData.saleReturns.length > 0) {
-          await offlineStorage.bulkPut('sale_returns', pullData.saleReturns);
-        }
-        if (Array.isArray(pullData.purchaseReturns) && pullData.purchaseReturns.length > 0) {
-          await offlineStorage.bulkPut('purchase_returns', pullData.purchaseReturns);
-        }
-        if (Array.isArray(pullData.salesmen) && pullData.salesmen.length > 0) {
-          await offlineStorage.bulkPut('salesmen', pullData.salesmen);
-        }
-        if (pullData.supplySnapshot) {
-          await offlineStorage.cacheApiData('supply_snapshot', pullData.supplySnapshot);
-        }
-        if (pullData.payrollSnapshot) {
-          await offlineStorage.cacheApiData('payroll_snapshot', pullData.payrollSnapshot);
-        }
-        if (Array.isArray(pullData.offlineUsers) && pullData.offlineUsers.length > 0) {
-          await offlineStorage.bulkPut('auth_vault', pullData.offlineUsers);
-          try {
-            localStorage.setItem('ams_offline_auth_vault_v2', JSON.stringify(pullData.offlineUsers));
-            localStorage.setItem('ams_workstation_authorized_v2', '1');
-          } catch {
-            // ignore storage quota errors
-          }
-        }
-        if (pullData.companySettings) {
-          await offlineStorage.put('company_settings', pullData.companySettings);
-        }
-        if (pullData.advanceTaxSettings) {
-          await offlineStorage.cacheApiData('advance_tax_settings', pullData.advanceTaxSettings);
+      if (!pullData || !pullData.success) {
+        throw new Error(pullData?.error || 'Synchronization pull returned invalid response');
+      }
+
+      const serverSyncTime = String(pullData.serverTime || new Date().toISOString());
+
+      // Validate that all required tables are present in pullData before marking sync complete
+      const requiredArrays = [
+        'items',
+        'accounts',
+        'inventory',
+        'sales',
+        'purchases',
+        'offlineUsers',
+      ];
+      for (const reqKey of requiredArrays) {
+        if (!Array.isArray(pullData[reqKey])) {
+          throw new Error(`Incomplete synchronization response: missing required table '${reqKey}'`);
         }
       }
+
+      // 1. Apply deletion tombstones first
+      if (Array.isArray(pullData.tombstones) && pullData.tombstones.length > 0) {
+        await this.applyTombstones(
+          pullData.tombstones,
+          pendingItemIds,
+          pendingAccountIds,
+          pendingTxIds
+        );
+      }
+      if (typeof pullData.maxTombstoneId === 'number') {
+        await offlineStorage.setMeta('last_tombstone_id', pullData.maxTombstoneId);
+      }
+
+      // 2. Synchronize Items & Accounts with conflict protection
+      await this.mergeIdKeyedTable('items', pullData.items, pendingItemIds, serverSyncTime);
+      await this.mergeIdKeyedTable('accounts', pullData.accounts, pendingAccountIds, serverSyncTime);
+
+      // 3. Synchronize Inventory (Stock Batches) for all items without pending local stock mutations
+      if (Array.isArray(pullData.inventory)) {
+        const localBatches = await offlineStorage.getAll<any>('inventory');
+        if (pullData.inventory.length > 0 || localBatches.length === 0) {
+          const safeRemoteBatches = pullData.inventory.filter(
+            (b: any) => !pendingItemIds.has(Number(b.item_id))
+          );
+          const remoteBatchIds = new Set(
+            pullData.inventory.map((b: any) => Number(b.id)).filter((id: number) => id > 0)
+          );
+          // Remove stale local batches that were consolidated/removed on server (only for non-pending items)
+          for (const lb of localBatches) {
+            const lbId = Number(lb?.id || 0);
+            const lbItemId = Number(lb?.item_id || 0);
+            if (
+              lbId > 0 &&
+              !pendingItemIds.has(lbItemId) &&
+              !remoteBatchIds.has(lbId) &&
+              pullData.inventory.length > 0
+            ) {
+              await offlineStorage.delete('inventory', lbId).catch(() => {});
+            }
+          }
+          if (safeRemoteBatches.length > 0) {
+            await offlineStorage.bulkPut('inventory', safeRemoteBatches);
+          }
+          await offlineStorage.setTableSyncMeta('inventory', {
+            lastSyncedAt: serverSyncTime,
+            rowCount: pullData.inventory.length,
+            latestUpdatedAt: pullData.tableMeta?.inventory?.latestUpdatedAt || serverSyncTime,
+            maxId: pullData.tableMeta?.inventory?.maxId || 0,
+            status: 'synced',
+          });
+        }
+      }
+
+      // 4. Synchronize Transactions (Sales, Purchases, Cash Book, Returns) with deduplication & conflict protection
+      await this.mergeTxKeyedTable('sales', pullData.sales, pendingTxIds, serverSyncTime);
+      await this.mergeTxKeyedTable('purchases', pullData.purchases, pendingTxIds, serverSyncTime);
+      if (Array.isArray(pullData.cashBookVouchers)) {
+        await this.mergeTxKeyedTable('cash_book', pullData.cashBookVouchers, pendingTxIds, serverSyncTime);
+      }
+      if (Array.isArray(pullData.saleReturns)) {
+        await this.mergeTxKeyedTable('sale_returns', pullData.saleReturns, pendingTxIds, serverSyncTime);
+      }
+      if (Array.isArray(pullData.purchaseReturns)) {
+        await this.mergeTxKeyedTable(
+          'purchase_returns',
+          pullData.purchaseReturns,
+          pendingTxIds,
+          serverSyncTime
+        );
+      }
+
+      // 5. Synchronize Salesmen, Supply, Payroll, Users & Settings
+      if (Array.isArray(pullData.salesmen)) {
+        await this.mergeIdKeyedTable('salesmen', pullData.salesmen, new Set(), serverSyncTime);
+      }
+      if (pullData.supplySnapshot) {
+        await offlineStorage.cacheApiData('supply_snapshot', pullData.supplySnapshot);
+      }
+      if (pullData.payrollSnapshot) {
+        await offlineStorage.cacheApiData('payroll_snapshot', pullData.payrollSnapshot);
+      }
+      if (Array.isArray(pullData.offlineUsers) && pullData.offlineUsers.length > 0) {
+        await offlineStorage.bulkPut('auth_vault', pullData.offlineUsers);
+        await offlineStorage.setTableSyncMeta('auth_vault', {
+          lastSyncedAt: serverSyncTime,
+          rowCount: pullData.offlineUsers.length,
+          latestUpdatedAt: serverSyncTime,
+          maxId: pullData.tableMeta?.auth_vault?.maxId || 0,
+          status: 'synced',
+        });
+        try {
+          localStorage.setItem('ams_offline_auth_vault_v2', JSON.stringify(pullData.offlineUsers));
+          localStorage.setItem('ams_workstation_authorized_v2', '1');
+        } catch {
+          // ignore storage quota errors
+        }
+      }
+      if (pullData.companySettings) {
+        await offlineStorage.put('company_settings', pullData.companySettings);
+        await offlineStorage.setTableSyncMeta('company_settings', {
+          lastSyncedAt: serverSyncTime,
+          rowCount: 1,
+          latestUpdatedAt: this.normalizeTimestamp(pullData.companySettings.updated_at) || serverSyncTime,
+          maxId: Number(pullData.companySettings.id || 1),
+          status: 'synced',
+        });
+      }
+      if (pullData.advanceTaxSettings) {
+        await offlineStorage.cacheApiData('advance_tax_settings', pullData.advanceTaxSettings);
+      }
+
+      // 6. Invalidate stale dynamic API response caches so offline mode always computes from latest IndexedDB tables
+      await offlineStorage.invalidateDynamicApiCache([
+        'inventory_',
+        'stock_',
+        'ledger_',
+        'cash_book_',
+        'sale_details_',
+        'purchase_details_',
+        'sale_returns_',
+        'purchase_returns_',
+        'payment_vouchers_',
+      ]);
 
       const now = new Date().toISOString();
       this.lastSyncedAt = now;
@@ -376,6 +784,14 @@ class OfflineSyncManager {
         }, 8000);
       }
       this.notify();
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('ams-data-synchronized', {
+            detail: { syncedAt: now, serverTime: serverSyncTime },
+          })
+        );
+      }
       return true;
     } catch (err: unknown) {
       this.syncProgress = null;
@@ -1026,31 +1442,33 @@ class OfflineSyncManager {
   /**
    * Fast indexed search of items from local IndexedDB (instant search with zero latency!)
    */
-  public async searchLocalItems(query = '', limit = 50): Promise<any[]> {
+  public async searchLocalItems(query = '', limit = 0): Promise<any[]> {
     try {
       const allItems = await offlineStorage.getAll<any>('items');
+      allItems.sort((a, b) =>
+        String(a.item_name || '').localeCompare(String(b.item_name || ''))
+      );
       if (!query.trim()) {
-        return allItems.slice(0, limit);
+        return limit > 0 ? allItems.slice(0, limit) : allItems;
       }
       const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-      return allItems
-        .filter((item) => {
-          const searchCorpus = [
-            item.item_code,
-            item.barcode,
-            item.item_name,
-            item.generic_name,
-            item.company_name,
-            item.category,
-            item.packing,
-          ]
-            .filter(Boolean)
-            .join(' ')
-            .toLowerCase();
+      const matched = allItems.filter((item) => {
+        const searchCorpus = [
+          item.item_code,
+          item.barcode,
+          item.item_name,
+          item.generic_name,
+          item.company_name,
+          item.category,
+          item.packing,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
 
-          return tokens.every((token) => searchCorpus.includes(token));
-        })
-        .slice(0, limit);
+        return tokens.every((token) => searchCorpus.includes(token));
+      });
+      return limit > 0 ? matched.slice(0, limit) : matched;
     } catch {
       return [];
     }
@@ -1059,31 +1477,33 @@ class OfflineSyncManager {
   /**
    * Fast indexed search of accounts from local IndexedDB
    */
-  public async searchLocalAccounts(query = '', limit = 50): Promise<any[]> {
+  public async searchLocalAccounts(query = '', limit = 0): Promise<any[]> {
     try {
       const allAccounts = await offlineStorage.getAll<any>('accounts');
+      allAccounts.sort((a, b) =>
+        String(a.account_name || '').localeCompare(String(b.account_name || ''))
+      );
       if (!query.trim()) {
-        return allAccounts.slice(0, limit);
+        return limit > 0 ? allAccounts.slice(0, limit) : allAccounts;
       }
       const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-      return allAccounts
-        .filter((acc) => {
-          const searchCorpus = [
-            acc.account_code,
-            acc.account_name,
-            acc.account_group,
-            acc.main_group,
-            acc.phone,
-            acc.contact_person,
-            acc.city,
-          ]
-            .filter(Boolean)
-            .join(' ')
-            .toLowerCase();
+      const matched = allAccounts.filter((acc) => {
+        const searchCorpus = [
+          acc.account_code,
+          acc.account_name,
+          acc.account_group,
+          acc.main_group,
+          acc.phone,
+          acc.contact_person,
+          acc.city,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
 
-          return tokens.every((token) => searchCorpus.includes(token));
-        })
-        .slice(0, limit);
+        return tokens.every((token) => searchCorpus.includes(token));
+      });
+      return limit > 0 ? matched.slice(0, limit) : matched;
     } catch {
       return [];
     }

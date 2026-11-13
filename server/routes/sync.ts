@@ -6,6 +6,7 @@ import { processSaleUpsert } from './sales.ts';
 import { recalculateAccountBalance } from './accounts.ts';
 import { allocateNextAccountCode } from '../utils/accountCodeGenerator.ts';
 import { ensureAuthTables, getOfflineAuthVaultProfiles } from '../services/authService.ts';
+import { ensureCloudPersistenceReady } from '../services/cloudPersistenceService.ts';
 
 export const syncRouter = Router();
 
@@ -26,7 +27,8 @@ function parseUnitsPerPack(packingStr?: string | null): number {
   return 1;
 }
 
-// Ensure sync_audit_log and device_registry tables exist
+// Ensure sync_audit_log, device_registry, and sync_tombstones tables & triggers exist
+let syncTablesInitialized = false;
 function ensureSyncTables() {
   const db = getDatabase();
   db.exec(`
@@ -56,9 +58,66 @@ function ensureSyncTables() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS sync_tombstones (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      table_name TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      client_tx_id TEXT,
+      deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sync_audit_tx ON sync_audit_log(client_tx_id);
     CREATE INDEX IF NOT EXISTS idx_sync_audit_device ON sync_audit_log(device_id);
+    CREATE INDEX IF NOT EXISTS idx_sync_tombstones_table ON sync_tombstones(table_name, record_id);
+    CREATE INDEX IF NOT EXISTS idx_sync_tombstones_deleted_at ON sync_tombstones(deleted_at);
   `);
+
+  if (!syncTablesInitialized) {
+    const safeAddColumn = (table: string, colDef: string) => {
+      try {
+        db.exec(`ALTER TABLE "${table}" ADD COLUMN ${colDef}`);
+      } catch {
+        // column already exists
+      }
+    };
+    safeAddColumn('sales', 'client_request_id TEXT');
+    safeAddColumn('purchases', 'client_request_id TEXT');
+    safeAddColumn('cash_book_vouchers', 'client_tx_id TEXT');
+    safeAddColumn('sale_returns', 'client_tx_id TEXT');
+    safeAddColumn('purchase_returns', 'client_tx_id TEXT');
+
+    // Create AFTER DELETE triggers so any hard delete in SQLite records a tombstone for offline clients
+    const triggerSpecs: Array<{ table: string; txCol?: string }> = [
+      { table: 'items' },
+      { table: 'accounts' },
+      { table: 'inventory' },
+      { table: 'sales', txCol: 'client_request_id' },
+      { table: 'purchases', txCol: 'client_request_id' },
+      { table: 'cash_book_vouchers', txCol: 'client_tx_id' },
+      { table: 'sale_returns', txCol: 'client_tx_id' },
+      { table: 'purchase_returns', txCol: 'client_tx_id' },
+      { table: 'salesmen' },
+      { table: 'users' },
+    ];
+
+    for (const spec of triggerSpecs) {
+      try {
+        const txExpr = spec.txCol ? `OLD.${spec.txCol}` : 'NULL';
+        db.exec(`
+          CREATE TRIGGER IF NOT EXISTS trg_sync_tombstone_${spec.table}_del
+          AFTER DELETE ON "${spec.table}"
+          BEGIN
+            INSERT INTO sync_tombstones (table_name, record_id, client_tx_id, deleted_at)
+            VALUES ('${spec.table}', CAST(OLD.id AS TEXT), ${txExpr}, CURRENT_TIMESTAMP);
+          END;
+        `);
+      } catch {
+        // ignore if table does not exist yet
+      }
+    }
+
+    syncTablesInitialized = true;
+  }
 }
 
 function getNextContinuousCashBookVoucherNumber(db: any): {
@@ -134,12 +193,18 @@ syncRouter.get('/status', (_req: Request, res: Response) => {
  * GET /api/sync/pull
  * Pull complete canonical data snapshot from server to local device IndexedDB
  */
-syncRouter.get('/pull', (req: Request, res: Response) => {
+syncRouter.get('/pull', async (req: Request, res: Response) => {
   try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    await ensureCloudPersistenceReady();
     ensureSyncTables();
     const db = getDatabase();
     const deviceId = String(req.query.device_id || 'unknown');
     const counterName = String(req.query.counter_name || 'Main Counter');
+    const lastTombstoneId = Math.max(0, Number(req.query.last_tombstone_id || 0));
 
     // Update device registry heartbeat
     db.prepare(`
@@ -152,15 +217,15 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
         user_agent = excluded.user_agent
     `).run(deviceId, counterName, req.ip || '127.0.0.1', String(req.headers['user-agent'] || ''));
 
-    const items = db.prepare('SELECT * FROM items ORDER BY item_name ASC').all();
-    const accounts = db.prepare('SELECT * FROM accounts ORDER BY account_name ASC').all();
-    const inventory = db.prepare('SELECT * FROM inventory ORDER BY expiry_date ASC').all();
-    const companySettings = db.prepare('SELECT * FROM company_settings LIMIT 1').get();
+    const items = db.prepare('SELECT * FROM items ORDER BY item_name ASC').all() as Array<Record<string, any>>;
+    const accounts = db.prepare('SELECT * FROM accounts ORDER BY account_name ASC').all() as Array<Record<string, any>>;
+    const inventory = db.prepare('SELECT * FROM inventory ORDER BY expiry_date ASC').all() as Array<Record<string, any>>;
+    const companySettings = db.prepare('SELECT * FROM company_settings LIMIT 1').get() as Record<string, any> | undefined;
     const advanceTaxSettings = db
       .prepare('SELECT * FROM advance_tax_settings ORDER BY id ASC LIMIT 1')
-      .get();
+      .get() as Record<string, any> | undefined;
 
-    // Pull recent sales with line items for offline Sales History, Reprint & Return
+    // Pull all active sales with line items for offline Sales History, Ledgers, Reprint & Return
     const rawSales = db
       .prepare(`
         SELECT s.*,
@@ -172,21 +237,25 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
         LEFT JOIN accounts a ON s.customer_account_id = a.id
         LEFT JOIN accounts payAcc ON s.payment_account_id = payAcc.id
         ORDER BY s.invoice_date DESC, s.id DESC
-        LIMIT 200
+        LIMIT 5000
       `)
       .all() as Array<Record<string, any>>;
 
     const saleIds = rawSales.map((s) => Number(s.id));
     const saleItemsBySaleId = new Map<number, any[]>();
     if (saleIds.length > 0) {
-      const ph = saleIds.map(() => '?').join(',');
-      const allSaleItems = db
-        .prepare(`SELECT * FROM sale_items WHERE sale_id IN (${ph}) ORDER BY id ASC`)
-        .all(...saleIds) as Array<Record<string, any>>;
-      for (const si of allSaleItems) {
-        const sid = Number(si.sale_id);
-        if (!saleItemsBySaleId.has(sid)) saleItemsBySaleId.set(sid, []);
-        saleItemsBySaleId.get(sid)!.push(si);
+      const CHUNK = 800;
+      for (let i = 0; i < saleIds.length; i += CHUNK) {
+        const slice = saleIds.slice(i, i + CHUNK);
+        const ph = slice.map(() => '?').join(',');
+        const chunkItems = db
+          .prepare(`SELECT * FROM sale_items WHERE sale_id IN (${ph}) ORDER BY id ASC`)
+          .all(...slice) as Array<Record<string, any>>;
+        for (const si of chunkItems) {
+          const sid = Number(si.sale_id);
+          if (!saleItemsBySaleId.has(sid)) saleItemsBySaleId.set(sid, []);
+          saleItemsBySaleId.get(sid)!.push(si);
+        }
       }
     }
 
@@ -194,6 +263,7 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       const lines = saleItemsBySaleId.get(Number(s.id)) || [];
       return {
         ...s,
+        server_id: s.id,
         client_tx_id: s.client_request_id || `SERVER-SALE-${s.id}`,
         item_count: lines.length,
         items: lines,
@@ -202,7 +272,7 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       };
     });
 
-    // Pull recent purchases with line items for offline Purchase History & Return
+    // Pull all active purchases with line items for offline Purchase History, Ledgers & Return
     const rawPurchases = db
       .prepare(`
         SELECT p.*,
@@ -213,21 +283,25 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
         LEFT JOIN accounts a ON p.supplier_account_id = a.id
         LEFT JOIN accounts payAcc ON p.payment_account_id = payAcc.id
         ORDER BY p.bill_date DESC, p.id DESC
-        LIMIT 200
+        LIMIT 5000
       `)
       .all() as Array<Record<string, any>>;
 
     const purchaseIds = rawPurchases.map((p) => Number(p.id));
     const purchaseItemsByPurId = new Map<number, any[]>();
     if (purchaseIds.length > 0) {
-      const ph = purchaseIds.map(() => '?').join(',');
-      const allPurItems = db
-        .prepare(`SELECT * FROM purchase_items WHERE purchase_id IN (${ph}) ORDER BY id ASC`)
-        .all(...purchaseIds) as Array<Record<string, any>>;
-      for (const pi of allPurItems) {
-        const pid = Number(pi.purchase_id);
-        if (!purchaseItemsByPurId.has(pid)) purchaseItemsByPurId.set(pid, []);
-        purchaseItemsByPurId.get(pid)!.push(pi);
+      const CHUNK = 800;
+      for (let i = 0; i < purchaseIds.length; i += CHUNK) {
+        const slice = purchaseIds.slice(i, i + CHUNK);
+        const ph = slice.map(() => '?').join(',');
+        const chunkPurItems = db
+          .prepare(`SELECT * FROM purchase_items WHERE purchase_id IN (${ph}) ORDER BY id ASC`)
+          .all(...slice) as Array<Record<string, any>>;
+        for (const pi of chunkPurItems) {
+          const pid = Number(pi.purchase_id);
+          if (!purchaseItemsByPurId.has(pid)) purchaseItemsByPurId.set(pid, []);
+          purchaseItemsByPurId.get(pid)!.push(pi);
+        }
       }
     }
 
@@ -235,6 +309,7 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       const lines = purchaseItemsByPurId.get(Number(p.id)) || [];
       return {
         ...p,
+        server_id: p.id,
         client_tx_id: p.client_request_id || `SERVER-PUR-${p.id}`,
         invoice_number: p.bill_number || p.invoice_number || `PUR-${p.id}`,
         item_count: lines.length,
@@ -255,28 +330,40 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
           LEFT JOIN accounts ha ON ha.id = cb.head_account_id
           LEFT JOIN accounts ca ON ca.id = cb.cash_bank_account_id
           ORDER BY cb.sequence_number DESC, cb.id DESC
-          LIMIT 500
+          LIMIT 5000
         `)
         .all() as Array<Record<string, any>>;
 
       cashBookVouchers = cbRows.map((cb) => ({
         ...cb,
-        client_tx_id: `SERVER-CB-${cb.id}`,
+        server_id: cb.id,
+        client_tx_id: cb.client_tx_id || `SERVER-CB-${cb.id}`,
         sync_status: 'synced',
       }));
     } catch {
       // ignore if table not yet queried
     }
 
-    // Pull Sale Returns & Purchase Returns
+    // Pull Sale Returns & Purchase Returns (with their return items)
     let saleReturns: any[] = [];
     try {
       const srRows = db
-        .prepare('SELECT * FROM sale_returns ORDER BY return_date DESC, id DESC LIMIT 200')
+        .prepare('SELECT * FROM sale_returns ORDER BY return_date DESC, id DESC LIMIT 2000')
         .all() as Array<Record<string, any>>;
+      const srItems = db
+        .prepare('SELECT * FROM sale_return_items ORDER BY id ASC')
+        .all() as Array<Record<string, any>>;
+      const srMap = new Map<number, any[]>();
+      for (const sri of srItems) {
+        const id = Number(sri.sale_return_id);
+        if (!srMap.has(id)) srMap.set(id, []);
+        srMap.get(id)!.push(sri);
+      }
       saleReturns = srRows.map((sr) => ({
         ...sr,
-        client_tx_id: `SERVER-SR-${sr.id}`,
+        server_id: sr.id,
+        client_tx_id: sr.client_tx_id || `SERVER-SR-${sr.id}`,
+        items: srMap.get(Number(sr.id)) || [],
         sync_status: 'synced',
       }));
     } catch {
@@ -286,11 +373,22 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
     let purchaseReturns: any[] = [];
     try {
       const prRows = db
-        .prepare('SELECT * FROM purchase_returns ORDER BY return_date DESC, id DESC LIMIT 200')
+        .prepare('SELECT * FROM purchase_returns ORDER BY return_date DESC, id DESC LIMIT 2000')
         .all() as Array<Record<string, any>>;
+      const prItems = db
+        .prepare('SELECT * FROM purchase_return_items ORDER BY id ASC')
+        .all() as Array<Record<string, any>>;
+      const prMap = new Map<number, any[]>();
+      for (const pri of prItems) {
+        const id = Number(pri.purchase_return_id);
+        if (!prMap.has(id)) prMap.set(id, []);
+        prMap.get(id)!.push(pri);
+      }
       purchaseReturns = prRows.map((pr) => ({
         ...pr,
-        client_tx_id: `SERVER-PR-${pr.id}`,
+        server_id: pr.id,
+        client_tx_id: pr.client_tx_id || `SERVER-PR-${pr.id}`,
+        items: prMap.get(Number(pr.id)) || [],
         sync_status: 'synced',
       }));
     } catch {
@@ -307,9 +405,9 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
 
     let supplySnapshot: Record<string, any> = {};
     try {
-      const towns = db.prepare('SELECT * FROM supply_towns ORDER BY town_name ASC').all();
-      const areas = db.prepare('SELECT * FROM supply_areas ORDER BY area_name ASC').all();
-      const bookings = db.prepare('SELECT * FROM supply_bookings ORDER BY id DESC LIMIT 200').all();
+      const towns = db.prepare('SELECT * FROM towns ORDER BY town_name ASC').all();
+      const areas = db.prepare('SELECT * FROM town_areas ORDER BY area_name ASC').all();
+      const bookings = db.prepare('SELECT * FROM supply_bookings ORDER BY id DESC LIMIT 500').all();
       supplySnapshot = { towns, areas, bookings };
     } catch {
       // ignore
@@ -319,7 +417,7 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
     let payrollSnapshot: Record<string, any> = {};
     try {
       const employees = db.prepare('SELECT * FROM employees ORDER BY id ASC').all();
-      const payrollRuns = db.prepare('SELECT * FROM payroll_runs ORDER BY id DESC LIMIT 60').all();
+      const payrollRuns = db.prepare('SELECT * FROM payroll_records ORDER BY id DESC LIMIT 120').all();
       payrollSnapshot = { employees, payrollRuns };
     } catch {
       // ignore
@@ -334,9 +432,66 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       // ignore
     }
 
+    // Pull Deletion Tombstones for incremental deletion sync
+    let tombstones: Array<{
+      id: number;
+      table_name: string;
+      record_id: string;
+      client_tx_id: string | null;
+      deleted_at: string;
+    }> = [];
+    let maxTombstoneId = lastTombstoneId;
+    try {
+      tombstones = db
+        .prepare('SELECT * FROM sync_tombstones WHERE id > ? ORDER BY id ASC LIMIT 5000')
+        .all(lastTombstoneId) as any[];
+      if (tombstones.length > 0) {
+        maxTombstoneId = Number(tombstones[tombstones.length - 1].id || lastTombstoneId);
+      } else {
+        const maxRow = db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM sync_tombstones').get() as { m: number };
+        maxTombstoneId = Number(maxRow?.m || 0);
+      }
+    } catch {
+      // ignore
+    }
+
+    const nowIso = new Date().toISOString();
+    const buildMeta = (rows: any[]) => {
+      let maxId = 0;
+      let latestUpdatedAt = '';
+      for (const r of rows) {
+        const numId = Number(r?.id || 0);
+        if (numId > maxId) maxId = numId;
+        const ts = String(r?.updated_at || r?.created_at || '')
+          .trim()
+          .replace(' ', 'T');
+        if (ts > latestUpdatedAt) latestUpdatedAt = ts;
+      }
+      return {
+        rowCount: rows.length,
+        maxId,
+        latestUpdatedAt: latestUpdatedAt || nowIso,
+        syncedAt: nowIso,
+      };
+    };
+
+    const tableMeta = {
+      items: buildMeta(items),
+      accounts: buildMeta(accounts),
+      inventory: buildMeta(inventory),
+      sales: buildMeta(sales),
+      purchases: buildMeta(purchases),
+      cash_book: buildMeta(cashBookVouchers),
+      sale_returns: buildMeta(saleReturns),
+      purchase_returns: buildMeta(purchaseReturns),
+      salesmen: buildMeta(salesmen),
+      auth_vault: buildMeta(offlineUsers),
+      company_settings: buildMeta(companySettings ? [companySettings] : []),
+    };
+
     return res.json({
       success: true,
-      serverTime: new Date().toISOString(),
+      serverTime: nowIso,
       items,
       accounts,
       inventory,
@@ -351,6 +506,9 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       supplySnapshot,
       payrollSnapshot,
       offlineUsers,
+      tombstones,
+      maxTombstoneId,
+      tableMeta,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -431,14 +589,21 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           }
 
           const targetStatus = action === 'HOLD_SALE' ? 'held' : payload.status || 'completed';
+          const rawSaleItems = Array.isArray(payload.items)
+            ? payload.items
+            : Array.isArray(payload.lines)
+            ? payload.lines
+            : [];
+          const normalizedSaleItems = rawSaleItems.map((line: any) => ({
+            ...line,
+            quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
+            loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
+            bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
+          }));
           const normalizedPayload = {
             ...payload,
             status: targetStatus,
-            items: Array.isArray(payload.items)
-              ? payload.items
-              : Array.isArray(payload.lines)
-              ? payload.lines
-              : [],
+            items: normalizedSaleItems,
             allow_negative_stock: true,
           };
 
@@ -465,13 +630,19 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           if (!targetId || Number.isNaN(targetId)) {
             throw new Error('Valid numeric sale ID is required for UPDATE_SALE');
           }
+          const rawUpdateItems = Array.isArray(payload.items)
+            ? payload.items
+            : Array.isArray(payload.lines)
+            ? payload.lines
+            : [];
           const saleId = processSaleUpsert(targetId, {
             ...payload,
-            items: Array.isArray(payload.items)
-              ? payload.items
-              : Array.isArray(payload.lines)
-              ? payload.lines
-              : [],
+            items: rawUpdateItems.map((line: any) => ({
+              ...line,
+              quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
+              loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
+              bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
+            })),
             allow_negative_stock: true,
           });
           const saleRow = db
@@ -497,11 +668,28 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           });
         } else if (action === 'CREATE_PURCHASE' || action === 'HOLD_PURCHASE') {
           const targetStatus = action === 'HOLD_PURCHASE' ? 'held' : 'completed';
+          const rawPurItems = Array.isArray(payload.items)
+            ? payload.items
+            : Array.isArray(payload.lines)
+            ? payload.lines
+            : [];
+          const normalizedPurItems = rawPurItems.map((line: any) => ({
+            ...line,
+            quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
+            bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
+            loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
+          }));
           const purchaseId = executePurchasePosting({
             ...payload,
+            items: normalizedPurItems,
             status: targetStatus,
             client_request_id: client_tx_id,
           });
+          try {
+            db.prepare('UPDATE purchases SET client_request_id = ? WHERE id = ?').run(client_tx_id, purchaseId);
+          } catch {
+            // ignore
+          }
 
           const purRow = db
             .prepare('SELECT bill_number FROM purchases WHERE id = ?')
@@ -521,8 +709,19 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           });
         } else if (action === 'UPDATE_PURCHASE') {
           const targetId = Number(payload.id || item.local_id);
+          const rawUpdatePurItems = Array.isArray(payload.items)
+            ? payload.items
+            : Array.isArray(payload.lines)
+            ? payload.lines
+            : [];
           const purchaseId = executePurchasePosting({
             ...payload,
+            items: rawUpdatePurItems.map((line: any) => ({
+              ...line,
+              quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
+              bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
+              loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
+            })),
             existingPurchaseId: targetId,
           });
           const purRow = db
@@ -882,6 +1081,14 @@ syncRouter.post('/push', (req: Request, res: Response) => {
               );
 
             const cbVoucherId = Number(cbInsert.lastInsertRowid);
+            try {
+              db.prepare('UPDATE cash_book_vouchers SET client_tx_id = ? WHERE id = ?').run(
+                client_tx_id,
+                cbVoucherId
+              );
+            } catch {
+              // ignore
+            }
             db.prepare('UPDATE journal_entries SET reference_id = ? WHERE id = ?').run(
               cbVoucherId,
               jeId
@@ -999,6 +1206,14 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 payload.notes || null
               );
             const newSrId = Number(ins.lastInsertRowid);
+            try {
+              db.prepare('UPDATE sale_returns SET client_tx_id = ? WHERE id = ?').run(
+                client_tx_id,
+                newSrId
+              );
+            } catch {
+              // ignore
+            }
 
             for (const line of returnLines) {
               const itemId = Number(line.item_id || 0);
@@ -1036,16 +1251,23 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                   ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(Number(line.batch_id)) as any)
                   : (db.prepare('SELECT * FROM inventory WHERE item_id = ? ORDER BY id DESC LIMIT 1').get(itemId) as any);
                 if (batchRow) {
-                  const nextTotalUnits = Number(batchRow.quantity_in_stock || 0) + unitsReturned;
+                  const prevUnits = Number(
+                    batchRow.total_stock_units ?? batchRow.quantity_in_stock ?? 0
+                  );
+                  const nextTotalUnits = prevUnits + unitsReturned;
                   const bUnitsPerPack = Math.max(1, Number(batchRow.units_per_pack || uPerPack));
                   db.prepare(`
                     UPDATE inventory
-                    SET quantity_in_stock = ?,
+                    SET total_stock_units = ?,
+                        current_pack_qty = ?,
+                        quantity_in_stock = ?,
                         pack_quantity = ?,
                         loose_units = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                   `).run(
+                    nextTotalUnits,
+                    round2(nextTotalUnits / bUnitsPerPack),
                     nextTotalUnits,
                     Math.floor(nextTotalUnits / bUnitsPerPack),
                     nextTotalUnits % bUnitsPerPack,
@@ -1103,6 +1325,14 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 payload.notes || null
               );
             const newPrId = Number(ins.lastInsertRowid);
+            try {
+              db.prepare('UPDATE purchase_returns SET client_tx_id = ? WHERE id = ?').run(
+                client_tx_id,
+                newPrId
+              );
+            } catch {
+              // ignore
+            }
 
             for (const line of returnLines) {
               const itemId = Number(line.item_id || 0);
@@ -1139,16 +1369,23 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                   ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(Number(line.batch_id)) as any)
                   : (db.prepare('SELECT * FROM inventory WHERE item_id = ? ORDER BY id DESC LIMIT 1').get(itemId) as any);
                 if (batchRow) {
-                  const nextTotalUnits = Math.max(0, Number(batchRow.quantity_in_stock || 0) - unitsReturned);
+                  const prevUnits = Number(
+                    batchRow.total_stock_units ?? batchRow.quantity_in_stock ?? 0
+                  );
+                  const nextTotalUnits = Math.max(0, prevUnits - unitsReturned);
                   const bUnitsPerPack = Math.max(1, Number(batchRow.units_per_pack || uPerPack));
                   db.prepare(`
                     UPDATE inventory
-                    SET quantity_in_stock = ?,
+                    SET total_stock_units = ?,
+                        current_pack_qty = ?,
+                        quantity_in_stock = ?,
                         pack_quantity = ?,
                         loose_units = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                   `).run(
+                    nextTotalUnits,
+                    round2(nextTotalUnits / bUnitsPerPack),
                     nextTotalUnits,
                     Math.floor(nextTotalUnits / bUnitsPerPack),
                     nextTotalUnits % bUnitsPerPack,
@@ -1192,12 +1429,21 @@ syncRouter.post('/push', (req: Request, res: Response) => {
 
               db.prepare(`
                 UPDATE inventory
-                SET pack_quantity = ?,
+                SET total_stock_units = ?,
+                    current_pack_qty = ?,
+                    pack_quantity = ?,
                     loose_units = ?,
                     quantity_in_stock = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-              `).run(Math.floor(totalUnits / uPerPack), totalUnits % uPerPack, totalUnits, batchRow.id);
+              `).run(
+                totalUnits,
+                round2(totalUnits / uPerPack),
+                Math.floor(totalUnits / uPerPack),
+                totalUnits % uPerPack,
+                totalUnits,
+                batchRow.id
+              );
             }
           }
           db.prepare(`
