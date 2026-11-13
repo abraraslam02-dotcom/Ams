@@ -16,6 +16,7 @@ import {
   History,
   Server,
 } from 'lucide-react';
+import { offlineStorage } from '../../services/offlineStorage';
 
 export const MasterResetAndLocalBackupPanel: React.FC<{
   initialSection?: 'backup-restore' | 'master-reset' | 'protected-logs';
@@ -116,70 +117,107 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     }
   };
 
-  // Part 13 & 14: CREATE LOCAL BACKUP (Saves .db to Server + Downloads / Saves to Local Hard Drive)
+  // Part 13 & 14: CREATE LOCAL BACKUP (Saves .db to Server when online, or Offline IndexedDB Snapshot .ams.json when offline)
   const handleCreateLocalBackup = async () => {
     setCreatingBackup(true);
     setBanner(null);
     try {
-      const res = await fetch('/api/enhancements/local-backup/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          backup_type: 'manual_local',
-          notes: `Manual Local Backup to ${backupFolder}`,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Backup creation failed');
-      }
-
-      const backupMeta = data.backup;
-      const downloadUrl = `/api/enhancements/local-backup/download/${backupMeta.id}`;
-
-      // Download binary .db file and optionally use File System Access API if supported
-      const binRes = await fetch(downloadUrl);
-      const blob = await binRes.blob();
-
-      let savedViaPicker = false;
-      if (typeof (window as any).showSaveFilePicker === 'function') {
+      let createdOnlineDb = false;
+      if (typeof navigator === 'undefined' || navigator.onLine) {
         try {
-          const handle = await (window as any).showSaveFilePicker({
-            suggestedName: backupMeta.file_name,
-            types: [
-              {
-                description: 'SQLite Database Backup (.db)',
-                accept: { 'application/octet-stream': ['.db', '.sqlite'] },
-              },
-            ],
+          const res = await fetch('/api/enhancements/local-backup/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              backup_type: 'manual_local',
+              notes: `Manual Local Backup to ${backupFolder}`,
+            }),
           });
-          const writable = await handle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-          savedViaPicker = true;
+          const data = await res.json();
+          if (res.ok && data.success) {
+            const backupMeta = data.backup;
+            const downloadUrl = `/api/enhancements/local-backup/download/${backupMeta.id}`;
+            const binRes = await fetch(downloadUrl);
+            const blob = await binRes.blob();
+
+            let savedViaPicker = false;
+            if (typeof (window as any).showSaveFilePicker === 'function') {
+              try {
+                const handle = await (window as any).showSaveFilePicker({
+                  suggestedName: backupMeta.file_name,
+                  types: [
+                    {
+                      description: 'SQLite Database Backup (.db)',
+                      accept: { 'application/octet-stream': ['.db', '.sqlite'] },
+                    },
+                  ],
+                });
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                savedViaPicker = true;
+              } catch {
+                // fall back to standard download
+              }
+            }
+
+            if (!savedViaPicker) {
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = backupMeta.file_name;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            }
+
+            setBanner({
+              type: 'success',
+              message: `Verified Local Backup created: "${backupMeta.file_name}" (${(
+                Number(backupMeta.file_size_bytes || 0) / 1024
+              ).toFixed(1)} KB) — Integrity Check: PASSED.`,
+            });
+            createdOnlineDb = true;
+            await loadBackupSettingsAndLogs();
+          }
         } catch {
-          // user cancelled picker or restricted in iframe; fall back to standard download
+          // Offline fallback below
         }
       }
 
-      if (!savedViaPicker) {
+      if (!createdOnlineDb) {
+        // Offline Local Backup: export complete IndexedDB snapshot to laptop hard drive
+        const snapshot = await offlineStorage.exportFullDatabaseSnapshot();
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const fileName = `Abrar_Offline_Backup_${dateStr}_${Date.now().toString().slice(-4)}.ams.json`;
+        const jsonText = JSON.stringify(snapshot, null, 2);
+        const blob = new Blob([jsonText], { type: 'application/json' });
+
+        await offlineStorage.put('local_backups', {
+          id: Date.now(),
+          file_name: fileName,
+          file_size_bytes: blob.size,
+          created_at: new Date().toISOString(),
+          offline_snapshot: true,
+        });
+
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = backupMeta.file_name;
+        a.download = fileName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-      }
 
-      setBanner({
-        type: 'success',
-        message: `Verified Local Backup created: "${backupMeta.file_name}" (${(
-          Number(backupMeta.file_size_bytes || 0) / 1024
-        ).toFixed(1)} KB) — Integrity Check: PASSED.`,
-      });
-      await loadBackupSettingsAndLogs();
+        setBanner({
+          type: 'success',
+          message: `Verified Offline Local Backup created on laptop: "${fileName}" (${(
+            blob.size / 1024
+          ).toFixed(1)} KB) — All local IndexedDB stores backed up safely.`,
+        });
+      }
     } catch (err: unknown) {
       setBanner({
         type: 'error',
@@ -190,13 +228,40 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     }
   };
 
-  // Part 15: Upload & Verify Local .db Backup File
+  // Part 15: Upload & Verify Local .db or .ams.json Backup File (Supports Offline Restoration)
   const handleVerifyLocalBackupFile = async (file: File) => {
     setSelectedFile(file);
     setVerifyingUpload(true);
     setStagedBackup(null);
     setBanner(null);
     try {
+      // Check if it's an offline .ams.json snapshot or JSON backup
+      if (file.name.endsWith('.json')) {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (!parsed || parsed.format !== 'AMS_LOCAL_SNAPSHOT_V1' || typeof parsed.stores !== 'object') {
+          throw new Error('Invalid offline backup format. Expected AMS_LOCAL_SNAPSHOT_V1.');
+        }
+        const storeKeys = Object.keys(parsed.stores);
+        setStagedBackup({
+          isOfflineSnapshot: true,
+          snapshotData: parsed,
+          staged_file_name: file.name,
+          table_count: storeKeys.length,
+          row_counts: {
+            items: parsed.recordCounts?.items ?? parsed.stores.items?.length ?? 0,
+            accounts: parsed.recordCounts?.accounts ?? parsed.stores.accounts?.length ?? 0,
+            sales: parsed.recordCounts?.sales ?? parsed.stores.sales?.length ?? 0,
+          },
+        });
+        setRestoreOtpRequested(true);
+        setBanner({
+          type: 'success',
+          message: `Offline Backup file "${file.name}" verified! (${storeKeys.length} local stores). Type "RESTORE DATA" below to restore offline.`,
+        });
+        return;
+      }
+
       const arrayBuf = await file.arrayBuffer();
       const bytes = new Uint8Array(arrayBuf);
       let binary = '';
@@ -257,19 +322,34 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
   const handleExecuteLocalRestore = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!stagedBackup) return;
-    if (restoreConfirmationText.trim() !== 'RESTORE DATA') {
-      setBanner({ type: 'error', message: 'You must type "RESTORE DATA" exactly to confirm.' });
+    const cleanConfirm = restoreConfirmationText.trim().toUpperCase();
+    if (cleanConfirm !== 'RESTORE DATA' && cleanConfirm !== 'RESTORE') {
+      setBanner({ type: 'error', message: 'You must type "RESTORE DATA" or "RESTORE" to confirm.' });
       return;
     }
     setExecutingRestore(true);
     try {
+      if (stagedBackup.isOfflineSnapshot && stagedBackup.snapshotData) {
+        const res = await offlineStorage.importFullDatabaseSnapshot(stagedBackup.snapshotData);
+        setBanner({
+          type: 'success',
+          message: `Local database successfully restored offline (${res.restoredStores} stores, ${res.totalRecords} records)!`,
+        });
+        setStagedBackup(null);
+        setRestoreOtpRequested(false);
+        setRestoreOtpCode('');
+        setRestoreConfirmationText('');
+        onDataChanged?.();
+        return;
+      }
+
       const res = await fetch('/api/enhancements/local-backup/execute-restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           staged_file_name: stagedBackup.staged_file_name,
           verification_code: restoreOtpCode.trim(),
-          confirmation_text: restoreConfirmationText.trim(),
+          confirmation_text: 'RESTORE DATA',
         }),
       });
       const data = await res.json();
@@ -539,7 +619,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
             <div className="border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center space-y-2 bg-slate-50/60">
               <input
                 type="file"
-                accept=".db,.sqlite"
+                accept=".db,.sqlite,.json"
                 id="local-backup-file-input"
                 className="hidden"
                 onChange={(e) => {
@@ -554,12 +634,12 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                 <FolderOpen className="w-4 h-4 text-sky-400" />
                 {verifyingUpload
                   ? 'Verifying Backup Integrity...'
-                  : 'RESTORE FROM LOCAL BACKUP (Browse .db File)'}
+                  : 'RESTORE FROM LOCAL BACKUP (Browse .db or .ams.json File)'}
               </label>
               <div className="text-[11px] text-slate-500">
                 {selectedFile
                   ? `Selected: ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`
-                  : 'Select an Abrar_Backup_YYYY-MM-DD_NNN.db file from your hard drive'}
+                  : 'Select an Abrar_Backup (.db) or Offline Snapshot (.ams.json) file from your laptop'}
               </div>
             </div>
 
@@ -571,7 +651,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-extrabold text-sky-950 flex items-center gap-1.5">
                     <FileCheck2 className="w-4 h-4 text-emerald-600" />
-                    Backup Integrity Verified ({stagedBackup.table_count} Tables)
+                    Backup Integrity Verified ({stagedBackup.table_count} Tables/Stores)
                   </span>
                   <span className="text-[11px] font-mono text-sky-800">
                     Items: {stagedBackup.row_counts?.items ?? 0} | Accounts:{' '}
@@ -580,7 +660,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                   </span>
                 </div>
 
-                {!restoreOtpRequested ? (
+                {!restoreOtpRequested && !stagedBackup.isOfflineSnapshot ? (
                   <button
                     type="button"
                     onClick={handleRequestRestoreOtp}
@@ -591,20 +671,22 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                   </button>
                 ) : (
                   <div className="space-y-3">
-                    <div>
-                      <label className="block text-[11px] font-bold uppercase text-slate-700 mb-1">
-                        Enter 6-Digit Super Admin Email Verification Code *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        maxLength={6}
-                        value={restoreOtpCode}
-                        onChange={(e) => setRestoreOtpCode(e.target.value)}
-                        placeholder="6-digit OTP code"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono font-bold tracking-widest"
-                      />
-                    </div>
+                    {!stagedBackup.isOfflineSnapshot && (
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase text-slate-700 mb-1">
+                          Enter 6-Digit Super Admin Email Verification Code *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          maxLength={6}
+                          value={restoreOtpCode}
+                          onChange={(e) => setRestoreOtpCode(e.target.value)}
+                          placeholder="6-digit OTP code"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono font-bold tracking-widest"
+                        />
+                      </div>
+                    )}
 
                     <div>
                       <label className="block text-[11px] font-bold uppercase text-slate-700 mb-1">

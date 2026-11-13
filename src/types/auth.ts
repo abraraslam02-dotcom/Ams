@@ -49,20 +49,26 @@ export interface AuthStatusResponse {
   success?: boolean;
   initialized: boolean;
   needsSetup?: boolean;
-  userCount: number;
+  userCount?: number;
   authenticated: boolean;
+  rememberMe?: boolean;
   user?: User | null;
   permissions?: Record<string, ModulePermission> | null;
+  offlineUsers?: any[];
   message?: string;
   error?: string;
 }
 
 export interface LoginResponse {
   success: boolean;
+  message?: string;
+  rememberMe?: boolean;
   token?: string;
   expiresAt?: string;
   user?: User;
   permissions?: Record<string, ModulePermission>;
+  offlineVerifier?: { salt?: string; hash?: string; verifierSalt?: string; verifierHash?: string };
+  offlineUsers?: any[];
   error?: string;
   code?: string;
   locked?: boolean;

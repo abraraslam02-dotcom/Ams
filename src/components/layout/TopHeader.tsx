@@ -32,6 +32,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
     syncStatus: typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'synced',
     pendingCount: 0,
+    failedCount: 0,
+    syncProgress: null,
+    failedItems: [],
     lastSyncedAt: null,
     deviceId: 'POS-LOCAL',
     counterName: 'Computer 1: Main Counter',
@@ -203,51 +206,106 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             >
               Pending: {syncState.pendingCount}
             </span>
+            {syncState.failedCount > 0 && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-rose-600 text-white"
+                title="Failed sync records requiring retry"
+              >
+                Failed: {syncState.failedCount}
+              </span>
+            )}
           </button>
 
           {syncPopoverOpen && (
-            <div className="absolute right-0 top-full mt-2 w-80 bg-white rounded-xl border border-slate-200 shadow-2xl p-4 z-50 text-xs text-slate-700">
+            <div className="absolute right-0 top-full mt-2 w-96 bg-white rounded-xl border border-slate-200 shadow-2xl p-4 z-50 text-xs text-slate-700">
               <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-slate-100">
                 <div className="flex items-center gap-2 font-bold text-slate-900 text-sm">
                   <Database className="w-4 h-4 text-emerald-600" />
-                  <span>Offline-First Sync Engine</span>
+                  <span>Connection & Sync Dashboard</span>
                 </div>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                   syncState.isOnline ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
                 }`}>
-                  {syncState.isOnline ? 'Online' : 'Offline Mode'}
+                  {syncState.isOnline ? 'ONLINE' : 'OFFLINE'}
                 </span>
               </div>
 
-              <div className="space-y-2 mb-3">
+              <div className="space-y-1.5 mb-3">
                 <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Current Status:</span>
+                  <span className="text-slate-500">Connection Status:</span>
                   <span className="font-semibold text-slate-900">{badgeInfo.label}</span>
                 </div>
                 <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Pending Transactions:</span>
-                  <span className={`font-bold ${syncState.pendingCount > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
-                    {syncState.pendingCount} queued
+                  <span className="text-slate-500">Counter / Device ID:</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {syncState.counterName} ({syncState.deviceId})
                   </span>
                 </div>
                 <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Local SQLite + IndexedDB:</span>
-                  <span className="font-semibold text-emerald-700">Active & Protected</span>
+                  <span className="text-slate-500">Pending Sync Records:</span>
+                  <span className={`font-bold ${syncState.pendingCount > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
+                    {syncState.pendingCount} record(s)
+                  </span>
                 </div>
-                {syncState.lastSyncedAt && (
-                  <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                    <span className="text-slate-500">Last Synchronized:</span>
-                    <span className="font-medium text-slate-800">
-                      {new Date(syncState.lastSyncedAt).toLocaleTimeString()}
+                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
+                  <span className="text-slate-500">Failed Sync Records:</span>
+                  <span className={`font-bold ${syncState.failedCount > 0 ? 'text-rose-600' : 'text-slate-600'}`}>
+                    {syncState.failedCount} record(s)
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
+                  <span className="text-slate-500">Last Successful Sync:</span>
+                  <span className="font-medium text-slate-800">
+                    {syncState.lastSyncedAt
+                      ? `${new Date(syncState.lastSyncedAt).toLocaleDateString('en-GB')} ${new Date(syncState.lastSyncedAt).toLocaleTimeString()}`
+                      : 'Not synced yet'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
+                  <span className="text-slate-500">Local IndexedDB Storage:</span>
+                  <span className="font-semibold text-emerald-700">Active & Persistent</span>
+                </div>
+              </div>
+
+              {syncState.syncProgress && (
+                <div className="mb-3 p-2.5 rounded-lg bg-blue-50 border border-blue-200">
+                  <div className="flex justify-between text-[11px] font-bold text-blue-800 mb-1">
+                    <span>Synchronizing Pending Records...</span>
+                    <span>
+                      {syncState.syncProgress.current} / {syncState.syncProgress.total}
                     </span>
                   </div>
-                )}
-              </div>
+                  <div className="w-full h-1.5 bg-blue-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-600 transition-all"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.round(
+                            (syncState.syncProgress.current /
+                              Math.max(1, syncState.syncProgress.total)) *
+                              100
+                          )
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
 
               {syncState.lastError && (
                 <div className="mb-3 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px]">
                   <div className="font-bold mb-0.5">Sync Issue Details:</div>
                   <div>{syncState.lastError}</div>
+                  {syncState.failedItems.length > 0 && (
+                    <div className="mt-1.5 max-h-24 overflow-y-auto space-y-1 border-t border-rose-200 pt-1">
+                      {syncState.failedItems.slice(0, 5).map((fi) => (
+                        <div key={fi.client_tx_id} className="text-[10px] font-mono">
+                          • {fi.action}: {fi.error}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -261,6 +319,16 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   <RefreshCw className={`w-3.5 h-3.5 ${syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
                   <span>{syncState.syncStatus === 'syncing' ? 'Synchronizing...' : 'Sync Now'}</span>
                 </button>
+                {syncState.failedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={!syncState.isOnline || syncState.syncStatus === 'syncing'}
+                    onClick={() => offlineSyncManager.retryFailed()}
+                    className="py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold cursor-pointer transition-colors"
+                  >
+                    Retry Failed
+                  </button>
+                )}
               </div>
             </div>
           )}

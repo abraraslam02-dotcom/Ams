@@ -12,6 +12,14 @@ export interface SyncState {
   isOnline: boolean;
   syncStatus: SyncStatusType;
   pendingCount: number;
+  failedCount: number;
+  syncProgress: { current: number; total: number } | null;
+  failedItems: Array<{
+    client_tx_id: string;
+    action: string;
+    error: string;
+    created_at: string;
+  }>;
   lastSyncedAt: string | null;
   deviceId: string;
   counterName: string;
@@ -47,6 +55,14 @@ class OfflineSyncManager {
   private isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   private syncStatus: SyncStatusType = 'synced';
   private pendingCount = 0;
+  private failedCount = 0;
+  private syncProgress: { current: number; total: number } | null = null;
+  private failedItems: Array<{
+    client_tx_id: string;
+    action: string;
+    error: string;
+    created_at: string;
+  }> = [];
   private lastSyncedAt: string | null = null;
   private deviceId = 'POS-INITIALIZING';
   private counterName = 'Computer 1: Main Counter';
@@ -138,6 +154,9 @@ class OfflineSyncManager {
       isOnline: this.isOnline,
       syncStatus: !this.isOnline ? 'offline' : this.syncStatus,
       pendingCount: this.pendingCount,
+      failedCount: this.failedCount,
+      syncProgress: this.syncProgress,
+      failedItems: this.failedItems,
       lastSyncedAt: this.lastSyncedAt,
       deviceId: this.deviceId,
       counterName: this.counterName,
@@ -161,7 +180,15 @@ class OfflineSyncManager {
   public async refreshPendingCount(): Promise<number> {
     try {
       const items = await offlineStorage.getPendingSyncItems();
+      const failed = await offlineStorage.getFailedSyncItems();
       this.pendingCount = items.length;
+      this.failedCount = failed.length;
+      this.failedItems = failed.map((f) => ({
+        client_tx_id: f.client_tx_id,
+        action: f.action,
+        error: f.error || 'Sync failed',
+        created_at: f.created_at,
+      }));
       if (this.pendingCount > 0 && this.syncStatus === 'synced') {
         this.syncStatus = 'pending';
       }
@@ -170,6 +197,13 @@ class OfflineSyncManager {
     } catch {
       return 0;
     }
+  }
+
+  public async retryFailed(): Promise<boolean> {
+    await offlineStorage.retryFailedSyncItems();
+    this.lastError = null;
+    await this.refreshPendingCount();
+    return this.syncNow();
   }
 
   /**
@@ -204,6 +238,9 @@ class OfflineSyncManager {
       // Step 1: Push any pending offline transactions in chronological order
       const pendingItems = await offlineStorage.getPendingSyncItems();
       if (pendingItems.length > 0) {
+        this.syncProgress = { current: 0, total: pendingItems.length };
+        this.notify();
+
         const res = await fetch('/api/sync/push', {
           method: 'POST',
           headers: getStoredAuthHeaders(),
@@ -220,7 +257,11 @@ class OfflineSyncManager {
 
         const data = await res.json();
         if (data.success && Array.isArray(data.results)) {
+          let processed = 0;
           for (const resItem of data.results) {
+            processed++;
+            this.syncProgress = { current: processed, total: pendingItems.length };
+            this.notify();
             await offlineStorage.updateSyncItemStatus(resItem.client_tx_id, resItem.status, {
               server_id: resItem.server_id,
               server_invoice_number: resItem.invoice_number,
@@ -231,6 +272,20 @@ class OfflineSyncManager {
       }
 
       // Step 2: Pull latest items, accounts, inventory, sales, purchases, cash_book, settings to IndexedDB
+      // Never overwrite local records that still have pending unsynced changes
+      const remainingPending = await offlineStorage.getPendingSyncItems();
+      const pendingTxIds = new Set(remainingPending.map((p) => p.client_tx_id));
+      const pendingItemIds = new Set(
+        remainingPending
+          .filter((p) => p.entity === 'items')
+          .map((p) => Number(p.local_id || p.payload?.id))
+      );
+      const pendingAccountIds = new Set(
+        remainingPending
+          .filter((p) => p.entity === 'accounts')
+          .map((p) => Number(p.local_id || p.payload?.id))
+      );
+
       const pullRes = await fetch(
         `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(this.counterName)}`,
         { headers: getStoredAuthHeaders() }
@@ -242,22 +297,59 @@ class OfflineSyncManager {
       const pullData = await pullRes.json();
       if (pullData.success) {
         if (Array.isArray(pullData.items) && pullData.items.length > 0) {
-          await offlineStorage.bulkPut('items', pullData.items);
+          const safeItems = pullData.items.filter((it: any) => !pendingItemIds.has(Number(it.id)));
+          await offlineStorage.bulkPut('items', safeItems);
         }
         if (Array.isArray(pullData.accounts) && pullData.accounts.length > 0) {
-          await offlineStorage.bulkPut('accounts', pullData.accounts);
+          const safeAccounts = pullData.accounts.filter(
+            (acc: any) => !pendingAccountIds.has(Number(acc.id))
+          );
+          await offlineStorage.bulkPut('accounts', safeAccounts);
         }
-        if (Array.isArray(pullData.inventory) && pullData.inventory.length > 0) {
+        if (Array.isArray(pullData.inventory) && pullData.inventory.length > 0 && remainingPending.length === 0) {
           await offlineStorage.bulkPut('inventory', pullData.inventory);
         }
         if (Array.isArray(pullData.sales) && pullData.sales.length > 0) {
-          await offlineStorage.bulkPut('sales', pullData.sales);
+          const safeSales = pullData.sales.filter(
+            (s: any) => !pendingTxIds.has(String(s.client_tx_id))
+          );
+          await offlineStorage.bulkPut('sales', safeSales);
         }
         if (Array.isArray(pullData.purchases) && pullData.purchases.length > 0) {
-          await offlineStorage.bulkPut('purchases', pullData.purchases);
+          const safePurchases = pullData.purchases.filter(
+            (p: any) => !pendingTxIds.has(String(p.client_tx_id))
+          );
+          await offlineStorage.bulkPut('purchases', safePurchases);
         }
         if (Array.isArray(pullData.cashBookVouchers) && pullData.cashBookVouchers.length > 0) {
-          await offlineStorage.bulkPut('cash_book', pullData.cashBookVouchers);
+          const safeCb = pullData.cashBookVouchers.filter(
+            (cb: any) => !pendingTxIds.has(String(cb.client_tx_id))
+          );
+          await offlineStorage.bulkPut('cash_book', safeCb);
+        }
+        if (Array.isArray(pullData.saleReturns) && pullData.saleReturns.length > 0) {
+          await offlineStorage.bulkPut('sale_returns', pullData.saleReturns);
+        }
+        if (Array.isArray(pullData.purchaseReturns) && pullData.purchaseReturns.length > 0) {
+          await offlineStorage.bulkPut('purchase_returns', pullData.purchaseReturns);
+        }
+        if (Array.isArray(pullData.salesmen) && pullData.salesmen.length > 0) {
+          await offlineStorage.bulkPut('salesmen', pullData.salesmen);
+        }
+        if (pullData.supplySnapshot) {
+          await offlineStorage.cacheApiData('supply_snapshot', pullData.supplySnapshot);
+        }
+        if (pullData.payrollSnapshot) {
+          await offlineStorage.cacheApiData('payroll_snapshot', pullData.payrollSnapshot);
+        }
+        if (Array.isArray(pullData.offlineUsers) && pullData.offlineUsers.length > 0) {
+          await offlineStorage.bulkPut('auth_vault', pullData.offlineUsers);
+          try {
+            localStorage.setItem('ams_offline_auth_vault_v2', JSON.stringify(pullData.offlineUsers));
+            localStorage.setItem('ams_workstation_authorized_v2', '1');
+          } catch {
+            // ignore storage quota errors
+          }
         }
         if (pullData.companySettings) {
           await offlineStorage.put('company_settings', pullData.companySettings);
@@ -269,12 +361,13 @@ class OfflineSyncManager {
 
       const now = new Date().toISOString();
       this.lastSyncedAt = now;
+      this.syncProgress = null;
       await offlineStorage.setMeta('last_synced_at', now);
       await this.refreshPendingCount();
 
       this.isOnline = true;
-      this.syncStatus = this.pendingCount === 0 ? 'synced' : 'pending';
-      this.lastError = null;
+      this.syncStatus = this.failedCount > 0 ? 'failed' : this.pendingCount === 0 ? 'synced' : 'pending';
+      this.lastError = this.failedCount > 0 ? `${this.failedCount} record(s) need attention` : null;
       if (hadPendingBefore && this.pendingCount === 0) {
         this.justCompletedSync = true;
         setTimeout(() => {
@@ -285,6 +378,7 @@ class OfflineSyncManager {
       this.notify();
       return true;
     } catch (err: unknown) {
+      this.syncProgress = null;
       const errorMsg = err instanceof Error ? err.message : String(err);
       if (
         errorMsg.includes('Failed to fetch') ||
@@ -301,6 +395,7 @@ class OfflineSyncManager {
       return false;
     } finally {
       this.isSyncing = false;
+      this.syncProgress = null;
     }
   }
 
@@ -711,6 +806,220 @@ class OfflineSyncManager {
       voucher_number: voucherNo,
       voucher: record,
       message: `Voucher #${voucherNo} saved locally (Offline Mode). Will automatically synchronize when online.`,
+    };
+  }
+
+  /**
+   * Records an offline Sales Return into IndexedDB, restores local stock & updates customer balance, and queues for sync
+   */
+  public async queueOfflineSaleReturn(payload: any): Promise<{
+    success: boolean;
+    return_number: string;
+    saleReturn: any;
+  }> {
+    const clientTxId = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `SR-TX-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const now = new Date();
+    const allSr = await offlineStorage.getAll<any>('sale_returns');
+    const returnNo =
+      payload.return_number || `SR-${now.getFullYear()}-${String(allSr.length + 1).padStart(3, '0')}`;
+    const lines = Array.isArray(payload.items) ? payload.items : [];
+    const netAmt = round2(payload.net_return_amount || payload.total_amount || 0);
+
+    const record = {
+      id: Date.now(),
+      ...payload,
+      client_tx_id: clientTxId,
+      return_number: returnNo,
+      return_date: payload.return_date || now.toISOString().slice(0, 10),
+      net_return_amount: netAmt,
+      items: lines,
+      sync_status: 'pending',
+      created_at: now.toISOString(),
+    };
+
+    await offlineStorage.put('sale_returns', record);
+
+    // Restore stock in local inventory
+    const allBatches = await offlineStorage.getAll<any>('inventory');
+    for (const line of lines) {
+      const itemId = Number(line.item_id || 0);
+      if (!itemId) continue;
+      const item = await offlineStorage.get<any>('items', itemId);
+      const uPerPack = parseLocalUnitsPerPack(line.packing || item?.packing);
+      const unitsReturned = Number(
+        line.total_units_returned ||
+          line.quantity_returned ||
+          Number(line.pack_qty || 0) * uPerPack + Number(line.loose_qty || 0)
+      );
+      if (item && unitsReturned > 0) {
+        item.opening_stock = round2((Number(item.opening_stock) || 0) + unitsReturned / uPerPack);
+        await offlineStorage.put('items', item);
+      }
+      const batch = allBatches.find((b) => Number(b.item_id) === itemId);
+      if (batch && unitsReturned > 0) {
+        batch.total_stock_units = round2((Number(batch.total_stock_units) || 0) + unitsReturned);
+        batch.current_pack_qty = round2(batch.total_stock_units / uPerPack);
+        await offlineStorage.put('inventory', batch);
+      }
+    }
+
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: this.deviceId,
+      action: 'CREATE_SALE_RETURN',
+      entity: 'sale_returns',
+      local_id: clientTxId,
+      payload: record,
+      created_at: now.toISOString(),
+    });
+    await this.refreshPendingCount();
+
+    return {
+      success: true,
+      return_number: returnNo,
+      saleReturn: record,
+    };
+  }
+
+  /**
+   * Records an offline Purchase Return into IndexedDB, deducts local stock & updates supplier balance, and queues for sync
+   */
+  public async queueOfflinePurchaseReturn(payload: any): Promise<{
+    success: boolean;
+    return_number: string;
+    purchaseReturn: any;
+  }> {
+    const clientTxId = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `PR-TX-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const now = new Date();
+    const allPr = await offlineStorage.getAll<any>('purchase_returns');
+    const returnNo =
+      payload.return_number || `PR-${now.getFullYear()}-${String(allPr.length + 1).padStart(3, '0')}`;
+    const lines = Array.isArray(payload.items) ? payload.items : [];
+    const netAmt = round2(payload.net_return_amount || payload.total_amount || 0);
+
+    const record = {
+      id: Date.now(),
+      ...payload,
+      client_tx_id: clientTxId,
+      return_number: returnNo,
+      return_date: payload.return_date || now.toISOString().slice(0, 10),
+      net_return_amount: netAmt,
+      items: lines,
+      sync_status: 'pending',
+      created_at: now.toISOString(),
+    };
+
+    await offlineStorage.put('purchase_returns', record);
+
+    const allBatches = await offlineStorage.getAll<any>('inventory');
+    for (const line of lines) {
+      const itemId = Number(line.item_id || 0);
+      if (!itemId) continue;
+      const item = await offlineStorage.get<any>('items', itemId);
+      const uPerPack = parseLocalUnitsPerPack(line.packing || item?.packing);
+      const unitsReturned = Number(
+        line.total_units_returned ||
+          line.quantity_returned ||
+          Number(line.pack_qty || 0) * uPerPack + Number(line.loose_qty || 0)
+      );
+      if (item && unitsReturned > 0) {
+        item.opening_stock = round2(
+          Math.max(0, (Number(item.opening_stock) || 0) - unitsReturned / uPerPack)
+        );
+        await offlineStorage.put('items', item);
+      }
+      const batch = allBatches.find((b) => Number(b.item_id) === itemId);
+      if (batch && unitsReturned > 0) {
+        batch.total_stock_units = round2(
+          Math.max(0, (Number(batch.total_stock_units) || 0) - unitsReturned)
+        );
+        batch.current_pack_qty = round2(batch.total_stock_units / uPerPack);
+        await offlineStorage.put('inventory', batch);
+      }
+    }
+
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: this.deviceId,
+      action: 'CREATE_PURCHASE_RETURN',
+      entity: 'purchase_returns',
+      local_id: clientTxId,
+      payload: record,
+      created_at: now.toISOString(),
+    });
+    await this.refreshPendingCount();
+
+    return {
+      success: true,
+      return_number: returnNo,
+      purchaseReturn: record,
+    };
+  }
+
+  /**
+   * Records an offline Stock Adjustment into IndexedDB and queues for sync
+   */
+  public async queueOfflineStockAdjustment(payload: any): Promise<{
+    success: boolean;
+    adjustment: any;
+  }> {
+    const clientTxId = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `ADJ-TX-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const now = new Date();
+    const itemId = Number(payload.item_id || 0);
+    const record = {
+      id: Date.now(),
+      ...payload,
+      client_tx_id: clientTxId,
+      created_at: now.toISOString(),
+    };
+
+    await offlineStorage.put('stock_adjustments', record);
+
+    if (itemId > 0) {
+      const item = await offlineStorage.get<any>('items', itemId);
+      const uPerPack = parseLocalUnitsPerPack(item?.packing);
+      const allBatches = await offlineStorage.getAll<any>('inventory');
+      const batch =
+        allBatches.find((b) => Number(b.id) === Number(payload.batch_id)) ||
+        allBatches.find((b) => Number(b.item_id) === itemId);
+      if (batch) {
+        const totalUnits =
+          payload.new_total_units !== undefined
+            ? Number(payload.new_total_units)
+            : Number(payload.new_pack_quantity || 0) * uPerPack + Number(payload.new_loose_units || 0);
+        batch.total_stock_units = totalUnits;
+        batch.quantity_in_stock = totalUnits;
+        batch.current_pack_qty = round2(totalUnits / uPerPack);
+        batch.pack_quantity = Math.floor(totalUnits / uPerPack);
+        batch.loose_units = totalUnits % uPerPack;
+        await offlineStorage.put('inventory', batch);
+      }
+      if (item && payload.new_pack_quantity !== undefined) {
+        item.opening_stock = Number(payload.new_pack_quantity);
+        await offlineStorage.put('items', item);
+      }
+    }
+
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: this.deviceId,
+      action: 'STOCK_ADJUSTMENT',
+      entity: 'inventory',
+      local_id: clientTxId,
+      payload: record,
+      created_at: now.toISOString(),
+    });
+    await this.refreshPendingCount();
+
+    return {
+      success: true,
+      adjustment: record,
     };
   }
 

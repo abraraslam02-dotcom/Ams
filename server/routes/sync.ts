@@ -5,6 +5,7 @@ import { executePurchasePosting } from './purchases.ts';
 import { processSaleUpsert } from './sales.ts';
 import { recalculateAccountBalance } from './accounts.ts';
 import { allocateNextAccountCode } from '../utils/accountCodeGenerator.ts';
+import { ensureAuthTables, getOfflineAuthVaultProfiles } from '../services/authService.ts';
 
 export const syncRouter = Router();
 
@@ -267,6 +268,72 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       // ignore if table not yet queried
     }
 
+    // Pull Sale Returns & Purchase Returns
+    let saleReturns: any[] = [];
+    try {
+      const srRows = db
+        .prepare('SELECT * FROM sale_returns ORDER BY return_date DESC, id DESC LIMIT 200')
+        .all() as Array<Record<string, any>>;
+      saleReturns = srRows.map((sr) => ({
+        ...sr,
+        client_tx_id: `SERVER-SR-${sr.id}`,
+        sync_status: 'synced',
+      }));
+    } catch {
+      // ignore
+    }
+
+    let purchaseReturns: any[] = [];
+    try {
+      const prRows = db
+        .prepare('SELECT * FROM purchase_returns ORDER BY return_date DESC, id DESC LIMIT 200')
+        .all() as Array<Record<string, any>>;
+      purchaseReturns = prRows.map((pr) => ({
+        ...pr,
+        client_tx_id: `SERVER-PR-${pr.id}`,
+        sync_status: 'synced',
+      }));
+    } catch {
+      // ignore
+    }
+
+    // Pull Salesmen & Supply Snapshot
+    let salesmen: any[] = [];
+    try {
+      salesmen = db.prepare('SELECT * FROM salesmen ORDER BY name ASC').all();
+    } catch {
+      // ignore
+    }
+
+    let supplySnapshot: Record<string, any> = {};
+    try {
+      const towns = db.prepare('SELECT * FROM supply_towns ORDER BY town_name ASC').all();
+      const areas = db.prepare('SELECT * FROM supply_areas ORDER BY area_name ASC').all();
+      const bookings = db.prepare('SELECT * FROM supply_bookings ORDER BY id DESC LIMIT 200').all();
+      supplySnapshot = { towns, areas, bookings };
+    } catch {
+      // ignore
+    }
+
+    // Pull Payroll Snapshot
+    let payrollSnapshot: Record<string, any> = {};
+    try {
+      const employees = db.prepare('SELECT * FROM employees ORDER BY id ASC').all();
+      const payrollRuns = db.prepare('SELECT * FROM payroll_runs ORDER BY id DESC LIMIT 60').all();
+      payrollSnapshot = { employees, payrollRuns };
+    } catch {
+      // ignore
+    }
+
+    // Pull Offline Auth Vault Profiles (active users + permissions + PBKDF2 verifiers)
+    let offlineUsers: any[] = [];
+    try {
+      ensureAuthTables(db);
+      offlineUsers = getOfflineAuthVaultProfiles(db);
+    } catch {
+      // ignore
+    }
+
     return res.json({
       success: true,
       serverTime: new Date().toISOString(),
@@ -278,6 +345,12 @@ syncRouter.get('/pull', (req: Request, res: Response) => {
       sales,
       purchases,
       cashBookVouchers,
+      saleReturns,
+      purchaseReturns,
+      salesmen,
+      supplySnapshot,
+      payrollSnapshot,
+      offlineUsers,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -842,6 +915,296 @@ syncRouter.post('/push', (req: Request, res: Response) => {
             server_id: cbResult.cbVoucherId,
             invoice_number: cbResult.nextVoucherNumber,
           });
+        } else if (action === 'UPDATE_CASH_BOOK_VOUCHER') {
+          const targetId = Number(payload.id || item.local_id);
+          if (targetId > 0) {
+            const existingCb = db
+              .prepare('SELECT * FROM cash_book_vouchers WHERE id = ?')
+              .get(targetId) as any;
+            if (existingCb) {
+              const recAmt = round2(Math.max(0, Number(payload.receipt_amount ?? existingCb.receipt_amount ?? 0)));
+              const payAmt = round2(Math.max(0, Number(payload.payment_amount ?? existingCb.payment_amount ?? 0)));
+              const netAmt = recAmt > 0 ? recAmt : payAmt;
+              const headId = Number(payload.head_account_id || existingCb.head_account_id);
+              const cbId = Number(payload.cash_bank_account_id || existingCb.cash_bank_account_id);
+              db.prepare(`
+                UPDATE cash_book_vouchers
+                SET voucher_date = COALESCE(?, voucher_date),
+                    transaction_type = COALESCE(?, transaction_type),
+                    head_account_id = ?,
+                    cash_bank_account_id = ?,
+                    receipt_amount = ?,
+                    payment_amount = ?,
+                    net_amount = ?,
+                    narration = COALESCE(?, narration),
+                    reference_number = COALESCE(?, reference_number),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+              `).run(
+                payload.voucher_date ?? null,
+                payload.transaction_type ?? null,
+                headId,
+                cbId,
+                recAmt,
+                payAmt,
+                netAmt,
+                payload.narration ?? null,
+                payload.reference_number ?? null,
+                targetId
+              );
+              recalculateAccountBalance(headId);
+              recalculateAccountBalance(cbId);
+            }
+          }
+          db.prepare(`
+            INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, status, payload_json)
+            VALUES (?, ?, 'UPDATE_CASH_BOOK_VOUCHER', 'cash_book', ?, 'synced', ?)
+          `).run(client_tx_id, deviceId, targetId, JSON.stringify(payload));
+          results.push({ client_tx_id, status: 'synced', server_id: targetId });
+        } else if (action === 'CREATE_SALE_RETURN') {
+          const returnNumber = String(payload.return_number || `SR-${Date.now().toString().slice(-6)}`);
+          const returnDate = String(payload.return_date || new Date().toISOString().slice(0, 10));
+          const netReturnAmt = round2(payload.net_return_amount || payload.total_amount || 0);
+          const refundPaid = round2(payload.refund_paid || 0);
+          const customerAccId = payload.customer_account_id ? Number(payload.customer_account_id) : null;
+          const returnLines = Array.isArray(payload.items) ? payload.items : [];
+
+          const srId = db.transaction(() => {
+            const ins = db
+              .prepare(`
+                INSERT INTO sale_returns (
+                  return_number, return_date, original_sale_id, original_invoice_number,
+                  customer_account_id, customer_name, return_mode, settlement_mode,
+                  payment_account_id, subtotal_amount, discount_amount, tax_amount,
+                  net_return_amount, refund_paid, credit_adjusted, reason, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `)
+              .run(
+                returnNumber,
+                returnDate,
+                payload.original_sale_id || null,
+                payload.original_invoice_number || null,
+                customerAccId,
+                payload.customer_name || 'Walk-in Customer',
+                payload.return_mode || 'direct',
+                payload.settlement_mode || 'Cash Refund',
+                payload.payment_account_id || null,
+                round2(payload.subtotal_amount || netReturnAmt),
+                round2(payload.discount_amount || 0),
+                round2(payload.tax_amount || 0),
+                netReturnAmt,
+                refundPaid,
+                round2(netReturnAmt - refundPaid),
+                payload.reason || 'Customer Return (Synced)',
+                payload.notes || null
+              );
+            const newSrId = Number(ins.lastInsertRowid);
+
+            for (const line of returnLines) {
+              const itemId = Number(line.item_id || 0);
+              const unitsReturned = Number(line.total_units_returned || line.quantity_returned || 0);
+              const uPerPack = Math.max(1, Number(line.units_per_pack || 1));
+              const packRet = Number(line.pack_qty || Math.floor(unitsReturned / uPerPack));
+              const looseRet = Number(line.loose_qty || unitsReturned % uPerPack);
+
+              db.prepare(`
+                INSERT INTO sale_return_items (
+                  sale_return_id, item_id, item_name, batch_id, batch_number,
+                  sale_mode, units_per_pack, pack_qty, loose_qty, quantity_returned,
+                  total_units_returned, unit_price, discount_percent, discount_amount, line_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(
+                newSrId,
+                itemId,
+                line.item_name || 'Item',
+                line.batch_id || null,
+                line.batch_number || 'DEFAULT',
+                line.sale_mode || 'pack',
+                uPerPack,
+                packRet,
+                looseRet,
+                unitsReturned,
+                unitsReturned,
+                round2(line.unit_price || 0),
+                round2(line.discount_percent || 0),
+                round2(line.discount_amount || 0),
+                round2(line.line_total || 0)
+              );
+
+              if (itemId > 0 && unitsReturned > 0) {
+                const batchRow = line.batch_id
+                  ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(Number(line.batch_id)) as any)
+                  : (db.prepare('SELECT * FROM inventory WHERE item_id = ? ORDER BY id DESC LIMIT 1').get(itemId) as any);
+                if (batchRow) {
+                  const nextTotalUnits = Number(batchRow.quantity_in_stock || 0) + unitsReturned;
+                  const bUnitsPerPack = Math.max(1, Number(batchRow.units_per_pack || uPerPack));
+                  db.prepare(`
+                    UPDATE inventory
+                    SET quantity_in_stock = ?,
+                        pack_quantity = ?,
+                        loose_units = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                  `).run(
+                    nextTotalUnits,
+                    Math.floor(nextTotalUnits / bUnitsPerPack),
+                    nextTotalUnits % bUnitsPerPack,
+                    batchRow.id
+                  );
+                }
+              }
+            }
+
+            if (customerAccId) recalculateAccountBalance(customerAccId);
+            if (payload.payment_account_id) recalculateAccountBalance(Number(payload.payment_account_id));
+            return newSrId;
+          })();
+
+          db.prepare(`
+            INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
+            VALUES (?, ?, 'CREATE_SALE_RETURN', 'sale_returns', ?, ?, 'synced', ?)
+          `).run(client_tx_id, deviceId, srId, returnNumber, JSON.stringify(payload));
+          results.push({ client_tx_id, status: 'synced', server_id: srId, invoice_number: returnNumber });
+        } else if (action === 'CREATE_PURCHASE_RETURN') {
+          const returnNumber = String(payload.return_number || `PR-${Date.now().toString().slice(-6)}`);
+          const returnDate = String(payload.return_date || new Date().toISOString().slice(0, 10));
+          const netReturnAmt = round2(payload.net_return_amount || payload.total_amount || 0);
+          const refundReceived = round2(payload.refund_received || 0);
+          const supplierAccId = payload.supplier_account_id ? Number(payload.supplier_account_id) : null;
+          const returnLines = Array.isArray(payload.items) ? payload.items : [];
+
+          const prId = db.transaction(() => {
+            const ins = db
+              .prepare(`
+                INSERT INTO purchase_returns (
+                  return_number, return_date, original_purchase_id, original_bill_number,
+                  supplier_account_id, supplier_name, return_mode, settlement_mode,
+                  payment_account_id, subtotal_amount, discount_amount, tax_amount,
+                  net_return_amount, refund_received, debit_adjusted, reason, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `)
+              .run(
+                returnNumber,
+                returnDate,
+                payload.original_purchase_id || null,
+                payload.original_bill_number || null,
+                supplierAccId,
+                payload.supplier_name || 'Supplier',
+                payload.return_mode || 'direct',
+                payload.settlement_mode || 'Account Adjustment',
+                payload.payment_account_id || null,
+                round2(payload.subtotal_amount || netReturnAmt),
+                round2(payload.discount_amount || 0),
+                round2(payload.tax_amount || 0),
+                netReturnAmt,
+                refundReceived,
+                round2(netReturnAmt - refundReceived),
+                payload.reason || 'Purchase Return (Synced)',
+                payload.notes || null
+              );
+            const newPrId = Number(ins.lastInsertRowid);
+
+            for (const line of returnLines) {
+              const itemId = Number(line.item_id || 0);
+              const unitsReturned = Number(line.total_units_returned || line.quantity_returned || 0);
+              const uPerPack = Math.max(1, Number(line.units_per_pack || 1));
+              const packRet = Number(line.pack_qty || Math.floor(unitsReturned / uPerPack));
+              const looseRet = Number(line.loose_qty || unitsReturned % uPerPack);
+
+              db.prepare(`
+                INSERT INTO purchase_return_items (
+                  purchase_return_id, item_id, item_name, batch_id, batch_number,
+                  units_per_pack, pack_qty, loose_qty, quantity_returned,
+                  total_units_returned, purchase_price, discount_percent, discount_amount, line_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(
+                newPrId,
+                itemId,
+                line.item_name || 'Item',
+                line.batch_id || null,
+                line.batch_number || 'DEFAULT',
+                uPerPack,
+                packRet,
+                looseRet,
+                unitsReturned,
+                unitsReturned,
+                round2(line.purchase_price || line.unit_price || 0),
+                round2(line.discount_percent || 0),
+                round2(line.discount_amount || 0),
+                round2(line.line_total || 0)
+              );
+
+              if (itemId > 0 && unitsReturned > 0) {
+                const batchRow = line.batch_id
+                  ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(Number(line.batch_id)) as any)
+                  : (db.prepare('SELECT * FROM inventory WHERE item_id = ? ORDER BY id DESC LIMIT 1').get(itemId) as any);
+                if (batchRow) {
+                  const nextTotalUnits = Math.max(0, Number(batchRow.quantity_in_stock || 0) - unitsReturned);
+                  const bUnitsPerPack = Math.max(1, Number(batchRow.units_per_pack || uPerPack));
+                  db.prepare(`
+                    UPDATE inventory
+                    SET quantity_in_stock = ?,
+                        pack_quantity = ?,
+                        loose_units = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                  `).run(
+                    nextTotalUnits,
+                    Math.floor(nextTotalUnits / bUnitsPerPack),
+                    nextTotalUnits % bUnitsPerPack,
+                    batchRow.id
+                  );
+                }
+              }
+            }
+
+            if (supplierAccId) recalculateAccountBalance(supplierAccId);
+            if (payload.payment_account_id) recalculateAccountBalance(Number(payload.payment_account_id));
+            return newPrId;
+          })();
+
+          db.prepare(`
+            INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
+            VALUES (?, ?, 'CREATE_PURCHASE_RETURN', 'purchase_returns', ?, ?, 'synced', ?)
+          `).run(client_tx_id, deviceId, prId, returnNumber, JSON.stringify(payload));
+          results.push({ client_tx_id, status: 'synced', server_id: prId, invoice_number: returnNumber });
+        } else if (action === 'STOCK_ADJUSTMENT') {
+          const itemId = Number(payload.item_id || 0);
+          const batchId = payload.batch_id ? Number(payload.batch_id) : null;
+          if (itemId > 0) {
+            const batchRow = batchId
+              ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(batchId) as any)
+              : (db.prepare('SELECT * FROM inventory WHERE item_id = ? ORDER BY id DESC LIMIT 1').get(itemId) as any);
+            if (batchRow) {
+              const uPerPack = Math.max(1, Number(batchRow.units_per_pack || 1));
+              const newPackQty =
+                payload.new_pack_quantity !== undefined
+                  ? Number(payload.new_pack_quantity)
+                  : Number(batchRow.pack_quantity || 0);
+              const newLooseUnits =
+                payload.new_loose_units !== undefined
+                  ? Number(payload.new_loose_units)
+                  : Number(batchRow.loose_units || 0);
+              const totalUnits =
+                payload.new_total_units !== undefined
+                  ? Number(payload.new_total_units)
+                  : newPackQty * uPerPack + newLooseUnits;
+
+              db.prepare(`
+                UPDATE inventory
+                SET pack_quantity = ?,
+                    loose_units = ?,
+                    quantity_in_stock = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+              `).run(Math.floor(totalUnits / uPerPack), totalUnits % uPerPack, totalUnits, batchRow.id);
+            }
+          }
+          db.prepare(`
+            INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, status, payload_json)
+            VALUES (?, ?, 'STOCK_ADJUSTMENT', 'inventory', ?, 'synced', ?)
+          `).run(client_tx_id, deviceId, itemId, JSON.stringify(payload));
+          results.push({ client_tx_id, status: 'synced', server_id: itemId });
         } else {
           // Record other actions cleanly
           db.prepare(`

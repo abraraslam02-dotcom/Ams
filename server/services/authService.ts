@@ -178,7 +178,7 @@ export function ensureAuthTables(db: Database.Database): void {
         );
       `);
 
-      // 6. Ensure Company Settings has recovery email & More Options columns
+      // 6. Ensure Company Settings has recovery email & More Options columns, and users has offline PBKDF2 verifier columns
       const ensureCol = (table: string, colName: string, colDef: string) => {
         const cols = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>;
         if (!cols.some((c) => c.name === colName)) {
@@ -190,32 +190,38 @@ export function ensureAuthTables(db: Database.Database): void {
       ensureCol('company_settings', 'sales_invoice_more_options_json', "TEXT DEFAULT '{}'");
       ensureCol('company_settings', 'invoice_subtitle', "TEXT DEFAULT ''");
       ensureCol('company_settings', 'custom_invoice_heading', "TEXT DEFAULT ''");
+      ensureCol('users', 'offline_verifier_salt', 'TEXT');
+      ensureCol('users', 'offline_verifier_hash', 'TEXT');
 
       tablesInitialized = true;
     }
 
     // 7. Always verify Default Super Admin Account exists (even if cloud snapshot restore wiped users)
     const superAdminRow = db
-      .prepare("SELECT id FROM users WHERE role = 'Super Admin' LIMIT 1")
-      .get() as { id: number } | undefined;
+      .prepare("SELECT id, salt, offline_verifier_hash FROM users WHERE role = 'Super Admin' LIMIT 1")
+      .get() as { id: number; salt: string; offline_verifier_hash?: string | null } | undefined;
 
     if (!superAdminRow) {
       const defaultSalt = 'ams_default_superadmin_salt_2026';
       const defaultHash =
         '9d3990a8be03bc0dabf2ec5561478f79b91cad2293883f425440adaa9044a05af31eb1615e349254617c19c45cca6a991ef4a2d606ca4d38cc18d6aa3381d2cc';
+      const defaultOffline = deriveOfflinePbkdf2Verifier('MasterAdmin@2026', '616d735f6f66666c696e655f73616c74');
 
       const insert = db.prepare(`
         INSERT OR IGNORE INTO users (
           username, full_name, email, phone, password_hash, salt,
+          offline_verifier_salt, offline_verifier_hash,
           role, status, failed_login_attempts, locked_until, last_login, last_login_ip, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, 'Super Admin', 'Active', 0, NULL, datetime('now'), '127.0.0.1', 'Primary Store Super Administrator')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Super Admin', 'Active', 0, NULL, datetime('now'), '127.0.0.1', 'Primary Store Super Administrator')
       `).run(
         'admin',
         'Abrar Aslam',
         'abrar.aslam02@gmail.com',
         '+92 42 35789000',
         defaultHash,
-        defaultSalt
+        defaultSalt,
+        defaultOffline.verifierSalt,
+        defaultOffline.verifierHash
       );
 
       const superAdminId =
@@ -229,6 +235,15 @@ export function ensureAuthTables(db: Database.Database): void {
         INSERT INTO auth_audit_logs (user_id, username, action, status, ip_address, user_agent, details)
         VALUES (?, 'admin', 'SUPER_ADMIN_INITIALIZED', 'SUCCESS', '127.0.0.1', 'System', 'Initial Super Admin account created with full application control')
       `).run(superAdminId);
+    } else if (!superAdminRow.offline_verifier_hash || superAdminRow.salt === 'ams_default_superadmin_salt_2026') {
+      const defaultOffline = deriveOfflinePbkdf2Verifier('MasterAdmin@2026', '616d735f6f66666c696e655f73616c74');
+      if (superAdminRow.offline_verifier_hash !== defaultOffline.verifierHash) {
+        db.prepare('UPDATE users SET offline_verifier_salt = ?, offline_verifier_hash = ? WHERE id = ?').run(
+          defaultOffline.verifierSalt,
+          defaultOffline.verifierHash,
+          superAdminRow.id
+        );
+      }
     }
   } catch (err) {
     console.error('[AMS Auth Table Initialization Error]', err);
@@ -298,6 +313,31 @@ export function hashPassword(password: string, customSalt?: string): { salt: str
   return {
     salt,
     hash: derivedKey.toString('hex'),
+  };
+}
+
+/**
+ * Derive a client-compatible RFC 2898 PBKDF2-HMAC-SHA256 (100,000 iterations, 32 bytes)
+ * cryptographic verifier for offline authentication in Web Crypto API.
+ */
+export function deriveOfflinePbkdf2Verifier(
+  password: string,
+  customSaltHex?: string
+): { verifierSalt: string; verifierHash: string; salt: string; hash: string } {
+  const saltHex = customSaltHex || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.pbkdf2Sync(
+    String(password).trim(),
+    Buffer.from(saltHex, 'utf8'),
+    100000,
+    32,
+    'sha256'
+  );
+  const hashHex = derived.toString('hex');
+  return {
+    verifierSalt: saltHex,
+    verifierHash: hashHex,
+    salt: saltHex,
+    hash: hashHex,
   };
 }
 
@@ -894,8 +934,9 @@ export function verifyAndResetPassword(
     };
   }
 
-  // Code matches! Hash new password with scrypt and update
+  // Code matches! Hash new password with scrypt and update offline PBKDF2 verifier
   const { hash, salt } = hashPassword(newPassword);
+  const { verifierSalt, verifierHash } = deriveOfflinePbkdf2Verifier(newPassword);
 
   const resetTx = db.transaction(() => {
     // Update user password & reset lockout counters
@@ -903,12 +944,14 @@ export function verifyAndResetPassword(
       UPDATE users
       SET password_hash = ?,
           salt = ?,
+          offline_verifier_salt = ?,
+          offline_verifier_hash = ?,
           failed_login_attempts = 0,
           locked_until = NULL,
           password_changed_at = datetime('now'),
           updated_at = datetime('now')
       WHERE id = ?
-    `).run(hash, salt, user.id);
+    `).run(hash, salt, verifierSalt, verifierHash, user.id);
 
     // Mark code as used
     db.prepare('UPDATE password_recovery_codes SET used = 1 WHERE id = ?').run(recovery.id);
@@ -934,3 +977,62 @@ export function verifyAndResetPassword(
     message: 'Your password has been reset successfully! You can now log in with your new password.',
   };
 }
+
+/**
+ * Returns offline cryptographic auth vault profiles (PBKDF2-HMAC-SHA256 verifiers + permissions, never plaintext passwords)
+ * for active users so authorized desktop workstations can authenticate users offline.
+ */
+export function getOfflineAuthVaultProfiles(db: Database.Database): Array<{
+  id: number;
+  username: string;
+  full_name: string;
+  email: string | null;
+  phone: string | null;
+  role: string;
+  status: string;
+  permissions: Record<string, ModulePermission>;
+  offline_verifier_salt: string | null;
+  offline_verifier_hash: string | null;
+  verifier_salt: string | null;
+  verifier_hash: string | null;
+  is_default_superadmin: boolean;
+}> {
+  ensureAuthTables(db);
+  const rows = db
+    .prepare(`
+      SELECT id, username, full_name, email, phone, role, status, salt,
+             offline_verifier_salt, offline_verifier_hash
+      FROM users
+      WHERE status = 'Active'
+      ORDER BY id ASC
+    `)
+    .all() as Array<{
+    id: number;
+    username: string;
+    full_name: string;
+    email: string | null;
+    phone: string | null;
+    role: string;
+    status: string;
+    salt: string;
+    offline_verifier_salt: string | null;
+    offline_verifier_hash: string | null;
+  }>;
+
+  return rows.map((u) => ({
+    id: u.id,
+    username: u.username,
+    full_name: u.full_name,
+    email: u.email,
+    phone: u.phone,
+    role: u.role,
+    status: u.status,
+    permissions: getUserPermissions(db, u.id, u.role),
+    offline_verifier_salt: u.offline_verifier_salt || null,
+    offline_verifier_hash: u.offline_verifier_hash || null,
+    verifier_salt: u.offline_verifier_salt || null,
+    verifier_hash: u.offline_verifier_hash || null,
+    is_default_superadmin: u.salt === 'ams_default_superadmin_salt_2026',
+  }));
+}
+

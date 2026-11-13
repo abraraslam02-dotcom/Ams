@@ -18,6 +18,8 @@ import {
   verifyAndResetPassword,
   getSuperAdminRecoveryEmail,
   PERMISSION_MODULES,
+  deriveOfflinePbkdf2Verifier,
+  getOfflineAuthVaultProfiles,
 } from '../services/authService.ts';
 import type { UserRecord } from '../services/authService.ts';
 import {
@@ -94,6 +96,7 @@ authRouter.get('/status', (req: Request, res: Response) => {
           rememberMe: Boolean(validation.rememberMe),
           user: validation.user,
           permissions: validation.permissions,
+          offlineUsers: getOfflineAuthVaultProfiles(db),
         });
       }
       // Clear expired or invalid cookie so stale cookies do not linger
@@ -258,15 +261,18 @@ authRouter.post('/login', (req: Request, res: Response) => {
       }
     }
 
-    // Reset failed attempts & record successful login
+    // Reset failed attempts, record successful login & refresh WebCrypto-compatible PBKDF2 offline verifier
+    const offlineVerifier = deriveOfflinePbkdf2Verifier(String(password));
     db.prepare(`
       UPDATE users
       SET failed_login_attempts = 0,
           locked_until = NULL,
           last_login = datetime('now'),
-          last_login_ip = ?
+          last_login_ip = ?,
+          offline_verifier_salt = ?,
+          offline_verifier_hash = ?
       WHERE id = ?
-    `).run(ip, user.id);
+    `).run(ip, offlineVerifier.salt, offlineVerifier.hash, user.id);
 
     const rememberMe = Boolean(remember_me);
     const session = createSession(db, user.id, rememberMe, ip, userAgent);
@@ -284,6 +290,7 @@ authRouter.post('/login', (req: Request, res: Response) => {
 
     const safeUser = getUserById(db, user.id);
     const permissions = getUserPermissions(db, user.id, user.role);
+    const offlineUsers = getOfflineAuthVaultProfiles(db);
 
     return res.json({
       success: true,
@@ -292,6 +299,8 @@ authRouter.post('/login', (req: Request, res: Response) => {
       rememberMe,
       user: safeUser,
       permissions,
+      offlineVerifier,
+      offlineUsers,
     });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -539,13 +548,15 @@ authRouter.post(
       const role = req.body.role && ALLOWED_NON_ADMIN_ROLES.includes(req.body.role) ? req.body.role : 'Viewer';
 
       const { hash, salt } = hashPassword(password);
+      const offlineVerifier = deriveOfflinePbkdf2Verifier(password);
 
       const result = db
         .prepare(`
           INSERT INTO users (
             username, full_name, email, phone, password_hash, salt,
+            offline_verifier_salt, offline_verifier_hash,
             role, status, notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           cleanUsername,
@@ -554,6 +565,8 @@ authRouter.post(
           cleanPhone,
           hash,
           salt,
+          offlineVerifier.salt,
+          offlineVerifier.hash,
           role,
           userStatus,
           req.body.notes ? String(req.body.notes).trim() : null
@@ -818,17 +831,20 @@ authRouter.put(
       }
 
       const { hash, salt } = hashPassword(new_password);
+      const offlineVerifier = deriveOfflinePbkdf2Verifier(new_password);
 
       db.prepare(`
         UPDATE users
         SET password_hash = ?,
             salt = ?,
+            offline_verifier_salt = ?,
+            offline_verifier_hash = ?,
             failed_login_attempts = 0,
             locked_until = NULL,
             password_changed_at = datetime('now'),
             updated_at = datetime('now')
         WHERE id = ?
-      `).run(hash, salt, id);
+      `).run(hash, salt, offlineVerifier.salt, offlineVerifier.hash, id);
 
       // Invalidate active sessions
       db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(id);

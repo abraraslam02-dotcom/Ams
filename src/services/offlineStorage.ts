@@ -10,7 +10,7 @@
  */
 
 const DB_NAME = 'AbrarMedicalStore_LocalDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export type OfflineSyncAction =
   | 'CREATE_SALE'
@@ -35,6 +35,8 @@ export type OfflineSyncAction =
 export type OfflineSyncEntity =
   | 'sales'
   | 'purchases'
+  | 'sale_returns'
+  | 'purchase_returns'
   | 'items'
   | 'accounts'
   | 'inventory'
@@ -173,6 +175,42 @@ class OfflineStorage {
         if (!db.objectStoreNames.contains('api_cache')) {
           db.createObjectStore('api_cache', { keyPath: 'key' });
         }
+
+        // 12. Offline Auth Vault Store (Added in v3 for offline login & permissions)
+        if (!db.objectStoreNames.contains('auth_vault')) {
+          const authStore = db.createObjectStore('auth_vault', { keyPath: 'id' });
+          authStore.createIndex('username', 'username', { unique: false });
+          authStore.createIndex('email', 'email', { unique: false });
+        }
+
+        // 13. Sale Returns Store (Added in v3)
+        if (!db.objectStoreNames.contains('sale_returns')) {
+          const srStore = db.createObjectStore('sale_returns', { keyPath: 'client_tx_id' });
+          srStore.createIndex('return_number', 'return_number', { unique: false });
+          srStore.createIndex('return_date', 'return_date', { unique: false });
+        }
+
+        // 14. Purchase Returns Store (Added in v3)
+        if (!db.objectStoreNames.contains('purchase_returns')) {
+          const prStore = db.createObjectStore('purchase_returns', { keyPath: 'client_tx_id' });
+          prStore.createIndex('return_number', 'return_number', { unique: false });
+          prStore.createIndex('return_date', 'return_date', { unique: false });
+        }
+
+        // 15. Stock Adjustments Store (Added in v3)
+        if (!db.objectStoreNames.contains('stock_adjustments')) {
+          db.createObjectStore('stock_adjustments', { keyPath: 'client_tx_id' });
+        }
+
+        // 16. Salesmen Store (Added in v3)
+        if (!db.objectStoreNames.contains('salesmen')) {
+          db.createObjectStore('salesmen', { keyPath: 'id', autoIncrement: true });
+        }
+
+        // 17. Local Backups Store (Added in v3)
+        if (!db.objectStoreNames.contains('local_backups')) {
+          db.createObjectStore('local_backups', { keyPath: 'id' });
+        }
       };
 
       request.onsuccess = () => {
@@ -303,6 +341,23 @@ class OfflineStorage {
       .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   }
 
+  async getFailedSyncItems(): Promise<OfflineSyncItem[]> {
+    const all = await this.getAll<OfflineSyncItem>('sync_queue');
+    return all
+      .filter((i) => i.status === 'failed')
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  }
+
+  async retryFailedSyncItems(): Promise<number> {
+    const failed = await this.getFailedSyncItems();
+    for (const item of failed) {
+      item.status = 'pending';
+      item.error = null;
+      await this.put('sync_queue', item);
+    }
+    return failed.length;
+  }
+
   async updateSyncItemStatus(
     clientTxId: string,
     status: 'pending' | 'syncing' | 'synced' | 'failed',
@@ -321,6 +376,80 @@ class OfflineStorage {
       existing.server_invoice_number = extra.server_invoice_number;
     if (status === 'failed') existing.retry_count = (existing.retry_count || 0) + 1;
     await this.put('sync_queue', existing);
+  }
+
+  // --- OFFLINE LOCAL BACKUP & RESTORATION ---
+
+  async exportFullDatabaseSnapshot(): Promise<{
+    format: 'AMS_LOCAL_SNAPSHOT_V1';
+    createdAt: string;
+    deviceId: string;
+    stores: Record<string, any[]>;
+    recordCounts: Record<string, number>;
+  }> {
+    const storeNames = [
+      'items',
+      'accounts',
+      'inventory',
+      'sales',
+      'purchases',
+      'sale_returns',
+      'purchase_returns',
+      'stock_adjustments',
+      'cash_book',
+      'vouchers',
+      'salesmen',
+      'company_settings',
+      'sync_queue',
+      'sync_meta',
+      'api_cache',
+    ];
+    const stores: Record<string, any[]> = {};
+    const recordCounts: Record<string, number> = {};
+    for (const name of storeNames) {
+      try {
+        const rows = await this.getAll<any>(name);
+        stores[name] = rows;
+        recordCounts[name] = rows.length;
+      } catch {
+        stores[name] = [];
+        recordCounts[name] = 0;
+      }
+    }
+    const deviceId = await this.getOrCreateDeviceId();
+    return {
+      format: 'AMS_LOCAL_SNAPSHOT_V1',
+      createdAt: new Date().toISOString(),
+      deviceId,
+      stores,
+      recordCounts,
+    };
+  }
+
+  async importFullDatabaseSnapshot(snapshot: any): Promise<{
+    restoredStores: number;
+    totalRecords: number;
+  }> {
+    if (!snapshot || snapshot.format !== 'AMS_LOCAL_SNAPSHOT_V1' || typeof snapshot.stores !== 'object') {
+      throw new Error('Invalid local backup file format. Expected AMS_LOCAL_SNAPSHOT_V1.');
+    }
+    let restoredStores = 0;
+    let totalRecords = 0;
+    for (const [storeName, rows] of Object.entries(snapshot.stores)) {
+      if (!Array.isArray(rows)) continue;
+      if (storeName === 'auth_vault') continue; // Preserve device auth vault
+      try {
+        await this.clearStore(storeName);
+        if (rows.length > 0) {
+          await this.bulkPut(storeName, rows);
+        }
+        restoredStores++;
+        totalRecords += rows.length;
+      } catch {
+        // ignore missing store
+      }
+    }
+    return { restoredStores, totalRecords };
   }
 
   // --- META & DEVICE ID ---

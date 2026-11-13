@@ -23,6 +23,10 @@ import { offlineSyncManager } from './offlineSyncManager';
 const LEGACY_TOKEN_KEY = 'ams_session_token';
 const LEGACY_CACHED_SESSION_KEY = 'ams_cached_auth_session';
 const LEGACY_OFFLINE_VERIFIERS_KEY = 'ams_offline_auth_verifiers';
+const ACTIVE_AUTH_SESSION_KEY = 'ams_active_auth_session_v2';
+const ACTIVE_TAB_SESSION_KEY = 'ams_active_tab_session_v2';
+const OFFLINE_AUTH_VAULT_KEY = 'ams_offline_auth_vault_v2';
+const WORKSTATION_AUTHORIZED_KEY = 'ams_workstation_authorized_v2';
 const DEVICE_ID_KEY = 'ams_registered_device_id';
 const DEVICE_NAME_KEY = 'ams_registered_device_name';
 
@@ -36,6 +40,150 @@ function purgeLegacyAuthStorage(): void {
   } catch {
     // ignore storage errors
   }
+}
+
+async function deriveBrowserPbkdf2Hash(password: string, saltHex: string): Promise<string> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('Web Crypto API is unavailable in this browser.');
+  }
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(String(password).trim()),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits']
+  );
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: enc.encode(saltHex),
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+  return Array.from(new Uint8Array(derivedBits))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function saveOfflineAuthVault(users: any[]): Promise<void> {
+  if (!Array.isArray(users) || users.length === 0) return;
+  try {
+    await offlineStorage.bulkPut('auth_vault', users);
+  } catch {
+    // ignore IDB error
+  }
+  try {
+    localStorage.setItem(OFFLINE_AUTH_VAULT_KEY, JSON.stringify(users));
+    localStorage.setItem(WORKSTATION_AUTHORIZED_KEY, '1');
+  } catch {
+    // ignore quota error
+  }
+}
+
+async function loadOfflineAuthVault(): Promise<any[]> {
+  const byId = new Map<number, any>();
+  try {
+    const raw = localStorage.getItem(OFFLINE_AUTH_VAULT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const u of parsed) {
+          if (u && u.id) byId.set(Number(u.id), u);
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const idbUsers = await offlineStorage.getAll<any>('auth_vault');
+    for (const u of idbUsers) {
+      if (u && u.id) byId.set(Number(u.id), u);
+    }
+  } catch {
+    // ignore
+  }
+  return Array.from(byId.values());
+}
+
+async function saveActiveAuthSession(payload: {
+  user: User;
+  permissions: any;
+  rememberMe: boolean;
+  offlineLogin?: boolean;
+}): Promise<void> {
+  const record = {
+    ...payload,
+    savedAt: new Date().toISOString(),
+  };
+  try {
+    sessionStorage.setItem(ACTIVE_TAB_SESSION_KEY, JSON.stringify(record));
+    if (payload.rememberMe) {
+      localStorage.setItem(ACTIVE_AUTH_SESSION_KEY, JSON.stringify(record));
+    } else {
+      localStorage.removeItem(ACTIVE_AUTH_SESSION_KEY);
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    await offlineStorage.setMeta('active_auth_session', record);
+  } catch {
+    // ignore
+  }
+}
+
+async function clearActiveAuthSession(): Promise<void> {
+  try {
+    sessionStorage.removeItem(ACTIVE_TAB_SESSION_KEY);
+    localStorage.removeItem(ACTIVE_AUTH_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+  try {
+    await offlineStorage.setMeta('active_auth_session', null);
+  } catch {
+    // ignore
+  }
+}
+
+async function getSavedActiveAuthSession(): Promise<{
+  user: User;
+  permissions: any;
+  rememberMe: boolean;
+  offlineLogin?: boolean;
+} | null> {
+  try {
+    const tabRaw = sessionStorage.getItem(ACTIVE_TAB_SESSION_KEY);
+    if (tabRaw) {
+      const parsed = JSON.parse(tabRaw);
+      if (parsed && parsed.user) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const localRaw = localStorage.getItem(ACTIVE_AUTH_SESSION_KEY);
+    if (localRaw) {
+      const parsed = JSON.parse(localRaw);
+      if (parsed && parsed.user) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const metaSession = await offlineStorage.getMeta('active_auth_session');
+    if (metaSession && metaSession.user && metaSession.rememberMe) {
+      return metaSession;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 export function getClientDeviceId(): string {
@@ -1800,8 +1948,12 @@ export const api = {
       // Offline fallback
     }
     const cached = await offlineStorage.getCachedApiData<any>('purchase_returns_list');
-    if (cached) return { ...cached, offline: true };
-    return { success: true, offline: true, returns: [], data: [] };
+    const localReturns = await offlineStorage.getAll<any>('purchase_returns');
+    if (cached && Array.isArray(cached.returns)) {
+      const merged = [...localReturns, ...cached.returns];
+      return { ...cached, returns: merged, data: merged, offline: true };
+    }
+    return { success: true, offline: true, returns: localReturns, data: localReturns };
   },
 
   async getPurchaseReturnDetails(id: number) {
@@ -1817,20 +1969,43 @@ export const api = {
     }
     const cached = await offlineStorage.getCachedApiData<any>(`purchase_return_${id}`);
     if (cached) return { ...cached, offline: true };
+    const localReturns = await offlineStorage.getAll<any>('purchase_returns');
+    const found = localReturns.find(
+      (r) => String(r.id) === String(id) || String(r.client_tx_id) === String(id)
+    );
+    if (found) {
+      return { success: true, offline: true, purchaseReturn: found, items: found.items || [] };
+    }
     throw new Error('Purchase return details not found in offline cache');
   },
 
   async createPurchaseReturn(payload: any) {
-    const res = await authFetch('/api/purchases/returns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to create purchase return');
+    try {
+      const res = await authFetch('/api/purchases/returns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+      if (res.status >= 400 && res.status < 500 && data.error) {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      if (err?.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+        throw err;
+      }
     }
-    return data;
+    const offlineRes = await offlineSyncManager.queueOfflinePurchaseReturn(payload);
+    return {
+      success: true,
+      offline: true,
+      return_number: offlineRes.return_number,
+      purchaseReturn: offlineRes.purchaseReturn,
+      message: `Purchase Return ${offlineRes.return_number} saved locally (Offline Mode). Will automatically synchronize when online.`,
+    };
   },
 
   /**
@@ -2236,8 +2411,12 @@ export const api = {
       // Offline fallback
     }
     const cached = await offlineStorage.getCachedApiData<any>('sale_returns_list');
-    if (cached) return { ...cached, offline: true };
-    return { success: true, offline: true, returns: [], data: [] };
+    const localReturns = await offlineStorage.getAll<any>('sale_returns');
+    if (cached && Array.isArray(cached.returns)) {
+      const merged = [...localReturns, ...cached.returns];
+      return { ...cached, returns: merged, data: merged, offline: true };
+    }
+    return { success: true, offline: true, returns: localReturns, data: localReturns };
   },
 
   async getSaleReturnDetails(id: number) {
@@ -2253,20 +2432,43 @@ export const api = {
     }
     const cached = await offlineStorage.getCachedApiData<any>(`sale_return_${id}`);
     if (cached) return { ...cached, offline: true };
+    const localReturns = await offlineStorage.getAll<any>('sale_returns');
+    const found = localReturns.find(
+      (r) => String(r.id) === String(id) || String(r.client_tx_id) === String(id)
+    );
+    if (found) {
+      return { success: true, offline: true, saleReturn: found, items: found.items || [] };
+    }
     throw new Error('Sales return details not found in offline cache');
   },
 
   async createSaleReturn(payload: any) {
-    const res = await authFetch('/api/sales/returns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to create sales return');
+    try {
+      const res = await authFetch('/api/sales/returns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+      if (res.status >= 400 && res.status < 500 && data.error) {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      if (err?.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+        throw err;
+      }
     }
-    return data;
+    const offlineRes = await offlineSyncManager.queueOfflineSaleReturn(payload);
+    return {
+      success: true,
+      offline: true,
+      return_number: offlineRes.return_number,
+      saleReturn: offlineRes.saleReturn,
+      message: `Sales Return ${offlineRes.return_number} saved locally (Offline Mode). Will automatically synchronize when online.`,
+    };
   },
 
   /**
@@ -2454,21 +2656,60 @@ export const api = {
   },
 
   /**
-   * Authentication - System status & session verification (HttpOnly Cookie Session)
+   * Authentication - System status & session verification (HttpOnly Cookie + Offline Session Restoration)
    */
   async getAuthStatus(): Promise<AuthStatusResponse> {
     purgeLegacyAuthStorage();
     try {
       const res = await authFetch('/api/auth/status');
       const data = await res.json();
-      return data;
+      if (res.ok && data.authenticated && data.user) {
+        if (Array.isArray(data.offlineUsers) && data.offlineUsers.length > 0) {
+          await saveOfflineAuthVault(data.offlineUsers);
+        }
+        await saveActiveAuthSession({
+          user: data.user,
+          permissions: data.permissions || {},
+          rememberMe: Boolean(data.rememberMe ?? true),
+          offlineLogin: false,
+        });
+        return data;
+      }
+      if (res.ok && data.authenticated === false) {
+        // If user logged in while offline during this session, preserve their offline session
+        const savedSession = await getSavedActiveAuthSession();
+        if (savedSession && savedSession.offlineLogin) {
+          return {
+            initialized: true,
+            authenticated: true,
+            rememberMe: savedSession.rememberMe,
+            user: savedSession.user,
+            permissions: savedSession.permissions,
+          };
+        }
+        await clearActiveAuthSession();
+        return data;
+      }
     } catch {
+      // Offline fallback: restore active session from local storage / IndexedDB without requiring cloud connection
+    }
+
+    const savedSession = await getSavedActiveAuthSession();
+    if (savedSession && savedSession.user) {
       return {
         initialized: true,
-        authenticated: false,
-        userCount: 1,
+        authenticated: true,
+        rememberMe: Boolean(savedSession.rememberMe),
+        user: savedSession.user,
+        permissions: savedSession.permissions,
       };
     }
+
+    return {
+      initialized: true,
+      authenticated: false,
+      userCount: 1,
+    };
   },
 
   /**
@@ -2495,7 +2736,7 @@ export const api = {
   },
 
   /**
-   * Authentication - Login with HttpOnly Cookie Session & Remember Me support
+   * Authentication - Login with HttpOnly Cookie Session, Remember Me & Secure Offline PBKDF2 Authentication
    */
   async login(data: {
     username: string;
@@ -2505,45 +2746,179 @@ export const api = {
     purgeLegacyAuthStorage();
     const device_id = getClientDeviceId();
     const device_name = getClientDeviceName();
-    const res = await authFetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: data.username,
-        password: data.password,
-        remember_me: Boolean(data.remember_me),
-        device_id,
-        device_name,
-      }),
-    });
-    const result = await res.json();
-    if (!res.ok || !result.success) {
-      const err: any = new Error(result.error || 'Invalid username/email or password');
-      err.code = result.code;
-      err.locked = result.locked;
-      err.remainingMinutes = result.remainingMinutes;
-      err.attemptsRemaining = result.attemptsRemaining;
-      err.deviceApprovalRequired = Boolean(result.deviceApprovalRequired);
-      err.registeredDeviceId = result.registeredDeviceId;
-      err.registeredDeviceName = result.registeredDeviceName;
-      err.requestedDeviceId = result.requestedDeviceId || device_id;
-      err.requestedDeviceName = result.requestedDeviceName || device_name;
-      throw err;
+    const rememberMe = Boolean(data.remember_me);
+
+    try {
+      const res = await authFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: data.username,
+          password: data.password,
+          remember_me: rememberMe,
+          device_id,
+          device_name,
+        }),
+      });
+      const result = await res.json();
+      if (!res.ok || !result.success) {
+        const err: any = new Error(result.error || 'Invalid username/email or password');
+        err.code = result.code;
+        err.locked = result.locked;
+        err.remainingMinutes = result.remainingMinutes;
+        err.attemptsRemaining = result.attemptsRemaining;
+        err.deviceApprovalRequired = Boolean(result.deviceApprovalRequired);
+        err.registeredDeviceId = result.registeredDeviceId;
+        err.registeredDeviceName = result.registeredDeviceName;
+        err.requestedDeviceId = result.requestedDeviceId || device_id;
+        err.requestedDeviceName = result.requestedDeviceName || device_name;
+        throw err;
+      }
+
+      // Persist offline auth vault & current user's PBKDF2 verifier for future offline logins
+      const vaultList = Array.isArray(result.offlineUsers) ? [...result.offlineUsers] : await loadOfflineAuthVault();
+      if (result.user) {
+        let salt = result.offlineVerifier?.salt;
+        let hash = result.offlineVerifier?.hash;
+        if (!salt || !hash) {
+          try {
+            salt = `ams-salt-${result.user.id}`;
+            hash = await deriveBrowserPbkdf2Hash(String(data.password), salt);
+          } catch {
+            // ignore
+          }
+        }
+        const selfVaultRecord = {
+          ...result.user,
+          offline_verifier_salt: salt,
+          offline_verifier_hash: hash,
+          permissions: result.permissions || {},
+          updated_at: new Date().toISOString(),
+        };
+        const idx = vaultList.findIndex((u: any) => Number(u.id) === Number(result.user.id));
+        if (idx >= 0) {
+          vaultList[idx] = { ...vaultList[idx], ...selfVaultRecord };
+        } else {
+          vaultList.push(selfVaultRecord);
+        }
+      }
+      await saveOfflineAuthVault(vaultList);
+
+      if (result.user) {
+        await saveActiveAuthSession({
+          user: result.user,
+          permissions: result.permissions || {},
+          rememberMe,
+          offlineLogin: false,
+        });
+      }
+
+      return result;
+    } catch (err: any) {
+      // Re-throw explicit HTTP authentication failures (wrong password, locked account, deactivated) when server responded
+      const msg = String(err?.message || '');
+      const isNetworkOfflineError =
+        !err?.code &&
+        !err?.locked &&
+        err?.attemptsRemaining === undefined &&
+        (msg.includes('Failed to fetch') ||
+          msg.includes('NetworkError') ||
+          msg.includes('Load failed') ||
+          msg.includes('fetch') ||
+          (typeof navigator !== 'undefined' && !navigator.onLine));
+
+      if (!isNetworkOfflineError) {
+        throw err;
+      }
     }
-    return result;
+
+    // OFFLINE LOGIN VERIFICATION USING STORED PBKDF2-HMAC-SHA256 AUTH VAULT
+    const vaultUsers = await loadOfflineAuthVault();
+    const isWorkstationAuthorized =
+      vaultUsers.length > 0 || localStorage.getItem(WORKSTATION_AUTHORIZED_KEY) === '1';
+
+    if (!isWorkstationAuthorized || vaultUsers.length === 0) {
+      throw new Error(
+        'This computer has not been authorized online yet. Please connect to the internet once to sign in and authorize this workstation for offline use.'
+      );
+    }
+
+    const cleanIdentifier = String(data.username || '').trim().toLowerCase();
+    const matchedUser = vaultUsers.find(
+      (u: any) =>
+        String(u.username || '').trim().toLowerCase() === cleanIdentifier ||
+        (u.email && String(u.email).trim().toLowerCase() === cleanIdentifier)
+    );
+
+    if (!matchedUser) {
+      throw new Error(
+        'User account is not cached on this computer. New users must log in with internet connection at least once.'
+      );
+    }
+
+    if (matchedUser.status && matchedUser.status !== 'Active') {
+      throw new Error(
+        `Your account is currently ${String(matchedUser.status).toLowerCase()}. Please contact the Super Administrator.`
+      );
+    }
+
+    if (!matchedUser.offline_verifier_salt || !matchedUser.offline_verifier_hash) {
+      throw new Error(
+        'Offline security verifier not initialized for this user. Please log in once while connected to the internet.'
+      );
+    }
+
+    const computedHash = await deriveBrowserPbkdf2Hash(
+      String(data.password),
+      String(matchedUser.offline_verifier_salt)
+    );
+
+    if (computedHash !== String(matchedUser.offline_verifier_hash)) {
+      throw new Error('Invalid username/email or password');
+    }
+
+    const safeUser: User = {
+      id: matchedUser.id,
+      username: matchedUser.username,
+      full_name: matchedUser.full_name,
+      email: matchedUser.email || null,
+      phone: matchedUser.phone || null,
+      role: matchedUser.role,
+      status: matchedUser.status || 'Active',
+      failed_login_attempts: 0,
+      last_login: new Date().toISOString(),
+      created_at: matchedUser.created_at || new Date().toISOString(),
+      updated_at: matchedUser.updated_at || new Date().toISOString(),
+    };
+    const permissions = matchedUser.permissions || {};
+
+    await saveActiveAuthSession({
+      user: safeUser,
+      permissions,
+      rememberMe,
+      offlineLogin: true,
+    });
+
+    return {
+      success: true,
+      message: `Welcome back, ${safeUser.full_name} (Offline Mode)!`,
+      rememberMe,
+      user: safeUser,
+      permissions,
+    };
   },
 
   /**
-   * Authentication - Voluntary Logout
+   * Authentication - Voluntary Logout (Supports Offline Logout while preserving Auth Vault for subsequent Offline Login)
    */
   async logout(): Promise<{ success: boolean; message: string }> {
+    await clearActiveAuthSession();
+    purgeLegacyAuthStorage();
     try {
       const res = await authFetch('/api/auth/logout', { method: 'POST' });
       return await res.json();
     } catch {
-      return { success: true, message: 'Logged out.' };
-    } finally {
-      purgeLegacyAuthStorage();
+      return { success: true, message: 'You have been logged out (Offline Mode).' };
     }
   },
 
@@ -3250,16 +3625,50 @@ export const api = {
     journal_voucher_id: number | null;
     message: string;
   }> {
-    const res = await authFetch('/api/inventory/adjustments', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to create stock adjustment');
+    try {
+      const res = await authFetch('/api/inventory/adjustments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+      if (res.status >= 400 && res.status < 500 && data.error) {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      if (err?.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+        throw err;
+      }
     }
-    return data;
+    const batches = await offlineStorage.getAll<any>('inventory');
+    for (const line of payload.items || []) {
+      const batch = batches.find((b) => Number(b.id) === Number(line.inventory_id));
+      const upp = Math.max(1, Number(batch?.units_per_pack || 1));
+      const deltaUnits =
+        (Number(line.quantity_packs || 0) * upp + Number(line.quantity_loose || 0)) *
+        (line.direction === 'DECREASE' ? -1 : 1);
+      const currentUnits = Number(batch?.total_stock_units ?? batch?.quantity_in_stock ?? 0);
+      const newTotalUnits = Math.max(0, currentUnits + deltaUnits);
+      await offlineSyncManager.queueOfflineStockAdjustment({
+        item_id: batch?.item_id || 0,
+        batch_id: line.inventory_id,
+        new_total_units: newTotalUnits,
+        new_pack_quantity: Math.floor(newTotalUnits / upp),
+        new_loose_units: newTotalUnits % upp,
+        reason: payload.description || payload.reason_category,
+      });
+    }
+    const adjNo = `ADJ-OFF-${Date.now().toString().slice(-5)}`;
+    return {
+      success: true,
+      adjustment_no: adjNo,
+      adjustment_id: Date.now(),
+      journal_voucher_id: null,
+      message: `Stock adjustment ${adjNo} saved locally (Offline Mode). Will automatically synchronize when online.`,
+    };
   },
 
   async getStockTransfers(params?: { limit?: number; offset?: number }): Promise<{
@@ -3517,12 +3926,40 @@ export const api = {
   },
 
   async getInventoryCompaniesItemsMeta(): Promise<import('../types/inventory').CompanyItemMetaResponse> {
-    const res = await authFetch('/api/inventory/companies-items-meta');
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load company & item metadata');
+    try {
+      const res = await authFetch('/api/inventory/companies-items-meta');
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData('inventory_companies_items_meta', data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const cached = await offlineStorage.getCachedApiData<any>('inventory_companies_items_meta');
+    if (cached) return { ...cached, offline: true };
+    const items = await offlineStorage.getAll<any>('items');
+    const companiesSet = new Set<string>();
+    const categoriesSet = new Set<string>();
+    for (const it of items) {
+      if (it.company_name) companiesSet.add(String(it.company_name));
+      if (it.category) categoriesSet.add(String(it.category));
+    }
+    return {
+      success: true,
+      companies: Array.from(companiesSet).map((c) => ({ company_name: c, item_count: 1 })),
+      categories: Array.from(categoriesSet),
+      items: items.map((it) => ({
+        id: it.id,
+        item_code: it.item_code || '',
+        item_name: it.item_name || '',
+        generic_name: it.generic_name || '',
+        company_name: it.company_name || '',
+        category: it.category || '',
+        pack_size: it.packing || '1x1',
+        units_per_pack: Number(it.units_per_pack || 1),
+      })),
+    } as any;
   },
 
   async getItemStockReport(params?: {
@@ -3546,12 +3983,39 @@ export const api = {
     if (params?.itemGroup && params.itemGroup !== 'ALL') query.append('itemGroup', params.itemGroup);
     if (params?.search) query.append('search', params.search);
 
-    const res = await authFetch(`/api/inventory/item-stock-report?${query.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load item stock report');
+    try {
+      const res = await authFetch(`/api/inventory/item-stock-report?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData(`item_stock_report_${query.toString()}`, data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const cached = await offlineStorage.getCachedApiData<any>(`item_stock_report_${query.toString()}`);
+    if (cached) return { ...cached, offline: true };
+    const items = await offlineStorage.getAll<any>('items');
+    return {
+      success: true,
+      count: items.length,
+      data: items.map((it) => ({
+        item_id: it.id,
+        item_code: it.item_code || '',
+        item_name: it.item_name || '',
+        company_name: it.company_name || '',
+        category: it.category || '',
+        pack_size: it.packing || '1x1',
+        opening_qty: Number(it.opening_stock || 0),
+        purchased_qty: 0,
+        sold_qty: 0,
+        closing_qty: Number(it.opening_stock || 0),
+        purchase_price: Number(it.purchase_price || 0),
+        sale_price: Number(it.retail_price || 0),
+        stock_value: round2Local(Number(it.opening_stock || 0) * Number(it.purchase_price || 0)),
+      })) as any,
+      totals: {},
+    };
   },
 
   async getCompanyStockStatement(params?: {
@@ -3568,12 +4032,19 @@ export const api = {
     if (params?.itemIds && params.itemIds.length > 0) query.append('itemIds', params.itemIds.join(','));
     if (params?.itemGroup && params.itemGroup !== 'ALL') query.append('itemGroup', params.itemGroup);
 
-    const res = await authFetch(`/api/inventory/stock-statement?${query.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load company stock statement');
+    try {
+      const res = await authFetch(`/api/inventory/stock-statement?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData(`stock_statement_${query.toString()}`, data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const cached = await offlineStorage.getCachedApiData<any>(`stock_statement_${query.toString()}`);
+    if (cached) return { ...cached, offline: true };
+    return { success: true, companies: [], grandTotals: {} } as any;
   },
 
   async getDetailedItemStockReport(params?: {
@@ -3597,12 +4068,19 @@ export const api = {
     if (params?.itemGroup && params.itemGroup !== 'ALL') query.append('itemGroup', params.itemGroup);
     if (params?.search) query.append('search', params.search);
 
-    const res = await authFetch(`/api/inventory/detailed-stock-report?${query.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load detailed item stock report');
+    try {
+      const res = await authFetch(`/api/inventory/detailed-stock-report?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData(`detailed_stock_report_${query.toString()}`, data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const cached = await offlineStorage.getCachedApiData<any>(`detailed_stock_report_${query.toString()}`);
+    if (cached) return { ...cached, offline: true };
+    return { success: true, count: 0, data: [], totals: {} };
   },
 
   // ==========================================
@@ -3615,34 +4093,46 @@ export const api = {
     if (params?.pillar) query.append('pillar', params.pillar);
     if (params?.status) query.append('status', params.status);
 
-    const res = await authFetch(`/api/accounting/coa?${query.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load Chart of Accounts');
+    try {
+      const res = await authFetch(`/api/accounting/coa?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData(`accounting_coa_${query.toString()}`, data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const cached = await offlineStorage.getCachedApiData<any>(`accounting_coa_${query.toString()}`);
+    if (cached) return { ...cached, offline: true };
+    const accounts = await offlineStorage.getAll<any>('accounts');
+    return { success: true, offline: true, accounts, tree: [], summary: {} };
   },
 
   async createCOAAccount(payload: any) {
-    const res = await authFetch('/api/accounting/coa', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to create account');
+    try {
+      const res = await authFetch('/api/accounting/coa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) return data;
+    } catch {
+      // Offline fallback
     }
-    return data;
+    return this.createAccount(payload);
   },
 
   async getNextAccountingVoucherNumber(type: string = 'JV') {
-    const res = await authFetch(`/api/accounting/vouchers/next-number?type=${encodeURIComponent(type)}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to get next voucher number');
+    try {
+      const res = await authFetch(`/api/accounting/vouchers/next-number?type=${encodeURIComponent(type)}`);
+      const data = await res.json();
+      if (res.ok && data.success) return data;
+    } catch {
+      // Offline fallback
     }
-    return data;
+    return { success: true, nextVoucherNumber: `${type}-OFF-${Date.now().toString().slice(-4)}` };
   },
 
   async getAccountingVouchers(params?: {
@@ -3661,25 +4151,47 @@ export const api = {
     if (params?.q) query.append('q', params.q);
     if (params?.accountId) query.append('accountId', String(params.accountId));
 
-    const res = await authFetch(`/api/accounting/vouchers?${query.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load vouchers');
+    try {
+      const res = await authFetch(`/api/accounting/vouchers?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData(`accounting_vouchers_${query.toString()}`, data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const cached = await offlineStorage.getCachedApiData<any>(`accounting_vouchers_${query.toString()}`);
+    if (cached) return { ...cached, offline: true };
+    const vouchers = await offlineStorage.getAll<any>('vouchers');
+    return { success: true, offline: true, vouchers, data: vouchers };
   },
 
   async createAccountingVoucher(payload: any) {
-    const res = await authFetch('/api/accounting/vouchers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to save voucher');
+    try {
+      const res = await authFetch('/api/accounting/vouchers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) return data;
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const clientTxId = `JV-OFF-${Date.now()}`;
+    const record = { id: Date.now(), client_tx_id: clientTxId, ...payload, status: 'posted' };
+    await offlineStorage.put('vouchers', record);
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: getClientDeviceId(),
+      action: 'CREATE_VOUCHER',
+      entity: 'vouchers',
+      local_id: clientTxId,
+      payload: record,
+      created_at: new Date().toISOString(),
+    });
+    return { success: true, offline: true, voucher: record, message: 'Voucher saved offline.' };
   },
 
   async updateAccountingVoucher(id: number, payload: any) {
@@ -4104,12 +4616,20 @@ export const api = {
     const query = new URLSearchParams();
     if (params?.status) query.append('status', params.status);
     if (params?.q) query.append('q', params.q);
-    const res = await authFetch(`/api/staff/salesmen?${query.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to load salesmen');
+    try {
+      const res = await authFetch(`/api/staff/salesmen?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (Array.isArray(data.salesmen)) {
+          offlineStorage.bulkPut('salesmen', data.salesmen).catch(() => {});
+        }
+        return data;
+      }
+    } catch {
+      // Offline fallback
     }
-    return data;
+    const localSalesmen = await offlineStorage.getAll<any>('salesmen');
+    return { success: true, offline: true, salesmen: localSalesmen, data: localSalesmen };
   },
 
   async createSalesman(payload: any) {
@@ -4776,28 +5296,61 @@ export const api = {
   // ==========================================================================
 
   async getSupplyNextNumbers() {
-    const res = await authFetch('/api/supply/next-numbers');
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch supply sequence numbers');
-    return data;
+    try {
+      const res = await authFetch('/api/supply/next-numbers');
+      const data = await res.json();
+      if (res.ok && data.success) return data;
+    } catch {
+      // Offline fallback
+    }
+    const suffix = Date.now().toString().slice(-4);
+    return {
+      success: true,
+      offline: true,
+      nextOrderFormNumber: `OF-OFF-${suffix}`,
+      nextBookingNumber: `BK-OFF-${suffix}`,
+      nextSupplyNumber: `SUP-OFF-${suffix}`,
+      nextDispatchNumber: `DSP-OFF-${suffix}`,
+      nextReturnNumber: `SRT-OFF-${suffix}`,
+      nextRecoveryNumber: `RCV-OFF-${suffix}`,
+    };
   },
 
   async getSupplyDashboard(date?: string) {
     const q = date ? `?date=${encodeURIComponent(date)}` : '';
-    const res = await authFetch(`/api/supply/dashboard${q}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Supply Dashboard');
-    return data;
+    try {
+      const res = await authFetch(`/api/supply/dashboard${q}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData('supply_dashboard', data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = await offlineStorage.getCachedApiData<any>('supply_dashboard');
+    if (cached) return { ...cached, offline: true };
+    return { success: true, offline: true, kpis: {}, recentBookings: [], recentSupplies: [] };
   },
 
   async getSupplySalesmen(params?: { q?: string; status?: string }) {
     const q = new URLSearchParams();
     if (params?.q) q.set('q', params.q);
     if (params?.status) q.set('status', params.status);
-    const res = await authFetch(`/api/supply/salesmen?${q.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load salesmen');
-    return data;
+    try {
+      const res = await authFetch(`/api/supply/salesmen?${q.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData('supply_salesmen', data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = await offlineStorage.getCachedApiData<any>('supply_salesmen');
+    if (cached) return { ...cached, offline: true };
+    const localSalesmen = await offlineStorage.getAll<any>('salesmen');
+    return { success: true, offline: true, salesmen: localSalesmen, data: localSalesmen };
   },
 
   async saveSupplySalesman(payload: Record<string, unknown>, id?: number) {
@@ -4832,10 +5385,25 @@ export const api = {
   },
 
   async getSupplyTowns() {
-    const res = await authFetch('/api/supply/towns');
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Towns & Areas');
-    return data;
+    try {
+      const res = await authFetch('/api/supply/towns');
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData('supply_towns', data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = await offlineStorage.getCachedApiData<any>('supply_towns');
+    if (cached) return { ...cached, offline: true };
+    const snap = await offlineStorage.getCachedApiData<any>('supply_snapshot');
+    return {
+      success: true,
+      offline: true,
+      towns: snap?.towns || [],
+      areas: snap?.areas || [],
+    };
   },
 
   async saveSupplyTown(payload: Record<string, unknown>, id?: number) {
@@ -4875,10 +5443,20 @@ export const api = {
     const q = new URLSearchParams();
     if (params?.company) q.set('company', params.company);
     if (params?.q) q.set('q', params.q);
-    const res = await authFetch(`/api/supply/order-forms/catalog?${q.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load company-wise item catalog');
-    return data;
+    try {
+      const res = await authFetch(`/api/supply/order-forms/catalog?${q.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData(`supply_catalog_${q.toString()}`, data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = await offlineStorage.getCachedApiData<any>(`supply_catalog_${q.toString()}`);
+    if (cached) return { ...cached, offline: true };
+    const items = await offlineStorage.getAll<any>('items');
+    return { success: true, offline: true, items, companies: [] };
   },
 
   async getSupplyOrderForms(params?: Record<string, string | number | undefined>) {
@@ -4888,10 +5466,19 @@ export const api = {
         if (v !== undefined && v !== '') q.set(k, String(v));
       });
     }
-    const res = await authFetch(`/api/supply/order-forms?${q.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Order Forms');
-    return data;
+    try {
+      const res = await authFetch(`/api/supply/order-forms?${q.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData('supply_order_forms', data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = await offlineStorage.getCachedApiData<any>('supply_order_forms');
+    if (cached) return { ...cached, offline: true };
+    return { success: true, offline: true, orderForms: [], data: [] };
   },
 
   async saveSupplyOrderForm(payload: Record<string, unknown>, id?: number) {
@@ -4923,21 +5510,49 @@ export const api = {
         if (v !== undefined && v !== '') q.set(k, String(v));
       });
     }
-    const res = await authFetch(`/api/supply/bookings?${q.toString()}`);
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load Order Bookings');
-    return data;
+    try {
+      const res = await authFetch(`/api/supply/bookings?${q.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await offlineStorage.cacheApiData('supply_bookings', data);
+        return data;
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = await offlineStorage.getCachedApiData<any>('supply_bookings');
+    if (cached) return { ...cached, offline: true };
+    const snap = await offlineStorage.getCachedApiData<any>('supply_snapshot');
+    return { success: true, offline: true, bookings: snap?.bookings || [], data: snap?.bookings || [] };
   },
 
   async saveSupplyBooking(payload: Record<string, unknown>, id?: number) {
-    const res = await authFetch(id ? `/api/supply/bookings/${id}` : '/api/supply/bookings', {
-      method: id ? 'PUT' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    try {
+      const res = await authFetch(id ? `/api/supply/bookings/${id}` : '/api/supply/bookings', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) return data;
+      if (res.status >= 400 && res.status < 500 && data.error) throw new Error(data.error);
+    } catch (err: any) {
+      if (err?.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+        throw err;
+      }
+    }
+    const clientTxId = `BK-OFF-${Date.now()}`;
+    const bookingRecord = { id: id || Date.now(), booking_number: clientTxId, ...payload, status: 'Confirmed' };
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: getClientDeviceId(),
+      action: 'CREATE_VOUCHER',
+      entity: 'vouchers',
+      local_id: clientTxId,
+      payload: bookingRecord,
+      created_at: new Date().toISOString(),
     });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save Order Booking');
-    return data;
+    return { success: true, offline: true, booking: bookingRecord, message: 'Order Booking saved locally (Offline Mode).' };
   },
 
   async getTownPendingBookings(params: { town_id?: number; town_name?: string; salesman_id?: number; area_id?: number }) {

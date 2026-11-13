@@ -15,7 +15,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="manifest" id="app-pwa-manifest" href="/salesman-manifest.json" />
+    <link rel="manifest" id="app-pwa-manifest" href="/manifest.json" />
     <script>
       // Dynamically adjust title & manifest when opened on /salesman standalone PWA route
       (function () {
@@ -25,6 +25,10 @@
             window.location.search.indexOf('app=salesman') !== -1;
           if (isSalesmanRoute) {
             document.title = 'AMS Salesman Booking App - Abrar Medical Store';
+            var manifestEl = document.getElementById('app-pwa-manifest');
+            if (manifestEl) {
+              manifestEl.setAttribute('href', '/salesman-manifest.json');
+            }
           }
           if ('serviceWorker' in navigator) {
             window.addEventListener('load', function () {
@@ -33,41 +37,8 @@
           }
         } catch (e) {}
       })();
-
-      // Automatic stale Service Worker & CacheStorage invalidation when app build updates
-      (function () {
-        try {
-          var BUILD_STAMP = '2026-11-13-salesman-pwa-v8';
-          var prevStamp = localStorage.getItem('ams_app_build_stamp');
-          if (prevStamp !== BUILD_STAMP) {
-            localStorage.setItem('ams_app_build_stamp', BUILD_STAMP);
-            var tasks = [];
-            if ('caches' in window) {
-              tasks.push(
-                caches.keys().then(function (keys) {
-                  return Promise.all(
-                    keys.map(function (k) {
-                      return caches.delete(k);
-                    })
-                  );
-                })
-              );
-            }
-            if (tasks.length > 0) {
-              Promise.all(tasks).catch(function () {});
-            }
-          }
-          if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.addEventListener('message', function (event) {
-              if (event.data && event.data.type === 'AMS_SW_ACTIVATED' && event.data.deletedLegacy) {
-                window.location.reload();
-              }
-            });
-          }
-        } catch (e) {
-          // ignore
-        }
-      })();
+    </script>
+    <script>
 
       // Suppress benign preview iframe Vite HMR WebSocket disconnects
       (function () {

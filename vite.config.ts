@@ -5,34 +5,73 @@ import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
-const NETWORK_FIRST_SW_SCRIPT = `// AMS Service Worker v7 (Network-First, Auto-Purge Legacy Caches)
-const SW_VERSION = 'ams-sw-v7-2026-11-10-prod-sync';
-const RUNTIME_CACHE = 'ams-runtime-v7';
+function buildOfflineFirstSwScript(assetUrls: string[]): string {
+  const baseUrls = [
+    '/',
+    '/index.html',
+    '/salesman',
+    '/manifest.json',
+    '/salesman-manifest.json',
+    '/pwa-192x192.png',
+    '/pwa-512x512.png',
+    '/pwa-maskable-512x512.png',
+    '/apple-touch-icon.png',
+    '/icon.svg',
+    ...assetUrls,
+  ];
+  const uniqueUrls = Array.from(new Set(baseUrls));
+
+  return `// AMS Service Worker v9 (Complete Offline-First Desktop & Mobile App Shell + Bundle Cache)
+const SW_VERSION = 'ams-sw-v9-offline-desktop';
+const RUNTIME_CACHE = 'ams-runtime-v9';
+const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(RUNTIME_CACHE);
+      await Promise.allSettled(
+        PRECACHE_URLS.map(async (url) => {
+          try {
+            const req = new Request(url, { cache: 'reload' });
+            const res = await fetch(req);
+            if (res && res.status === 200) {
+              await cache.put(url, res.clone());
+            }
+          } catch (e) {}
+        })
+      );
+    } catch (e) {}
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     try {
+      const targetCache = await caches.open(RUNTIME_CACHE);
       const keys = await caches.keys();
-      let deletedLegacy = false;
       for (const key of keys) {
-        if (key !== RUNTIME_CACHE) {
+        if (key !== RUNTIME_CACHE && key.startsWith('ams-runtime-')) {
+          try {
+            // Migrate any cached assets from previous runtime cache before deleting it so offline updates never lose assets
+            const oldCache = await caches.open(key);
+            const oldReqs = await oldCache.keys();
+            for (const oldReq of oldReqs) {
+              const existing = await targetCache.match(oldReq);
+              if (!existing) {
+                const oldRes = await oldCache.match(oldReq);
+                if (oldRes) await targetCache.put(oldReq, oldRes.clone());
+              }
+            }
+          } catch (e) {}
           await caches.delete(key);
-          deletedLegacy = true;
         }
       }
       await self.clients.claim();
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
-        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, deletedLegacy });
-        if (deletedLegacy && 'navigate' in client) {
-          try {
-            await client.navigate(client.url);
-          } catch (e) {}
-        }
+        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, deletedLegacy: false });
       }
     } catch (err) {}
   })());
@@ -50,27 +89,85 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname === '/sw.js' || url.pathname === '/dev-sw.js' || url.pathname === '/registerSW.js') return;
+  if (url.pathname.startsWith('/api/')) return;
 
+  // Navigation requests (HTML app shell for / and /salesman): Network-first with fast fallback to cached app shell
+  const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
+  if (isNav) {
+    event.respondWith((async () => {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3500);
+        const networkResponse = await fetch(req, { signal: controller.signal });
+        clearTimeout(timer);
+        if (networkResponse && networkResponse.status === 200) {
+          const cache = await caches.open(RUNTIME_CACHE);
+          cache.put(req, networkResponse.clone()).catch(() => {});
+          cache.put('/index.html', networkResponse.clone()).catch(() => {});
+          cache.put('/', networkResponse.clone()).catch(() => {});
+          return networkResponse;
+        }
+      } catch (err) {
+        // Offline or network timeout -> fall back to cached HTML shell
+      }
+      const cachedExact = await caches.match(req, { ignoreSearch: true });
+      if (cachedExact) return cachedExact;
+      if (url.pathname.startsWith('/salesman')) {
+        const cachedSalesman = await caches.match('/salesman', { ignoreSearch: true });
+        if (cachedSalesman) return cachedSalesman;
+      }
+      const cachedIndex = await caches.match('/index.html', { ignoreSearch: true });
+      if (cachedIndex) return cachedIndex;
+      const cachedRoot = await caches.match('/', { ignoreSearch: true });
+      if (cachedRoot) return cachedRoot;
+      return new Response('Offline - App Shell Not Cached Yet', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+    })());
+    return;
+  }
+
+  // Hashed static bundles (/assets/*) and icons: Cache-First with background refresh
+  if (url.pathname.startsWith('/assets/') || /\\.(png|svg|ico|woff2?|ttf)$/i.test(url.pathname)) {
+    event.respondWith((async () => {
+      const cached = (await caches.match(req)) || (await caches.match(req, { ignoreSearch: true }));
+      if (cached) {
+        fetch(req)
+          .then(async (netRes) => {
+            if (netRes && netRes.status === 200) {
+              const cache = await caches.open(RUNTIME_CACHE);
+              await cache.put(req, netRes.clone());
+            }
+          })
+          .catch(() => {});
+        return cached;
+      }
+      const netRes = await fetch(req);
+      if (netRes && netRes.status === 200) {
+        const cache = await caches.open(RUNTIME_CACHE);
+        cache.put(req, netRes.clone()).catch(() => {});
+      }
+      return netRes;
+    })());
+    return;
+  }
+
+  // All other same-origin GET requests (including Vite dev modules /src/*, /node_modules/*, manifests): Network-First with Cache Fallback
   event.respondWith((async () => {
     try {
       const networkResponse = await fetch(req);
-      if (networkResponse && networkResponse.status === 200 && !url.pathname.startsWith('/api/')) {
+      if (networkResponse && networkResponse.status === 200) {
         const cache = await caches.open(RUNTIME_CACHE);
         cache.put(req, networkResponse.clone()).catch(() => {});
       }
       return networkResponse;
     } catch (err) {
-      const cached = await caches.match(req);
+      const cached = (await caches.match(req)) || (await caches.match(req, { ignoreSearch: true }));
       if (cached) return cached;
-      if (req.mode === 'navigate') {
-        const fallback = await caches.match('/index.html');
-        if (fallback) return fallback;
-      }
       throw err;
     }
   })());
 });
 `;
+}
 
 export default defineConfig(() => {
   return {
@@ -89,9 +186,9 @@ export default defineConfig(() => {
         manifest: {
           id: '/',
           name: 'Abrar Medical Store (AMS) - POS & ERP',
-          short_name: 'AMS POS',
+          short_name: 'AMS ERP',
           description:
-            'Professional Medical Store Point of Sale (POS), Billing, Inventory & Accounting System for Abrar Medical Store.',
+            'Offline-First Desktop Point of Sale (POS), Billing, Inventory & Accounting System for Abrar Medical Store.',
           theme_color: '#065f46',
           background_color: '#0f172a',
           display: 'standalone',
@@ -122,7 +219,7 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: [],
-          cleanupOutdatedCaches: true,
+          cleanupOutdatedCaches: false,
           clientsClaim: true,
           skipWaiting: true,
           navigateFallback: null,
@@ -140,7 +237,16 @@ export default defineConfig(() => {
           try {
             const outDir = path.resolve(import.meta.dirname, 'dist');
             if (fs.existsSync(outDir)) {
-              fs.writeFileSync(path.join(outDir, 'sw.js'), NETWORK_FIRST_SW_SCRIPT, 'utf8');
+              const assetsDir = path.join(outDir, 'assets');
+              const assetUrls: string[] = [];
+              if (fs.existsSync(assetsDir)) {
+                for (const file of fs.readdirSync(assetsDir)) {
+                  if (/\.(js|css|woff2?|ttf|svg|png)$/i.test(file)) {
+                    assetUrls.push(`/assets/${file}`);
+                  }
+                }
+              }
+              fs.writeFileSync(path.join(outDir, 'sw.js'), buildOfflineFirstSwScript(assetUrls), 'utf8');
             }
           } catch {
             // ignore
