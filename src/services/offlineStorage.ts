@@ -538,6 +538,68 @@ class OfflineStorage {
     }
   }
 
+  /**
+   * Purges all cached business data, drafts, sync queues, and sync error logs when the server
+   * signals a new database reset or backup restore epoch, while strictly preserving user credentials,
+   * auth_vault, workstation authorization, and terminal identity.
+   */
+  async purgeBusinessDataForReset(newResetEpoch: string): Promise<void> {
+    const storesToClear = [
+      'items',
+      'inventory',
+      'sales',
+      'purchases',
+      'vouchers',
+      'cash_book',
+      'sale_returns',
+      'purchase_returns',
+      'stock_adjustments',
+      'salesmen',
+      'api_cache',
+      'local_backups',
+      'sync_queue',
+      'sync_error_logs',
+    ];
+
+    for (const store of storesToClear) {
+      try {
+        await this.clearStore(store);
+      } catch {
+        // ignore if store absent
+      }
+    }
+
+    try {
+      await this.setMeta('last_synced_at', null);
+      await this.setMeta('last_tombstone_id', 0);
+      await this.setMeta('table_sync_status', {});
+      await this.setMeta('db_reset_epoch', newResetEpoch);
+    } catch {
+      // ignore meta reset errors
+    }
+
+    if (typeof window !== 'undefined') {
+      try {
+        const draftAndMobileKeys = [
+          'ams_sales_invoice_active_draft',
+          'ams_active_sales_invoice_draft_v2',
+          'ams_active_purchase_draft',
+          'ams_active_purchase_draft_v2',
+          'ams_mobile_salesman_session_v1',
+          'ams_mobile_offline_creds_v1',
+          'ams_mobile_catalog_cache_v1',
+          'ams_mobile_bookings_queue_v1',
+        ];
+        for (const k of draftAndMobileKeys) {
+          window.localStorage.removeItem(k);
+        }
+        window.localStorage.setItem('ams_db_reset_epoch', newResetEpoch);
+      } catch {
+        // ignore storage restrictions
+      }
+    }
+  }
+
   // --- DIAGNOSTIC SYNC ERROR LOGGING (NON-DESTRUCTIVE) ---
 
   async addSyncErrorLog(entry: Omit<SyncErrorLogRecord, 'id' | 'timestamp'> & { timestamp?: string }): Promise<SyncErrorLogRecord> {

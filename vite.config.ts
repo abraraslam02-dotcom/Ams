@@ -21,9 +21,9 @@ function buildOfflineFirstSwScript(assetUrls: string[]): string {
   ];
   const uniqueUrls = Array.from(new Set(baseUrls));
 
-  return `// AMS Service Worker v9 (Complete Offline-First Desktop & Mobile App Shell + Bundle Cache)
-const SW_VERSION = 'ams-sw-v9-offline-desktop';
-const RUNTIME_CACHE = 'ams-runtime-v9';
+  return `// AMS Service Worker v10 (Complete Offline-First Desktop & Mobile App Shell + Fresh Sync)
+const SW_VERSION = 'ams-sw-v10-fresh-start';
+const RUNTIME_CACHE = 'ams-runtime-v10';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {

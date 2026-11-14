@@ -9,6 +9,7 @@ import {
   reopenDatabaseConnection,
 } from '../db/connection.ts';
 import { runMigrations } from '../db/migrations.ts';
+import { bumpDbResetEpoch } from '../db/resetState.ts';
 import {
   uploadBackupToCloudSQL,
   syncDatabaseToCloudSQL,
@@ -462,6 +463,7 @@ export function restoreDatabaseFromBackup(options: {
   restoredBy: string;
 }): {
   success: boolean;
+  dbResetEpoch: string;
   safetyBackup: BackupRecord;
   restoredVerification: BackupVerificationResult;
   message: string;
@@ -525,6 +527,7 @@ export function restoreDatabaseFromBackup(options: {
   // Step 4: Reopen connection and run idempotent migrations so all tables (including backup_history) are up to date
   const newDb = reopenDatabaseConnection();
   runMigrations();
+  const { epoch: restoredEpoch } = bumpDbResetEpoch(newDb, `restore:${targetFilename}`);
 
   // Re-sync backup directory files into backup_history of the restored DB
   listBackups();
@@ -558,6 +561,7 @@ export function restoreDatabaseFromBackup(options: {
 
   return {
     success: true,
+    dbResetEpoch: restoredEpoch,
     safetyBackup,
     restoredVerification: verification,
     message: `Database successfully restored from "${targetFilename}". A pre-restoration safety backup ("${safetyBackup.filename}") was automatically saved.`,

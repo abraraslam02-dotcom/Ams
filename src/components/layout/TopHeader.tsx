@@ -30,6 +30,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const [syncPopoverOpen, setSyncPopoverOpen] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>(() => offlineSyncManager.getState());
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
+  const [restoringUpdate, setRestoringUpdate] = useState(false);
+  const [restoreStatusMsg, setRestoreStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const menuRef = useRef<HTMLDivElement>(null);
   const syncRef = useRef<HTMLDivElement>(null);
@@ -65,6 +67,18 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
     deferredInstallPrompt.prompt();
     await deferredInstallPrompt.userChoice;
     setDeferredInstallPrompt(null);
+  };
+
+  const handleRestoreLastUpdate = async () => {
+    setRestoringUpdate(true);
+    setRestoreStatusMsg(null);
+    try {
+      const res = await offlineSyncManager.restoreLastUpdate();
+      setRestoreStatusMsg({ ok: res.success, text: res.message });
+      onRefresh();
+    } finally {
+      setRestoringUpdate(false);
+    }
   };
 
   const [mainTitle, ...restTitle] = currentViewTitle.split(' — ');
@@ -342,20 +356,42 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                 </div>
               )}
 
-              <div className="flex items-center gap-2 pt-1">
+              {restoreStatusMsg && (
+                <div
+                  className={`mb-2.5 p-2 rounded-lg border text-[11px] font-medium ${
+                    restoreStatusMsg.ok
+                      ? 'bg-indigo-50 border-indigo-200 text-indigo-800'
+                      : 'bg-rose-50 border-rose-200 text-rose-800'
+                  }`}
+                >
+                  {restoreStatusMsg.text}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
                   type="button"
-                  disabled={syncState.syncStatus === 'syncing'}
+                  disabled={syncState.syncStatus === 'syncing' || restoringUpdate}
                   onClick={() => offlineSyncManager.syncNow()}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold cursor-pointer transition-colors"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
                   <span>{syncState.syncStatus === 'syncing' ? 'Synchronizing...' : 'Sync Now'}</span>
                 </button>
+                <button
+                  type="button"
+                  disabled={syncState.syncStatus === 'syncing' || restoringUpdate}
+                  onClick={handleRestoreLastUpdate}
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold cursor-pointer transition-colors"
+                  title="Restore latest cloud items & invoices from Firestore"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{restoringUpdate ? 'Restoring...' : 'Restore Last Update'}</span>
+                </button>
                 {syncState.failedCount > 0 && (
                   <button
                     type="button"
-                    disabled={syncState.syncStatus === 'syncing'}
+                    disabled={syncState.syncStatus === 'syncing' || restoringUpdate}
                     onClick={() => offlineSyncManager.retryFailed()}
                     className="py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold cursor-pointer transition-colors"
                   >

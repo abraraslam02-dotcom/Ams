@@ -7,6 +7,7 @@ import {
   Clock,
   Cloud,
   CloudOff,
+  Download,
   Loader2,
   RefreshCw,
   RotateCcw,
@@ -86,6 +87,8 @@ export const FirestoreSyncStatusBar: React.FC<FirestoreSyncStatusBarProps> = ({
 }) => {
   const [syncState, setSyncState] = useState<SyncState>(() => offlineSyncManager.getState());
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreFeedback, setRestoreFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const unsub = offlineSyncManager.subscribe((state) => {
@@ -102,18 +105,33 @@ export const FirestoreSyncStatusBar: React.FC<FirestoreSyncStatusBarProps> = ({
   }, [onSyncCompleted]);
 
   const stats = entity === 'items' ? syncState.itemsStats : syncState.invoicesStats;
-  const isSyncing = syncState.syncStatus === 'syncing' || stats.syncing > 0;
+  const isSyncing = syncState.syncStatus === 'syncing' || stats.syncing > 0 || restoring;
   const isOnline = syncState.firestoreConnected || syncState.isOnline;
   const entityLogs = syncState.diagnosticLogs.filter(
     (l) => l.entity === entity || l.entity === 'sync' || l.entity === 'connection'
   );
 
   const handleSyncNow = async () => {
+    setRestoreFeedback(null);
     await offlineSyncManager.syncNow();
     onSyncCompleted?.();
   };
 
+  const handleRestoreLastUpdate = async () => {
+    setRestoring(true);
+    setRestoreFeedback(null);
+    try {
+      const res = await offlineSyncManager.restoreLastUpdate();
+      setRestoreFeedback({ ok: res.success, text: res.message });
+      onSyncCompleted?.();
+      setTimeout(() => setRestoreFeedback(null), 7000);
+    } finally {
+      setRestoring(false);
+    }
+  };
+
   const handleRetryFailed = async () => {
+    setRestoreFeedback(null);
     await offlineSyncManager.retryFailed();
     onSyncCompleted?.();
   };
@@ -194,6 +212,17 @@ export const FirestoreSyncStatusBar: React.FC<FirestoreSyncStatusBarProps> = ({
         >
           <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
           <span>Sync Now</span>
+        </button>
+
+        <button
+          type="button"
+          disabled={isSyncing}
+          onClick={handleRestoreLastUpdate}
+          className="px-2 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1 cursor-pointer"
+          title="Restore Last Cloud Update from Firestore"
+        >
+          <Download className="w-3 h-3" />
+          <span>{restoring ? 'Restoring...' : 'Restore Last Update'}</span>
         </button>
 
         {stats.failed > 0 && (
@@ -363,6 +392,17 @@ export const FirestoreSyncStatusBar: React.FC<FirestoreSyncStatusBarProps> = ({
             <span>{isSyncing ? 'Syncing...' : 'Sync Now'}</span>
           </button>
 
+          <button
+            type="button"
+            disabled={isSyncing}
+            onClick={handleRestoreLastUpdate}
+            className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            title="Pull latest cloud records from Firestore and hydrate local & server databases"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>{restoring ? 'Restoring...' : 'Restore Last Update'}</span>
+          </button>
+
           {(entityLogs.length > 0 || syncState.lastError) && (
             <button
               type="button"
@@ -379,6 +419,18 @@ export const FirestoreSyncStatusBar: React.FC<FirestoreSyncStatusBarProps> = ({
           )}
         </div>
       </div>
+
+      {restoreFeedback && (
+        <div
+          className={`px-3 py-1.5 rounded-lg border text-xs font-medium ${
+            restoreFeedback.ok
+              ? 'bg-indigo-50 border-indigo-200 text-indigo-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          {restoreFeedback.text}
+        </div>
+      )}
 
       {showDiagnostics && (
         <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2 text-xs">

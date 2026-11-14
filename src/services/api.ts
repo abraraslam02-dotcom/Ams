@@ -922,7 +922,18 @@ export const api = {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.items)) {
-          const existingLocal = await offlineStorage.getAll<any>('items').catch(() => []);
+          let existingLocal = await offlineStorage.getAll<any>('items').catch(() => []);
+          const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+          if (data.items.length === 0 && existingLocal.length === 0 && isOnline) {
+            const pulled = await firestoreSyncService.pullItemsFromFirestore().catch(() => 0);
+            if (pulled > 0) {
+              existingLocal = await offlineStorage.getAll<any>('items').catch(() => []);
+              firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
+            }
+          } else if (data.items.length === 0 && existingLocal.length > 0 && isOnline && !params?.q) {
+            firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
+          }
+
           const localById = new Map<number, any>();
           const localByCode = new Map<string, any>();
           for (const loc of existingLocal) {
@@ -932,8 +943,10 @@ export const api = {
 
           const toCache: any[] = [];
           const seenIds = new Set<number>();
+          const seenCodes = new Set<string>();
           const enrichedItems = data.items.map((srvItem: any) => {
             seenIds.add(Number(srvItem.id));
+            if (srvItem?.item_code) seenCodes.add(String(srvItem.item_code).toLowerCase());
             const loc =
               localById.get(Number(srvItem.id)) ||
               localByCode.get(String(srvItem.item_code || '').toLowerCase());
@@ -955,19 +968,101 @@ export const api = {
             return merged;
           });
 
-          // Preserve any offline-created pending/failed items not yet in SQLite
+          // Preserve ALL local/Firestore-restored items not yet in SQLite (both pending/failed AND synced)
+          let mergedExtraCount = 0;
+          const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
-            if (
-              !seenIds.has(Number(loc.id)) &&
-              (loc.sync_status === 'pending' || loc.sync_status === 'syncing' || loc.sync_status === 'failed')
-            ) {
-              enrichedItems.unshift(loc);
+            const locCode = String(loc?.item_code || '').toLowerCase();
+            if (seenIds.has(Number(loc.id)) || (locCode && seenCodes.has(locCode))) {
+              continue;
             }
+            if (qLower) {
+              const hay = `${loc.item_code || ''} ${loc.item_name || ''} ${loc.generic_name || ''} ${loc.company_name || ''} ${loc.barcode || ''}`.toLowerCase();
+              if (!hay.includes(qLower)) continue;
+            }
+            if (params?.category && params.category !== 'all' && String(loc.category || '') !== params.category) {
+              continue;
+            }
+            if (params?.company && params.company !== 'all' && String(loc.company_name || '') !== params.company) {
+              continue;
+            }
+            if (
+              params?.status &&
+              params.status !== 'all' &&
+              String(loc.status || 'Active').toLowerCase() !== params.status.toLowerCase()
+            ) {
+              continue;
+            }
+            if (
+              params?.lowStock &&
+              Number(loc.opening_stock ?? loc.current_stock ?? 0) >
+                Number(loc.minimum_stock ?? loc.reorder_level ?? 10)
+            ) {
+              continue;
+            }
+            enrichedItems.push(loc);
+            mergedExtraCount++;
           }
 
           if (toCache.length > 0) {
             offlineStorage.bulkPut('items', toCache).catch(() => {});
           }
+
+          if (mergedExtraCount > 0) {
+            const sortKey = params?.sortBy || 'item_name';
+            const dir = params?.sortOrder === 'desc' ? -1 : 1;
+            enrichedItems.sort((a: any, b: any) => {
+              const av = a?.[sortKey];
+              const bv = b?.[sortKey];
+              if (typeof av === 'number' || typeof bv === 'number') {
+                return ((Number(av) || 0) - (Number(bv) || 0)) * dir;
+              }
+              return String(av || '').localeCompare(String(bv || '')) * dir;
+            });
+
+            const allForStats = data.items.length === 0 ? existingLocal : enrichedItems;
+            const cats = Array.from(new Set(allForStats.map((i: any) => i.category).filter(Boolean))).sort();
+            const comps = Array.from(new Set(allForStats.map((i: any) => i.company_name).filter(Boolean))).sort();
+            const computedStats = {
+              totalItems: allForStats.length,
+              activeItems: allForStats.filter((i: any) => String(i.status || 'Active') === 'Active').length,
+              lowStockItems: allForStats.filter(
+                (i: any) =>
+                  Number(i.opening_stock ?? i.current_stock ?? 0) <=
+                  Number(i.minimum_stock ?? i.reorder_level ?? 10)
+              ).length,
+              totalTradeValue: round2Local(
+                allForStats.reduce(
+                  (s: number, i: any) =>
+                    s + Math.max(0, Number(i.opening_stock ?? i.current_stock ?? 0)) * Number(i.trade_price || i.purchase_price || 0),
+                  0
+                )
+              ),
+              totalRetailValue: round2Local(
+                allForStats.reduce(
+                  (s: number, i: any) =>
+                    s + Math.max(0, Number(i.opening_stock ?? i.current_stock ?? 0)) * Number(i.retail_price || 0),
+                  0
+                )
+              ),
+              totalStockUnits: round2Local(
+                allForStats.reduce(
+                  (s: number, i: any) => s + Math.max(0, Number(i.opening_stock ?? i.current_stock ?? 0)),
+                  0
+                )
+              ),
+            };
+            return {
+              ...data,
+              items: enrichedItems,
+              stats: data.items.length === 0 ? computedStats : data.stats || computedStats,
+              filters: {
+                categories: cats.length > 0 ? cats : data.filters?.categories || [],
+                companies: comps.length > 0 ? comps : data.filters?.companies || [],
+              },
+            };
+          }
+
           return { ...data, items: enrichedItems };
         }
         return data;
@@ -2548,7 +2643,16 @@ export const api = {
             : Array.isArray(data.sales)
             ? data.sales
             : [];
-          const existingLocal = await offlineStorage.getAll<any>('sales').catch(() => []);
+          let existingLocal = await offlineStorage.getAll<any>('sales').catch(() => []);
+          const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+          if (rows.length === 0 && existingLocal.length === 0 && isOnline) {
+            const pulled = await firestoreSyncService.pullInvoicesFromFirestore().catch(() => 0);
+            if (pulled > 0) {
+              existingLocal = await offlineStorage.getAll<any>('sales').catch(() => []);
+              firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
+            }
+          }
+
           const localByTx = new Map<string, any>();
           const localBySrvId = new Map<number, any>();
           for (const loc of existingLocal) {
@@ -2559,9 +2663,11 @@ export const api = {
 
           const toCache: any[] = [];
           const seenKeys = new Set<string>();
+          const seenInvNos = new Set<string>();
           const enriched = rows.map((srvSale: any) => {
             const txKey = String(srvSale.client_tx_id || `SRV-SALE-${srvSale.id}`);
             seenKeys.add(txKey);
+            if (srvSale.invoice_number) seenInvNos.add(String(srvSale.invoice_number).toLowerCase());
             const loc = localByTx.get(txKey) || localBySrvId.get(Number(srvSale.id));
             if (loc?.client_tx_id) seenKeys.add(String(loc.client_tx_id));
             if (
@@ -2582,21 +2688,79 @@ export const api = {
             return merged;
           });
 
-          // Include offline-only pending/failed invoices in IndexedDB that are not on server yet
+          // Include ALL local/Firestore-restored invoices not yet in SQLite (both pending/failed AND synced)
+          let mergedExtraCount = 0;
+          const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
             const key = String(loc?.client_tx_id || '');
-            if (
-              key &&
-              !seenKeys.has(key) &&
-              (loc.sync_status === 'pending' || loc.sync_status === 'syncing' || loc.sync_status === 'failed')
-            ) {
-              enriched.unshift(loc);
+            const invNoLower = String(loc?.invoice_number || '').toLowerCase();
+            if ((key && seenKeys.has(key)) || (invNoLower && seenInvNos.has(invNoLower))) {
+              continue;
             }
+            if (params?.status && params.status !== 'all') {
+              const locSt = String(loc.status || '').toLowerCase();
+              if (params.status === 'held_or_draft') {
+                if (locSt !== 'held' && locSt !== 'draft') continue;
+              } else if (locSt !== params.status.toLowerCase()) {
+                continue;
+              }
+            }
+            if (params?.customerId && params.customerId !== 'All' && params.customerId !== 'all') {
+              if (String(loc.customer_account_id || '') !== String(params.customerId)) continue;
+            }
+            if (params?.paymentMode && params.paymentMode !== 'All' && params.paymentMode !== 'all') {
+              if (String(loc.payment_mode || '').toLowerCase() !== params.paymentMode.toLowerCase()) continue;
+            }
+            if (params?.startDate && String(loc.invoice_date || loc.sale_date || '') < params.startDate) {
+              continue;
+            }
+            if (params?.endDate && String(loc.invoice_date || loc.sale_date || '') > params.endDate) {
+              continue;
+            }
+            if (qLower) {
+              const hay = `${loc.invoice_number || ''} ${loc.customer_name || ''} ${loc.salesman || ''}`.toLowerCase();
+              if (!hay.includes(qLower)) continue;
+            }
+            enriched.push(loc);
+            mergedExtraCount++;
           }
 
           if (toCache.length > 0) {
             offlineStorage.bulkPut('sales', toCache).catch(() => {});
           }
+
+          if (mergedExtraCount > 0) {
+            enriched.sort((a: any, b: any) => {
+              const da = String(a.invoice_date || a.sale_date || '');
+              const db = String(b.invoice_date || b.sale_date || '');
+              if (da !== db) return db.localeCompare(da);
+              return Number(b.id || 0) - Number(a.id || 0);
+            });
+            const computedSummary = {
+              ...(data.summary || {}),
+              totalInvoices: enriched.length,
+              totalNet: round2Local(
+                enriched.reduce((acc: number, s: any) => acc + Number(s.net_total ?? s.total_amount ?? 0), 0)
+              ),
+              totalDiscount: round2Local(
+                enriched.reduce((acc: number, s: any) => acc + Number(s.discount_total ?? s.discount_amount ?? 0), 0)
+              ),
+              totalPaid: round2Local(
+                enriched.reduce((acc: number, s: any) => acc + Number(s.paid_amount ?? s.received_amount ?? 0), 0)
+              ),
+              totalBalance: round2Local(
+                enriched.reduce((acc: number, s: any) => acc + Number(s.balance_amount ?? s.balance_due ?? 0), 0)
+              ),
+            };
+            return {
+              ...data,
+              data: enriched,
+              sales: enriched,
+              summary: rows.length === 0 ? computedSummary : data.summary || computedSummary,
+              totalCount: Math.max(Number(data.totalCount || 0), enriched.length),
+            };
+          }
+
           return {
             ...data,
             data: enriched,

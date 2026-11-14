@@ -6,7 +6,14 @@ import { processSaleUpsert } from './sales.ts';
 import { recalculateAccountBalance } from './accounts.ts';
 import { allocateNextAccountCode } from '../utils/accountCodeGenerator.ts';
 import { ensureAuthTables, getOfflineAuthVaultProfiles } from '../services/authService.ts';
-import { ensureCloudPersistenceReady } from '../services/cloudPersistenceService.ts';
+import { authenticateToken } from '../middleware/authMiddleware.ts';
+import { getDbResetEpoch, getDbResetTimestamp } from '../db/resetState.ts';
+import {
+  ensureCloudPersistenceReady,
+  hydrateSqliteFromCloudRecords,
+  restoreItemsAndInvoicesFromFirestoreCollections,
+  syncDatabaseToCloudSQL,
+} from '../services/cloudPersistenceService.ts';
 
 export const syncRouter = Router();
 
@@ -182,6 +189,8 @@ syncRouter.get('/status', (_req: Request, res: Response) => {
       totalSyncedTransactions: totalSynced.c,
       registeredDevicesCount: devices.c,
       lastSyncAt: lastSyncRow?.synced_at || null,
+      dbResetEpoch: getDbResetEpoch(db),
+      dbResetAt: getDbResetTimestamp(db),
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -492,6 +501,8 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     return res.json({
       success: true,
       serverTime: nowIso,
+      dbResetEpoch: getDbResetEpoch(db),
+      dbResetAt: getDbResetTimestamp(db),
       items,
       accounts,
       inventory,
@@ -524,6 +535,17 @@ syncRouter.post('/push', (req: Request, res: Response) => {
   try {
     ensureSyncTables();
     const db = getDatabase();
+    const serverResetEpoch = getDbResetEpoch(db);
+    const clientResetEpoch = String(req.body?.resetEpoch || req.headers['x-reset-epoch'] || '').trim();
+    if (serverResetEpoch && clientResetEpoch !== serverResetEpoch) {
+      return res.status(409).json({
+        success: false,
+        code: 'RESET_EPOCH_MISMATCH',
+        serverResetEpoch,
+        error: 'Client offline cache predates the latest database reset or restore. Syncing clean state first.',
+      });
+    }
+
     const deviceId = req.body?.deviceId || req.body?.device_id || 'POS-TERMINAL';
     const items = req.body?.items || req.body?.operations;
 
@@ -1572,6 +1594,78 @@ syncRouter.get('/audit-logs', (req: Request, res: Response) => {
       .all(limit);
 
     return res.json({ success: true, logs });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * POST /api/sync/restore-cloud-records
+ * Non-destructively restores items & invoices from Firestore and/or provided records into SQLite
+ */
+syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    ensureSyncTables();
+    const db = getDatabase();
+    const serverResetEpoch = getDbResetEpoch(db);
+    const serverResetAt = getDbResetTimestamp(db);
+    const clientResetEpoch = String(req.body?.resetEpoch || req.headers['x-reset-epoch'] || '').trim();
+
+    if (serverResetEpoch && clientResetEpoch && clientResetEpoch !== serverResetEpoch) {
+      return res.status(409).json({
+        success: false,
+        code: 'RESET_EPOCH_MISMATCH',
+        serverResetEpoch,
+        error: 'Stale client cache cannot rehydrate records from before database reset.',
+      });
+    }
+
+    const rawBodyItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const rawBodyInvoices = Array.isArray(req.body?.invoices) ? req.body.invoices : [];
+
+    // Filter out any pre-reset records if resetAt is established
+    const filterPostReset = (arr: any[]) => {
+      if (!serverResetAt) return arr;
+      const cutoff = serverResetAt.replace(' ', 'T');
+      return arr.filter((rec) => {
+        const ts = String(rec?.updated_at || rec?.updatedAt || rec?.created_at || rec?.createdAt || '')
+          .trim()
+          .replace(' ', 'T');
+        return Boolean(ts && ts > cutoff);
+      });
+    };
+
+    const bodyItems = filterPostReset(rawBodyItems);
+    const bodyInvoices = filterPostReset(rawBodyInvoices);
+
+    let restoredItems = 0;
+    let restoredInvoices = 0;
+
+    if (bodyItems.length > 0 || bodyInvoices.length > 0) {
+      const r1 = hydrateSqliteFromCloudRecords(bodyItems, bodyInvoices);
+      restoredItems += r1.restoredItems;
+      restoredInvoices += r1.restoredInvoices;
+    }
+
+    if (req.body?.pullFromFirestore !== false) {
+      const r2 = await restoreItemsAndInvoicesFromFirestoreCollections().catch(() => ({
+        restoredItems: 0,
+        restoredInvoices: 0,
+      }));
+      restoredItems += r2.restoredItems;
+      restoredInvoices += r2.restoredInvoices;
+    }
+
+    if (restoredItems > 0 || restoredInvoices > 0) {
+      syncDatabaseToCloudSQL('restore-cloud-records').catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      restoredItems,
+      restoredInvoices,
+    });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ success: false, error: errorMsg });

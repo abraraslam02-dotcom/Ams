@@ -355,14 +355,18 @@ class FirestoreSyncService {
    * Synchronizes a single Medicine Item to Firestore with strict conflict checking
    * and server read-back verification before marking local IndexedDB as 'synced'.
    */
-  public async syncItemToFirestore(item: any, deviceId: string): Promise<SyncOperationResult> {
+  public async syncItemToFirestore(
+    item: any,
+    deviceId: string,
+    options?: { prefetchedRemote?: Record<string, any> | null; skipUiEmit?: boolean }
+  ): Promise<SyncOperationResult> {
     const cloudDocId = getItemCloudDocId(item);
     const docPath = `items/${cloudDocId}`;
     const docRef = doc(db, 'items', cloudDocId);
     const nowIso = new Date().toISOString();
 
     // Step 1: Mark local item as 'syncing'
-    if (item?.id !== undefined && item?.id !== null) {
+    if (item?.id !== undefined && item?.id !== null && !options?.skipUiEmit) {
       await offlineStorage
         .put('items', {
           ...item,
@@ -376,24 +380,32 @@ class FirestoreSyncService {
 
     try {
       // Step 2: Check existing Firestore server document to prevent stale local overwrite & preserve createdAt
-      let existingSnap;
-      try {
-        existingSnap = await getDocFromServer(docRef);
-      } catch (err) {
-        if (isPermissionError(err)) {
-          handleFirestoreError(err, OperationType.GET, docPath);
+      let existingData: Record<string, any> | null = null;
+      if (options && options.prefetchedRemote !== undefined) {
+        existingData = options.prefetchedRemote;
+      } else {
+        try {
+          const existingSnap = await getDocFromServer(docRef);
+          existingData = existingSnap.exists() ? existingSnap.data() : null;
+        } catch (err) {
+          if (isPermissionError(err)) {
+            handleFirestoreError(err, OperationType.GET, docPath);
+          }
+          throw err;
         }
-        throw err;
       }
 
       const localCreatedAt = toUtcIsoTimestamp(item?.created_at, nowIso);
       const localUpdatedAt = toUtcIsoTimestamp(item?.updated_at ?? item?.created_at, nowIso);
 
-      if (existingSnap.exists()) {
-        const remote = existingSnap.data();
+      if (existingData) {
+        const remote = existingData;
         const remoteUpdatedAt = toUtcIsoTimestamp(remote?.updatedAt, '');
-        if (remoteUpdatedAt && remoteUpdatedAt > localUpdatedAt) {
-          // Never overwrite newer cloud data with stale local data!
+        if (
+          remoteUpdatedAt &&
+          (remoteUpdatedAt > localUpdatedAt || (remoteUpdatedAt >= localUpdatedAt && !item?.local_modified))
+        ) {
+          // Never overwrite newer or already-matching cloud data; reconcile local IndexedDB as verified
           const mergedLocal = {
             ...item,
             item_code: remote.item_code ?? item.item_code,
@@ -414,6 +426,7 @@ class FirestoreSyncService {
             minimum_stock: remote.minimum_stock ?? item.minimum_stock ?? 10,
             rack_number: remote.rack_number ?? item.rack_number ?? '',
             status: remote.status ?? item.status ?? 'Active',
+            created_at: remote.createdAt ?? item.created_at ?? localCreatedAt,
             updated_at: remoteUpdatedAt,
             cloud_doc_id: cloudDocId,
             cloud_synced_at: nowIso,
@@ -424,7 +437,7 @@ class FirestoreSyncService {
           if (mergedLocal.id !== undefined) {
             await offlineStorage.put('items', mergedLocal);
           }
-          this.emitChange();
+          if (!options?.skipUiEmit) this.emitChange();
           return {
             success: true,
             cloudDocId,
@@ -435,11 +448,11 @@ class FirestoreSyncService {
         }
       }
 
-      const createdAt = existingSnap.exists()
-        ? toUtcIsoTimestamp(existingSnap.data()?.createdAt, localCreatedAt)
+      const createdAt = existingData
+        ? toUtcIsoTimestamp(existingData?.createdAt, localCreatedAt)
         : localCreatedAt;
-      const updatedAt = existingSnap.exists()
-        ? localUpdatedAt >= toUtcIsoTimestamp(existingSnap.data()?.updatedAt, localUpdatedAt)
+      const updatedAt = existingData
+        ? localUpdatedAt >= toUtcIsoTimestamp(existingData?.updatedAt, localUpdatedAt)
           ? localUpdatedAt
           : nowIso
         : localUpdatedAt;
@@ -453,7 +466,7 @@ class FirestoreSyncService {
         if (isPermissionError(err)) {
           handleFirestoreError(
             err,
-            existingSnap.exists() ? OperationType.UPDATE : OperationType.CREATE,
+            existingData ? OperationType.UPDATE : OperationType.CREATE,
             docPath
           );
         }
@@ -481,14 +494,14 @@ class FirestoreSyncService {
           sync_error: null,
         });
       }
-      this.emitChange();
+      if (!options?.skipUiEmit) this.emitChange();
 
       return {
         success: true,
         cloudDocId,
         status: 'synced',
         verifiedAt,
-        action: existingSnap.exists() ? 'updated' : 'created',
+        action: existingData ? 'updated' : 'created',
       };
     } catch (error) {
       const msg = await this.logSyncError({
@@ -733,13 +746,46 @@ class FirestoreSyncService {
       return false;
     });
 
-    for (const item of itemsToSync) {
-      const res = await this.syncItemToFirestore(item, deviceId);
-      if (res.success) {
-        pushedItems++;
-      } else {
-        failedCount++;
-        if (res.error) errors.push(`Item ${item.item_code || item.id}: ${res.error}`);
+    if (itemsToSync.length > 0) {
+      // Pre-fetch existing cloud items in 1 query when syncing multiple items to cut roundtrips & latency
+      const remoteItemMap = new Map<string, Record<string, any>>();
+      let prefetchedItemsAvailable = false;
+      try {
+        const snap = await getDocsFromServer(
+          query(collection(db, 'items'), where('syncKey', '==', FIRESTORE_SYNC_KEY))
+        );
+        snap.forEach((d) => remoteItemMap.set(d.id, d.data()));
+        prefetchedItemsAvailable = true;
+      } catch {
+        // Fallback to per-item getDocFromServer if batch list fails
+      }
+
+      const CONCURRENCY = 6;
+      for (let i = 0; i < itemsToSync.length; i += CONCURRENCY) {
+        const batch = itemsToSync.slice(i, i + CONCURRENCY);
+        const batchResults = await Promise.all(
+          batch.map((item) => {
+            const docId = getItemCloudDocId(item);
+            return this.syncItemToFirestore(item, deviceId, {
+              prefetchedRemote: prefetchedItemsAvailable
+                ? remoteItemMap.get(docId) ?? null
+                : undefined,
+              skipUiEmit: true,
+            });
+          })
+        );
+        for (let j = 0; j < batchResults.length; j++) {
+          const res = batchResults[j];
+          if (res.success) {
+            pushedItems++;
+          } else {
+            failedCount++;
+            if (res.error) {
+              errors.push(`Item ${batch[j].item_code || batch[j].id}: ${res.error}`);
+            }
+          }
+        }
+        this.emitChange();
       }
     }
 
@@ -1111,6 +1157,116 @@ class FirestoreSyncService {
       pulledItems,
       pulledInvoices,
       failedCount: pushResult.failedCount,
+      errors,
+    };
+  }
+
+  /**
+   * Non-destructively hydrates the Express SQLite database with restored Firestore/IndexedDB records
+   * so server-side searches, reports, and cloud snapshots stay aligned.
+   */
+  public async hydrateExpressFromLocal(): Promise<{ restoredItems: number; restoredInvoices: number }> {
+    try {
+      const [items, sales] = await Promise.all([
+        offlineStorage.getAll<any>('items').catch(() => []),
+        offlineStorage.getAll<any>('sales').catch(() => []),
+      ]);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      let resetEpoch = '';
+      if (typeof window !== 'undefined') {
+        try {
+          resetEpoch = window.localStorage.getItem('ams_db_reset_epoch') || '';
+          const rawSess =
+            window.sessionStorage.getItem('ams_active_tab_session_v2') ||
+            window.localStorage.getItem('ams_active_auth_session_v2');
+          if (rawSess) {
+            const parsed = JSON.parse(rawSess);
+            if (parsed?.token) headers['x-session-token'] = String(parsed.token);
+          }
+        } catch {
+          // ignore storage parse error
+        }
+      }
+      const res = await fetch('/api/sync/restore-cloud-records', {
+        method: 'POST',
+        headers,
+        cache: 'no-store',
+        body: JSON.stringify({
+          items,
+          invoices: sales,
+          resetEpoch: resetEpoch || undefined,
+          pullFromFirestore: true,
+        }),
+      });
+      if (!res.ok) return { restoredItems: 0, restoredInvoices: 0 };
+      const data = await res.json();
+      return {
+        restoredItems: Number(data?.restoredItems || 0),
+        restoredInvoices: Number(data?.restoredInvoices || 0),
+      };
+    } catch {
+      return { restoredItems: 0, restoredInvoices: 0 };
+    }
+  }
+
+  /**
+   * Restores the latest cloud update from Firestore into local IndexedDB and Express SQLite
+   * non-destructively (never overwriting newer local pending mutations or deleting records).
+   */
+  public async restoreLastCloudUpdate(deviceId: string): Promise<{
+    success: boolean;
+    pulledItems: number;
+    pulledInvoices: number;
+    pushedItems: number;
+    pushedInvoices: number;
+    restoredToServer: number;
+    errors: string[];
+  }> {
+    const conn = await this.verifyConnection();
+    if (!conn.connected) {
+      return {
+        success: false,
+        pulledItems: 0,
+        pulledInvoices: 0,
+        pushedItems: 0,
+        pushedInvoices: 0,
+        restoredToServer: 0,
+        errors: [conn.lastError || 'Firestore server unreachable'],
+      };
+    }
+
+    const errors: string[] = [];
+    let pulledItems = 0;
+    let pulledInvoices = 0;
+
+    try {
+      pulledItems = await this.pullItemsFromFirestore();
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
+    }
+
+    try {
+      pulledInvoices = await this.pullInvoicesFromFirestore();
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
+    }
+
+    const pushResult = await this.pushPendingToFirestore(deviceId, {
+      includeFailed: true,
+      includeUnsyncedCatalog: true,
+    });
+    errors.push(...pushResult.errors);
+
+    const srvHydrate = await this.hydrateExpressFromLocal();
+    this.emitChange();
+
+    return {
+      success: errors.length === 0,
+      pulledItems,
+      pulledInvoices,
+      pushedItems: pushResult.pushedItems,
+      pushedInvoices: pushResult.pushedInvoices,
+      restoredToServer: srvHydrate.restoredItems + srvHydrate.restoredInvoices,
       errors,
     };
   }

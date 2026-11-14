@@ -15,8 +15,10 @@ import {
   FileCheck2,
   History,
   Server,
+  RotateCcw,
 } from 'lucide-react';
 import { offlineStorage } from '../../services/offlineStorage';
+import { offlineSyncManager } from '../../services/offlineSyncManager';
 
 export const MasterResetAndLocalBackupPanel: React.FC<{
   initialSection?: 'backup-restore' | 'master-reset' | 'protected-logs';
@@ -39,12 +41,10 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
   const [backupsList, setBackupsList] = useState<Array<Record<string, any>>>([]);
   const [creatingBackup, setCreatingBackup] = useState(false);
 
-  // Restore from Local Hard Drive state
+  // Restore from Local Hard Drive state (No email OTP required — Super Admin direct verified restore)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [verifyingUpload, setVerifyingUpload] = useState(false);
   const [stagedBackup, setStagedBackup] = useState<Record<string, any> | null>(null);
-  const [restoreOtpRequested, setRestoreOtpRequested] = useState(false);
-  const [restoreOtpCode, setRestoreOtpCode] = useState('');
   const [restoreConfirmationText, setRestoreConfirmationText] = useState('');
   const [executingRestore, setExecutingRestore] = useState(false);
 
@@ -254,7 +254,6 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
             sales: parsed.recordCounts?.sales ?? parsed.stores.sales?.length ?? 0,
           },
         });
-        setRestoreOtpRequested(true);
         setBanner({
           type: 'success',
           message: `Offline Backup file "${file.name}" verified! (${storeKeys.length} local stores). Type "RESTORE DATA" below to restore offline.`,
@@ -284,9 +283,10 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
         throw new Error(data.error || 'Backup file failed SQLite integrity verification');
       }
       setStagedBackup(data.verification);
+      setRestoreConfirmationText('');
       setBanner({
         type: 'success',
-        message: `Backup file "${file.name}" verified! SQLite Integrity: OK (${data.verification.table_count} tables). Ready for Super Admin OTP confirmation.`,
+        message: `Backup file "${file.name}" verified! SQLite Integrity: OK (${data.verification.table_count} tables). Type "RESTORE DATA" below to restore directly without OTP.`,
       });
     } catch (err: unknown) {
       setBanner({
@@ -298,25 +298,19 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     }
   };
 
-  const handleRequestRestoreOtp = async () => {
-    try {
-      const res = await fetch('/api/enhancements/local-backup/request-restore-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          staged_file_name: stagedBackup?.staged_file_name || selectedFile?.name || '',
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to send verification code');
-      setRestoreOtpRequested(true);
-      setBanner({
-        type: 'info',
-        message: data.message || `6-digit Restore Verification Code sent to ${superAdminEmail}.`,
-      });
-    } catch (err: unknown) {
-      setBanner({ type: 'error', message: err instanceof Error ? err.message : 'OTP request failed' });
-    }
+  const handleSelectExistingBackupForRestore = (bk: Record<string, any>) => {
+    setSelectedFile(null);
+    setRestoreConfirmationText('');
+    setStagedBackup({
+      backup_id: bk.id,
+      staged_file_name: bk.file_name || bk.filename,
+      table_count: bk.tables_count || 'Verified',
+      row_counts: {},
+    });
+    setBanner({
+      type: 'info',
+      message: `Selected backup "${bk.file_name || bk.filename}" for direct Super Admin restoration. Type "RESTORE DATA" below to confirm.`,
+    });
   };
 
   const handleExecuteLocalRestore = async (e: React.FormEvent) => {
@@ -336,8 +330,6 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
           message: `Local database successfully restored offline (${res.restoredStores} stores, ${res.totalRecords} records)!`,
         });
         setStagedBackup(null);
-        setRestoreOtpRequested(false);
-        setRestoreOtpCode('');
         setRestoreConfirmationText('');
         onDataChanged?.();
         return;
@@ -347,20 +339,22 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          backup_id: stagedBackup.backup_id,
           staged_file_name: stagedBackup.staged_file_name,
-          verification_code: restoreOtpCode.trim(),
-          confirmation_text: 'RESTORE DATA',
+          confirmation_text: cleanConfirm,
         }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Restore failed');
+      if (data.dbResetEpoch) {
+        await offlineStorage.purgeBusinessDataForReset(String(data.dbResetEpoch));
+      }
+      await offlineSyncManager.syncNow().catch(() => {});
       setBanner({
         type: 'success',
         message: data.message || 'Database successfully restored from local backup!',
       });
       setStagedBackup(null);
-      setRestoreOtpRequested(false);
-      setRestoreOtpCode('');
       setRestoreConfirmationText('');
       await loadBackupSettingsAndLogs();
       onDataChanged?.();
@@ -413,6 +407,10 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Master Reset failed');
+      if (data.dbResetEpoch) {
+        await offlineStorage.purgeBusinessDataForReset(String(data.dbResetEpoch));
+      }
+      await offlineSyncManager.syncNow().catch(() => {});
       setBanner({
         type: 'success',
         message: `${data.message} Pre-reset backup saved as: ${data.pre_reset_backup?.file_name || 'Verified .db'}`,
@@ -590,14 +588,24 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                         <span className="text-emerald-700 font-bold">Verified</span>
                       </div>
                     </div>
-                    <a
-                      href={`/api/enhancements/local-backup/download/${bk.id}`}
-                      download={bk.file_name}
-                      className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-[11px] flex items-center gap-1"
-                    >
-                      <Download className="w-3 h-3" />
-                      Download .db
-                    </a>
+                    <div className="flex items-center gap-1.5">
+                      <a
+                        href={`/api/enhancements/local-backup/download/${bk.id}`}
+                        download={bk.file_name}
+                        className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-[11px] flex items-center gap-1"
+                      >
+                        <Download className="w-3 h-3" />
+                        Download .db
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectExistingBackupForRestore(bk)}
+                        className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        Restore
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -612,7 +620,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                 RESTORE FROM LOCAL BACKUP
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Browse a <code className="font-mono">.db</code> backup file from your computer hard drive, verify its integrity, and restore with Super Admin OTP verification.
+                Browse a <code className="font-mono">.db</code> or <code className="font-mono">.ams.json</code> backup file from your computer hard drive—or pick a verified snapshot on the left—to restore directly as Super Admin without email verification codes.
               </p>
             </div>
 
@@ -648,71 +656,45 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                 onSubmit={handleExecuteLocalRestore}
                 className="bg-sky-50/70 border border-sky-200 rounded-2xl p-4 space-y-3"
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-extrabold text-sky-950 flex items-center gap-1.5">
                     <FileCheck2 className="w-4 h-4 text-emerald-600" />
-                    Backup Integrity Verified ({stagedBackup.table_count} Tables/Stores)
+                    Backup Ready: {stagedBackup.staged_file_name} ({stagedBackup.table_count} Tables/Stores)
                   </span>
-                  <span className="text-[11px] font-mono text-sky-800">
-                    Items: {stagedBackup.row_counts?.items ?? 0} | Accounts:{' '}
-                    {stagedBackup.row_counts?.accounts ?? 0} | Sales:{' '}
-                    {stagedBackup.row_counts?.sales ?? 0}
-                  </span>
+                  {stagedBackup.row_counts && Object.keys(stagedBackup.row_counts).length > 0 && (
+                    <span className="text-[11px] font-mono text-sky-800">
+                      Items: {stagedBackup.row_counts?.items ?? 0} | Accounts:{' '}
+                      {stagedBackup.row_counts?.accounts ?? 0} | Sales:{' '}
+                      {stagedBackup.row_counts?.sales ?? 0}
+                    </span>
+                  )}
                 </div>
 
-                {!restoreOtpRequested && !stagedBackup.isOfflineSnapshot ? (
-                  <button
-                    type="button"
-                    onClick={handleRequestRestoreOtp}
-                    className="w-full py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <Mail className="w-4 h-4" />
-                    Step 1: Send 6-Digit Restore Verification Code to Super Admin Email
-                  </button>
-                ) : (
-                  <div className="space-y-3">
-                    {!stagedBackup.isOfflineSnapshot && (
-                      <div>
-                        <label className="block text-[11px] font-bold uppercase text-slate-700 mb-1">
-                          Enter 6-Digit Super Admin Email Verification Code *
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          maxLength={6}
-                          value={restoreOtpCode}
-                          onChange={(e) => setRestoreOtpCode(e.target.value)}
-                          placeholder="6-digit OTP code"
-                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono font-bold tracking-widest"
-                        />
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="block text-[11px] font-bold uppercase text-slate-700 mb-1">
-                        Type <code className="text-rose-600">RESTORE DATA</code> to Confirm *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={restoreConfirmationText}
-                        onChange={(e) => setRestoreConfirmationText(e.target.value)}
-                        placeholder="RESTORE DATA"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono font-bold"
-                      />
-                    </div>
-
-                    <button
-                      type="submit"
-                      disabled={executingRestore}
-                      className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs cursor-pointer"
-                    >
-                      {executingRestore
-                        ? 'Creating Safety Backup & Restoring Database...'
-                        : 'Step 2: Confirm & Execute Local Backup Restore'}
-                    </button>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-700 mb-1">
+                      Type <code className="text-rose-600">RESTORE DATA</code> to Confirm *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={restoreConfirmationText}
+                      onChange={(e) => setRestoreConfirmationText(e.target.value)}
+                      placeholder="RESTORE DATA"
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono font-bold"
+                    />
                   </div>
-                )}
+
+                  <button
+                    type="submit"
+                    disabled={executingRestore}
+                    className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs cursor-pointer"
+                  >
+                    {executingRestore
+                      ? 'Creating Safety Backup & Restoring Database...'
+                      : 'Confirm & Execute Local Backup Restore'}
+                  </button>
+                </div>
               </form>
             )}
           </div>

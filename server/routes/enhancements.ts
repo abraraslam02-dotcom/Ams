@@ -1,8 +1,9 @@
 import express from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
-import { getDatabase } from '../db/connection.ts';
-import { optionalAuth as authenticateToken } from '../middleware/authMiddleware.ts';
+import { getDatabase, syncRuntimeToSeedDatabase } from '../db/connection.ts';
+import { bumpDbResetEpoch } from '../db/resetState.ts';
+import { authenticateToken } from '../middleware/authMiddleware.ts';
 import {
   hashPassword,
   verifyPassword,
@@ -27,7 +28,10 @@ import {
   recordBatchStockMovement,
   evaluateLineOfferAndPartyDiscount,
 } from '../services/fifoAndOfferEngine.ts';
-import { syncDatabaseToCloudSQL } from '../services/cloudPersistenceService.ts';
+import {
+  syncDatabaseToCloudSQL,
+  resetCloudPersistenceState,
+} from '../services/cloudPersistenceService.ts';
 
 export const enhancementsRouter = express.Router();
 
@@ -42,14 +46,21 @@ function getAuthenticatedUser(req: express.Request): {
 } {
   const u = (req as express.Request & { user?: { id: number; username: string; role: string } }).user;
   return {
-    id: Number(u?.id || 1),
-    username: String(u?.username || 'admin'),
-    role: String(u?.role || 'Super Admin'),
+    id: Number(u?.id || 0),
+    username: String(u?.username || ''),
+    role: String(u?.role || ''),
   };
 }
 
 function requireSuperAdmin(req: express.Request, res: express.Response): boolean {
   const user = getAuthenticatedUser(req);
+  if (!user.id || !user.username) {
+    res.status(401).json({
+      success: false,
+      error: 'Authentication required. Please log in to continue.',
+    });
+    return false;
+  }
   if (user.role !== 'Super Admin') {
     res.status(403).json({
       success: false,
@@ -2712,29 +2723,51 @@ const TRANSACTION_TABLES_FOR_RESET = [
   'purchase_items',
   'purchases',
   'batch_stock_movements',
+  'stock_ledger',
+  'stock_transfer_items',
+  'stock_transfers',
+  'physical_verification_items',
+  'physical_verifications',
   'stock_adjustment_items',
   'stock_adjustments',
   'inventory',
   'salesman_settlement_expenses',
   'salesman_settlements',
+  'salesman_commission_payments',
   'supply_recoveries',
   'supply_return_items',
   'supply_returns',
   'supply_dispatches',
   'party_supply_items',
   'party_supplies',
+  'town_supply_items',
   'town_supplies',
   'supply_booking_items',
   'supply_bookings',
   'supply_order_form_items',
   'supply_order_forms',
   'mobile_booking_imports',
+  'mobile_submitted_batches',
+  'cash_book_audit_history',
   'cash_book_vouchers',
+  'cash_book_sequences',
+  'accounting_voucher_lines',
+  'accounting_vouchers',
   'payment_vouchers',
   'journal_entry_lines',
   'journal_entries',
   'expenses',
-  'invoice_number_sequences',
+  'closing_account_snapshots',
+  'closing_stock_snapshots',
+  'closing_audit_logs',
+  'financial_closings',
+  'invoice_sequences',
+  'invoice_number_registry',
+  'sync_audit_log',
+  'sync_tombstones',
+  'idempotency_keys',
+  'whatsapp_log',
+  'whatsapp_logs',
 ];
 
 const MASTER_TABLES_FOR_COMPLETE_RESET = [
@@ -2745,9 +2778,22 @@ const MASTER_TABLES_FOR_COMPLETE_RESET = [
   'salesman_areas',
   'salesman_towns',
   'salesmen',
+  'salesman_sequences',
+  'deliverymen',
   'town_areas',
   'towns',
   'items',
+  'account_code_history',
+  'employee_advance_loan_recoveries',
+  'employee_advances_loans',
+  'employee_attendance',
+  'employee_leaves',
+  'employee_financial_ledger',
+  'salary_payments',
+  'payroll_records',
+  'employee_salary_structures',
+  'payroll_audit_logs',
+  'employees',
 ];
 
 function safeCountTable(db: ReturnType<typeof getDatabase>, tableName: string): number {
@@ -3035,14 +3081,25 @@ enhancementsRouter.post('/master-reset/execute', authenticateToken, async (req, 
               deletedSummary[exists.name] = cnt;
             }
           }
-          // Delete all non-system customer/supplier/party accounts while preserving core Chart of Accounts heads
+          // Delete all non-system customer/supplier/party accounts while preserving core Chart of Accounts heads & financial accounts
           const accCnt = (
             db.prepare('SELECT COUNT(*) as cnt FROM accounts WHERE is_system_account = 0').get() as { cnt: number }
           )?.cnt || 0;
           db.prepare('DELETE FROM accounts WHERE is_system_account = 0').run();
           db.prepare(
-            'UPDATE accounts SET total_debit = 0, total_credit = 0, current_balance = COALESCE(opening_balance, 0)'
+            `UPDATE accounts
+             SET total_debit = 0,
+                 total_credit = 0,
+                 customer_debit = 0,
+                 customer_credit = 0,
+                 supplier_debit = 0,
+                 supplier_credit = 0,
+                 current_balance = COALESCE(opening_balance, 0)`
           ).run();
+          db.prepare("DELETE FROM account_sequences WHERE prefix NOT IN ('FIN', 'AST', 'LIA', 'EQT', 'INC', 'EXP')").run();
+          db.prepare("UPDATE account_sequences SET last_number = 0 WHERE prefix IN ('CUS', 'SUP', 'PRT', 'CUSTOMER', 'SUPPLIER')").run();
+          db.prepare("UPDATE employee_sequences SET last_number = 0").run();
+          db.prepare("DELETE FROM app_sequences WHERE seq_key = 'salesman_sal'").run();
           deletedSummary['accounts_parties'] = accCnt;
         } else {
           // Option A: Preserve Item Master, Accounts Master, Salesmen, Towns/Areas, Offers, Party Discounts,
@@ -3066,6 +3123,8 @@ enhancementsRouter.post('/master-reset/execute', authenticateToken, async (req, 
       db.pragma('foreign_keys = ON');
     }
 
+    const { epoch: resetEpoch } = bumpDbResetEpoch(db, `master_reset:${reset_option}`);
+
     writeProtectedAuditLog({
       userId: user.id,
       username: user.username,
@@ -3075,6 +3134,7 @@ enhancementsRouter.post('/master-reset/execute', authenticateToken, async (req, 
       recordReference: preResetBackup.filename,
       newValue: {
         reset_option: isCompleteReset ? 'COMPLETE_RESET' : 'RESET_TRANSACTIONS_ONLY',
+        reset_epoch: resetEpoch,
         pre_reset_backup: preResetBackup.filename,
         deleted_summary: deletedSummary,
       },
@@ -3082,10 +3142,12 @@ enhancementsRouter.post('/master-reset/execute', authenticateToken, async (req, 
       details: `Executed Master Reset (${isCompleteReset ? 'Option B: Complete Reset' : 'Option A: Transactions Only'}). Pre-reset backup: ${preResetBackup.filename}`,
     });
 
-    await syncDatabaseToCloudSQL(`master_reset:${reset_option}`).catch(() => {});
+    await resetCloudPersistenceState().catch(() => {});
+    syncRuntimeToSeedDatabase();
 
     return res.json({
       success: true,
+      dbResetEpoch: resetEpoch,
       reset_option: isCompleteReset ? 'COMPLETE_RESET' : 'RESET_TRANSACTIONS_ONLY',
       pre_reset_backup: preResetBackup,
       deleted_summary: deletedSummary,
@@ -3381,80 +3443,25 @@ enhancementsRouter.post('/local-backup/request-restore-code', authenticateToken,
 enhancementsRouter.post('/local-backup/execute-restore', authenticateToken, (req, res) => {
   try {
     if (!requireSuperAdmin(req, res)) return;
-    const db = getDatabase();
     const user = getAuthenticatedUser(req);
     const body = req.body || {};
     const backup_id = body.backup_id;
     const filename = body.filename || body.staged_file_name || body.file_name;
-    const { verification_code, confirmation_text } = body;
+    const rawConfirm = String(body.confirmation_text || '').trim().toUpperCase();
 
-    if (String(confirmation_text || '').trim() !== 'RESTORE DATA') {
+    if (rawConfirm !== 'RESTORE DATA' && rawConfirm !== 'RESTORE') {
       return res.status(400).json({
         success: false,
-        error: 'Exact confirmation phrase "RESTORE DATA" is required.',
+        error: 'Exact confirmation phrase "RESTORE DATA" or "RESTORE" is required.',
       });
     }
 
-    if (!verification_code) {
+    if (!backup_id && !filename) {
       return res.status(400).json({
         success: false,
-        error: 'Super Admin email verification code is required.',
+        error: 'A verified backup file or backup_id must be selected for restoration.',
       });
     }
-
-    const activeCode = db
-      .prepare(
-        `SELECT * FROM security_verification_codes
-         WHERE purpose = 'LOCAL_RESTORE' AND used = 0
-         ORDER BY id DESC LIMIT 1`
-      )
-      .get() as Record<string, unknown> | undefined;
-
-    if (!activeCode) {
-      return res.status(400).json({
-        success: false,
-        error: 'No active restore verification code found. Please request a new code.',
-      });
-    }
-
-    const expiredCheck = db
-      .prepare("SELECT CASE WHEN datetime('now') > datetime(?) THEN 1 ELSE 0 END as is_expired")
-      .get(String(activeCode.expires_at)) as { is_expired: number };
-
-    if (expiredCheck.is_expired === 1) {
-      db.prepare('UPDATE security_verification_codes SET used = 1 WHERE id = ?').run(activeCode.id);
-      return res.status(400).json({
-        success: false,
-        error: 'Verification code has expired (5-minute limit). Please request a new code.',
-      });
-    }
-
-    const attempts = Number(activeCode.attempts || 0);
-    const maxAttempts = Number(activeCode.max_attempts || 5);
-    if (attempts >= maxAttempts) {
-      db.prepare('UPDATE security_verification_codes SET used = 1 WHERE id = ?').run(activeCode.id);
-      return res.status(400).json({
-        success: false,
-        error: 'Maximum verification attempts (5) exceeded. Code invalidated.',
-      });
-    }
-
-    const candidateHash = hashOtpCode(String(verification_code));
-    if (candidateHash !== String(activeCode.code_hash)) {
-      const nextAttempts = attempts + 1;
-      db.prepare('UPDATE security_verification_codes SET attempts = ? WHERE id = ?').run(
-        nextAttempts,
-        activeCode.id
-      );
-      return res.status(400).json({
-        success: false,
-        error: `Invalid verification code (${maxAttempts - nextAttempts} attempts remaining).`,
-      });
-    }
-
-    db.prepare("UPDATE security_verification_codes SET used = 1, used_at = datetime('now') WHERE id = ?").run(
-      activeCode.id
-    );
 
     const restoreResult = restoreDatabaseFromBackup({
       backupId: backup_id ? Number(backup_id) : undefined,
@@ -3473,9 +3480,10 @@ enhancementsRouter.post('/local-backup/execute-restore', authenticateToken, (req
         restored_file: restoreResult.restoredVerification.filename,
         safety_backup: restoreResult.safetyBackup.filename,
         core_counts: restoreResult.restoredVerification.coreCounts,
+        db_reset_epoch: restoreResult.dbResetEpoch,
       },
       ipAddress: req.ip,
-      details: `Restored database from ${restoreResult.restoredVerification.filename} (Safety backup: ${restoreResult.safetyBackup.filename})`,
+      details: `Restored database directly (no email OTP required) from ${restoreResult.restoredVerification.filename} (Safety backup: ${restoreResult.safetyBackup.filename})`,
     });
 
     return res.json(restoreResult);

@@ -27,6 +27,8 @@ import {
   parseFieldVisibility,
 } from '../../types/system';
 import { api } from '../../services/api';
+import { offlineStorage } from '../../services/offlineStorage';
+import { offlineSyncManager } from '../../services/offlineSyncManager';
 import { MasterResetAndLocalBackupPanel } from '../admin/MasterResetAndLocalBackupPanel';
 
 export type AdminSubTab = 'store-printing' | 'backup-restore' | 'system-admin';
@@ -324,6 +326,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       setRestoring(true);
       setErrorMsg(null);
       const res = await api.restoreBackup(restoreTarget.id, 'RESTORE');
+      if ((res as any)?.dbResetEpoch) {
+        await offlineStorage.purgeBusinessDataForReset(String((res as any).dbResetEpoch));
+      }
+      await offlineSyncManager.syncNow().catch(() => {});
       setSuccessMsg(res.message);
       setRestoreTarget(null);
       setRestoreConfirmText('');

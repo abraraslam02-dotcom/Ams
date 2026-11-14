@@ -3,7 +3,7 @@ import {registerSW} from 'virtual:pwa-register';
 import App from './App.tsx';
 import './index.css';
 
-const RUNTIME_CACHE_NAME = 'ams-runtime-v9';
+const RUNTIME_CACHE_NAME = 'ams-runtime-v10';
 
 const updateSW = registerSW({
   immediate: true,

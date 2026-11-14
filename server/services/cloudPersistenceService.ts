@@ -6,6 +6,7 @@ import pg from 'pg';
 import type { Request, Response, NextFunction } from 'express';
 import { getDatabase, syncRuntimeToSeedDatabase } from '../db/connection.ts';
 import { ensureAuthTables } from './authService.ts';
+import { getDbResetEpoch, getDbResetTimestamp } from '../db/resetState.ts';
 
 const { Pool } = pg;
 
@@ -92,6 +93,7 @@ const PERSISTED_TABLES = [
   'salary_payments',
   'employee_financial_ledger',
   'payroll_audit_logs',
+  'app_system_state',
 ];
 
 interface CloudSyncState {
@@ -250,15 +252,34 @@ function getFirestoreDocUrl(cfg: FirestoreRestConfig, docId: string): string {
   return `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${encodedDb}/documents/ams_cloud_snapshots/${encodedDoc}?key=${encodeURIComponent(cfg.apiKey)}`;
 }
 
+function parseFirestoreRestValue(v: any): any {
+  if (!v || typeof v !== 'object') return null;
+  if ('stringValue' in v) return v.stringValue;
+  if ('integerValue' in v) return Number(v.integerValue);
+  if ('doubleValue' in v) return Number(v.doubleValue);
+  if ('booleanValue' in v) return Boolean(v.booleanValue);
+  if ('nullValue' in v) return null;
+  if ('timestampValue' in v) return v.timestampValue;
+  if ('arrayValue' in v) {
+    const vals = Array.isArray(v.arrayValue?.values) ? v.arrayValue.values : [];
+    return vals.map(parseFirestoreRestValue);
+  }
+  if ('mapValue' in v) {
+    const out: Record<string, any> = {};
+    const fields = v.mapValue?.fields || {};
+    for (const [mk, mv] of Object.entries<any>(fields)) {
+      out[mk] = parseFirestoreRestValue(mv);
+    }
+    return out;
+  }
+  return null;
+}
+
 function parseFirestoreDocFields(docJson: any): Record<string, any> | null {
   if (!docJson || !docJson.fields) return null;
   const out: Record<string, any> = {};
   for (const [k, v] of Object.entries<any>(docJson.fields)) {
-    if ('stringValue' in v) out[k] = v.stringValue;
-    else if ('integerValue' in v) out[k] = Number(v.integerValue);
-    else if ('doubleValue' in v) out[k] = Number(v.doubleValue);
-    else if ('booleanValue' in v) out[k] = Boolean(v.booleanValue);
-    else if ('nullValue' in v) out[k] = null;
+    out[k] = parseFirestoreRestValue(v);
   }
   return out;
 }
@@ -532,9 +553,42 @@ function getRemoteActivityMetrics(tables: Record<string, any[]>): DatabaseActivi
   };
 }
 
+function extractRemoteResetEpoch(tables: Record<string, any[]>): { epoch: string | null; resetAt: string | null } {
+  const rows = Array.isArray(tables?.app_system_state) ? tables.app_system_state : [];
+  let epoch: string | null = null;
+  let resetAt: string | null = null;
+  for (const r of rows) {
+    if (r?.state_key === 'db_reset_epoch' && r?.state_value) epoch = String(r.state_value);
+    if (r?.state_key === 'db_reset_at' && r?.state_value) resetAt = String(r.state_value);
+  }
+  return { epoch, resetAt };
+}
+
 function shouldRestoreFromRemoteSnapshot(remoteTables: Record<string, any[]>): boolean {
   if (!remoteTables || typeof remoteTables !== 'object') return false;
-  if (isLocalDatabaseFreshDefault()) return true;
+
+  const db = getDatabase();
+  const localEpoch = getDbResetEpoch(db);
+  const localResetAt = getDbResetTimestamp(db);
+  const remoteReset = extractRemoteResetEpoch(remoteTables);
+
+  // Never allow a pre-reset or mismatched-epoch remote snapshot to overwrite an intentionally reset DB
+  if (localEpoch) {
+    if (!remoteReset.epoch || remoteReset.epoch !== localEpoch) {
+      // Only accept a different epoch if the remote reset itself happened strictly later than local reset
+      if (!remoteReset.resetAt || !localResetAt || remoteReset.resetAt <= localResetAt) {
+        return false;
+      }
+    }
+  }
+
+  if (isLocalDatabaseFreshDefault()) {
+    // Only auto-restore into a blank DB if remote actually belongs to the current epoch (or no reset epoch exists)
+    if (localEpoch && remoteReset.epoch !== localEpoch) {
+      return false;
+    }
+    return true;
+  }
 
   const local = getLocalActivityMetrics();
   const remote = getRemoteActivityMetrics(remoteTables);
@@ -798,6 +852,353 @@ async function loadSnapshotFromFirestore(): Promise<{
   };
 }
 
+async function queryFirestoreCollectionBySyncKey(
+  cfg: FirestoreRestConfig,
+  collectionId: 'items' | 'invoices'
+): Promise<Array<Record<string, any>>> {
+  const encodedDb = encodeURIComponent(cfg.databaseId);
+  const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/${encodedDb}/documents:runQuery?key=${encodeURIComponent(cfg.apiKey)}`;
+  const body = {
+    structuredQuery: {
+      from: [{ collectionId }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: 'syncKey' },
+          op: 'EQUAL',
+          value: { stringValue: 'ams_erp_cloud_sync_v2_2026' },
+        },
+      },
+      limit: 5000,
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return [];
+  const rows = (await res.json()) as any[];
+  if (!Array.isArray(rows)) return [];
+  const results: Array<Record<string, any>> = [];
+  for (const r of rows) {
+    if (r?.document?.fields) {
+      const parsed = parseFirestoreDocFields(r.document);
+      if (parsed) results.push(parsed);
+    }
+  }
+  return results;
+}
+
+export function hydrateSqliteFromCloudRecords(
+  items: Array<Record<string, any>> = [],
+  invoices: Array<Record<string, any>> = []
+): { restoredItems: number; restoredInvoices: number } {
+  const db = getDatabase();
+  let restoredItems = 0;
+  let restoredInvoices = 0;
+
+  const tx = db.transaction(() => {
+    const findItemStmt = db.prepare('SELECT id, updated_at, company_name FROM items WHERE LOWER(item_code) = LOWER(?) LIMIT 1');
+    const insertItemStmt = db.prepare(`
+      INSERT INTO items (
+        item_code, barcode, item_name, generic_name, category, company_name,
+        packing, purchase_price, trade_price, wholesale_price, retail_price,
+        loose_rate, tax_percent, discount_percent, minimum_stock, opening_stock,
+        rack_number, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateItemStmt = db.prepare(`
+      UPDATE items SET
+        barcode = COALESCE(?, barcode),
+        item_name = ?,
+        generic_name = ?,
+        category = ?,
+        company_name = ?,
+        packing = ?,
+        purchase_price = ?,
+        trade_price = ?,
+        wholesale_price = ?,
+        retail_price = ?,
+        loose_rate = ?,
+        tax_percent = ?,
+        discount_percent = ?,
+        minimum_stock = ?,
+        opening_stock = ?,
+        rack_number = ?,
+        status = ?,
+        updated_at = ?
+      WHERE id = ?
+    `);
+
+    for (const it of items) {
+      const code = String(it?.item_code || '').trim();
+      const name = String(it?.item_name || '').trim();
+      if (!code || !name) continue;
+      const existing = findItemStmt.get(code) as { id: number; updated_at?: string; company_name?: string } | undefined;
+      const incomingTs = normalizeDbTimestamp(it?.updated_at || it?.updatedAt || '');
+      const status = String(it?.status || 'Active') === 'Inactive' ? 'Inactive' : 'Active';
+      const packing = String(it?.packing || '1x1').trim() || '1x1';
+      const companyName = String(it?.company_name || 'General').trim() || 'General';
+      const category = String(it?.category || 'Medicine').trim() || 'Medicine';
+      const retailPrice = Number(it?.retail_price || 0);
+      const looseRate = Number(it?.loose_rate || 0);
+
+      if (!existing) {
+        insertItemStmt.run(
+          code,
+          it?.barcode || null,
+          name,
+          it?.generic_name || '',
+          category,
+          companyName,
+          packing,
+          Number(it?.purchase_price || 0),
+          Number(it?.trade_price || 0),
+          Number(it?.wholesale_price || 0),
+          retailPrice,
+          looseRate,
+          Number(it?.tax_percent || 0),
+          Number(it?.discount_percent || 0),
+          Number(it?.minimum_stock ?? it?.reorder_level ?? 10),
+          Number(it?.opening_stock ?? it?.current_stock ?? 0),
+          String(it?.rack_number ?? it?.rack_location ?? ''),
+          status,
+          String(it?.created_at || it?.createdAt || new Date().toISOString()),
+          String(it?.updated_at || it?.updatedAt || new Date().toISOString())
+        );
+        restoredItems++;
+      } else if (incomingTs && incomingTs > normalizeDbTimestamp(existing.updated_at)) {
+        updateItemStmt.run(
+          it?.barcode || null,
+          name,
+          it?.generic_name || '',
+          category,
+          companyName,
+          packing,
+          Number(it?.purchase_price || 0),
+          Number(it?.trade_price || 0),
+          Number(it?.wholesale_price || 0),
+          retailPrice,
+          looseRate,
+          Number(it?.tax_percent || 0),
+          Number(it?.discount_percent || 0),
+          Number(it?.minimum_stock ?? it?.reorder_level ?? 10),
+          Number(it?.opening_stock ?? it?.current_stock ?? 0),
+          String(it?.rack_number ?? it?.rack_location ?? ''),
+          status,
+          String(it?.updated_at || it?.updatedAt || new Date().toISOString()),
+          existing.id
+        );
+        restoredItems++;
+      }
+    }
+
+    const findSaleByTx = db.prepare('SELECT id FROM sales WHERE client_request_id = ? LIMIT 1');
+    const findSaleByInv = db.prepare('SELECT id FROM sales WHERE LOWER(invoice_number) = LOWER(?) LIMIT 1');
+    const insertSaleStmt = db.prepare(`
+      INSERT INTO sales (
+        invoice_number, invoice_date, customer_account_id, customer_name,
+        customer_filer_status, salesman, invoice_type, payment_mode,
+        gross_total, discount_amount, tax_amount, net_total,
+        paid_amount, balance_amount, status, remarks,
+        client_request_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertSaleLineStmt = db.prepare(`
+      INSERT INTO sale_items (
+        sale_id, item_id, item_code, company_name, item_name, packing, units_per_pack,
+        batch_number, expiry_date, quantity, bonus_quantity, loose_quantity, total_units,
+        unit_price, loose_rate, discount_percent, discount_amount,
+        gross_amount, taxable_amount, tax_percent, tax_amount, line_total
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const inv of invoices) {
+      const txId = String(inv?.clientTxId || inv?.client_tx_id || inv?.client_request_id || '').trim();
+      const invNo = String(inv?.invoice_number || txId).trim();
+      if (!invNo) continue;
+      const existing =
+        (txId ? findSaleByTx.get(txId) : undefined) ||
+        findSaleByInv.get(invNo);
+      if (existing) continue;
+
+      const rawType = String(inv?.invoice_type || 'Retail');
+      const invType = rawType === 'Wholesale' ? 'Wholesale' : 'Retail';
+      const rawPay = String(inv?.payment_mode || 'Cash');
+      const payMode = ['Cash', 'Credit', 'Partial', 'Bank'].includes(rawPay) ? rawPay : 'Cash';
+      const rawSt = String(inv?.status || 'completed').toLowerCase();
+      const saleStatus = ['completed', 'held', 'draft', 'cancelled'].includes(rawSt) ? rawSt : 'completed';
+
+      let custId: number | null = null;
+      if (Number(inv?.customer_account_id) > 0) {
+        const acc = db.prepare('SELECT id FROM accounts WHERE id = ?').get(Number(inv.customer_account_id)) as { id: number } | undefined;
+        if (acc) custId = acc.id;
+      }
+
+      const info = insertSaleStmt.run(
+        invNo,
+        String(inv?.invoice_date || new Date().toISOString().slice(0, 10)),
+        custId,
+        String(inv?.customer_name || 'Walk-in Cash Customer'),
+        String(inv?.customer_filer_status || 'Non-Filer'),
+        String(inv?.salesman || 'Counter Pharmacist'),
+        invType,
+        payMode,
+        Number(inv?.gross_total || 0),
+        Number(inv?.discount_total ?? inv?.discount_amount ?? 0),
+        Number(inv?.tax_total ?? inv?.tax_amount ?? 0),
+        Number(inv?.net_total || 0),
+        Number(inv?.paid_amount || 0),
+        Number(inv?.balance_amount || 0),
+        saleStatus,
+        String(inv?.remarks || ''),
+        txId || null,
+        String(inv?.created_at || inv?.createdAt || new Date().toISOString()),
+        String(inv?.updated_at || inv?.updatedAt || new Date().toISOString())
+      );
+      const newSaleId = Number(info.lastInsertRowid);
+      const lines = Array.isArray(inv?.items) ? inv.items : [];
+      for (const ln of lines) {
+        const lineCode = String(ln?.item_code || '').trim();
+        let matchedItem = lineCode
+          ? (findItemStmt.get(lineCode) as { id: number; company_name?: string } | undefined)
+          : undefined;
+        if (!matchedItem && Number(ln?.item_id) > 0) {
+          matchedItem = db.prepare('SELECT id, company_name FROM items WHERE id = ?').get(Number(ln.item_id)) as { id: number; company_name?: string } | undefined;
+        }
+        if (!matchedItem) continue;
+        const qty = Number(ln?.quantity || 0);
+        const looseQty = Number(ln?.loose_quantity || 0);
+        const bonusQty = Number(ln?.bonus_quantity || 0);
+        const uPerPack = Number(ln?.units_per_pack || 1) || 1;
+        const unitPrice = Number(ln?.unit_price || 0);
+        const looseRate = Number(ln?.loose_rate || 0);
+        const lineTotal = Number(ln?.line_total || 0);
+        const discAmt = Number(ln?.discount_amount || 0);
+        const taxAmt = Number(ln?.tax_amount || 0);
+        const grossAmt = Number(ln?.gross_amount ?? (qty * unitPrice + looseQty * looseRate));
+        const taxableAmt = Number(ln?.taxable_amount ?? Math.max(0, grossAmt - discAmt));
+        insertSaleLineStmt.run(
+          newSaleId,
+          matchedItem.id,
+          lineCode || String(ln?.item_id),
+          String(ln?.company_name || matchedItem.company_name || 'General'),
+          String(ln?.item_name || 'Item'),
+          String(ln?.packing || '1x1'),
+          uPerPack,
+          String(ln?.batch_number || 'DEFAULT-BATCH'),
+          String(ln?.expiry_date || '2028-12-31'),
+          qty,
+          bonusQty,
+          looseQty,
+          Number(ln?.total_units ?? (qty * uPerPack + looseQty)),
+          unitPrice,
+          looseRate,
+          Number(ln?.discount_percent || 0),
+          discAmt,
+          grossAmt,
+          taxableAmt,
+          Number(ln?.tax_percent || 0),
+          taxAmt,
+          lineTotal
+        );
+      }
+      restoredInvoices++;
+    }
+  });
+
+  tx();
+  if (restoredItems > 0 || restoredInvoices > 0) {
+    try {
+      syncRuntimeToSeedDatabase();
+    } catch {
+      // ignore mirror warning
+    }
+  }
+  return { restoredItems, restoredInvoices };
+}
+
+export async function restoreItemsAndInvoicesFromFirestoreCollections(): Promise<{
+  restoredItems: number;
+  restoredInvoices: number;
+}> {
+  const cfg = getFirestoreRestConfig();
+  if (!cfg) return { restoredItems: 0, restoredInvoices: 0 };
+
+  const db = getDatabase();
+  const resetAt = getDbResetTimestamp(db);
+
+  const [rawRemoteItems, rawRemoteInvoices] = await Promise.all([
+    queryFirestoreCollectionBySyncKey(cfg, 'items').catch((e) => {
+      console.warn('[AMS Cloud Persistence] Firestore items query warning:', e?.message || e);
+      return [];
+    }),
+    queryFirestoreCollectionBySyncKey(cfg, 'invoices').catch((e) => {
+      console.warn('[AMS Cloud Persistence] Firestore invoices query warning:', e?.message || e);
+      return [];
+    }),
+  ]);
+
+  // Never pull pre-reset records back into a freshly reset database
+  const isPostResetRecord = (rec: Record<string, any>): boolean => {
+    if (!resetAt) return true;
+    const recTs = normalizeDbTimestamp(rec?.updatedAt || rec?.updated_at || rec?.createdAt || rec?.created_at);
+    return Boolean(recTs && recTs > normalizeDbTimestamp(resetAt));
+  };
+
+  const remoteItems = rawRemoteItems.filter(isPostResetRecord);
+  const remoteInvoices = rawRemoteInvoices.filter(isPostResetRecord);
+
+  if (remoteItems.length === 0 && remoteInvoices.length === 0) {
+    return { restoredItems: 0, restoredInvoices: 0 };
+  }
+
+  try {
+    return hydrateSqliteFromCloudRecords(remoteItems, remoteInvoices);
+  } catch (err: any) {
+    console.error('[AMS Cloud Persistence] SQLite hydration error:', err?.message || err);
+    throw err;
+  }
+}
+
+export async function resetCloudPersistenceState(): Promise<void> {
+  lastUploadedChecksum = null;
+  syncState.lastSyncedAt = null;
+  syncState.restoredFromCloud = false;
+  syncState.totalRowsSynced = 0;
+  syncState.snapshotVersion = 0;
+
+  if (syncTimer) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+
+  const pool = getPostgresPool();
+  if (pool) {
+    try {
+      await pool.query(`DELETE FROM ams_cloud_snapshots WHERE snapshot_key = 'primary'`);
+    } catch {
+      // Ignore if Cloud SQL proxy unavailable
+    }
+  }
+
+  // Also clear legacy Firestore ams_cloud_snapshots chunks if rules permit
+  const cfg = getFirestoreRestConfig();
+  if (cfg) {
+    const chunkIds = ['primary_meta', ...Array.from({ length: 20 }, (_, i) => `primary_chunk_${i}`)];
+    await Promise.allSettled(
+      chunkIds.map((id) =>
+        fetch(getFirestoreDocUrl(cfg, id), {
+          method: 'DELETE',
+          signal: AbortSignal.timeout(4000),
+        })
+      )
+    );
+  }
+}
+
 /**
  * Initializes persistent Cloud SQL / Firestore storage on startup.
  * Runs non-blocking after the HTTP server starts listening so container health probes never time out.
@@ -910,6 +1311,30 @@ async function runInitCloudPersistence(): Promise<{
             `[AMS Cloud Persistence] Restored ${restoredCount} records from Cloud Firestore.`
           );
           return { provider: 'firestore-cloud', restored: true, rowsRestored: restoredCount };
+        }
+      }
+
+      // If no full snapshot existed (or local SQLite is still fresh with 0 items/sales), restore items & invoices directly from Firestore collections
+      const localMetrics = getLocalActivityMetrics();
+      if (localMetrics.itemsCount === 0 || localMetrics.maxSaleId === 0) {
+        const collectionRestore = await restoreItemsAndInvoicesFromFirestoreCollections().catch(() => ({
+          restoredItems: 0,
+          restoredInvoices: 0,
+        }));
+        const totalCollectionRestored =
+          collectionRestore.restoredItems + collectionRestore.restoredInvoices;
+        if (totalCollectionRestored > 0) {
+          syncState.restoredFromCloud = true;
+          syncState.lastRestoredAt = new Date().toISOString();
+          syncState.totalRowsSynced = totalCollectionRestored;
+          console.log(
+            `[AMS Cloud Persistence] Hydrated ${collectionRestore.restoredItems} items and ${collectionRestore.restoredInvoices} invoices from Firestore collections.`
+          );
+          return {
+            provider: 'firestore-cloud',
+            restored: true,
+            rowsRestored: totalCollectionRestored,
+          };
         }
       }
 

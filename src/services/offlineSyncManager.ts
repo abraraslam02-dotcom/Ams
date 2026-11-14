@@ -7,7 +7,7 @@
 import { offlineStorage, SyncErrorLogRecord } from './offlineStorage';
 import { prepareItemIndex, searchItems } from '../utils/itemSearch';
 import { firestoreSyncService } from './firestoreSyncService';
-import { subscribeFirestoreConnection } from '../lib/firebase';
+import { getFirestoreConnectionState, subscribeFirestoreConnection } from '../lib/firebase';
 
 export type SyncStatusType = 'synced' | 'pending' | 'syncing' | 'failed' | 'offline';
 
@@ -101,6 +101,7 @@ class OfflineSyncManager {
   private listeners: Set<SyncListener> = new Set();
   private syncTimer: any = null;
   private isSyncing = false;
+  private isRestoring = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -627,6 +628,7 @@ class OfflineSyncManager {
 
     let expressSyncError: string | null = null;
     let serverSyncTime = new Date().toISOString();
+    let serverCatalogEmpty = false;
 
     try {
       await offlineStorage.getDb();
@@ -636,6 +638,34 @@ class OfflineSyncManager {
       this.firestoreConnected = conn.connected;
       this.lastFirestoreCheckedAt = conn.lastCheckedAt;
       this.firestoreLatencyMs = conn.latencyMs;
+
+      // Step 1.5: Check server db_reset_epoch BEFORE pushing stale IndexedDB records or syncing Firestore
+      let serverResetEpoch: string | null = null;
+      let skipPreResetPush = false;
+      try {
+        const statusRes = await fetch(`/api/sync/status?_t=${Date.now()}`, {
+          headers: getStoredAuthHeaders(),
+          cache: 'no-store',
+        });
+        if (statusRes.ok) {
+          this.serverConnected = true;
+          const statusData = await statusRes.json();
+          if (statusData?.dbResetEpoch) {
+            serverResetEpoch = String(statusData.dbResetEpoch);
+            const localEpoch = String(
+              (await offlineStorage.getMeta('db_reset_epoch')) ||
+                (typeof window !== 'undefined' ? window.localStorage.getItem('ams_db_reset_epoch') || '' : '')
+            );
+            if (localEpoch !== serverResetEpoch) {
+              await offlineStorage.purgeBusinessDataForReset(serverResetEpoch);
+              await this.refreshPendingCount();
+              skipPreResetPush = true;
+            }
+          }
+        }
+      } catch {
+        // Offline or server unavailable; continue with cached state
+      }
 
       // Step 2: Try Express SQLite LAN/Cloud sync (optional when logged in — never block Firestore sync if Express returns 401/offline)
       try {
@@ -650,12 +680,17 @@ class OfflineSyncManager {
           }),
         }).catch(() => {});
 
-        const pendingItems = await offlineStorage.getPendingSyncItems();
+        const pendingItems = skipPreResetPush ? [] : await offlineStorage.getPendingSyncItems();
         const pendingByTxId = new Map(pendingItems.map((p) => [p.client_tx_id, p]));
 
         if (pendingItems.length > 0) {
           this.syncProgress = { current: 0, total: pendingItems.length };
           this.notify();
+
+          const activeLocalEpoch = String(
+            (await offlineStorage.getMeta('db_reset_epoch')) ||
+              (typeof window !== 'undefined' ? window.localStorage.getItem('ams_db_reset_epoch') || '' : '')
+          );
 
           const res = await fetch('/api/sync/push', {
             method: 'POST',
@@ -664,11 +699,19 @@ class OfflineSyncManager {
             body: JSON.stringify({
               deviceId: this.deviceId,
               counterName: this.counterName,
+              resetEpoch: activeLocalEpoch || undefined,
               items: pendingItems,
             }),
           });
 
-          if (res.ok) {
+          if (res.status === 409) {
+            const conflictData = await res.json().catch(() => ({}));
+            if (conflictData?.code === 'RESET_EPOCH_MISMATCH' && conflictData?.serverResetEpoch) {
+              serverResetEpoch = String(conflictData.serverResetEpoch);
+              await offlineStorage.purgeBusinessDataForReset(serverResetEpoch);
+              await this.refreshPendingCount();
+            }
+          } else if (res.ok) {
             this.serverConnected = true;
             const data = await res.json();
             if (data.success && Array.isArray(data.results)) {
@@ -801,6 +844,17 @@ class OfflineSyncManager {
           this.serverConnected = true;
           const pullData = await pullRes.json();
           if (pullData && pullData.success) {
+            if (pullData.dbResetEpoch) {
+              const pullEpoch = String(pullData.dbResetEpoch);
+              serverResetEpoch = pullEpoch;
+              const curLocalEpoch = String(
+                (await offlineStorage.getMeta('db_reset_epoch')) ||
+                  (typeof window !== 'undefined' ? window.localStorage.getItem('ams_db_reset_epoch') || '' : '')
+              );
+              if (curLocalEpoch !== pullEpoch) {
+                await offlineStorage.purgeBusinessDataForReset(pullEpoch);
+              }
+            }
             serverSyncTime = String(pullData.serverTime || serverSyncTime);
             if (Array.isArray(pullData.tombstones) && pullData.tombstones.length > 0) {
               await this.applyTombstones(
@@ -815,6 +869,7 @@ class OfflineSyncManager {
             }
 
             if (Array.isArray(pullData.items)) {
+              if (pullData.items.length === 0) serverCatalogEmpty = true;
               await this.mergeIdKeyedTable('items', pullData.items, pendingItemIds, serverSyncTime);
             }
             if (Array.isArray(pullData.accounts)) {
@@ -839,6 +894,7 @@ class OfflineSyncManager {
               }
             }
             if (Array.isArray(pullData.sales)) {
+              if (pullData.sales.length === 0) serverCatalogEmpty = true;
               await this.mergeTxKeyedTable('sales', pullData.sales, pendingTxIds, serverSyncTime);
             }
             if (Array.isArray(pullData.purchases)) {
@@ -911,6 +967,19 @@ class OfflineSyncManager {
         includeUnsyncedCatalog: true,
       });
       this.firestoreConnected = firestoreSummary.connected;
+
+      await this.refreshPendingCount();
+
+      // If Express SQLite had an empty catalog/sales table while Firestore/IndexedDB holds post-reset records, hydrate Express non-destructively
+      const confirmedEpoch = String((await offlineStorage.getMeta('db_reset_epoch')) || '');
+      if (
+        serverCatalogEmpty &&
+        this.serverConnected &&
+        (!serverResetEpoch || confirmedEpoch === serverResetEpoch) &&
+        (this.itemsStats.total > 0 || this.invoicesStats.total > 0)
+      ) {
+        await firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
+      }
 
       await offlineStorage.invalidateDynamicApiCache([
         'inventory_',
@@ -993,6 +1062,148 @@ class OfflineSyncManager {
     } finally {
       this.isSyncing = false;
       this.syncProgress = null;
+    }
+  }
+
+  /**
+   * Restores the latest update from Firestore (items & invoices) into IndexedDB and Express SQLite
+   * non-destructively while also pushing any locally pending mutations.
+   */
+  public async restoreLastUpdate(): Promise<{
+    success: boolean;
+    pulledItems: number;
+    pulledInvoices: number;
+    pushedItems: number;
+    pushedInvoices: number;
+    restoredToServer: number;
+    message: string;
+    errors: string[];
+  }> {
+    if (this.isRestoring || this.isSyncing) {
+      return {
+        success: false,
+        pulledItems: 0,
+        pulledInvoices: 0,
+        pushedItems: 0,
+        pushedInvoices: 0,
+        restoredToServer: 0,
+        message: 'Synchronization is already in progress. Please wait a moment.',
+        errors: ['Synchronization already in progress'],
+      };
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.isOnline = false;
+      this.firestoreConnected = false;
+      this.syncStatus = 'offline';
+      this.notify();
+      return {
+        success: false,
+        pulledItems: 0,
+        pulledInvoices: 0,
+        pushedItems: 0,
+        pushedInvoices: 0,
+        restoredToServer: 0,
+        message: 'Internet is offline. Connect to internet to restore from Firestore.',
+        errors: ['Network offline'],
+      };
+    }
+
+    this.isRestoring = true;
+    this.isSyncing = true;
+    this.syncStatus = 'syncing';
+    this.notify();
+
+    try {
+      await offlineStorage.getDb();
+      const result = await firestoreSyncService.restoreLastCloudUpdate(this.deviceId);
+      const conn = getFirestoreConnectionState();
+      this.firestoreConnected = conn.connected;
+      this.lastFirestoreCheckedAt = conn.lastCheckedAt;
+      this.firestoreLatencyMs = conn.latencyMs;
+
+      await offlineStorage.invalidateDynamicApiCache([
+        'items_',
+        'sales_',
+        'inventory_',
+        'stock_',
+        'ledger_',
+      ]);
+
+      await this.refreshPendingCount();
+
+      const now = new Date().toISOString();
+      this.isOnline = this.firestoreConnected || this.serverConnected;
+      if (this.isOnline) {
+        this.lastSyncedAt = now;
+        await offlineStorage.setMeta('last_synced_at', now);
+      }
+
+      if (!this.isOnline) {
+        this.syncStatus = 'offline';
+        this.lastError = result.errors[0] || conn.lastError || 'Firestore unreachable';
+      } else if (result.errors.length > 0 || this.failedCount > 0) {
+        this.syncStatus = 'failed';
+        this.lastError = result.errors[0] || `${this.failedCount} record(s) failed sync`;
+      } else if (this.pendingCount > 0) {
+        this.syncStatus = 'pending';
+        this.lastError = null;
+      } else {
+        this.syncStatus = 'synced';
+        this.lastError = null;
+        this.justCompletedSync = true;
+        setTimeout(() => {
+          this.justCompletedSync = false;
+          this.notify();
+        }, 8000);
+      }
+
+      this.notify();
+
+      if (typeof window !== 'undefined' && this.isOnline) {
+        window.dispatchEvent(
+          new CustomEvent('ams-data-synchronized', {
+            detail: {
+              syncedAt: now,
+              restored: true,
+              pulledItems: result.pulledItems,
+              pulledInvoices: result.pulledInvoices,
+              firestoreConnected: this.firestoreConnected,
+            },
+          })
+        );
+      }
+
+      const message = result.success
+        ? `Restored ${result.pulledItems} item(s), ${result.pulledInvoices} invoice(s) from Firestore; synced ${result.pushedItems} item(s), ${result.pushedInvoices} invoice(s)${
+            result.restoredToServer > 0 ? `; hydrated ${result.restoredToServer} record(s) to server` : ''
+          }.`
+        : result.errors[0] || 'Restore completed with errors.';
+
+      return {
+        ...result,
+        message,
+      };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.lastError = errorMsg;
+      this.syncStatus = 'failed';
+      this.notify();
+      return {
+        success: false,
+        pulledItems: 0,
+        pulledInvoices: 0,
+        pushedItems: 0,
+        pushedInvoices: 0,
+        restoredToServer: 0,
+        message: errorMsg,
+        errors: [errorMsg],
+      };
+    } finally {
+      this.isRestoring = false;
+      this.isSyncing = false;
+      this.syncProgress = null;
+      this.notify();
     }
   }
 
