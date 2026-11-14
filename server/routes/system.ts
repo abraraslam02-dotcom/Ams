@@ -25,8 +25,8 @@ import {
 
 export const systemRouter = Router();
 
-export const APP_VERSION = '2.11.0-ERP';
-export const APP_RELEASE_PHASE = 'Phase 11 — Permanent Cloud SQL Persistence & Unified Monthly Invoice Numbering';
+export const APP_VERSION = '2.12.0-ERP';
+export const APP_RELEASE_PHASE = 'Phase 12 — Independent Permanent SQLite Central DB & Simple Incremental Sync';
 
 function canAdministerSystem(req: Request): boolean {
   return Boolean(req.user && ['Super Admin', 'Administrator'].includes(req.user.role));

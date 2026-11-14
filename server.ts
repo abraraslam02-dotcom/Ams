@@ -213,9 +213,9 @@ async function startServer() {
     }
     const uniqueUrls = Array.from(new Set(baseUrls));
 
-    return `// AMS Service Worker v10 (Complete Offline-First Desktop & Mobile App Shell + Fresh Sync)
-const SW_VERSION = 'ams-sw-v10-fresh-start';
-const RUNTIME_CACHE = 'ams-runtime-v10';
+    return `// AMS Service Worker v11 (Complete Offline-First App Shell + Simple Sync)
+const SW_VERSION = 'ams-sw-v11-simple-sync';
+const RUNTIME_CACHE = 'ams-runtime-v11';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -388,7 +388,7 @@ self.addEventListener('fetch', (event) => {
   app.listen(config.port, '0.0.0.0', () => {
     console.log(`[AMS Ready] Listening on http://0.0.0.0:${config.port}`);
 
-    // Initialize Cloud SQL / Firestore persistence in the background after port 3000 is open
+    // Initialize central database persistence check after port 3000 is open
     initCloudPersistence()
       .then(async (cloudInit) => {
         if (cloudInit.restored) {

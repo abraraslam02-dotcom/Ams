@@ -87,9 +87,7 @@ export function getDatabase(): Database.Database {
 }
 
 /**
- * Checkpoints the runtime WAL and atomically mirrors the active runtime SQLite database
- * (/tmp/ams_runtime_data/ams_medical.db) back to the workspace seed database (data/ams_medical.db)
- * so restarts and redeployments always preserve the latest transactions.
+ * Checkpoints the active SQLite WAL and mirrors to seed path when DATABASE_PATH differs from data/ams_medical.db.
  */
 export function syncRuntimeToSeedDatabase(): boolean {
   try {

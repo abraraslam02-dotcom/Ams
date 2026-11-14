@@ -70,14 +70,10 @@ export function getBackupDirectory(): string {
       const candidate = path.isAbsolute(customDir)
         ? customDir
         : path.resolve(runtimeBaseDir, customDir);
-      // Never write runtime backups inside the source workspace directory
-      const workspaceRoot = path.resolve(process.cwd());
-      if (!candidate.startsWith(workspaceRoot)) {
-        if (!fs.existsSync(candidate)) {
-          fs.mkdirSync(candidate, { recursive: true });
-        }
-        return candidate;
+      if (!fs.existsSync(candidate)) {
+        fs.mkdirSync(candidate, { recursive: true });
       }
+      return candidate;
     }
   } catch {
     // Fallback to default runtime backup directory

@@ -10,10 +10,10 @@ import {
   boolean,
 } from 'drizzle-orm/pg-core';
 
-// 1. Users table (linked to Firebase Auth UID)
+// 1. Users table (PostgreSQL schema)
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
-  uid: text('uid').notNull().unique(), // Firebase Auth UID
+  uid: text('uid').notNull().unique(), // External / Local User Unique Identifier
   email: text('email').notNull(),
   displayName: text('display_name'),
   role: text('role').default('operator').notNull(),

@@ -9,16 +9,14 @@ const workspaceRoot = path.resolve(process.cwd());
 const rawEnvDbPath = process.env.DATABASE_PATH
   ? path.resolve(workspaceRoot, process.env.DATABASE_PATH)
   : '';
-const safeRuntimeDatabasePath =
-  rawEnvDbPath && !rawEnvDbPath.startsWith(workspaceRoot)
-    ? rawEnvDbPath
-    : path.resolve(os.tmpdir(), 'ams_runtime_data', 'ams_medical.db');
+const permanentDatabasePath =
+  rawEnvDbPath || path.resolve(workspaceRoot, 'data', 'ams_medical.db');
 
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   seedDatabasePath: path.resolve(workspaceRoot, 'data', 'ams_medical.db'),
-  databasePath: safeRuntimeDatabasePath,
+  databasePath: permanentDatabasePath,
   appTimezone: process.env.APP_TIMEZONE || 'Asia/Karachi',
   appTimezoneOffset: '+05:00',
   appCurrency: process.env.APP_CURRENCY || 'PKR',

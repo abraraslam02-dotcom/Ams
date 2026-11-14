@@ -224,7 +224,7 @@ class OfflineStorage {
           db.createObjectStore('local_backups', { keyPath: 'id' });
         }
 
-        // 18. Firestore Sync Error & Diagnostic Logs Store (Added in v4, non-destructive)
+        // 18. Sync Error & Diagnostic Logs Store
         if (!db.objectStoreNames.contains('sync_error_logs')) {
           const logStore = db.createObjectStore('sync_error_logs', {
             keyPath: 'id',

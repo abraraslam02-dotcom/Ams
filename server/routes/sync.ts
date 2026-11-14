@@ -10,12 +10,31 @@ import { authenticateToken } from '../middleware/authMiddleware.ts';
 import { getDbResetEpoch, getDbResetTimestamp } from '../db/resetState.ts';
 import {
   ensureCloudPersistenceReady,
+  getCloudPersistenceStatus,
   hydrateSqliteFromCloudRecords,
-  restoreItemsAndInvoicesFromFirestoreCollections,
   syncDatabaseToCloudSQL,
 } from '../services/cloudPersistenceService.ts';
 
 export const syncRouter = Router();
+
+function normalizeIsoTs(ts: unknown): string {
+  const s = String(ts || '').trim();
+  if (!s) return '';
+  if (s.includes('T')) return s.endsWith('Z') ? s : `${s}Z`;
+  return `${s.replace(' ', 'T')}.000Z`;
+}
+
+function isIncomingStale(existingRow: any, payload: any): boolean {
+  if (!existingRow) return false;
+  const existingTs = normalizeIsoTs(existingRow.updated_at || existingRow.created_at);
+  const incomingTs = normalizeIsoTs(payload?.updated_at || payload?.updatedAt);
+  if (!existingTs || !incomingTs) return false;
+  return existingTs > incomingTs;
+}
+
+function normSqlTs(col = 'COALESCE(updated_at, created_at)'): string {
+  return `CASE WHEN instr(${col}, 'T') > 0 THEN ${col} ELSE replace(${col}, ' ', 'T') || '.000Z' END`;
+}
 
 function round2(val: number): number {
   return Math.round((Number(val) || 0) * 100) / 100;
@@ -185,6 +204,7 @@ syncRouter.get('/status', (_req: Request, res: Response) => {
     return res.json({
       success: true,
       online: true,
+      databaseProvider: getCloudPersistenceStatus().provider,
       serverTime: new Date().toISOString(),
       totalSyncedTransactions: totalSynced.c,
       registeredDevicesCount: devices.c,
@@ -214,6 +234,20 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     const deviceId = String(req.query.device_id || 'unknown');
     const counterName = String(req.query.counter_name || 'Main Counter');
     const lastTombstoneId = Math.max(0, Number(req.query.last_tombstone_id || 0));
+    const rawSince = String(req.query.since || '').trim();
+    const forceFull = String(req.query.full || '') === '1' || String(req.query.full || '') === 'true';
+    const clientResetEpoch = String(req.query.reset_epoch || '').trim();
+    const serverResetEpoch = getDbResetEpoch(db);
+
+    let sinceIso: string | null = null;
+    if (rawSince && !Number.isNaN(Date.parse(rawSince))) {
+      sinceIso = new Date(rawSince).toISOString();
+    }
+    const isIncremental = Boolean(
+      sinceIso &&
+        !forceFull &&
+        (!serverResetEpoch || !clientResetEpoch || clientResetEpoch === serverResetEpoch)
+    );
 
     // Update device registry heartbeat
     db.prepare(`
@@ -226,29 +260,57 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
         user_agent = excluded.user_agent
     `).run(deviceId, counterName, req.ip || '127.0.0.1', String(req.headers['user-agent'] || ''));
 
-    const items = db.prepare('SELECT * FROM items ORDER BY item_name ASC').all() as Array<Record<string, any>>;
-    const accounts = db.prepare('SELECT * FROM accounts ORDER BY account_name ASC').all() as Array<Record<string, any>>;
-    const inventory = db.prepare('SELECT * FROM inventory ORDER BY expiry_date ASC').all() as Array<Record<string, any>>;
+    const items = isIncremental
+      ? (db
+          .prepare(`SELECT * FROM items WHERE ${normSqlTs()} > ? ORDER BY item_name ASC`)
+          .all(sinceIso) as Array<Record<string, any>>)
+      : (db.prepare('SELECT * FROM items ORDER BY item_name ASC').all() as Array<Record<string, any>>);
+    const accounts = isIncremental
+      ? (db
+          .prepare(`SELECT * FROM accounts WHERE ${normSqlTs()} > ? ORDER BY account_name ASC`)
+          .all(sinceIso) as Array<Record<string, any>>)
+      : (db.prepare('SELECT * FROM accounts ORDER BY account_name ASC').all() as Array<Record<string, any>>);
+    const inventory = isIncremental
+      ? (db
+          .prepare(`SELECT * FROM inventory WHERE ${normSqlTs()} > ? ORDER BY expiry_date ASC`)
+          .all(sinceIso) as Array<Record<string, any>>)
+      : (db.prepare('SELECT * FROM inventory ORDER BY expiry_date ASC').all() as Array<Record<string, any>>);
     const companySettings = db.prepare('SELECT * FROM company_settings LIMIT 1').get() as Record<string, any> | undefined;
     const advanceTaxSettings = db
       .prepare('SELECT * FROM advance_tax_settings ORDER BY id ASC LIMIT 1')
       .get() as Record<string, any> | undefined;
 
-    // Pull all active sales with line items for offline Sales History, Ledgers, Reprint & Return
-    const rawSales = db
-      .prepare(`
-        SELECT s.*,
-               a.account_code as customer_code,
-               a.phone as customer_phone,
-               a.city as customer_city,
-               payAcc.account_name as payment_account_name
-        FROM sales s
-        LEFT JOIN accounts a ON s.customer_account_id = a.id
-        LEFT JOIN accounts payAcc ON s.payment_account_id = payAcc.id
-        ORDER BY s.invoice_date DESC, s.id DESC
-        LIMIT 5000
-      `)
-      .all() as Array<Record<string, any>>;
+    // Pull active or delta sales with line items
+    const rawSales = (isIncremental
+      ? db
+          .prepare(`
+            SELECT s.*,
+                   a.account_code as customer_code,
+                   a.phone as customer_phone,
+                   a.city as customer_city,
+                   payAcc.account_name as payment_account_name
+            FROM sales s
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            LEFT JOIN accounts payAcc ON s.payment_account_id = payAcc.id
+            WHERE ${normSqlTs('COALESCE(s.updated_at, s.created_at)')} > ?
+            ORDER BY s.invoice_date DESC, s.id DESC
+            LIMIT 5000
+          `)
+          .all(sinceIso)
+      : db
+          .prepare(`
+            SELECT s.*,
+                   a.account_code as customer_code,
+                   a.phone as customer_phone,
+                   a.city as customer_city,
+                   payAcc.account_name as payment_account_name
+            FROM sales s
+            LEFT JOIN accounts a ON s.customer_account_id = a.id
+            LEFT JOIN accounts payAcc ON s.payment_account_id = payAcc.id
+            ORDER BY s.invoice_date DESC, s.id DESC
+            LIMIT 5000
+          `)
+          .all()) as Array<Record<string, any>>;
 
     const saleIds = rawSales.map((s) => Number(s.id));
     const saleItemsBySaleId = new Map<number, any[]>();
@@ -281,20 +343,35 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
       };
     });
 
-    // Pull all active purchases with line items for offline Purchase History, Ledgers & Return
-    const rawPurchases = db
-      .prepare(`
-        SELECT p.*,
-               a.account_code as supplier_code,
-               a.phone as supplier_phone,
-               payAcc.account_name as payment_account_name
-        FROM purchases p
-        LEFT JOIN accounts a ON p.supplier_account_id = a.id
-        LEFT JOIN accounts payAcc ON p.payment_account_id = payAcc.id
-        ORDER BY p.bill_date DESC, p.id DESC
-        LIMIT 5000
-      `)
-      .all() as Array<Record<string, any>>;
+    // Pull active or delta purchases with line items
+    const rawPurchases = (isIncremental
+      ? db
+          .prepare(`
+            SELECT p.*,
+                   a.account_code as supplier_code,
+                   a.phone as supplier_phone,
+                   payAcc.account_name as payment_account_name
+            FROM purchases p
+            LEFT JOIN accounts a ON p.supplier_account_id = a.id
+            LEFT JOIN accounts payAcc ON p.payment_account_id = payAcc.id
+            WHERE ${normSqlTs('COALESCE(p.updated_at, p.created_at)')} > ?
+            ORDER BY p.bill_date DESC, p.id DESC
+            LIMIT 5000
+          `)
+          .all(sinceIso)
+      : db
+          .prepare(`
+            SELECT p.*,
+                   a.account_code as supplier_code,
+                   a.phone as supplier_phone,
+                   payAcc.account_name as payment_account_name
+            FROM purchases p
+            LEFT JOIN accounts a ON p.supplier_account_id = a.id
+            LEFT JOIN accounts payAcc ON p.payment_account_id = payAcc.id
+            ORDER BY p.bill_date DESC, p.id DESC
+            LIMIT 5000
+          `)
+          .all()) as Array<Record<string, any>>;
 
     const purchaseIds = rawPurchases.map((p) => Number(p.id));
     const purchaseItemsByPurId = new Map<number, any[]>();
@@ -330,18 +407,32 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     // Pull Cash Book Vouchers
     let cashBookVouchers: any[] = [];
     try {
-      const cbRows = db
-        .prepare(`
-          SELECT cb.*,
-                 ha.account_code as head_code, ha.account_name as head_name, ha.account_group as head_group,
-                 ca.account_code as cb_code, ca.account_name as cb_name, ca.account_group as cb_group
-          FROM cash_book_vouchers cb
-          LEFT JOIN accounts ha ON ha.id = cb.head_account_id
-          LEFT JOIN accounts ca ON ca.id = cb.cash_bank_account_id
-          ORDER BY cb.sequence_number DESC, cb.id DESC
-          LIMIT 5000
-        `)
-        .all() as Array<Record<string, any>>;
+      const cbRows = (isIncremental
+        ? db
+            .prepare(`
+              SELECT cb.*,
+                     ha.account_code as head_code, ha.account_name as head_name, ha.account_group as head_group,
+                     ca.account_code as cb_code, ca.account_name as cb_name, ca.account_group as cb_group
+              FROM cash_book_vouchers cb
+              LEFT JOIN accounts ha ON ha.id = cb.head_account_id
+              LEFT JOIN accounts ca ON ca.id = cb.cash_bank_account_id
+              WHERE ${normSqlTs('COALESCE(cb.updated_at, cb.created_at)')} > ?
+              ORDER BY cb.sequence_number DESC, cb.id DESC
+              LIMIT 5000
+            `)
+            .all(sinceIso)
+        : db
+            .prepare(`
+              SELECT cb.*,
+                     ha.account_code as head_code, ha.account_name as head_name, ha.account_group as head_group,
+                     ca.account_code as cb_code, ca.account_name as cb_name, ca.account_group as cb_group
+              FROM cash_book_vouchers cb
+              LEFT JOIN accounts ha ON ha.id = cb.head_account_id
+              LEFT JOIN accounts ca ON ca.id = cb.cash_bank_account_id
+              ORDER BY cb.sequence_number DESC, cb.id DESC
+              LIMIT 5000
+            `)
+            .all()) as Array<Record<string, any>>;
 
       cashBookVouchers = cbRows.map((cb) => ({
         ...cb,
@@ -356,17 +447,25 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     // Pull Sale Returns & Purchase Returns (with their return items)
     let saleReturns: any[] = [];
     try {
-      const srRows = db
-        .prepare('SELECT * FROM sale_returns ORDER BY return_date DESC, id DESC LIMIT 2000')
-        .all() as Array<Record<string, any>>;
-      const srItems = db
-        .prepare('SELECT * FROM sale_return_items ORDER BY id ASC')
-        .all() as Array<Record<string, any>>;
+      const srRows = (isIncremental
+        ? db
+            .prepare(`SELECT * FROM sale_returns WHERE ${normSqlTs('created_at')} > ? ORDER BY return_date DESC, id DESC LIMIT 2000`)
+            .all(sinceIso)
+        : db
+            .prepare('SELECT * FROM sale_returns ORDER BY return_date DESC, id DESC LIMIT 2000')
+            .all()) as Array<Record<string, any>>;
+      const srIds = srRows.map((sr) => Number(sr.id));
       const srMap = new Map<number, any[]>();
-      for (const sri of srItems) {
-        const id = Number(sri.sale_return_id);
-        if (!srMap.has(id)) srMap.set(id, []);
-        srMap.get(id)!.push(sri);
+      if (srIds.length > 0) {
+        const ph = srIds.map(() => '?').join(',');
+        const srItems = db
+          .prepare(`SELECT * FROM sale_return_items WHERE sale_return_id IN (${ph}) ORDER BY id ASC`)
+          .all(...srIds) as Array<Record<string, any>>;
+        for (const sri of srItems) {
+          const id = Number(sri.sale_return_id);
+          if (!srMap.has(id)) srMap.set(id, []);
+          srMap.get(id)!.push(sri);
+        }
       }
       saleReturns = srRows.map((sr) => ({
         ...sr,
@@ -381,17 +480,25 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
 
     let purchaseReturns: any[] = [];
     try {
-      const prRows = db
-        .prepare('SELECT * FROM purchase_returns ORDER BY return_date DESC, id DESC LIMIT 2000')
-        .all() as Array<Record<string, any>>;
-      const prItems = db
-        .prepare('SELECT * FROM purchase_return_items ORDER BY id ASC')
-        .all() as Array<Record<string, any>>;
+      const prRows = (isIncremental
+        ? db
+            .prepare(`SELECT * FROM purchase_returns WHERE ${normSqlTs('created_at')} > ? ORDER BY return_date DESC, id DESC LIMIT 2000`)
+            .all(sinceIso)
+        : db
+            .prepare('SELECT * FROM purchase_returns ORDER BY return_date DESC, id DESC LIMIT 2000')
+            .all()) as Array<Record<string, any>>;
+      const prIds = prRows.map((pr) => Number(pr.id));
       const prMap = new Map<number, any[]>();
-      for (const pri of prItems) {
-        const id = Number(pri.purchase_return_id);
-        if (!prMap.has(id)) prMap.set(id, []);
-        prMap.get(id)!.push(pri);
+      if (prIds.length > 0) {
+        const ph = prIds.map(() => '?').join(',');
+        const prItems = db
+          .prepare(`SELECT * FROM purchase_return_items WHERE purchase_return_id IN (${ph}) ORDER BY id ASC`)
+          .all(...prIds) as Array<Record<string, any>>;
+        for (const pri of prItems) {
+          const id = Number(pri.purchase_return_id);
+          if (!prMap.has(id)) prMap.set(id, []);
+          prMap.get(id)!.push(pri);
+        }
       }
       purchaseReturns = prRows.map((pr) => ({
         ...pr,
@@ -407,7 +514,9 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     // Pull Salesmen & Supply Snapshot
     let salesmen: any[] = [];
     try {
-      salesmen = db.prepare('SELECT * FROM salesmen ORDER BY name ASC').all();
+      salesmen = isIncremental
+        ? db.prepare(`SELECT * FROM salesmen WHERE ${normSqlTs()} > ? ORDER BY name ASC`).all(sinceIso)
+        : db.prepare('SELECT * FROM salesmen ORDER BY name ASC').all();
     } catch {
       // ignore
     }
@@ -500,8 +609,10 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
+      isIncremental,
+      since: sinceIso,
       serverTime: nowIso,
-      dbResetEpoch: getDbResetEpoch(db),
+      dbResetEpoch: serverResetEpoch,
       dbResetAt: getDbResetTimestamp(db),
       items,
       accounts,
@@ -630,7 +741,12 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           };
 
           const saleId = processSaleUpsert(null, normalizedPayload);
-          db.prepare('UPDATE sales SET client_request_id = ? WHERE id = ?').run(client_tx_id, saleId);
+          const nowStamp = new Date().toISOString();
+          db.prepare('UPDATE sales SET client_request_id = ?, updated_at = ? WHERE id = ?').run(
+            client_tx_id,
+            nowStamp,
+            saleId
+          );
           const saleRow = db
             .prepare('SELECT invoice_number FROM sales WHERE id = ?')
             .get(saleId) as { invoice_number: string } | undefined;
@@ -652,6 +768,20 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           if (!targetId || Number.isNaN(targetId)) {
             throw new Error('Valid numeric sale ID is required for UPDATE_SALE');
           }
+          const existingSaleRow = db.prepare('SELECT id, invoice_number, created_at, updated_at FROM sales WHERE id = ?').get(targetId) as any;
+          if (isIncomingStale(existingSaleRow, payload)) {
+            db.prepare(`
+              INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
+              VALUES (?, ?, 'UPDATE_SALE', 'sales', ?, ?, 'synced', ?)
+            `).run(client_tx_id, deviceId, targetId, existingSaleRow?.invoice_number || '', JSON.stringify(payload));
+            results.push({
+              client_tx_id,
+              status: 'synced',
+              server_id: targetId,
+              invoice_number: existingSaleRow?.invoice_number || null,
+            });
+            continue;
+          }
           const rawUpdateItems = Array.isArray(payload.items)
             ? payload.items
             : Array.isArray(payload.lines)
@@ -667,6 +797,7 @@ syncRouter.post('/push', (req: Request, res: Response) => {
             })),
             allow_negative_stock: true,
           });
+          db.prepare('UPDATE sales SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), saleId);
           const saleRow = db
             .prepare('SELECT invoice_number FROM sales WHERE id = ?')
             .get(saleId) as { invoice_number: string } | undefined;
@@ -768,6 +899,7 @@ syncRouter.post('/push', (req: Request, res: Response) => {
             .prepare('SELECT id, item_code FROM items WHERE LOWER(item_code) = LOWER(?) LIMIT 1')
             .get(code) as { id: number; item_code: string } | undefined;
 
+          const nowStamp = new Date().toISOString();
           let itemId: number;
           if (existingByCode) {
             itemId = existingByCode.id;
@@ -786,8 +918,8 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                   item_code, barcode, item_name, generic_name, category, company_name,
                   packing, purchase_price, trade_price, wholesale_price, retail_price,
                   loose_rate, tax_percent, discount_percent, reorder_level, opening_stock,
-                  rack_location, status, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', ?)
+                  rack_location, status, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?)
               `)
               .run(
                 code,
@@ -807,7 +939,9 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 Number(payload.reorder_level || 10),
                 Number(payload.opening_stock || 0),
                 payload.rack_location || '',
-                payload.notes || ''
+                payload.notes || '',
+                nowStamp,
+                nowStamp
               );
             itemId = Number(insertItem.lastInsertRowid);
           }
@@ -821,47 +955,51 @@ syncRouter.post('/push', (req: Request, res: Response) => {
         } else if (action === 'UPDATE_ITEM') {
           const itemId = Number(payload.id || item.local_id);
           if (itemId > 0) {
-            const packing = String(payload.packing || '1x1');
-            const unitsPerPack = parseUnitsPerPack(packing);
-            const retailPrice = round2(payload.retail_price || 0);
-            const looseRate =
-              Number(payload.loose_rate || 0) > 0
-                ? round2(payload.loose_rate)
-                : round2(retailPrice / unitsPerPack);
+            const existingItemRow = db.prepare('SELECT id, created_at, updated_at FROM items WHERE id = ?').get(itemId) as any;
+            if (!isIncomingStale(existingItemRow, payload)) {
+              const packing = String(payload.packing || '1x1');
+              const unitsPerPack = parseUnitsPerPack(packing);
+              const retailPrice = round2(payload.retail_price || 0);
+              const looseRate =
+                Number(payload.loose_rate || 0) > 0
+                  ? round2(payload.loose_rate)
+                  : round2(retailPrice / unitsPerPack);
 
-            db.prepare(`
-              UPDATE items
-              SET item_name = COALESCE(?, item_name),
-                  generic_name = COALESCE(?, generic_name),
-                  company_name = COALESCE(?, company_name),
-                  category = COALESCE(?, category),
-                  packing = COALESCE(?, packing),
-                  purchase_price = COALESCE(?, purchase_price),
-                  trade_price = COALESCE(?, trade_price),
-                  wholesale_price = COALESCE(?, wholesale_price),
-                  retail_price = COALESCE(?, retail_price),
-                  loose_rate = ?,
-                  reorder_level = COALESCE(?, reorder_level),
-                  rack_location = COALESCE(?, rack_location),
-                  status = COALESCE(?, status),
-                  updated_at = CURRENT_TIMESTAMP
-              WHERE id = ?
-            `).run(
-              payload.item_name ?? null,
-              payload.generic_name ?? null,
-              payload.company_name ?? null,
-              payload.category ?? null,
-              payload.packing ?? null,
-              payload.purchase_price !== undefined ? round2(payload.purchase_price) : null,
-              payload.trade_price !== undefined ? round2(payload.trade_price) : null,
-              payload.wholesale_price !== undefined ? round2(payload.wholesale_price) : null,
-              payload.retail_price !== undefined ? retailPrice : null,
-              looseRate,
-              payload.reorder_level ?? null,
-              payload.rack_location ?? null,
-              payload.status ?? null,
-              itemId
-            );
+              db.prepare(`
+                UPDATE items
+                SET item_name = COALESCE(?, item_name),
+                    generic_name = COALESCE(?, generic_name),
+                    company_name = COALESCE(?, company_name),
+                    category = COALESCE(?, category),
+                    packing = COALESCE(?, packing),
+                    purchase_price = COALESCE(?, purchase_price),
+                    trade_price = COALESCE(?, trade_price),
+                    wholesale_price = COALESCE(?, wholesale_price),
+                    retail_price = COALESCE(?, retail_price),
+                    loose_rate = ?,
+                    reorder_level = COALESCE(?, reorder_level),
+                    rack_location = COALESCE(?, rack_location),
+                    status = COALESCE(?, status),
+                    updated_at = ?
+                WHERE id = ?
+              `).run(
+                payload.item_name ?? null,
+                payload.generic_name ?? null,
+                payload.company_name ?? null,
+                payload.category ?? null,
+                payload.packing ?? null,
+                payload.purchase_price !== undefined ? round2(payload.purchase_price) : null,
+                payload.trade_price !== undefined ? round2(payload.trade_price) : null,
+                payload.wholesale_price !== undefined ? round2(payload.wholesale_price) : null,
+                payload.retail_price !== undefined ? retailPrice : null,
+                looseRate,
+                payload.reorder_level ?? null,
+                payload.rack_location ?? null,
+                payload.status ?? null,
+                new Date().toISOString(),
+                itemId
+              );
+            }
           }
 
           db.prepare(`
@@ -957,41 +1095,45 @@ syncRouter.post('/push', (req: Request, res: Response) => {
         } else if (action === 'UPDATE_ACCOUNT') {
           const accId = Number(payload.id || item.local_id);
           if (accId > 0) {
-            const nextSyncType =
-              payload.account_type ??
-              (payload.account_group ? String(payload.account_group).trim() : null);
-            db.prepare(`
-              UPDATE accounts
-              SET account_name = COALESCE(?, account_name),
-                  account_group = COALESCE(?, account_group),
-                  account_type = COALESCE(?, account_type),
-                  contact_person = COALESCE(?, contact_person),
-                  phone = COALESCE(?, phone),
-                  email = COALESCE(?, email),
-                  filer_status = COALESCE(?, filer_status),
-                  address = COALESCE(?, address),
-                  city = COALESCE(?, city),
-                  credit_limit = COALESCE(?, credit_limit),
-                  opening_balance = COALESCE(?, opening_balance),
-                  opening_balance_type = COALESCE(?, opening_balance_type),
-                  updated_at = CURRENT_TIMESTAMP
-              WHERE id = ?
-            `).run(
-              payload.account_name ?? null,
-              payload.account_group ?? null,
-              nextSyncType,
-              payload.contact_person ?? null,
-              payload.phone ?? null,
-              payload.email ?? null,
-              payload.filer_status ?? null,
-              payload.address ?? null,
-              payload.city ?? null,
-              payload.credit_limit !== undefined ? round2(payload.credit_limit) : null,
-              payload.opening_balance !== undefined ? round2(payload.opening_balance) : null,
-              payload.opening_balance_type ?? null,
-              accId
-            );
-            recalculateAccountBalance(accId);
+            const existingAccRow = db.prepare('SELECT id, created_at, updated_at FROM accounts WHERE id = ?').get(accId) as any;
+            if (!isIncomingStale(existingAccRow, payload)) {
+              const nextSyncType =
+                payload.account_type ??
+                (payload.account_group ? String(payload.account_group).trim() : null);
+              db.prepare(`
+                UPDATE accounts
+                SET account_name = COALESCE(?, account_name),
+                    account_group = COALESCE(?, account_group),
+                    account_type = COALESCE(?, account_type),
+                    contact_person = COALESCE(?, contact_person),
+                    phone = COALESCE(?, phone),
+                    email = COALESCE(?, email),
+                    filer_status = COALESCE(?, filer_status),
+                    address = COALESCE(?, address),
+                    city = COALESCE(?, city),
+                    credit_limit = COALESCE(?, credit_limit),
+                    opening_balance = COALESCE(?, opening_balance),
+                    opening_balance_type = COALESCE(?, opening_balance_type),
+                    updated_at = ?
+                WHERE id = ?
+              `).run(
+                payload.account_name ?? null,
+                payload.account_group ?? null,
+                nextSyncType,
+                payload.contact_person ?? null,
+                payload.phone ?? null,
+                payload.email ?? null,
+                payload.filer_status ?? null,
+                payload.address ?? null,
+                payload.city ?? null,
+                payload.credit_limit !== undefined ? round2(payload.credit_limit) : null,
+                payload.opening_balance !== undefined ? round2(payload.opening_balance) : null,
+                payload.opening_balance_type ?? null,
+                new Date().toISOString(),
+                accId
+              );
+              recalculateAccountBalance(accId);
+            }
           }
 
           db.prepare(`
@@ -1646,15 +1788,6 @@ syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request
       const r1 = hydrateSqliteFromCloudRecords(bodyItems, bodyInvoices);
       restoredItems += r1.restoredItems;
       restoredInvoices += r1.restoredInvoices;
-    }
-
-    if (req.body?.pullFromFirestore !== false) {
-      const r2 = await restoreItemsAndInvoicesFromFirestoreCollections().catch(() => ({
-        restoredItems: 0,
-        restoredInvoices: 0,
-      }));
-      restoredItems += r2.restoredItems;
-      restoredInvoices += r2.restoredInvoices;
     }
 
     if (restoredItems > 0 || restoredInvoices > 0) {
