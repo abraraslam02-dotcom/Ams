@@ -19,11 +19,6 @@ import {
 } from '../types/inventory';
 import { offlineStorage } from './offlineStorage';
 import { offlineSyncManager } from './offlineSyncManager';
-import {
-  firestoreSyncService,
-  getItemCloudDocId,
-  getInvoiceCloudDocId,
-} from './firestoreSyncService';
 
 const LEGACY_TOKEN_KEY = 'ams_session_token';
 const LEGACY_CACHED_SESSION_KEY = 'ams_cached_auth_session';
@@ -922,17 +917,7 @@ export const api = {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.items)) {
-          let existingLocal = await offlineStorage.getAll<any>('items').catch(() => []);
-          const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
-          if (data.items.length === 0 && existingLocal.length === 0 && isOnline) {
-            const pulled = await firestoreSyncService.pullItemsFromFirestore().catch(() => 0);
-            if (pulled > 0) {
-              existingLocal = await offlineStorage.getAll<any>('items').catch(() => []);
-              firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
-            }
-          } else if (data.items.length === 0 && existingLocal.length > 0 && isOnline && !params?.q) {
-            firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
-          }
+          const existingLocal = await offlineStorage.getAll<any>('items').catch(() => []);
 
           const localById = new Map<number, any>();
           const localByCode = new Map<string, any>();
@@ -958,11 +943,9 @@ export const api = {
             }
             const merged = {
               ...srvItem,
-              cloud_doc_id: loc?.cloud_doc_id || getItemCloudDocId(srvItem),
-              cloud_synced_at: loc?.cloud_synced_at || null,
-              sync_status: loc?.cloud_synced_at ? loc.sync_status || 'synced' : 'pending',
-              sync_error: loc?.sync_error || null,
-              local_modified: loc?.local_modified || false,
+              sync_status: 'synced' as const,
+              sync_error: null,
+              local_modified: false,
             };
             toCache.push(merged);
             return merged;
@@ -1188,20 +1171,16 @@ export const api = {
       const data = await res.json();
       if (res.ok && data.success) {
         if (data.item) {
-          const itemToSync = {
+          const syncedItem = {
             ...data.item,
-            cloud_doc_id: getItemCloudDocId(data.item),
-            sync_status: 'pending' as const,
-            local_modified: true,
+            sync_status: 'synced' as const,
+            local_modified: false,
+            sync_error: null,
             updated_at: data.item.updated_at || nowIso,
             created_at: data.item.created_at || nowIso,
           };
-          await offlineStorage.put('items', itemToSync);
-          const fsRes = await firestoreSyncService.syncItemToFirestore(itemToSync, deviceId);
-          data.item = (await offlineStorage.get<any>('items', itemToSync.id)) || {
-            ...itemToSync,
-            sync_status: fsRes.status,
-          };
+          await offlineStorage.put('items', syncedItem);
+          data.item = syncedItem;
           await offlineSyncManager.refreshPendingCount();
         }
         return data;
@@ -1245,7 +1224,6 @@ export const api = {
       rack_number: item.rack_number || item.rack_location || '',
       rack_location: item.rack_location || item.rack_number || '',
       status: item.status || 'Active',
-      cloud_doc_id: getItemCloudDocId({ id: maxId + 1, item_code: nextCode }),
       sync_status: 'pending',
       local_modified: true,
       sync_error: null,
@@ -1263,20 +1241,13 @@ export const api = {
       payload: localItem,
       created_at: nowIso,
     });
-    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-      await firestoreSyncService.syncItemToFirestore(localItem, deviceId).catch(() => {});
-    }
-    const latestLocal = (await offlineStorage.get<any>('items', localItem.id)) || localItem;
     await offlineSyncManager.refreshPendingCount();
     return {
       success: true,
-      offline: latestLocal.sync_status !== 'synced',
-      item: latestLocal,
-      data: latestLocal,
-      message:
-        latestLocal.sync_status === 'synced'
-          ? 'Item saved locally & verified in Firestore Cloud.'
-          : 'Item saved locally (Pending Cloud Sync). Will automatically synchronize to Firestore when online.',
+      offline: true,
+      item: localItem,
+      data: localItem,
+      message: 'Item saved locally (Offline Mode). Will sync automatically when online.',
     };
   },
 
@@ -1296,20 +1267,16 @@ export const api = {
       const data = await res.json();
       if (res.ok && data.success) {
         if (data.item) {
-          const itemToSync = {
+          const syncedItem = {
             ...data.item,
-            cloud_doc_id: prevLocal?.cloud_doc_id || getItemCloudDocId(data.item),
-            sync_status: 'pending' as const,
-            local_modified: true,
-            updated_at: nowIso,
+            sync_status: 'synced' as const,
+            local_modified: false,
+            sync_error: null,
+            updated_at: data.item.updated_at || nowIso,
             created_at: prevLocal?.created_at || data.item.created_at || nowIso,
           };
-          await offlineStorage.put('items', itemToSync);
-          const fsRes = await firestoreSyncService.syncItemToFirestore(itemToSync, deviceId);
-          data.item = (await offlineStorage.get<any>('items', itemToSync.id)) || {
-            ...itemToSync,
-            sync_status: fsRes.status,
-          };
+          await offlineStorage.put('items', syncedItem);
+          data.item = syncedItem;
           await offlineSyncManager.refreshPendingCount();
         }
         return data;
@@ -1333,7 +1300,6 @@ export const api = {
       ...existing,
       ...item,
       id: Number(id),
-      cloud_doc_id: existing.cloud_doc_id || getItemCloudDocId({ ...existing, ...item, id: Number(id) }),
       sync_status: 'pending',
       local_modified: true,
       sync_error: null,
@@ -1351,20 +1317,13 @@ export const api = {
       payload: updatedItem,
       created_at: nowIso,
     });
-    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-      await firestoreSyncService.syncItemToFirestore(updatedItem, deviceId).catch(() => {});
-    }
-    const latestLocal = (await offlineStorage.get<any>('items', Number(id))) || updatedItem;
     await offlineSyncManager.refreshPendingCount();
     return {
       success: true,
-      offline: latestLocal.sync_status !== 'synced',
-      item: latestLocal,
-      data: latestLocal,
-      message:
-        latestLocal.sync_status === 'synced'
-          ? 'Item updated & verified in Firestore Cloud.'
-          : 'Item updated locally (Pending Cloud Sync). Will automatically synchronize to Firestore when online.',
+      offline: true,
+      item: updatedItem,
+      data: updatedItem,
+      message: 'Item updated locally (Offline Mode). Will sync automatically when online.',
     };
   },
 
@@ -2643,15 +2602,7 @@ export const api = {
             : Array.isArray(data.sales)
             ? data.sales
             : [];
-          let existingLocal = await offlineStorage.getAll<any>('sales').catch(() => []);
-          const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
-          if (rows.length === 0 && existingLocal.length === 0 && isOnline) {
-            const pulled = await firestoreSyncService.pullInvoicesFromFirestore().catch(() => 0);
-            if (pulled > 0) {
-              existingLocal = await offlineStorage.getAll<any>('sales').catch(() => []);
-              firestoreSyncService.hydrateExpressFromLocal().catch(() => {});
-            }
-          }
+          const existingLocal = await offlineStorage.getAll<any>('sales').catch(() => []);
 
           const localByTx = new Map<string, any>();
           const localBySrvId = new Map<number, any>();
@@ -2679,10 +2630,8 @@ export const api = {
             const merged = {
               ...srvSale,
               client_tx_id: loc?.client_tx_id || txKey,
-              cloud_doc_id: loc?.cloud_doc_id || getInvoiceCloudDocId({ ...srvSale, client_tx_id: txKey }),
-              cloud_synced_at: loc?.cloud_synced_at || null,
-              sync_status: loc?.cloud_synced_at ? loc.sync_status || 'synced' : 'pending',
-              sync_error: loc?.sync_error || null,
+              sync_status: 'synced' as const,
+              sync_error: null,
             };
             toCache.push(merged);
             return merged;
@@ -2911,22 +2860,15 @@ export const api = {
             server_id: savedInvoice.id,
             client_tx_id: savedInvoice.client_tx_id || clientTxId,
             items: savedInvoice.items || payload.items || [],
-            cloud_doc_id: getInvoiceCloudDocId({
-              ...savedInvoice,
-              client_tx_id: savedInvoice.client_tx_id || clientTxId,
-            }),
-            sync_status: 'pending' as const,
-            local_modified: true,
+            sync_status: 'synced' as const,
+            local_modified: false,
+            sync_error: null,
             created_at: savedInvoice.created_at || nowIso,
             updated_at: savedInvoice.updated_at || nowIso,
           };
           await offlineStorage.put('sales', saleRecord);
-          await firestoreSyncService.syncInvoiceToFirestore(saleRecord, deviceId);
-          const verified = await offlineStorage.get<any>('sales', saleRecord.client_tx_id);
-          if (verified) {
-            if (data.invoice) data.invoice = verified;
-            if (data.data) data.data = verified;
-          }
+          if (data.invoice) data.invoice = saleRecord;
+          if (data.data) data.data = saleRecord;
           await offlineSyncManager.refreshPendingCount();
         }
         return data;
@@ -2947,18 +2889,12 @@ export const api = {
     }
 
     const offlineRes = await offlineSyncManager.queueOfflineSale(payloadWithTx);
-    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-      await firestoreSyncService.syncInvoiceToFirestore(offlineRes.sale, deviceId).catch(() => {});
-    }
     const latestSale =
       (await offlineStorage.get<any>('sales', offlineRes.client_tx_id)) || offlineRes.sale;
     await offlineSyncManager.refreshPendingCount();
     return {
-      offline: latestSale.sync_status !== 'synced',
-      message:
-        latestSale.sync_status === 'synced'
-          ? 'Invoice saved locally & verified in Firestore Cloud.'
-          : 'Invoice created offline in local database (Pending Sync). Will automatically synchronize to Firestore when online.',
+      offline: true,
+      message: 'Invoice saved locally (Offline Mode). Will sync automatically when online.',
       invoice: {
         ...latestSale,
         id: latestSale.id || offlineRes.client_tx_id,
@@ -3002,21 +2938,15 @@ export const api = {
           server_id: savedInvoice?.id || existing?.server_id,
           client_tx_id: txKey,
           items: savedInvoice?.items || payload.items || existing?.items || [],
-          cloud_doc_id:
-            existing?.cloud_doc_id ||
-            getInvoiceCloudDocId({ ...(savedInvoice || payload), client_tx_id: txKey }),
-          sync_status: 'pending' as const,
-          local_modified: true,
+          sync_status: 'synced' as const,
+          local_modified: false,
+          sync_error: null,
           created_at: existing?.created_at || savedInvoice?.created_at || nowIso,
-          updated_at: nowIso,
+          updated_at: savedInvoice?.updated_at || nowIso,
         };
         await offlineStorage.put('sales', saleRecord);
-        await firestoreSyncService.syncInvoiceToFirestore(saleRecord, deviceId);
-        const verified = await offlineStorage.get<any>('sales', txKey);
-        if (verified) {
-          if (data.invoice) data.invoice = verified;
-          if (data.data) data.data = verified;
-        }
+        if (data.invoice) data.invoice = saleRecord;
+        if (data.data) data.data = saleRecord;
         await offlineSyncManager.refreshPendingCount();
         return data;
       }
@@ -3041,9 +2971,6 @@ export const api = {
       ...payload,
       id,
       client_tx_id: recordKey,
-      cloud_doc_id:
-        existing?.cloud_doc_id ||
-        getInvoiceCloudDocId({ ...(existing || {}), ...payload, client_tx_id: recordKey }),
       sync_status: 'pending',
       local_modified: true,
       sync_error: null,
@@ -3060,20 +2987,13 @@ export const api = {
       payload: { ...payload, id },
       created_at: nowIso,
     });
-    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-      await firestoreSyncService.syncInvoiceToFirestore(updatedRecord, deviceId).catch(() => {});
-    }
-    const latestLocal = (await offlineStorage.get<any>('sales', recordKey)) || updatedRecord;
     await offlineSyncManager.refreshPendingCount();
     return {
       success: true,
-      offline: latestLocal.sync_status !== 'synced',
-      invoice: latestLocal,
-      data: latestLocal,
-      message:
-        latestLocal.sync_status === 'synced'
-          ? 'Sales invoice updated & verified in Firestore Cloud.'
-          : 'Sales invoice updated locally (Pending Cloud Sync). Will synchronize to Firestore when online.',
+      offline: true,
+      invoice: updatedRecord,
+      data: updatedRecord,
+      message: 'Sales invoice updated locally (Offline Mode). Will sync automatically when online.',
     };
   },
 

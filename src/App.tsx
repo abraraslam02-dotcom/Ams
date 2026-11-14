@@ -47,7 +47,7 @@ import {
   PayrollTabId,
 } from './components/payroll/PayrollHRWorkspace';
 import { api } from './services/api';
-import { subscribeFirestoreConnection } from './lib/firebase';
+import { offlineSyncManager } from './services/offlineSyncManager';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
 import {
@@ -122,15 +122,15 @@ function AppContent() {
 
   const [, setHealth] = useState<HealthResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DatabaseDiagnostics | null>(null);
-  const [firestoreConnected, setFirestoreConnected] = useState<boolean>(false);
+  const [syncOnline, setSyncOnline] = useState<boolean>(() => offlineSyncManager.getState().isOnline);
   const [tables, setTables] = useState<TableDetail[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    return subscribeFirestoreConnection((state) => {
-      setFirestoreConnected(state.connected);
+    return offlineSyncManager.subscribe((state) => {
+      setSyncOnline(state.isOnline);
     });
   }, []);
 
@@ -740,7 +740,7 @@ function AppContent() {
           activeTab={activeTab}
           onSelectTab={handleSelectTab}
           roleName={user?.role}
-          databaseConnected={Boolean(diagnostics?.connected || firestoreConnected)}
+          databaseConnected={Boolean(diagnostics?.connected || syncOnline)}
           totalTables={tables.length}
           hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
         />

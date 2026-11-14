@@ -16,7 +16,7 @@ import { SalesPrintModal } from './SalesPrintModal';
 import { SalesDsrReportModal } from './SalesDsrReportModal';
 import { NumericInput } from '../common/NumericInput';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
-import { FirestoreSyncStatusBar } from '../common/FirestoreSyncStatusBar';
+import { SimpleSyncStatusBar } from '../common/SimpleSyncStatusBar';
 import { WhatsAppDocumentPayload } from '../../utils/whatsapp';
 import {
   Search,
@@ -2951,7 +2951,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             <MessageSquare className="w-3.5 h-3.5" />
             <span>Send SMS</span>
           </button>
-          <FirestoreSyncStatusBar entity="invoices" compact dark onSyncCompleted={loadReferenceData} />
+          <SimpleSyncStatusBar compact dark onSyncCompleted={loadReferenceData} />
           <span className="bg-slate-800 px-2 py-0.5 rounded-lg text-emerald-400 font-mono font-bold">
             {rows.filter((r) => r.item_id).length} Items
           </span>

@@ -70,7 +70,6 @@ export interface SyncErrorLogRecord {
   timestamp: string;
   entity: 'items' | 'invoices' | 'connection' | 'sync' | string;
   record_key: string;
-  cloud_doc_id?: string;
   operation: string;
   code: string;
   message: string;
@@ -607,7 +606,6 @@ class OfflineStorage {
       timestamp: entry.timestamp || new Date().toISOString(),
       entity: entry.entity,
       record_key: entry.record_key,
-      cloud_doc_id: entry.cloud_doc_id,
       operation: entry.operation,
       code: entry.code,
       message: entry.message,

@@ -28,7 +28,7 @@ import { exportItemsToExcel } from '../../utils/excel';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
-import { FirestoreSyncStatusBar, RecordSyncBadge } from '../common/FirestoreSyncStatusBar';
+import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 
 interface ItemsMasterViewProps {
   initialOpenImport?: boolean;
@@ -299,8 +299,8 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
         </div>
       )}
 
-      {/* Live Firestore Sync Status & Manual Sync Controls */}
-      <FirestoreSyncStatusBar entity="items" onSyncCompleted={fetchItems} />
+      {/* Live Database Sync Status */}
+      <SimpleSyncStatusBar onSyncCompleted={fetchItems} />
 
       {/* Summary KPI Cards Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -532,7 +532,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                 <th className="py-2.5 px-2 text-center">Min</th>
                 <th className="py-2.5 px-2.5">Rack</th>
                 <th className="py-2.5 px-2.5 text-center">Status</th>
-                <th className="py-2.5 px-2.5 text-center">Cloud Sync</th>
+                <th className="py-2.5 px-2.5 text-center">Sync Status</th>
                 <th className="py-2.5 px-3 text-right sticky right-0 bg-slate-50 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.05)] print:hidden">
                   Actions
                 </th>
@@ -738,14 +738,9 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                         </span>
                       </td>
 
-                      {/* Cloud Sync Status */}
+                      {/* Sync Status */}
                       <td className="py-2 px-2.5 text-center whitespace-nowrap">
-                        <RecordSyncBadge
-                          syncStatus={(item as any).sync_status}
-                          cloudSyncedAt={(item as any).cloud_synced_at}
-                          syncError={(item as any).sync_error}
-                          cloudDocId={(item as any).cloud_doc_id}
-                        />
+                        <RecordSyncBadge syncStatus={(item as any).sync_status} />
                       </td>
 
                       {/* Actions */}
@@ -781,7 +776,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
             Showing <strong>{items.length}</strong> items in catalog
           </span>
           <span className="text-[11px] font-mono text-slate-400">
-            Database: Firestore Cloud + Local IndexedDB &bull; Collection: items
+            Database: Central SQLite + Local IndexedDB &bull; Table: items
           </span>
         </div>
       </div>

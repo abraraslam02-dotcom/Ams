@@ -5,7 +5,7 @@ import { formatPKR } from '../../utils/formatters';
 import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { SalesPrintModal } from './SalesPrintModal';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
-import { FirestoreSyncStatusBar, RecordSyncBadge } from '../common/FirestoreSyncStatusBar';
+import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 import {
   Search,
   Download,
@@ -156,7 +156,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
 
   return (
     <div className="space-y-4">
-      <FirestoreSyncStatusBar entity="invoices" onSyncCompleted={fetchRegister} />
+      <SimpleSyncStatusBar onSyncCompleted={fetchRegister} />
 
       {/* Summary KPI Strip */}
       <div className="grid grid-cols-5 gap-3">
@@ -309,7 +309,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                 <th className="px-3 py-2.5 text-right">Balance</th>
                 <th className="px-3 py-2.5 text-center">Payment Type</th>
                 <th className="px-3 py-2.5">Salesman</th>
-                <th className="px-3 py-2.5 text-center">Cloud Sync</th>
+                <th className="px-3 py-2.5 text-center">Sync Status</th>
                 <th className="px-3 py-2.5 text-right">Actions / Reprint</th>
               </tr>
             </thead>
@@ -359,12 +359,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                     </td>
                     <td className="px-3 py-2 text-slate-700">{inv.salesman}</td>
                     <td className="px-3 py-2 text-center">
-                      <RecordSyncBadge
-                        syncStatus={(inv as any).sync_status}
-                        cloudSyncedAt={(inv as any).cloud_synced_at}
-                        syncError={(inv as any).sync_error}
-                        cloudDocId={(inv as any).cloud_doc_id}
-                      />
+                      <RecordSyncBadge syncStatus={(inv as any).sync_status} />
                     </td>
                     <td className="px-3 py-2 text-right">
                       <div className="inline-flex items-center gap-1">
