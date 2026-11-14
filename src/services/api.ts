@@ -951,11 +951,19 @@ export const api = {
             return merged;
           });
 
-          // Preserve ONLY genuinely unsynced offline items (pending/syncing/failed) not yet pushed to server
+          // If server returned 0 items on an unfiltered query while local IndexedDB has items,
+          // rehydrate server + Firestore from local IndexedDB automatically
+          if (data.items.length === 0 && existingLocal.length > 0 && !params?.q && !params?.category && !params?.company) {
+            await offlineSyncManager.rehydrateServerFromLocal();
+          }
+
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
-            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+            const isUnsynced =
+              loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+            const serverWasEmpty = data.items.length === 0 && !params?.q;
+            if (!isUnsynced && !serverWasEmpty) {
               continue;
             }
             const locCode = String(loc?.item_code || '').toLowerCase();
@@ -1573,8 +1581,18 @@ export const api = {
           const seenIds = new Set<number>(
             data.accounts.map((a: any) => Number(a?.id || 0)).filter((n: number) => n > 0)
           );
+          const serverCustomCount = data.accounts.filter((a: any) => Number(a?.is_system_account || 0) === 0).length;
+          const localCustomCount = existingLocal.filter((a: any) => Number(a?.is_system_account || 0) === 0).length;
+          if (serverCustomCount === 0 && localCustomCount > 0 && !params?.q) {
+            await offlineSyncManager.rehydrateServerFromLocal();
+          }
+
           for (const loc of existingLocal) {
-            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+            const isUnsynced =
+              loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+            const shouldRecoverCustom =
+              serverCustomCount === 0 && Number(loc?.is_system_account || 0) === 0 && !params?.q;
+            if (!isUnsynced && !shouldRecoverCustom) {
               continue;
             }
             const code = String(loc?.account_code || '').toLowerCase();

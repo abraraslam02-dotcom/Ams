@@ -134,12 +134,53 @@ class OfflineSyncManager {
   }
 
   /**
-   * Automatic server rehydration from client IndexedDB is disabled to prevent stale
-   * browser caches from ever overwriting or restoring old records on startup/republish.
-   * Genuine offline mutations push solely via authenticated idempotent /api/sync/push.
+   * Non-destructively rehydrates the server database from local IndexedDB records if the browser
+   * holds saved items, accounts, batches, sales, purchases, or vouchers not yet present on the server.
+   * Server uses INSERT OR IGNORE and respects sync_tombstones so deleted records are never resurrected.
    */
   public async rehydrateServerFromLocal(): Promise<number> {
-    return 0;
+    if (!this.isOnline) return 0;
+    try {
+      const [localItems, localAccounts, localInventory, localSales, localPurchases, localCashBook] =
+        await Promise.all([
+          offlineStorage.getAll<any>('items'),
+          offlineStorage.getAll<any>('accounts'),
+          offlineStorage.getAll<any>('inventory'),
+          offlineStorage.getAll<any>('sales'),
+          offlineStorage.getAll<any>('purchases'),
+          offlineStorage.getAll<any>('cash_book'),
+        ]);
+
+      const customAccounts = localAccounts.filter((a) => Number(a?.is_system_account || 0) === 0);
+      const totalLocal =
+        localItems.length +
+        customAccounts.length +
+        localInventory.length +
+        localSales.length +
+        localPurchases.length +
+        localCashBook.length;
+
+      if (totalLocal === 0) return 0;
+
+      const res = await fetch('/api/sync/rehydrate', {
+        method: 'POST',
+        headers: getStoredAuthHeaders(),
+        body: JSON.stringify({
+          items: localItems,
+          accounts: customAccounts,
+          inventory: localInventory,
+          sales: localSales,
+          purchases: localPurchases,
+          cashBookVouchers: localCashBook,
+        }),
+      });
+
+      if (!res.ok) return 0;
+      const data = await res.json();
+      return Number(data?.totalRestored || 0);
+    } catch {
+      return 0;
+    }
   }
 
   public async setTerminalDesignation(
@@ -291,22 +332,8 @@ class OfflineSyncManager {
       remoteRows.map((r) => Number(r?.id || 0)).filter((id) => !Number.isNaN(id) && id > 0)
     );
 
-    if (!isIncremental) {
-      // Full pull from authoritative server: purge previously-synced local cache rows that no longer exist on server,
-      // while strictly preserving any genuinely pending / failed / syncing offline mutations.
-      for (const loc of localRows) {
-        const locId = Number(loc?.id || 0);
-        if (
-          !remoteIds.has(locId) &&
-          !protectedIds.has(locId) &&
-          loc?.sync_status !== 'pending' &&
-          loc?.sync_status !== 'syncing' &&
-          loc?.sync_status !== 'failed'
-        ) {
-          await offlineStorage.delete(storeName, locId).catch(() => {});
-        }
-      }
-    }
+    // Never wipe local IndexedDB rows when remoteRows is empty (e.g. during container startup).
+    // Genuine deletions are propagated explicitly via sync_tombstones in applyTombstones().
 
     if (remoteRows.length === 0) {
       const remaining = isIncremental ? localRows : await offlineStorage.getAll<any>(storeName);
@@ -392,27 +419,8 @@ class OfflineSyncManager {
       remoteRows.map((r) => Number(r?.server_id || r?.id || 0)).filter((id) => id > 0)
     );
 
-    if (!isIncremental) {
-      // Full pull from authoritative server: purge previously-synced stale rows not on server,
-      // while preserving genuinely unsynced offline mutations.
-      for (const loc of localRows) {
-        const locTxId = String(loc?.client_tx_id || '');
-        const locSrvId = Number(loc?.server_id || loc?.id || 0);
-        const matchesRemote =
-          (locTxId && remoteTxIds.has(locTxId)) || (locSrvId > 0 && remoteServerIds.has(locSrvId));
-        if (
-          !matchesRemote &&
-          !pendingTxIds.has(locTxId) &&
-          loc?.sync_status !== 'pending' &&
-          loc?.sync_status !== 'syncing' &&
-          loc?.sync_status !== 'failed'
-        ) {
-          if (locTxId) {
-            await offlineStorage.delete(storeName, locTxId).catch(() => {});
-          }
-        }
-      }
-    }
+    // Never wipe local IndexedDB transactions when remoteRows is empty.
+    // Genuine deletions are propagated explicitly via sync_tombstones in applyTombstones().
 
     if (remoteRows.length === 0) {
       const remaining = isIncremental ? localRows : await offlineStorage.getAll<any>(storeName);
@@ -734,8 +742,8 @@ class OfflineSyncManager {
         }
       }
 
-      // Step 2.5: Automatic IndexedDB-to-server rehydration is permanently disabled
-      // so stale local caches never overwrite authoritative server records.
+      // Step 2.5: Ensure any local IndexedDB records missing on the server are non-destructively rehydrated
+      await this.rehydrateServerFromLocal();
 
       // Step 3: Build protected IDs for any remaining pending/failed local records
       const [remainingPending, remainingFailed] = await Promise.all([
@@ -815,18 +823,7 @@ class OfflineSyncManager {
           }
           if (Array.isArray(pullData.inventory)) {
             const localBatches = await offlineStorage.getAll<any>('inventory');
-            if (!isIncremental) {
-              const remoteBatchIds = new Set<number>(
-                pullData.inventory.map((b: any) => Number(b?.id || 0)).filter((id: number) => id > 0)
-              );
-              for (const locB of localBatches) {
-                const locId = Number(locB?.id || 0);
-                const locItemId = Number(locB?.item_id || 0);
-                if (!remoteBatchIds.has(locId) && !pendingItemIds.has(locItemId)) {
-                  await offlineStorage.delete('inventory', locId).catch(() => {});
-                }
-              }
-            }
+            // Preserve local batches unless explicitly removed via sync_tombstones in applyTombstones()
             const safeRemoteBatches = pullData.inventory.filter(
               (b: any) => !pendingItemIds.has(Number(b.item_id))
             );

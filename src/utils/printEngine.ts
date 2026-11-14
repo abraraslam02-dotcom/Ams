@@ -11,6 +11,7 @@ export interface PrintJobConfig {
   fontSizeScale?: FontSizeScaleOption;
   copies?: number;
   selectedPrinter?: string;
+  showPageNumbers?: boolean;
 }
 
 export interface BrowserPrintCapabilities {
@@ -172,6 +173,14 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
     `);
   }
 
+  const showPageNumbers = Boolean(config.showPageNumbers && paperSize === 'a4');
+  const effectiveMarginCss =
+    showPageNumbers && (marginMm === '0mm' || marginMm === '4mm')
+      ? `${marginMm} ${marginMm} 10mm ${marginMm}`
+      : showPageNumbers
+      ? `${marginMm} ${marginMm} 12mm ${marginMm}`
+      : marginMm;
+
   const printDocumentHtml = `<!DOCTYPE html>
 <html>
   <head>
@@ -185,7 +194,25 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
     <style>
       @page {
         size: ${pageSizeCss};
-        margin: ${marginMm};
+        margin: ${effectiveMarginCss};
+        ${
+          showPageNumbers
+            ? `
+        @bottom-left {
+          content: "${(config.title || 'Abrar Medical Store').replace(/"/g, '\\"')}";
+          font-size: 8.5px;
+          color: #64748b;
+          font-family: system-ui, sans-serif;
+        }
+        @bottom-right {
+          content: "Page " counter(page) " of " counter(pages);
+          font-size: 9px;
+          font-weight: 600;
+          color: #334155;
+          font-family: system-ui, sans-serif;
+        }`
+            : ''
+        }
       }
       *, *::before, *::after {
         box-sizing: border-box !important;
@@ -249,6 +276,14 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       tr, .ams-avoid-break {
         page-break-inside: avoid !important;
         break-inside: avoid !important;
+      }
+      .ams-keep-with-next {
+        page-break-after: avoid !important;
+        break-after: avoid !important;
+      }
+      .ams-company-group {
+        page-break-inside: auto !important;
+        break-inside: auto !important;
       }
       th, td {
         word-break: normal !important;

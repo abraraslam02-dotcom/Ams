@@ -5,6 +5,15 @@ import { config } from '../config.ts';
 
 let dbInstance: Database.Database | null = null;
 let connectionError: string | null = null;
+let wasDatabaseCreatedOnBoot = false;
+
+export function getWasDatabaseCreatedOnBoot(): boolean {
+  return wasDatabaseCreatedOnBoot;
+}
+
+export function markDatabaseHydratedFromCloud(): void {
+  wasDatabaseCreatedOnBoot = false;
+}
 
 export interface ConnectionDiagnostics {
   connected: boolean;
@@ -38,9 +47,14 @@ export function getDatabase(): Database.Database {
       fs.mkdirSync(dbDir, { recursive: true });
     }
 
-    // Seed runtime database from workspace data/ams_medical.db if not yet initialized in tmpdir
+    const dbMissingBeforeOpen = !fs.existsSync(config.databasePath);
+    if (dbMissingBeforeOpen) {
+      wasDatabaseCreatedOnBoot = true;
+    }
+
+    // Seed runtime database from workspace data/ams_medical.db if not yet initialized in container
     if (
-      !fs.existsSync(config.databasePath) &&
+      dbMissingBeforeOpen &&
       config.seedDatabasePath &&
       config.seedDatabasePath !== config.databasePath &&
       fs.existsSync(config.seedDatabasePath)

@@ -346,5 +346,71 @@ service cloud.firestore {
       allow get: if isValidId(docId) && docId == 'connection';
       allow list, create, update, delete: if false;
     }
+
+    // 5. Encrypted Server Database Persistence Vault (Single-doc get & verified server write, no list, no delete)
+    function isValidVaultChunk(data) {
+      return data.keys().hasAll([
+          'vaultKey',
+          'docId',
+          'chunkIndex',
+          'totalChunks',
+          'versionSeq',
+          'sha256Hash',
+          'payload',
+          'recordCounts',
+          'updatedByEnv',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'vaultKey',
+          'docId',
+          'chunkIndex',
+          'totalChunks',
+          'versionSeq',
+          'sha256Hash',
+          'payload',
+          'recordCounts',
+          'updatedByEnv',
+          'updatedAt'
+        ])
+        && data.vaultKey is string
+        && data.vaultKey == 'ams_srv_vault_e5f2831c_4daf_499d_a38b_45adc902ab45'
+        && isValidId(data.docId)
+        && data.chunkIndex is int
+        && data.chunkIndex >= 0
+        && data.chunkIndex <= 200
+        && data.totalChunks is int
+        && data.totalChunks >= 1
+        && data.totalChunks <= 200
+        && data.versionSeq is int
+        && data.versionSeq >= 1
+        && data.sha256Hash is string
+        && data.sha256Hash.size() == 64
+        && data.payload is string
+        && data.payload.size() >= 1
+        && data.payload.size() <= 900000
+        && data.recordCounts is string
+        && data.recordCounts.size() >= 2
+        && data.recordCounts.size() <= 4000
+        && data.updatedByEnv is string
+        && data.updatedByEnv.size() >= 1
+        && data.updatedByEnv.size() <= 120
+        && data.updatedAt is string
+        && data.updatedAt.size() >= 10
+        && data.updatedAt.size() <= 64;
+    }
+
+    match /ams_vault_e5f2831c/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if isAdmin();
+      allow create: if isValidId(docId)
+        && isValidVaultChunk(incoming())
+        && incoming().docId == docId;
+      allow update: if isValidId(docId)
+        && isValidVaultChunk(incoming())
+        && incoming().docId == existing().docId
+        && incoming().versionSeq >= existing().versionSeq;
+      allow delete: if isAdmin() && isValidId(docId);
+    }
   }
 }

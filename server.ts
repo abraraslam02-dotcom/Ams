@@ -27,6 +27,8 @@ import {
   initCloudPersistence,
   syncDatabaseToCloudSQL,
   cloudPersistenceMiddleware,
+  runPreDeploymentSafetyChecks,
+  startCloudPersistenceBackgroundLoop,
 } from './server/services/cloudPersistenceService.ts';
 
 async function startServer() {
@@ -385,24 +387,29 @@ self.addEventListener('fetch', (event) => {
     });
   }
 
-  app.listen(config.port, '0.0.0.0', () => {
+  // Hydrate from external Google Cloud Firestore BEFORE opening port or taking daily backup
+  try {
+    await initCloudPersistence();
+    const safetyReport = await runPreDeploymentSafetyChecks();
+    console.log(`[AMS Deployment Safety] ${safetyReport.message}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[AMS Cloud] Startup persistence check warning: ${msg}`);
+  }
+
+  const server = app.listen(config.port, '0.0.0.0', () => {
     console.log(`[AMS Ready] Listening on http://0.0.0.0:${config.port}`);
 
-    // Initialize persistence check after port 3000 is open (automatic restore disabled)
-    initCloudPersistence()
-      .then(() => {
-        try {
-          const dailyBackup = ensureDailyAutomaticBackup();
-          if (dailyBackup) {
-            console.log(`[AMS Backup] Automatic daily backup created: ${dailyBackup.filename}`);
-          }
-        } catch {
-          // ignore non-critical backup error on startup
-        }
-      })
-      .catch((err) => {
-        console.warn('[AMS Cloud] Background persistence init skipped:', err?.message || err);
-      });
+    startCloudPersistenceBackgroundLoop();
+
+    try {
+      const dailyBackup = ensureDailyAutomaticBackup();
+      if (dailyBackup) {
+        console.log(`[AMS Backup] Automatic daily backup created: ${dailyBackup.filename}`);
+      }
+    } catch {
+      // ignore non-critical backup error on startup
+    }
 
     setInterval(() => {
       try {
@@ -412,6 +419,21 @@ self.addEventListener('fetch', (event) => {
       }
     }, 60 * 60 * 1000);
   });
+
+  const handleGracefulShutdown = (signal: string) => {
+    console.log(`[AMS Shutdown] Received ${signal}. Flushing live database to Firestore before exit...`);
+    syncDatabaseToCloudSQL(`shutdown_${signal}`)
+      .catch(() => {})
+      .finally(() => {
+        server.close(() => {
+          process.exit(0);
+        });
+        setTimeout(() => process.exit(0), 2000).unref();
+      });
+  };
+
+  process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
 }
 
 startServer().catch((err) => {

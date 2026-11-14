@@ -112,6 +112,16 @@
     break-inside: avoid !important;
   }
 
+  .ams-keep-with-next {
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+
+  .ams-company-group {
+    page-break-inside: auto !important;
+    break-inside: auto !important;
+  }
+
   /* 8. Show print-only elements */
   .print\:block {
     display: block !important;

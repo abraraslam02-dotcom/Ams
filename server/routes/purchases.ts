@@ -1571,7 +1571,7 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
       .prepare(`
         SELECT
           pi.*,
-          COALESCE(NULLIF(TRIM(pi.company_name), ''), i.company_name, '') as company_name,
+          COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pi.company_name), ''), '') as company_name,
           COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
           COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code
         FROM purchase_items pi

@@ -1733,26 +1733,14 @@ syncRouter.get('/audit-logs', (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/sync/restore-cloud-records
- * Manual Super Admin endpoint only. Automatic IndexedDB-to-server restoration is disabled
- * so stale browser caches can never overwrite active database records on startup or republish.
+ * POST /api/sync/rehydrate
+ * Non-destructively merges any client IndexedDB records that are missing on the server
+ * (INSERT OR IGNORE, strictly respecting sync_tombstones so deleted records are never resurrected)
+ * and persists the merged superset to Google Cloud Firestore.
  */
-syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request, res: Response) => {
+syncRouter.post('/rehydrate', authenticateToken, async (req: Request, res: Response) => {
   try {
-    const authUser = (req as Request & { user?: { id?: number; username?: string; role?: string } }).user;
-    if (!authUser || authUser.role !== 'Super Admin') {
-      return res.status(403).json({
-        success: false,
-        error: 'Access Denied: Automatic record restoration is disabled. Only Super Admin can perform a confirmed manual restore.',
-      });
-    }
-    if (req.body?.confirmRestore !== true) {
-      return res.status(400).json({
-        success: false,
-        error: 'Explicit confirmation (confirmRestore: true) is required to restore records manually.',
-      });
-    }
-
+    await ensureCloudPersistenceReady();
     ensureSyncTables();
     const rawBodyItems = Array.isArray(req.body?.items) ? req.body.items : [];
     const rawBodyInvoices = Array.isArray(req.body?.invoices)
@@ -1781,7 +1769,70 @@ syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request
       result.restoredVouchers;
 
     if (totalRestored > 0) {
-      syncDatabaseToCloudSQL('restore-cloud-records').catch(() => {});
+      await syncDatabaseToCloudSQL('client_indexeddb_rehydrate');
+    }
+
+    return res.json({
+      success: true,
+      ...result,
+      totalRestored,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * POST /api/sync/restore-cloud-records
+ * Manual Super Admin endpoint only.
+ */
+syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as Request & { user?: { id?: number; username?: string; role?: string } }).user;
+    if (!authUser || authUser.role !== 'Super Admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only Super Admin can perform a confirmed manual restore.',
+      });
+    }
+    if (req.body?.confirmRestore !== true) {
+      return res.status(400).json({
+        success: false,
+        error: 'Explicit confirmation (confirmRestore: true) is required to restore records manually.',
+      });
+    }
+
+    await ensureCloudPersistenceReady();
+    ensureSyncTables();
+    const rawBodyItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const rawBodyInvoices = Array.isArray(req.body?.invoices)
+      ? req.body.invoices
+      : Array.isArray(req.body?.sales)
+      ? req.body.sales
+      : [];
+    const rawAccounts = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
+    const rawInventory = Array.isArray(req.body?.inventory) ? req.body.inventory : [];
+    const rawPurchases = Array.isArray(req.body?.purchases) ? req.body.purchases : [];
+    const rawVouchers = Array.isArray(req.body?.cashBookVouchers) ? req.body.cashBookVouchers : [];
+
+    const result = hydrateSqliteFromCloudRecords(rawBodyItems, rawBodyInvoices, {
+      accounts: rawAccounts,
+      inventory: rawInventory,
+      purchases: rawPurchases,
+      cashBookVouchers: rawVouchers,
+    });
+
+    const totalRestored =
+      result.restoredItems +
+      result.restoredInvoices +
+      result.restoredAccounts +
+      result.restoredInventory +
+      result.restoredPurchases +
+      result.restoredVouchers;
+
+    if (totalRestored > 0) {
+      await syncDatabaseToCloudSQL('restore-cloud-records');
     }
 
     return res.json({

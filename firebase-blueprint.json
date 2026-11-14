@@ -214,6 +214,78 @@
         }
       },
       "required": ["ok"]
+    },
+    "AmsEncryptedVaultChunk": {
+      "title": "AmsEncryptedVaultChunk",
+      "description": "AES-256-GCM encrypted server database snapshot and table mirror chunk stored in Firestore for permanent cross-deployment persistence.",
+      "type": "object",
+      "properties": {
+        "vaultKey": {
+          "type": "string",
+          "description": "Server vault verification key."
+        },
+        "docId": {
+          "type": "string",
+          "description": "Document identifier matching the path parameter.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chunkIndex": {
+          "type": "integer",
+          "description": "Zero-based chunk index."
+        },
+        "totalChunks": {
+          "type": "integer",
+          "description": "Total chunks in the snapshot or table mirror."
+        },
+        "versionSeq": {
+          "type": "integer",
+          "description": "Monotonically increasing snapshot version sequence."
+        },
+        "sha256Hash": {
+          "type": "string",
+          "description": "SHA-256 integrity digest of the uncompressed payload.",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "payload": {
+          "type": "string",
+          "description": "AES-256-GCM encrypted, gzip-compressed base64 payload chunk.",
+          "minLength": 1,
+          "maxLength": 900000
+        },
+        "recordCounts": {
+          "type": "string",
+          "description": "JSON summary of table record counts.",
+          "minLength": 2,
+          "maxLength": 4000
+        },
+        "updatedByEnv": {
+          "type": "string",
+          "description": "Origin environment and reason for snapshot update.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of the snapshot write.",
+          "minLength": 10,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "vaultKey",
+        "docId",
+        "chunkIndex",
+        "totalChunks",
+        "versionSeq",
+        "sha256Hash",
+        "payload",
+        "recordCounts",
+        "updatedByEnv",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -240,6 +312,10 @@
     "/test/{docId}": {
       "schema": { "$ref": "#/entities/ConnectionProbe" },
       "description": "Read-only boot connection check probe for /test/connection."
+    },
+    "/ams_vault_e5f2831c/{docId}": {
+      "schema": { "$ref": "#/entities/AmsEncryptedVaultChunk" },
+      "description": "AES-256-GCM encrypted permanent production database vault for cross-deployment persistence."
     }
   }
 }

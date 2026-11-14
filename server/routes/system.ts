@@ -21,6 +21,8 @@ import {
 import {
   getCloudPersistenceStatus,
   ensureLocalBackupFileFromCloudSQL,
+  runPreDeploymentSafetyChecks,
+  syncDatabaseToCloudSQL,
 } from '../services/cloudPersistenceService.ts';
 
 export const systemRouter = Router();
@@ -97,6 +99,47 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
       locale: config.appLocale,
     },
   });
+});
+
+/**
+ * Pre-Deployment & Runtime Database Safety Verification
+ * Verifies external Firestore connection, existing records, schema compatibility, and non-destructive protection lock.
+ */
+systemRouter.get('/deployment-safety', async (_req: Request, res: Response) => {
+  try {
+    const report = await runPreDeploymentSafetyChecks();
+    return res.status(report.safeToDeploy ? 200 : 503).json({
+      success: report.safeToDeploy,
+      ...report,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(503).json({
+      success: false,
+      safeToDeploy: false,
+      error: `Deployment safety check failed: ${msg}`,
+    });
+  }
+});
+
+/**
+ * Immediate Cloud Persistence Flush
+ */
+systemRouter.post('/cloud-sync-now', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const synced = await syncDatabaseToCloudSQL(`manual_flush_by_${req.user?.username || 'user'}`);
+    const status = getCloudPersistenceStatus();
+    return res.json({
+      success: synced,
+      cloudPersistence: status,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({
+      success: false,
+      error: msg,
+    });
+  }
 });
 
 /**

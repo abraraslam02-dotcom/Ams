@@ -25,6 +25,7 @@ import {
   PageMarginOption,
   FontSizeScaleOption,
 } from '../../utils/printEngine';
+import { buildCompanyGroupedPurchaseData } from '../../utils/purchaseCompanyGrouping';
 
 interface PurchasePrintModalProps {
   isOpen?: boolean;
@@ -113,6 +114,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
       fontSizeScale,
       copies,
       selectedPrinter,
+      showPageNumbers: mode === 'invoice',
     });
   };
 
@@ -174,6 +176,18 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
       : fontSizeScale === 'large'
       ? 'text-[13.5px]'
       : 'text-xs';
+
+  const invoiceTableFontClass =
+    fontSizeScale === 'small'
+      ? 'text-[8.75px]'
+      : fontSizeScale === 'large'
+      ? 'text-[10.5px]'
+      : 'text-[9.5px]';
+
+  const groupedPurchase =
+    mode === 'invoice' ? buildCompanyGroupedPurchaseData(doc, items) : null;
+
+  const supplierInvoiceNo = String(doc.supplier_invoice_number || '').trim();
 
   return (
     <div className="print-modal-container fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-2 lg:p-4 overflow-y-auto print:bg-white print:p-0 print:block">
@@ -347,24 +361,36 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
           <div className="bg-slate-50 border-b border-slate-200 px-5 py-2.5 text-xs print:hidden">
             <div className="font-bold text-slate-700 mb-1.5 flex items-center gap-1.5">
               <Eye className="w-3.5 h-3.5 text-emerald-600" />
-              Show / Hide Purchase Document Fields:
+              {mode === 'invoice'
+                ? 'Show / Hide Purchase Invoice Header & Footer Fields (13 Purchase Table Columns Always Locked Visible):'
+                : 'Show / Hide Purchase Document Fields:'}
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-              {[
-                { key: 'showLogo', label: 'Store Logo' },
-                { key: 'showDrugLicense', label: 'Drug License #' },
-                { key: 'showNtn', label: 'NTN / Tax ID' },
-                { key: 'showItemCode', label: 'Item Code' },
-                { key: 'showCompany', label: 'Company Name' },
-                { key: 'showPacking', label: 'Packing' },
-                { key: 'showBatchExpiry', label: 'Batch & Expiry' },
-                { key: 'showBonus', label: 'Bonus Qty' },
-                { key: 'showDiscount', label: 'Discount Column' },
-                { key: 'showTax', label: 'GST & Advance Tax' },
-                { key: 'showPreviousBalance', label: 'Previous Balance' },
-                { key: 'showSignature', label: 'Signatures' },
-                { key: 'showAccountingVerification', label: 'GL Journal Proof' },
-              ].map((item) => (
+              {(mode === 'invoice'
+                ? [
+                    { key: 'showLogo', label: 'Store Logo' },
+                    { key: 'showDrugLicense', label: 'Drug License #' },
+                    { key: 'showNtn', label: 'NTN / Tax ID' },
+                    { key: 'showPreviousBalance', label: 'Previous Balance' },
+                    { key: 'showSignature', label: 'Signatures' },
+                    { key: 'showAccountingVerification', label: 'GL Journal Proof' },
+                  ]
+                : [
+                    { key: 'showLogo', label: 'Store Logo' },
+                    { key: 'showDrugLicense', label: 'Drug License #' },
+                    { key: 'showNtn', label: 'NTN / Tax ID' },
+                    { key: 'showItemCode', label: 'Item Code' },
+                    { key: 'showCompany', label: 'Company Name' },
+                    { key: 'showPacking', label: 'Packing' },
+                    { key: 'showBatchExpiry', label: 'Batch & Expiry' },
+                    { key: 'showBonus', label: 'Bonus Qty' },
+                    { key: 'showDiscount', label: 'Discount Column' },
+                    { key: 'showTax', label: 'GST & Advance Tax' },
+                    { key: 'showPreviousBalance', label: 'Previous Balance' },
+                    { key: 'showSignature', label: 'Signatures' },
+                    { key: 'showAccountingVerification', label: 'GL Journal Proof' },
+                  ]
+              ).map((item) => (
                 <label
                   key={item.key}
                   className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 cursor-pointer select-none"
@@ -429,7 +455,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
             )}
 
             {/* 1. Store Header */}
-            <div className="flex items-start justify-between border-b-2 border-slate-900 pb-4">
+            <div className="flex items-start justify-between gap-4 border-b-2 border-slate-900 pb-3.5">
               <div className="flex items-start gap-3">
                 {fields.showLogo && logoDataUrl ? (
                   <img
@@ -438,12 +464,12 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                     className="w-14 h-14 object-contain rounded-lg border border-slate-200 p-1 bg-white shrink-0"
                   />
                 ) : (
-                  <div className="w-11 h-11 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-base tracking-wider shrink-0">
+                  <div className="w-11 h-11 rounded-lg bg-slate-900 text-white flex items-center justify-center font-black text-base tracking-wider shrink-0">
                     AMS
                   </div>
                 )}
                 <div>
-                  <h1 className="text-xl font-black tracking-tight text-slate-900 uppercase">
+                  <h1 className="text-xl font-black tracking-tight text-slate-900 uppercase leading-tight">
                     {storeName}
                   </h1>
                   <p className="text-xs text-slate-600 font-medium">{storeAddress}</p>
@@ -457,26 +483,34 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 </div>
               </div>
 
-              <div className="text-right">
-                <span className="inline-block px-3 py-1 rounded-md bg-slate-900 text-white text-xs font-black uppercase tracking-wider">
+              <div className="text-right shrink-0">
+                <div className="inline-block px-3 py-1 rounded bg-slate-900 text-white text-xs font-black uppercase tracking-wider">
                   {mode === 'invoice' ? 'PURCHASE INVOICE' : 'PURCHASE RETURN / DEBIT NOTE'}
-                </span>
+                </div>
                 <div className="mt-2 space-y-0.5 text-xs">
                   <div>
                     <span className="text-slate-500 font-medium">
-                      {mode === 'invoice' ? 'System Bill No:' : 'Debit Note No:'}
+                      {mode === 'invoice' ? 'Invoice Number:' : 'Debit Note No:'}
                     </span>{' '}
                     <span className="font-mono font-bold text-slate-900">
                       {mode === 'invoice' ? doc.bill_number : doc.debit_note_number}
                     </span>
                   </div>
+                  <div>
+                    <span className="text-slate-500 font-medium">Invoice Date:</span>{' '}
+                    <span className="font-mono font-semibold text-slate-900">
+                      {mode === 'invoice' ? doc.bill_date : doc.return_date}
+                    </span>
+                  </div>
                   {mode === 'invoice' ? (
-                    <div>
-                      <span className="text-slate-500 font-medium">Supplier Inv No:</span>{' '}
-                      <span className="font-mono font-bold text-slate-800">
-                        {doc.supplier_invoice_number || 'N/A'}
-                      </span>
-                    </div>
+                    supplierInvoiceNo ? (
+                      <div>
+                        <span className="text-slate-500 font-medium">Supplier Invoice No:</span>{' '}
+                        <span className="font-mono font-bold text-slate-900">
+                          {supplierInvoiceNo}
+                        </span>
+                      </div>
+                    ) : null
                   ) : (
                     <div>
                       <span className="text-slate-500 font-medium">Ref Purchase Bill:</span>{' '}
@@ -485,40 +519,49 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                       </span>
                     </div>
                   )}
-                  <div>
-                    <span className="text-slate-500 font-medium">Date:</span>{' '}
-                    <span className="font-semibold text-slate-800">
-                      {mode === 'invoice' ? doc.bill_date : doc.return_date}
-                    </span>
-                  </div>
                 </div>
               </div>
             </div>
 
             {/* 2. Supplier Details & Tax Classification */}
-            <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs">
-              <div className="space-y-1">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+            <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-lg border border-slate-300 text-xs">
+              <div className="space-y-0.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1">
                   <Building2 className="w-3 h-3" />
-                  <span>Supplier / Distributor Details</span>
+                  <span>Supplier Name & Details</span>
                 </div>
                 <div className="font-bold text-sm text-slate-900">
-                  {doc.supplier_name} ({doc.supplier_code})
+                  {doc.supplier_name}
+                  {doc.supplier_code ? (
+                    <span className="font-mono text-xs font-semibold text-slate-600 ml-1.5">
+                      ({doc.supplier_code})
+                    </span>
+                  ) : null}
                 </div>
                 {doc.supplier_address && (
                   <div className="text-slate-600">{doc.supplier_address}</div>
                 )}
-                <div className="text-slate-600 flex flex-wrap gap-x-4 gap-y-0.5">
+                <div className="text-slate-600 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
                   <span>Phone: {doc.supplier_phone || 'N/A'}</span>
                   <span>NTN: {doc.supplier_ntn || 'N/A'}</span>
                   <span>STRN: {doc.supplier_strn || 'N/A'}</span>
                 </div>
               </div>
 
-              <div className="space-y-1 border-l border-slate-200 pl-4">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Tax & Settlement Classification
+              <div className="space-y-1 border-l border-slate-300 pl-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                  {mode === 'invoice' ? 'Invoice & Tax Summary' : 'Tax & Settlement Classification'}
                 </div>
+                {mode === 'invoice' && groupedPurchase && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-600">Companies / Line Items:</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {groupedPurchase.groups.length}{' '}
+                      {groupedPurchase.groups.length === 1 ? 'Company' : 'Companies'} · {items.length}{' '}
+                      {items.length === 1 ? 'Item' : 'Items'}
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <span className="text-slate-600">Supplier Tax Status:</span>
                   <span className="font-bold text-slate-900">
@@ -554,74 +597,236 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
             </div>
 
             {/* 3. Line Items Table */}
-            <div className="border border-slate-300 rounded-lg overflow-hidden">
-              <table className="w-full text-[11px] border-collapse">
-                <thead>
-                  <tr className="bg-slate-900 text-white text-left">
-                    <th className="py-2 px-2 font-semibold w-8">#</th>
-                    {fields.showItemCode && (
-                      <th className="py-2 px-2 font-semibold">Item Code</th>
-                    )}
-                    <th className="py-2 px-2 font-semibold">Item Name</th>
-                    {mode === 'invoice' ? (
-                      <>
-                        <th className="py-2 px-2 font-semibold text-right">Qty</th>
-                        {fields.showDiscount && (
-                          <th className="py-2 px-2 font-semibold text-right">Discount</th>
-                        )}
-                        {fields.showBonus && (
-                          <th className="py-2 px-2 font-semibold text-right">Bonus</th>
-                        )}
-                        <th className="py-2 px-2 font-semibold text-right">Gross Amount</th>
-                        <th className="py-2 px-2 font-semibold text-right">Net Amount</th>
-                      </>
-                    ) : (
-                      <>
-                        <th className="py-2 px-2 font-semibold text-right">Pur. Qty</th>
-                        <th className="py-2 px-2 font-semibold text-right">Ret. Qty</th>
-                        <th className="py-2 px-2 font-semibold text-right">Debit Rate</th>
-                        {fields.showDiscount && (
-                          <th className="py-2 px-2 font-semibold text-right">Disc</th>
-                        )}
-                        <th className="py-2 px-2 font-semibold text-right">Taxable</th>
-                        {fields.showTax && (
-                          <th className="py-2 px-2 font-semibold text-right">GST</th>
-                        )}
-                        <th className="py-2 px-2 font-semibold text-right">Line Total</th>
-                      </>
-                    )}
-                    {fields.showPacking && (
-                      <th className="py-2 px-2 font-semibold">Packing</th>
-                    )}
-                    {fields.showBatchExpiry && (
-                      <th className="py-2 px-2 font-semibold">Batch/Expiry</th>
-                    )}
-                    {mode === 'invoice' && (
-                      <>
-                        <th className="py-2 px-2 font-semibold text-right">Purchase Rate</th>
-                        <th className="py-2 px-2 font-semibold text-right">MRP</th>
-                      </>
-                    )}
-                    {mode === 'invoice' && fields.showTax && (
-                      <th className="py-2 px-2 font-semibold text-right">GST</th>
-                    )}
-                    {mode === 'invoice' && (
-                      <>
-                        <th className="py-2 px-2 font-semibold text-right">Taxable</th>
-                        <th className="py-2 px-2 font-semibold text-right">Line Total</th>
-                      </>
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {items.map((item, idx) => {
-                    const grossAmount =
-                      Number(item.gross_amount ?? (Number(item.quantity || 0) * Number(item.purchase_rate || 0)));
-                    const netAmount = Number(
-                      item.net_amount ?? item.taxable_amount ?? (grossAmount - Number(item.discount_amount || 0))
-                    );
+            {mode === 'invoice' && groupedPurchase ? (
+              <div className="border border-slate-400 rounded-md overflow-hidden">
+                <table
+                  className={`w-full table-fixed border-collapse ${invoiceTableFontClass} leading-tight`}
+                >
+                  <colgroup>
+                    <col style={{ width: '3.5%' }} />
+                    <col style={{ width: '20.5%' }} />
+                    <col style={{ width: '4.5%' }} />
+                    <col style={{ width: '4.5%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '7.5%' }} />
+                    <col style={{ width: '5%' }} />
+                    <col style={{ width: '7.5%' }} />
+                    <col style={{ width: '7.5%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '9.5%' }} />
+                    <col style={{ width: '7%' }} />
+                  </colgroup>
+                  <thead>
+                    <tr className="bg-slate-900 text-white border-b border-slate-900">
+                      <th className="py-1.5 px-1 font-bold text-center border-r border-slate-700">
+                        S.No
+                      </th>
+                      <th className="py-1.5 px-1.5 font-bold text-left border-r border-slate-700">
+                        Item Name
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Qty
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Bonus
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-left border-r border-slate-700">
+                        Batch
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-left border-r border-slate-700">
+                        Expiry
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Trade Price
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Discount %
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Discount Amount
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Sales Tax Amount
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Advance Tax
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                        Value With All Taxes
+                      </th>
+                      <th className="py-1.5 px-1 font-bold text-left">
+                        Remarks
+                      </th>
+                    </tr>
+                  </thead>
+                  {groupedPurchase.groups.length === 0 ? (
+                    <tbody>
+                      <tr>
+                        <td colSpan={13} className="py-6 text-center text-slate-500 font-medium">
+                          No purchase line items found on this invoice.
+                        </td>
+                      </tr>
+                    </tbody>
+                  ) : (
+                    groupedPurchase.groups.map((group) => (
+                      <tbody key={group.companyKey} className="ams-company-group">
+                        {/* Company Group Heading */}
+                        <tr className="ams-keep-with-next bg-slate-200/90 border-t-2 border-b border-slate-400">
+                          <td colSpan={13} className="py-1.5 px-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="font-black text-slate-900 uppercase tracking-wide text-[10.5px]">
+                                COMPANY: {group.companyName}
+                              </div>
+                              <div className="font-mono text-[9.5px] font-semibold text-slate-700">
+                                {group.items.length} {group.items.length === 1 ? 'Item' : 'Items'}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
 
-                    return (
+                        {/* Company Items */}
+                        {group.items.map((line, itemIdx) => {
+                          const isLastInCompany = itemIdx === group.items.length - 1;
+                          return (
+                            <tr
+                              key={line.raw.id || `${group.companyKey}-${line.sNo}`}
+                              className={`border-b border-slate-200 odd:bg-white even:bg-slate-50/40 ${
+                                isLastInCompany ? 'ams-keep-with-next' : ''
+                              }`}
+                            >
+                              <td className="py-1.5 px-1 text-center font-mono tabular-nums text-slate-600 border-r border-slate-200 align-top">
+                                {line.sNo}
+                              </td>
+                              <td className="py-1.5 px-1.5 text-left border-r border-slate-200 align-top break-words">
+                                <div className="font-bold text-slate-900">{line.itemName}</div>
+                                {line.packing ? (
+                                  <div className="text-[8.5px] text-slate-500">{line.packing}</div>
+                                ) : null}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums font-bold text-slate-900 border-r border-slate-200 align-top whitespace-nowrap">
+                                {line.quantity}
+                                {line.looseQuantity > 0 && (
+                                  <div className="text-[8px] font-normal text-slate-500">
+                                    +{line.looseQuantity} L
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-800 border-r border-slate-200 align-top whitespace-nowrap">
+                                {line.bonusQuantity}
+                              </td>
+                              <td className="py-1.5 px-1 text-left font-mono text-slate-800 border-r border-slate-200 align-top break-words">
+                                {line.batchNumber}
+                              </td>
+                              <td className="py-1.5 px-1 text-left font-mono tabular-nums text-slate-700 border-r border-slate-200 align-top whitespace-nowrap">
+                                {line.expiryDate}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-900 border-r border-slate-200 align-top whitespace-nowrap">
+                                {formatPKR(line.tradePrice)}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-700 border-r border-slate-200 align-top whitespace-nowrap">
+                                {line.discountPercent > 0
+                                  ? `${line.discountPercent.toFixed(1)}%`
+                                  : '0.0%'}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-800 border-r border-slate-200 align-top whitespace-nowrap">
+                                {formatPKR(line.discountAmount)}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-800 border-r border-slate-200 align-top whitespace-nowrap">
+                                {formatPKR(line.salesTaxAmount)}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-800 border-r border-slate-200 align-top whitespace-nowrap">
+                                {formatPKR(line.advanceTaxAmount)}
+                              </td>
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums font-bold text-slate-950 border-r border-slate-200 align-top whitespace-nowrap">
+                                {formatPKR(line.valueWithAllTaxes)}
+                              </td>
+                              <td className="py-1.5 px-1 text-left text-slate-600 align-top break-words">
+                                {line.remarks || '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* Individual Company Footer (Printed Strictly After This Company's Final Item) */}
+                        <tr className="ams-avoid-break bg-slate-100 border-t border-b-2 border-slate-400 font-bold text-slate-900">
+                          <td colSpan={2} className="py-1.5 px-1.5 text-left border-r border-slate-300">
+                            <span className="uppercase tracking-tight">
+                              {group.companyName} — Company Total
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap">
+                            {group.totalQuantity}
+                            {group.totalLooseQuantity > 0 && (
+                              <div className="text-[8px] font-normal text-slate-600">
+                                +{group.totalLooseQuantity} L
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap">
+                            {group.totalBonus}
+                          </td>
+                          <td
+                            colSpan={4}
+                            className="py-1.5 px-1.5 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap"
+                          >
+                            <span className="font-sans font-semibold text-slate-600 mr-1">
+                              Gross Amount:
+                            </span>
+                            {formatPKR(group.grossAmount)}
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap">
+                            {formatPKR(group.totalDiscountAmount)}
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap">
+                            {formatPKR(group.totalSalesTax)}
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap">
+                            {formatPKR(group.totalAdvanceTax)}
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-950 border-r border-slate-300 whitespace-nowrap">
+                            {formatPKR(group.totalValueWithAllTaxes)}
+                          </td>
+                          <td className="py-1.5 px-1 text-left font-normal text-[8.5px] text-slate-600">
+                            {group.items.length} {group.items.length === 1 ? 'item' : 'items'}
+                          </td>
+                        </tr>
+                      </tbody>
+                    ))
+                  )}
+                </table>
+              </div>
+            ) : (
+              <div className="border border-slate-300 rounded-lg overflow-hidden">
+                <table className="w-full text-[11px] border-collapse">
+                  <thead>
+                    <tr className="bg-slate-900 text-white text-left">
+                      <th className="py-2 px-2 font-semibold w-8">#</th>
+                      {fields.showItemCode && (
+                        <th className="py-2 px-2 font-semibold">Item Code</th>
+                      )}
+                      <th className="py-2 px-2 font-semibold">Item Name</th>
+                      <th className="py-2 px-2 font-semibold text-right">Pur. Qty</th>
+                      <th className="py-2 px-2 font-semibold text-right">Ret. Qty</th>
+                      <th className="py-2 px-2 font-semibold text-right">Debit Rate</th>
+                      {fields.showDiscount && (
+                        <th className="py-2 px-2 font-semibold text-right">Disc</th>
+                      )}
+                      <th className="py-2 px-2 font-semibold text-right">Taxable</th>
+                      {fields.showTax && (
+                        <th className="py-2 px-2 font-semibold text-right">GST</th>
+                      )}
+                      <th className="py-2 px-2 font-semibold text-right">Line Total</th>
+                      {fields.showPacking && (
+                        <th className="py-2 px-2 font-semibold">Packing</th>
+                      )}
+                      {fields.showBatchExpiry && (
+                        <th className="py-2 px-2 font-semibold">Batch/Expiry</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {items.map((item, idx) => (
                       <tr key={item.id || idx} className="hover:bg-slate-50">
                         <td className="py-1.5 px-2 font-mono text-slate-500">{idx + 1}</td>
                         {fields.showItemCode && (
@@ -635,62 +840,31 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                             <div className="text-[10px] text-slate-500">{item.company_name}</div>
                           )}
                         </td>
-                        {mode === 'invoice' ? (
-                          <>
-                            <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-900">
-                              {item.quantity}
-                            </td>
-                            {fields.showDiscount && (
-                              <td className="py-1.5 px-2 text-right font-mono text-slate-700">
-                                {formatPKR(item.discount_amount)}
-                                {Number(item.discount_percent) > 0 && (
-                                  <span className="text-[9px] text-slate-400 block">
-                                    ({item.discount_percent}%)
-                                  </span>
-                                )}
-                              </td>
-                            )}
-                            {fields.showBonus && (
-                              <td className="py-1.5 px-2 text-right font-mono text-emerald-700 font-semibold">
-                                {item.bonus_quantity || 0}
-                              </td>
-                            )}
-                            <td className="py-1.5 px-2 text-right font-mono">
-                              {formatPKR(grossAmount)}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-900">
-                              {formatPKR(netAmount)}
-                            </td>
-                          </>
-                        ) : (
-                          <>
-                            <td className="py-1.5 px-2 text-right font-mono text-slate-600">
-                              {item.purchased_quantity}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono font-bold text-rose-700">
-                              {item.return_quantity}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono">
-                              {formatPKR(item.debit_unit_rate)}
-                            </td>
-                            {fields.showDiscount && (
-                              <td className="py-1.5 px-2 text-right font-mono text-slate-700">
-                                {formatPKR(item.discount_amount)}
-                              </td>
-                            )}
-                            <td className="py-1.5 px-2 text-right font-mono font-medium">
-                              {formatPKR(item.taxable_amount)}
-                            </td>
-                            {fields.showTax && (
-                              <td className="py-1.5 px-2 text-right font-mono">
-                                {formatPKR(item.gst_amount)}
-                              </td>
-                            )}
-                            <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-900">
-                              {formatPKR(item.line_total)}
-                            </td>
-                          </>
+                        <td className="py-1.5 px-2 text-right font-mono text-slate-600">
+                          {item.purchased_quantity}
+                        </td>
+                        <td className="py-1.5 px-2 text-right font-mono font-bold text-rose-700">
+                          {item.return_quantity}
+                        </td>
+                        <td className="py-1.5 px-2 text-right font-mono">
+                          {formatPKR(item.debit_unit_rate)}
+                        </td>
+                        {fields.showDiscount && (
+                          <td className="py-1.5 px-2 text-right font-mono text-slate-700">
+                            {formatPKR(item.discount_amount)}
+                          </td>
                         )}
+                        <td className="py-1.5 px-2 text-right font-mono font-medium">
+                          {formatPKR(item.taxable_amount)}
+                        </td>
+                        {fields.showTax && (
+                          <td className="py-1.5 px-2 text-right font-mono">
+                            {formatPKR(item.gst_amount)}
+                          </td>
+                        )}
+                        <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-900">
+                          {formatPKR(item.line_total)}
+                        </td>
                         {fields.showPacking && (
                           <td className="py-1.5 px-2 text-slate-700">{item.packing}</td>
                         )}
@@ -705,40 +879,19 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                             </div>
                           </td>
                         )}
-                        {mode === 'invoice' && (
-                          <>
-                            <td className="py-1.5 px-2 text-right font-mono">
-                              {formatPKR(item.purchase_rate)}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono text-slate-600">
-                              {formatPKR(item.mrp_rate)}
-                            </td>
-                            {fields.showTax && (
-                              <td className="py-1.5 px-2 text-right font-mono">
-                                {formatPKR(item.tax_amount)}
-                              </td>
-                            )}
-                            <td className="py-1.5 px-2 text-right font-mono font-medium">
-                              {formatPKR(item.taxable_amount)}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono font-bold text-slate-900">
-                              {formatPKR(item.line_total)}
-                            </td>
-                          </>
-                        )}
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
-            {/* 4. Financial Totals & Tax Breakdown */}
-            <div className="grid grid-cols-2 gap-6 items-start ams-avoid-break">
+            {/* 4. Final Invoice Summary & Financial Breakdown */}
+            <div className="grid grid-cols-12 gap-5 items-start ams-avoid-break">
               {/* Left: Notes & Double-Entry Accounting Proof */}
-              <div className="space-y-3">
+              <div className="col-span-5 space-y-3">
                 {(doc.remarks || doc.return_reason) && (
-                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs">
+                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-300 text-xs">
                     <div className="font-bold text-slate-700 mb-0.5">
                       {mode === 'invoice' ? 'Invoice Remarks:' : 'Return Reason:'}
                     </div>
@@ -749,7 +902,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 )}
 
                 {doc.is_tax_overridden === 1 && (
-                  <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+                  <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-[11px] text-amber-900">
                     <div className="font-bold">Advance Tax Override Applied:</div>
                     <div>
                       Reason: {doc.tax_override_reason} | Authorized By:{' '}
@@ -759,7 +912,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 )}
 
                 {fields.showAccountingVerification && journalLines.length > 0 && (
-                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-[10px]">
+                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-300 text-[10px]">
                     <div className="font-bold text-slate-700 uppercase tracking-wider mb-1.5 flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                       <span>Double-Entry Accounting Posting Verification</span>
@@ -782,82 +935,97 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 )}
               </div>
 
-              {/* Right: Invoice Summary Box */}
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-300 space-y-1.5 text-xs">
-                {mode === 'invoice' ? (
+              {/* Right: Final Invoice Summary Box */}
+              <div className="col-span-7 bg-slate-50 p-4 rounded-lg border-2 border-slate-800 space-y-1.5 text-xs">
+                {mode === 'invoice' && groupedPurchase ? (
                   <>
-                    <div className="flex justify-between text-slate-600">
+                    <div className="text-[11px] font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-1 mb-1">
+                      Final Invoice Summary (All Companies Combined)
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 pb-1.5 border-b border-slate-300">
+                      <div className="flex justify-between text-slate-700">
+                        <span className="font-medium">Total Quantity:</span>
+                        <span className="font-mono tabular-nums font-bold text-slate-900">
+                          {groupedPurchase.summary.totalQuantity}
+                          {groupedPurchase.summary.totalLooseQuantity > 0
+                            ? ` (+${groupedPurchase.summary.totalLooseQuantity} L)`
+                            : ''}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-700">
+                        <span className="font-medium">Total Bonus:</span>
+                        <span className="font-mono tabular-nums font-bold text-slate-900">
+                          {groupedPurchase.summary.totalBonus}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-slate-700">
                       <span>Gross Amount:</span>
-                      <span className="font-mono font-semibold">
-                        Rs. {formatPKR(doc.gross_total)}
+                      <span className="font-mono tabular-nums font-semibold text-slate-900">
+                        Rs. {formatPKR(groupedPurchase.summary.grossAmount)}
                       </span>
                     </div>
-                    {fields.showDiscount && (
-                      <>
-                        <div className="flex justify-between text-slate-600">
-                          <span>Item-Level Discount:</span>
-                          <span className="font-mono">
-                            - Rs. {formatPKR(doc.item_discount_amount)}
-                          </span>
-                        </div>
-                        <div className="flex justify-between text-slate-600">
-                          <span>
-                            Invoice Discount ({doc.invoice_discount_percent || 0}%):
-                          </span>
-                          <span className="font-mono">
-                            - Rs. {formatPKR(doc.invoice_discount_amount)}
-                          </span>
-                        </div>
-                      </>
-                    )}
-                    <div className="flex justify-between text-slate-800 font-semibold border-t border-slate-200 pt-1">
-                      <span>Taxable Amount:</span>
-                      <span className="font-mono">Rs. {formatPKR(doc.taxable_amount)}</span>
+                    <div className="flex justify-between text-slate-700">
+                      <span>
+                        Total Discount
+                        {groupedPurchase.summary.invoiceDiscountAmount > 0
+                          ? ` (Item ${formatPKR(groupedPurchase.summary.itemDiscountAmount)} + Inv ${formatPKR(groupedPurchase.summary.invoiceDiscountAmount)})`
+                          : ''}
+                        :
+                      </span>
+                      <span className="font-mono tabular-nums font-semibold text-slate-900">
+                        - Rs. {formatPKR(groupedPurchase.summary.totalDiscount)}
+                      </span>
                     </div>
-                    {fields.showTax && (
-                      <>
-                        <div className="flex justify-between text-slate-600">
-                          <span>Applicable GST / Input Tax:</span>
-                          <span className="font-mono">+ Rs. {formatPKR(doc.gst_amount)}</span>
-                        </div>
-                        <div className="flex justify-between text-amber-800 font-semibold">
-                          <span>
-                            {doc.advance_tax_name || 'Advance Tax'} ({doc.advance_tax_rate}% -{' '}
-                            {doc.supplier_filer_status}):
-                          </span>
-                          <span className="font-mono">
-                            + Rs. {formatPKR(doc.advance_tax_amount)}
-                          </span>
-                        </div>
-                      </>
-                    )}
-                    <div className="flex justify-between text-sm font-black text-slate-900 border-t-2 border-slate-900 pt-2">
-                      <span>Net Purchase Amount:</span>
-                      <span className="font-mono">Rs. {formatPKR(doc.net_total)}</span>
+                    <div className="flex justify-between text-slate-700">
+                      <span>Total Sales Tax:</span>
+                      <span className="font-mono tabular-nums font-semibold text-slate-900">
+                        + Rs. {formatPKR(groupedPurchase.summary.totalSalesTax)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-slate-700">
+                      <span>
+                        Total Advance Tax ({Number(doc.advance_tax_rate || 0).toFixed(2)}%):
+                      </span>
+                      <span className="font-mono tabular-nums font-semibold text-slate-900">
+                        + Rs. {formatPKR(groupedPurchase.summary.totalAdvanceTax)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm font-black text-slate-950 border-t-2 border-slate-900 pt-2 mt-1">
+                      <span>Grand Total (Incl. All Taxes):</span>
+                      <span className="font-mono tabular-nums">
+                        Rs. {formatPKR(groupedPurchase.summary.grandTotal)}
+                      </span>
                     </div>
                     {fields.showPreviousBalance && (
                       <>
-                        <div className="flex justify-between text-slate-600 pt-1">
+                        <div className="flex justify-between text-slate-600 pt-1 border-t border-slate-200">
                           <span>
                             Previous Supplier Balance ({doc.previous_balance_type}):
                           </span>
-                          <span className="font-mono">
+                          <span className="font-mono tabular-nums">
                             Rs. {formatPKR(doc.previous_supplier_balance)}
                           </span>
                         </div>
                         <div className="flex justify-between text-slate-800 font-bold">
                           <span>Total Payable:</span>
-                          <span className="font-mono">Rs. {formatPKR(doc.total_payable)}</span>
+                          <span className="font-mono tabular-nums">
+                            Rs. {formatPKR(doc.total_payable)}
+                          </span>
                         </div>
                       </>
                     )}
-                    <div className="flex justify-between text-emerald-700 font-bold">
+                    <div className="flex justify-between text-emerald-700 font-bold pt-1 border-t border-slate-200">
                       <span>Paid Amount ({doc.payment_mode}):</span>
-                      <span className="font-mono">- Rs. {formatPKR(doc.paid_amount)}</span>
+                      <span className="font-mono tabular-nums">
+                        - Rs. {formatPKR(doc.paid_amount)}
+                      </span>
                     </div>
-                    <div className="flex justify-between text-slate-900 font-black border-t border-slate-300 pt-1.5">
+                    <div className="flex justify-between text-slate-900 font-black border-t border-slate-300 pt-1">
                       <span>Remaining Payable Balance:</span>
-                      <span className="font-mono">Rs. {formatPKR(doc.remaining_balance)}</span>
+                      <span className="font-mono tabular-nums">
+                        Rs. {formatPKR(doc.remaining_balance)}
+                      </span>
                     </div>
                   </>
                 ) : (
@@ -908,13 +1076,24 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
             </div>
 
             {/* 5. Signatures Footer */}
-            {fields.showSignature && (
-              <div className="pt-8 grid grid-cols-3 gap-8 text-center text-xs text-slate-500 border-t border-slate-200 ams-avoid-break">
-                <div className="pt-6 border-t border-slate-400">Prepared By (Store Operator)</div>
-                <div className="pt-6 border-t border-slate-400">Verified By (Pharmacist / QC)</div>
-                <div className="pt-6 border-t border-slate-400">
-                  Authorized Signatory ({storeName})
+            {(fields.showSignature || mode === 'invoice') && (
+              <div className="pt-8 grid grid-cols-3 gap-8 text-center text-xs font-semibold text-slate-700 border-t border-slate-200 ams-avoid-break">
+                <div className="pt-7 border-t border-slate-500">Prepared By</div>
+                <div className="pt-7 border-t border-slate-500">Received By</div>
+                <div className="pt-7 border-t border-slate-500">
+                  Authorized Signature ({storeName})
                 </div>
+              </div>
+            )}
+
+            {mode === 'invoice' && (
+              <div className="flex items-center justify-between text-[10px] text-slate-500 border-t border-slate-200 pt-2 print:hidden">
+                <span>
+                  {storeName} · Purchase Invoice {doc.bill_number}
+                </span>
+                <span className="font-mono">
+                  A4 Portrait · Automatic Page Numbers (Page X of Y) in Print / PDF
+                </span>
               </div>
             )}
           </div>
