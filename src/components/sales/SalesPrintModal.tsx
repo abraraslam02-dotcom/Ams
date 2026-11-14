@@ -226,9 +226,9 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
   const fontScaleClass =
     fontSizeScale === 'small'
-      ? 'text-[11px]'
+      ? 'text-[13px]'
       : fontSizeScale === 'large'
-      ? 'text-[13.5px]'
+      ? 'text-[16px]'
       : 'text-xs';
 
   // Saved Database Totals (Never recalculated differently during printing)
