@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import { Item } from '../../types/item';
 import { Account, FilerStatus } from '../../types/account';
+import { PartyCitySelect } from '../accounts/PartyCitySelect';
 import {
   AdvanceTaxSettings,
   AdvanceTaxHistoryEntry,
@@ -6096,12 +6097,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="space-y-1">
                   <label className="block font-bold text-slate-700">City</label>
-                  <input
-                    type="text"
+                  <PartyCitySelect
                     value={newSupplierCity}
-                    onChange={(e) => setNewSupplierCity(e.target.value)}
-                    placeholder="City"
-                    className="w-full px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-900"
+                    onChange={(cityVal) => setNewSupplierCity(cityVal)}
+                    placeholder="Search or select city..."
                   />
                 </div>
                 <div className="sm:col-span-2 space-y-1">

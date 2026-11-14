@@ -279,6 +279,183 @@ accountsRouter.get('/groups', (_req: Request, res: Response) => {
 });
 
 /**
+ * Normalizes a city name by trimming and collapsing multiple internal spaces.
+ */
+function normalizeCityName(raw: unknown): string {
+  return String(raw || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Ensures the persistent cities table exists and is non-destructively synced
+ * with existing party records (accounts.city, accounts.town_name) and towns.
+ * Never modifies or deletes any existing party records.
+ */
+export function ensureCitiesTableAndSync(db: ReturnType<typeof getDatabase>): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      city_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      status TEXT NOT NULL DEFAULT 'Active',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  const existingPartyCities = db
+    .prepare(
+      `SELECT DISTINCT TRIM(city) as c FROM accounts WHERE city IS NOT NULL AND TRIM(city) != ''
+       UNION
+       SELECT DISTINCT TRIM(town_name) as c FROM accounts WHERE town_name IS NOT NULL AND TRIM(town_name) != ''
+       UNION
+       SELECT DISTINCT TRIM(town_name) as c FROM towns WHERE town_name IS NOT NULL AND TRIM(town_name) != ''`
+    )
+    .all() as Array<{ c: string }>;
+
+  const insertCity = db.prepare('INSERT OR IGNORE INTO cities (city_name, status) VALUES (?, \'Active\')');
+  for (const row of existingPartyCities) {
+    const clean = normalizeCityName(row.c);
+    if (clean) {
+      insertCity.run(clean);
+    }
+  }
+}
+
+/**
+ * Returns a sorted, case-insensitively deduplicated list of all existing cities
+ * from cities, towns, and saved party records.
+ */
+function getDeduplicatedCities(db: ReturnType<typeof getDatabase>): string[] {
+  ensureCitiesTableAndSync(db);
+
+  const rows = db
+    .prepare(
+      `SELECT city_name as name FROM cities WHERE status = 'Active' AND TRIM(city_name) != ''
+       UNION
+       SELECT town_name as name FROM towns WHERE status = 'Active' AND TRIM(town_name) != ''
+       UNION
+       SELECT city as name FROM accounts WHERE city IS NOT NULL AND TRIM(city) != ''
+       UNION
+       SELECT town_name as name FROM accounts WHERE town_name IS NOT NULL AND TRIM(town_name) != ''`
+    )
+    .all() as Array<{ name: string }>;
+
+  const byKey = new Map<string, string>();
+  for (const row of rows) {
+    const clean = normalizeCityName(row.name);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (!byKey.has(key)) {
+      byKey.set(key, clean);
+    }
+  }
+
+  return Array.from(byKey.values()).sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' })
+  );
+}
+
+/**
+ * Permanently records a city name in the cities table (if not already present)
+ * without modifying any existing party records.
+ */
+function registerCityIfNew(db: ReturnType<typeof getDatabase>, rawCity: unknown): string | null {
+  const clean = normalizeCityName(rawCity);
+  if (!clean) return null;
+  ensureCitiesTableAndSync(db);
+
+  const existing = db
+    .prepare('SELECT city_name FROM cities WHERE LOWER(TRIM(city_name)) = LOWER(?)')
+    .get(clean) as { city_name: string } | undefined;
+
+  if (existing) {
+    return existing.city_name;
+  }
+
+  db.prepare("INSERT OR IGNORE INTO cities (city_name, status) VALUES (?, 'Active')").run(clean);
+  return clean;
+}
+
+/**
+ * GET /api/accounts/cities
+ * Fetch all existing cities from saved party records and the cities database
+ */
+accountsRouter.get('/cities', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const cities = getDeduplicatedCities(db);
+    return res.json({
+      success: true,
+      cities,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: `Failed to fetch cities: ${errorMsg}` });
+  }
+});
+
+/**
+ * POST /api/accounts/cities
+ * Permanently save a new city in the database with case-insensitive & whitespace duplicate prevention
+ */
+accountsRouter.post('/cities', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const cleanCity = normalizeCityName(req.body?.city_name ?? req.body?.city);
+
+    if (!cleanCity) {
+      return res.status(400).json({
+        success: false,
+        error: 'City name is required.',
+      });
+    }
+
+    const existingCities = getDeduplicatedCities(db);
+    const duplicateMatch = existingCities.find(
+      (c) => c.toLowerCase() === cleanCity.toLowerCase()
+    );
+
+    if (duplicateMatch) {
+      return res.status(400).json({
+        success: false,
+        duplicate: true,
+        existingCity: duplicateMatch,
+        error: `City "${duplicateMatch}" already exists.`,
+      });
+    }
+
+    db.prepare("INSERT INTO cities (city_name, status) VALUES (?, 'Active')").run(cleanCity);
+
+    // Also keep towns table synced if not present so supply/town filters stay consistent
+    const existingTown = db
+      .prepare('SELECT id FROM towns WHERE LOWER(TRIM(town_name)) = LOWER(?)')
+      .get(cleanCity);
+    if (!existingTown) {
+      const countRow = db.prepare('SELECT COUNT(*) as c FROM towns').get() as { c: number };
+      const townCode = `TWN-${String((countRow?.c || 0) + 1).padStart(3, '0')}`;
+      try {
+        db.prepare(
+          "INSERT OR IGNORE INTO towns (town_code, town_name, status) VALUES (?, ?, 'Active')"
+        ).run(townCode, cleanCity);
+      } catch {
+        // Ignore if town_code collision
+      }
+    }
+
+    const updatedCities = getDeduplicatedCities(db);
+    return res.status(201).json({
+      success: true,
+      city: cleanCity,
+      cities: updatedCities,
+      message: `City "${cleanCity}" added successfully.`,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: `Failed to add city: ${errorMsg}` });
+  }
+});
+
+/**
  * GET /api/accounts/next-code
  * Universal automatic account code generator preview endpoint.
  * Returns the next sequential code for the specified account type/group (e.g. Cus-024, Sup-038, Exp-001).
@@ -1032,6 +1209,10 @@ accountsRouter.post('/', (req: Request, res: Response) => {
       refreshSalesmanPartiesJson(db, salesmanId);
     }
 
+    if (city || townName) {
+      registerCityIfNew(db, city || townName);
+    }
+
     recalculateAccountBalance(newId);
 
     const created = db
@@ -1311,6 +1492,10 @@ accountsRouter.put('/:id', (req: Request, res: Response) => {
         assigned_salesman_name = ?
       WHERE id = ?
     `).run(nextTownId, nextTownName || null, nextTownName || null, nextAreaId, nextAreaName || null, nextSalesmanId, nextSalesmanName || null, id);
+
+    if (resolvedTown || nextTownName) {
+      registerCityIfNew(db, resolvedTown || nextTownName);
+    }
 
     const prevSalesmanId = existing.assigned_salesman_id ? Number(existing.assigned_salesman_id) : null;
     if (prevSalesmanId && prevSalesmanId !== (nextSalesmanId ? Number(nextSalesmanId) : null)) {

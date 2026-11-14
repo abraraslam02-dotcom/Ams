@@ -196,12 +196,14 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       html, body {
         margin: 0 !important;
         padding: 0 !important;
+        height: auto !important;
+        min-height: 0 !important;
         background: #ffffff !important;
-        color: #0f172a !important;
+        color: #000000 !important;
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
         font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif !important;
-        line-height: 1.35 !important;
+        line-height: 1.3 !important;
         zoom: ${zoomPercent};
       }
       .ams-print-root {
@@ -216,6 +218,18 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
         margin: 0 !important;
         box-shadow: none !important;
         border: none !important;
+      }
+      .thermal-receipt,
+      .thermal-receipt * {
+        color: #000000 !important;
+      }
+      .thermal-receipt table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+      }
+      .thermal-receipt th,
+      .thermal-receipt td {
+        border: 1px solid #000000 !important;
       }
       .ams-page-break-after {
         page-break-after: always !important;

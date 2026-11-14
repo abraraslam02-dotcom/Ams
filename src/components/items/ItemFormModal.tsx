@@ -57,6 +57,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   const [formData, setFormData] = useState<ItemFormData>(initialForm);
   const [looseRateTouched, setLooseRateTouched] = useState<boolean>(false);
   const [codeChecking, setCodeChecking] = useState<boolean>(false);
+  const [loadingAutoCode, setLoadingAutoCode] = useState<boolean>(false);
   const [codeError, setCodeError] = useState<string | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -79,6 +80,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   };
 
   useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
     if (editingItem) {
       const units = parsePackingUnits(editingItem.packing);
       const savedLoose =
@@ -107,12 +110,31 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
       });
       setLooseRateTouched(true);
       setCodeError(null);
+      setLoadingAutoCode(false);
     } else {
       setFormData(initialForm);
       setLooseRateTouched(false);
       setCodeError(null);
+      setLoadingAutoCode(true);
+      api
+        .getNextItemCode()
+        .then((res) => {
+          if (!cancelled && res?.next_code) {
+            setFormData((prev) => ({
+              ...prev,
+              item_code: prev.item_code.trim() ? prev.item_code : res.next_code,
+            }));
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setLoadingAutoCode(false);
+        });
     }
     setFormError(null);
+    return () => {
+      cancelled = true;
+    };
   }, [editingItem, isOpen]);
 
   if (!isOpen) return null;
@@ -239,24 +261,30 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               {/* Item Code */}
               <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  Item Code <span className="text-rose-500">*</span>
+                <label className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                  <span>
+                    Item Code <span className="text-rose-500">*</span>
+                  </span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    {isEditing ? 'Saved Code' : loadingAutoCode ? 'Generating...' : 'Auto Code'}
+                  </span>
                 </label>
                 <div className="relative">
                   <input
                     type="text"
                     required
+                    readOnly
                     value={formData.item_code}
-                    onChange={(e) => {
-                      setFormData({ ...formData, item_code: e.target.value });
-                      if (codeError) setCodeError(null);
-                    }}
-                    onBlur={(e) => handleCheckCode(e.target.value)}
-                    placeholder="e.g. MED-0101"
-                    className={`w-full px-3 py-1.5 text-xs font-mono font-bold rounded-lg border bg-slate-50 focus:bg-white focus:outline-none focus:ring-1 ${
+                    placeholder={loadingAutoCode ? 'Generating next code...' : 'Auto-generated'}
+                    title={
+                      isEditing
+                        ? 'Existing item code is preserved and cannot be auto-replaced'
+                        : 'Item code is automatically generated sequentially from the database'
+                    }
+                    className={`w-full px-3 py-1.5 text-xs font-mono font-bold rounded-lg border bg-slate-100 text-slate-900 cursor-not-allowed focus:outline-none ${
                       codeError
-                        ? 'border-rose-400 text-rose-800 focus:ring-rose-500'
-                        : 'border-slate-300 text-slate-900 focus:ring-emerald-500'
+                        ? 'border-rose-400 text-rose-800'
+                        : 'border-slate-300 text-emerald-900'
                     }`}
                   />
                   {codeChecking && (

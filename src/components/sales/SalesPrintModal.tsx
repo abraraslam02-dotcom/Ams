@@ -1039,55 +1039,62 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
           ) : (
             /* =========================================================
                2. 80mm / 58mm THERMAL RECEIPT PRINTER LAYOUT
+               (Designed to match the POS Thermal Reference PDF)
                ========================================================= */
             <div
               ref={printAreaRef}
-              className={`thermal-receipt bg-white border border-slate-300 shadow-sm text-slate-950 font-sans tabular-nums leading-snug ${
+              className={`thermal-receipt bg-white border border-slate-300 shadow-sm text-black font-sans tabular-nums leading-tight ${
                 format === '80mm'
-                  ? 'thermal-80mm w-[302px] p-3 text-[13px]'
-                  : 'thermal-58mm w-[218px] p-2 text-[11.5px]'
-              } relative print:border-0 print:shadow-none`}
+                  ? 'thermal-80mm w-[312px] p-2.5 text-[12px]'
+                  : 'thermal-58mm w-[224px] p-1.5 text-[10.5px]'
+              } relative print:border-0 print:shadow-none print:p-1`}
             >
               {isCancelled && (
-                <div className="mb-2 py-1 px-2 border-2 border-slate-950 text-center font-black uppercase tracking-widest">
+                <div className="mb-1.5 py-1 px-2 border-2 border-black text-center font-black uppercase tracking-widest text-black">
                   *** CANCELLED ***
                 </div>
               )}
 
-              {/* Thermal Store Header */}
-              <div className="text-center border-b border-dashed border-slate-900 pb-2.5 mb-2.5">
+              {/* 1. Centered Store Header */}
+              <div className="text-center pb-2">
                 {fields.showLogo && logoDataUrl && (
                   <img
                     src={logoDataUrl}
                     alt={storeName}
-                    className="w-11 h-11 object-contain mx-auto mb-1"
+                    className={`object-contain mx-auto mb-1 ${
+                      format === '80mm' ? 'w-14 h-12' : 'w-10 h-9'
+                    }`}
                   />
                 )}
                 <div
-                  className={`font-black uppercase tracking-tight leading-tight ${
-                    format === '80mm' ? 'text-lg' : 'text-[15px]'
+                  className={`font-black text-black tracking-tight leading-tight ${
+                    format === '80mm' ? 'text-[18px]' : 'text-[14.5px]'
                   }`}
                 >
                   {storeName}
                 </div>
-                <div
-                  className={`leading-snug mt-0.5 font-medium text-slate-800 ${
-                    format === '80mm' ? 'text-xs' : 'text-[10.5px]'
-                  }`}
-                >
-                  {storeAddress}
-                </div>
-                <div
-                  className={`mt-0.5 font-medium text-slate-800 ${
-                    format === '80mm' ? 'text-xs' : 'text-[10.5px]'
-                  }`}
-                >
-                  Tel: {storePhone}
-                </div>
+                {storeAddress && (
+                  <div
+                    className={`font-semibold text-black leading-snug mt-0.5 ${
+                      format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
+                    }`}
+                  >
+                    {storeAddress}
+                  </div>
+                )}
+                {storePhone && (
+                  <div
+                    className={`font-semibold text-black leading-snug mt-0.5 ${
+                      format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
+                    }`}
+                  >
+                    {storePhone}
+                  </div>
+                )}
                 {(fields.showDrugLicense || fields.showNtn) && (
                   <div
-                    className={`text-slate-700 mt-0.5 ${
-                      format === '80mm' ? 'text-[11px]' : 'text-[10.5px]'
+                    className={`font-medium text-black mt-0.5 ${
+                      format === '80mm' ? 'text-[10.5px]' : 'text-[9.5px]'
                     }`}
                   >
                     {fields.showDrugLicense && drugLicense ? `DL: ${drugLicense}` : ''}
@@ -1095,113 +1102,145 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     {fields.showNtn && ntnNumber ? `NTN: ${ntnNumber}` : ''}
                   </div>
                 )}
-                <div
-                  className={`mt-1.5 font-black uppercase border-t border-slate-400 pt-1 tracking-wide ${
-                    format === '80mm' ? 'text-[13px]' : 'text-xs'
-                  }`}
-                >
-                  {isReturn ? 'SALES RETURN SLIP' : `${docRecord.invoice_type || 'RETAIL'} RECEIPT`}
-                </div>
+                {isReturn && (
+                  <div
+                    className={`mt-1 inline-block px-2 py-0.5 border border-black font-black uppercase tracking-wider ${
+                      format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
+                    }`}
+                  >
+                    SALES RETURN SLIP
+                  </div>
+                )}
               </div>
 
-              {/* Thermal Meta */}
-              <div
-                className={`space-y-1 border-b border-dashed border-slate-900 pb-2.5 mb-2.5 ${
-                  format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
+              {/* 2. Boxed Metadata Grid Table (Counter No, Date/Time, Bill No, Account, Contact No, Transport) */}
+              {(() => {
+                const rawDate = isReturn ? docRecord.return_date : docRecord.invoice_date;
+                const timeStr = docRecord.created_at
+                  ? (() => {
+                      const d = new Date(docRecord.created_at);
+                      return !Number.isNaN(d.getTime())
+                        ? d.toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: false,
+                          })
+                        : '';
+                    })()
+                  : '';
+                const dateTimeDisplay = [rawDate, timeStr].filter(Boolean).join(' ');
+                const transportOrInfo = [
+                  !isReturn && fields.showDeliveryman ? docRecord.deliveryman_name : '',
+                  !isReturn && fields.showSalesman ? docRecord.salesman : '',
+                  showCustAddress ? docRecord.customer_address : '',
+                  showRemarks ? docRecord.remarks : '',
+                ]
+                  .map((s) => String(s || '').trim())
+                  .filter(Boolean)
+                  .join(' · ');
+
+                return (
+                  <table
+                    className={`w-full border-collapse border border-black text-black ${
+                      format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
+                    }`}
+                  >
+                    <tbody>
+                      <tr>
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap w-[26%]">
+                          Counter No
+                        </td>
+                        <td className="border border-black px-1 py-0.5 font-bold text-center w-[12%]">
+                          {docRecord.counter_no ?? 0}
+                        </td>
+                        <td className="border border-black px-1 py-0.5 font-semibold whitespace-nowrap w-[14%]">
+                          Date
+                        </td>
+                        <td className="border border-black px-1.5 py-0.5 font-semibold text-left">
+                          {dateTimeDisplay}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
+                          {isReturn ? 'Return No' : 'Bill No'}
+                        </td>
+                        <td
+                          colSpan={3}
+                          className={`border border-black px-1.5 py-0.5 font-black font-mono ${
+                            format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
+                          }`}
+                        >
+                          {isReturn ? docRecord.return_number : docRecord.invoice_number}
+                          {isReturn && docRecord.original_invoice_number
+                            ? ` (Ref: ${docRecord.original_invoice_number})`
+                            : ''}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
+                          Account
+                        </td>
+                        <td
+                          colSpan={3}
+                          className={`border border-black px-1.5 py-0.5 font-black break-words ${
+                            format === '80mm' ? 'text-[13px]' : 'text-[11px]'
+                          }`}
+                        >
+                          {docRecord.customer_name || 'Walk-in Cash'}
+                          {docRecord.customer_city ? ` ${docRecord.customer_city}` : ''}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
+                          Contact No
+                        </td>
+                        <td colSpan={3} className="border border-black px-1.5 py-0.5 font-semibold">
+                          {showCustPhone ? docRecord.customer_phone || '' : ''}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
+                          Transport
+                        </td>
+                        <td colSpan={3} className="border border-black px-1.5 py-0.5 font-medium break-words">
+                          {transportOrInfo}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                );
+              })()}
+
+              {/* 3. Boxed Line Items Table */}
+              <table
+                className={`w-full border-collapse border border-black border-t-0 text-black ${
+                  format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
                 }`}
               >
-                <div className="flex justify-between gap-2">
-                  <span className="font-semibold shrink-0">{isReturn ? 'Ret #:' : 'Inv #:'}</span>
-                  <span
-                    className={`font-black font-mono text-right ${
-                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
-                    }`}
-                  >
-                    {isReturn ? docRecord.return_number : docRecord.invoice_number}
-                  </span>
-                </div>
-                {isReturn && docRecord.original_invoice_number && (
-                  <div className="flex justify-between gap-2">
-                    <span className="shrink-0">Orig Inv:</span>
-                    <span className="font-mono font-semibold text-right">
-                      {docRecord.original_invoice_number}
-                    </span>
-                  </div>
-                )}
-                <div className="flex justify-between gap-2">
-                  <span className="shrink-0">Date:</span>
-                  <span className="font-semibold text-right">
-                    {isReturn ? docRecord.return_date : docRecord.invoice_date}
-                  </span>
-                </div>
-                <div className="flex justify-between items-start gap-2">
-                  <span className="shrink-0 font-semibold">Customer:</span>
-                  <span
-                    className={`font-black text-right break-words ${
-                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
-                    }`}
-                  >
-                    {docRecord.customer_name || 'Walk-in Cash'}
-                  </span>
-                </div>
-                {showCustPhone && docRecord.customer_phone && (
-                  <div className="flex justify-between gap-2">
-                    <span className="shrink-0">Contact:</span>
-                    <span className="text-right font-medium">{docRecord.customer_phone}</span>
-                  </div>
-                )}
-                {showCustAddress && docRecord.customer_address && (
-                  <div
-                    className={`flex justify-between items-start gap-2 text-slate-800 ${
-                      format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
-                    }`}
-                  >
-                    <span className="shrink-0">Address:</span>
-                    <span className="text-right break-words">{docRecord.customer_address}</span>
-                  </div>
-                )}
-                <div className="flex justify-between gap-2">
-                  <span className="shrink-0">Payment:</span>
-                  <span className="font-bold uppercase text-right">{paymentMethodLabel}</span>
-                </div>
-                {!isReturn && fields.showSalesman && docRecord.salesman && (
-                  <div className="flex justify-between items-start gap-2">
-                    <span className="shrink-0">Salesman:</span>
-                    <span className="text-right font-medium break-words">{docRecord.salesman}</span>
-                  </div>
-                )}
-                {!isReturn && fields.showDeliveryman && docRecord.deliveryman_name && (
-                  <div className="flex justify-between items-start gap-2">
-                    <span className="shrink-0">Deliveryman:</span>
-                    <span className="text-right font-medium break-words">
-                      {docRecord.deliveryman_name}
-                    </span>
-                  </div>
-                )}
-                {showRemarks && docRecord.remarks && (
-                  <div
-                    className={`flex justify-between items-start gap-2 text-slate-800 border-t border-slate-300 pt-1 mt-1 ${
-                      format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
-                    }`}
-                  >
-                    <span className="shrink-0 font-semibold">Remarks:</span>
-                    <span className="text-right break-words">{docRecord.remarks}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Thermal Items Table */}
-              <div className="border-b border-dashed border-slate-900 pb-2.5 mb-2.5">
-                <div
-                  className={`grid grid-cols-12 font-black border-b-2 border-slate-800 pb-1 mb-1.5 uppercase ${
-                    format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
-                  }`}
-                >
-                  <span className="col-span-5">Item</span>
-                  <span className="col-span-3 text-right">Qty</span>
-                  <span className="col-span-4 text-right">Total</span>
-                </div>
-                <div className="space-y-2">
+                <thead>
+                  <tr className="font-black text-black bg-white">
+                    <th
+                      colSpan={2}
+                      className="border border-black px-1.5 py-1 text-center font-black"
+                    >
+                      Item Details
+                    </th>
+                    <th
+                      colSpan={2}
+                      className="border border-black px-1 py-1 text-center font-black whitespace-nowrap"
+                    >
+                      Qty
+                    </th>
+                    <th className="border border-black px-1 py-1 text-center font-black whitespace-nowrap">
+                      Rate
+                    </th>
+                    <th className="border border-black px-1.5 py-1 text-right font-black whitespace-nowrap">
+                      Amount
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
                   {items.map((line, idx) => {
                     const packQty = isReturn
                       ? Number(line.return_quantity ?? line.quantity ?? 0)
@@ -1209,169 +1248,291 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     const looseQty = isReturn
                       ? Number(line.return_loose_quantity ?? line.loose_quantity ?? 0)
                       : Number(line.loose_quantity ?? 0);
+                    const bonusQty = !isReturn ? Number(line.bonus_quantity ?? 0) : 0;
                     const discAmt = Number(line.discount_amount ?? 0);
+                    const discPct = Number(line.discount_percent ?? 0);
                     const taxAmt = isReturn
                       ? Number(line.gst_amount ?? line.tax_amount ?? 0)
                       : Number(line.tax_amount ?? 0);
 
+                    const displayQtyNum =
+                      packQty > 0 && looseQty > 0
+                        ? `${packQty}+${looseQty}L`
+                        : packQty > 0
+                        ? String(packQty)
+                        : looseQty > 0
+                        ? String(looseQty)
+                        : '0';
+
+                    const rawPacking = String(line.packing || '').trim();
+                    const unitBadge =
+                      showPacking && rawPacking
+                        ? rawPacking
+                        : looseQty > 0 && packQty === 0
+                        ? 'LSE'
+                        : 'PC';
+
+                    const rateVal =
+                      packQty === 0 && looseQty > 0 && Number(line.loose_rate || 0) > 0
+                        ? Number(line.loose_rate)
+                        : Number(line.unit_price || 0);
+
+                    const rateFormatted =
+                      rateVal % 1 === 0 ? rateVal.toFixed(0) : rateVal.toFixed(1);
+                    const lineTotalVal = Number(line.line_total || 0);
+                    const lineTotalFormatted = lineTotalVal.toFixed(1);
+
                     return (
-                      <div
-                        key={line.id || idx}
-                        className="leading-snug border-b border-dotted border-slate-300 pb-1.5 last:border-b-0 last:pb-0"
-                      >
-                        <div
-                          className={`font-bold text-slate-950 break-words ${
-                            format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                      <tr key={line.id || idx} className="align-middle">
+                        <td className="border border-black px-1 py-1 text-center font-bold w-[22px]">
+                          {idx + 1}
+                        </td>
+                        <td className="border border-black px-1.5 py-1 break-words">
+                          <div
+                            className={`font-bold text-black leading-snug ${
+                              format === '80mm' ? 'text-[12px]' : 'text-[10.5px]'
+                            }`}
+                          >
+                            {showItemCode && line.item_code ? `[${line.item_code}] ` : ''}
+                            {line.item_name}
+                          </div>
+                          {((showItemCompany && line.company_name) ||
+                            (showBatch && line.batch_number) ||
+                            (showExpiry && line.expiry_date) ||
+                            (showDiscount && discAmt > 0) ||
+                            (showTax && taxAmt > 0) ||
+                            (showBonus && bonusQty > 0)) && (
+                            <div
+                              className={`text-black font-medium leading-tight mt-0.5 ${
+                                format === '80mm' ? 'text-[10px]' : 'text-[9px]'
+                              }`}
+                            >
+                              {showItemCompany && line.company_name ? `${line.company_name} ` : ''}
+                              {showBatch && line.batch_number ? `B:${line.batch_number} ` : ''}
+                              {showExpiry && line.expiry_date ? `Exp:${line.expiry_date} ` : ''}
+                              {showBonus && bonusQty > 0 ? `Bonus:+${bonusQty} ` : ''}
+                              {showDiscount && discAmt > 0
+                                ? `Disc:-${discAmt.toFixed(0)}${discPct > 0 ? `(${discPct}%)` : ''} `
+                                : ''}
+                              {showTax && taxAmt > 0 ? `Tax:+${taxAmt.toFixed(0)}` : ''}
+                            </div>
+                          )}
+                        </td>
+                        <td className="border border-black px-1 py-1 text-center font-black whitespace-nowrap w-[28px]">
+                          {displayQtyNum}
+                        </td>
+                        <td
+                          className={`border border-black px-1 py-1 text-center font-bold whitespace-nowrap w-[34px] ${
+                            format === '80mm' ? 'text-[10.5px]' : 'text-[9.5px]'
                           }`}
                         >
-                          {idx + 1}. {showItemCode ? `[${line.item_code}] ` : ''}
-                          {line.item_name}
-                          {showItemCompany && line.company_name ? ` (${line.company_name})` : ''}
-                        </div>
-                        <div
-                          className={`grid grid-cols-12 items-baseline mt-0.5 ${
+                          {unitBadge}
+                        </td>
+                        <td className="border border-black px-1 py-1 text-center font-mono font-bold whitespace-nowrap">
+                          {rateFormatted}
+                        </td>
+                        <td
+                          className={`border border-black px-1.5 py-1 text-right font-mono font-black whitespace-nowrap ${
                             format === '80mm' ? 'text-[12px]' : 'text-[10.5px]'
-                          } text-slate-800`}
+                          }`}
                         >
-                          <span className="col-span-5 pr-1 break-words">
-                            {showPacking && line.packing ? `${line.packing} ` : ''}
-                            {(showBatch && line.batch_number) || (showExpiry && line.expiry_date) ? (
-                              <span
-                                className={`block text-slate-700 ${
-                                  format === '80mm' ? 'text-[11px]' : 'text-[10.5px]'
-                                }`}
-                              >
-                                {showBatch && line.batch_number ? `B:${line.batch_number} ` : ''}
-                                {showExpiry && line.expiry_date ? `Exp:${line.expiry_date}` : ''}
-                              </span>
-                            ) : null}
-                            @{Number(line.unit_price || 0).toFixed(0)}
-                            {showDiscount && discAmt > 0
-                              ? ` (-${discAmt.toFixed(0)})`
-                              : ''}
-                            {showTax && taxAmt > 0 ? ` (+T:${taxAmt.toFixed(0)})` : ''}
-                          </span>
-                          <span
-                            className={`col-span-3 text-right font-mono font-bold text-slate-900 ${
-                              format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
-                            }`}
-                          >
-                            {packQty > 0 ? `${packQty}P` : ''}
-                            {!isReturn && showBonus && Number(line.bonus_quantity || 0) > 0 ? ` +${line.bonus_quantity}B` : ''}
-                            {showLoose && looseQty > 0 ? ` ${looseQty}L` : ''}
-                          </span>
-                          <span
-                            className={`col-span-4 text-right font-mono font-black text-slate-950 ${
-                              format === '80mm' ? 'text-[13.5px]' : 'text-xs'
-                            }`}
-                          >
-                            {fmtMoney(line.line_total)}
-                          </span>
-                        </div>
-                      </div>
+                          {lineTotalFormatted}
+                        </td>
+                      </tr>
                     );
                   })}
-                </div>
-              </div>
+                </tbody>
+              </table>
 
-              {/* Thermal Totals */}
+              {/* 4. Boxed Financial Summary & TotalQty Section (Matches Reference PDF) */}
+              {(() => {
+                const totalQtyCount = items.reduce((sum, line) => {
+                  const p = isReturn
+                    ? Number(line.return_quantity ?? line.quantity ?? 0)
+                    : Number(line.quantity ?? 0);
+                  const l = isReturn
+                    ? Number(line.return_loose_quantity ?? line.loose_quantity ?? 0)
+                    : Number(line.loose_quantity ?? 0);
+                  const b = !isReturn ? Number(line.bonus_quantity ?? 0) : 0;
+                  return sum + p + l + b;
+                }, 0);
+
+                const addExpenseVal = Number(docRecord.delivery_charges || 0);
+
+                return (
+                  <div className="grid grid-cols-12 items-start">
+                    {/* Left TotalQty Box */}
+                    <div className="col-span-3 pr-1 pt-0.5">
+                      <table
+                        className={`w-full border-collapse border border-black text-center text-black ${
+                          format === '80mm' ? 'text-[11px]' : 'text-[9.5px]'
+                        }`}
+                      >
+                        <thead>
+                          <tr>
+                            <th className="border border-black px-1 py-0.5 font-bold">TotalQty</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td
+                              className={`border border-black px-1 py-1 font-black font-mono ${
+                                format === '80mm' ? 'text-[13px]' : 'text-[11px]'
+                              }`}
+                            >
+                              {Math.round(totalQtyCount * 100) / 100}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Right Financial Totals Boxed Table */}
+                    <div className="col-span-9">
+                      <table
+                        className={`w-full border-collapse border border-black border-t-0 text-black ${
+                          format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
+                        }`}
+                      >
+                        <tbody>
+                          <tr>
+                            <td className="border border-black px-1.5 py-0.5 text-right font-semibold">
+                              Gross Total
+                            </td>
+                            <td className="border border-black px-1.5 py-0.5 text-center font-mono font-bold w-[42%]">
+                              {fmtMoney(savedGross)}
+                            </td>
+                          </tr>
+                          {showDiscount && (
+                            <tr>
+                              <td className="border border-black px-1.5 py-0.5 text-right font-semibold">
+                                Discount
+                              </td>
+                              <td className="border border-black px-1.5 py-0.5 text-center font-mono font-bold">
+                                {fmtMoney(savedTotalDisc)}
+                              </td>
+                            </tr>
+                          )}
+                          <tr>
+                            <td className="border border-black px-1.5 py-0.5 text-right font-semibold">
+                              {savedTotalTax > 0 ? 'Tax (GST/Adv)' : 'Trade Offer'}
+                            </td>
+                            <td className="border border-black px-1.5 py-0.5 text-center font-mono font-bold">
+                              {fmtMoney(savedTotalTax)}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="border border-black px-1.5 py-0.5 text-right font-semibold">
+                              Add Expense
+                            </td>
+                            <td className="border border-black px-1.5 py-0.5 text-center font-mono font-bold">
+                              {fmtMoney(addExpenseVal)}
+                            </td>
+                          </tr>
+                          <tr
+                            className={`font-black ${
+                              format === '80mm' ? 'text-[13px]' : 'text-[11px]'
+                            }`}
+                          >
+                            <td className="border border-black px-1.5 py-1 text-right font-black">
+                              {isReturn ? 'Return Total' : 'Total Bill'}
+                            </td>
+                            <td className="border border-black px-1.5 py-1 text-center font-mono font-black">
+                              {fmtMoney(savedNetTotal)}
+                            </td>
+                          </tr>
+                          {!isReturn && showPrevBalance && (
+                            <>
+                              <tr>
+                                <td className="border border-black px-1.5 py-0.5 text-right font-semibold">
+                                  Previous Balance
+                                </td>
+                                <td className="border border-black px-1.5 py-0.5 text-center font-mono font-bold">
+                                  {fmtMoney(savedPrevBalance)}
+                                </td>
+                              </tr>
+                              <tr
+                                className={`font-black ${
+                                  format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
+                                }`}
+                              >
+                                <td className="border border-black px-1.5 py-0.5 text-right font-black">
+                                  Net Payable Amount
+                                </td>
+                                <td className="border border-black px-1.5 py-0.5 text-center font-mono font-black">
+                                  {fmtMoney(savedTotalReceivable)}
+                                </td>
+                              </tr>
+                            </>
+                          )}
+                          {showPaid && (
+                            <tr>
+                              <td className="border border-black px-1.5 py-0.5 text-right font-semibold">
+                                {isReturn ? 'Refunded' : 'Cash Received'}
+                              </td>
+                              <td className="border border-black px-1.5 py-0.5 text-center font-mono font-bold">
+                                {fmtMoney(savedPaidAmount)}
+                              </td>
+                            </tr>
+                          )}
+                          {!isReturn && showRemaining && (
+                            <tr
+                              className={`font-black ${
+                                format === '80mm' ? 'text-[13px]' : 'text-[11px]'
+                              }`}
+                            >
+                              <td className="border border-black px-1.5 py-1 text-right font-black">
+                                Balance
+                              </td>
+                              <td className="border border-black px-1.5 py-1 text-center font-mono font-black">
+                                {fmtMoney(savedRemainingBalance)}
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* 5. Thermal Footer & Policy Box */}
               <div
-                className={`space-y-1 border-b border-dashed border-slate-900 pb-2.5 mb-2.5 ${
-                  format === '80mm' ? 'text-[13px]' : 'text-[11.5px]'
+                className={`mt-2 text-center text-black space-y-1 ${
+                  format === '80mm' ? 'text-[11.5px]' : 'text-[10px]'
                 }`}
               >
-                <div className="flex justify-between">
-                  <span className="font-medium">Gross Total:</span>
-                  <span className="font-mono font-semibold">{fmtMoney(savedGross)}</span>
+                <div className="font-semibold">
+                  Bill Return Amount is {isReturn ? fmtMoney(savedNetTotal) : '0'}
                 </div>
-                {showDiscount && savedTotalDisc > 0 && (
-                  <div className="flex justify-between">
-                    <span className="font-medium">Discount:</span>
-                    <span className="font-mono font-semibold">- {fmtMoney(savedTotalDisc)}</span>
+
+                {fields.showSignature && (
+                  <div className="pt-3 pb-1 text-center text-black">
+                    <div className="border-t border-black w-3/4 mx-auto pt-1 font-semibold">
+                      Authorized Signature
+                    </div>
                   </div>
                 )}
-                {showTax && savedTotalTax > 0 && (
-                  <div className="flex justify-between">
-                    <span className="font-medium">Tax (GST/Adv):</span>
-                    <span className="font-mono font-semibold">+ {fmtMoney(savedTotalTax)}</span>
-                  </div>
-                )}
+
                 <div
-                  className={`flex justify-between items-baseline font-black border-t-2 border-slate-950 pt-1.5 mt-1.5 ${
-                    format === '80mm' ? 'text-base' : 'text-sm'
+                  className={`font-black text-black ${
+                    format === '80mm' ? 'text-[13px]' : 'text-[11px]'
                   }`}
                 >
-                  <span>{isReturn ? 'NET RETURN:' : 'NET TOTAL:'}</span>
-                  <span className="font-mono">Rs. {fmtMoney(savedNetTotal)}</span>
+                  {thankYouMessage || 'Thanks for Shopping'}
                 </div>
-                {!isReturn && showPrevBalance && savedPrevBalance > 0 && (
-                  <div className="flex justify-between pt-0.5">
-                    <span>Prev Balance:</span>
-                    <span className="font-mono font-semibold">{fmtMoney(savedPrevBalance)}</span>
-                  </div>
-                )}
-                {showPaid && (
+
+                {showFooterNote && (footerMessage || customTerms) && (
                   <div
-                    className={`flex justify-between font-bold ${
-                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                    className={`border border-black p-1.5 mt-1 text-center font-semibold leading-snug text-black space-y-0.5 ${
+                      format === '80mm' ? 'text-[11px]' : 'text-[9.5px]'
                     }`}
                   >
-                    <span>{isReturn ? 'Refunded:' : 'Paid:'}</span>
-                    <span className="font-mono">Rs. {fmtMoney(savedPaidAmount)}</span>
-                  </div>
-                )}
-                {!isReturn && showRemaining && (
-                  <div
-                    className={`flex justify-between font-bold ${
-                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
-                    }`}
-                  >
-                    <span>Balance Due:</span>
-                    <span className="font-mono">Rs. {fmtMoney(savedRemainingBalance)}</span>
+                    {footerMessage && <p className="whitespace-pre-line">{footerMessage}</p>}
+                    {customTerms && <p className="whitespace-pre-line">{customTerms}</p>}
                   </div>
                 )}
               </div>
-
-              {/* Thermal Signature & Footer */}
-              {fields.showSignature && (
-                <div
-                  className={`pt-4 pb-1.5 text-center text-slate-800 ${
-                    format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
-                  }`}
-                >
-                  <div className="border-t border-slate-500 w-3/4 mx-auto pt-1 font-semibold">
-                    Authorized Signature
-                  </div>
-                </div>
-              )}
-
-              {showFooterNote && (
-                <div
-                  className={`text-center leading-snug text-slate-800 mt-1.5 space-y-1 ${
-                    format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
-                  }`}
-                >
-                  {footerMessage && <p className="whitespace-pre-line">{footerMessage}</p>}
-                  {customTerms && (
-                    <p
-                      className={`whitespace-pre-line text-slate-700 ${
-                        format === '80mm' ? 'text-[11px]' : 'text-[10.5px]'
-                      }`}
-                    >
-                      {customTerms}
-                    </p>
-                  )}
-                  {thankYouMessage && (
-                    <p
-                      className={`font-black mt-1 text-slate-950 ${
-                        format === '80mm' ? 'text-[13px]' : 'text-xs'
-                      }`}
-                    >
-                      {thankYouMessage}
-                    </p>
-                  )}
-                </div>
-              )}
             </div>
           )}
         </div>

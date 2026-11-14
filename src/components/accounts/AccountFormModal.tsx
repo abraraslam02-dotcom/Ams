@@ -24,6 +24,7 @@ import {
 import { TownRecord, TownAreaRecord } from '../../types/supply';
 import { api } from '../../services/api';
 import { NumericInput } from '../common/NumericInput';
+import { PartyCitySelect } from './PartyCitySelect';
 
 interface AccountFormModalProps {
   isOpen: boolean;
@@ -922,12 +923,16 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
 
               <div className="space-y-1">
                 <label className="block text-xs font-semibold text-slate-700">City / Town Name</label>
-                <input
-                  type="text"
-                  value={formData.city}
-                  onChange={(e) => setFormData({ ...formData, city: e.target.value })}
-                  placeholder="e.g. Lahore"
-                  className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                <PartyCitySelect
+                  value={formData.city || ''}
+                  onChange={(cityVal) =>
+                    setFormData((prev) => ({
+                      ...prev,
+                      city: cityVal,
+                      town_name: prev.town_name || cityVal,
+                    }))
+                  }
+                  placeholder="Search or select city..."
                 />
               </div>
 

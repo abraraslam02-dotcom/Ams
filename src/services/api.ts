@@ -1138,6 +1138,50 @@ export const api = {
   },
 
   /**
+   * Items Master - Get Next Automatic Sequential Item Code (from persistent SQLite DB with Offline Support)
+   */
+  async getNextItemCode(): Promise<{
+    success: boolean;
+    prefix: string;
+    next_number: number;
+    next_code: string;
+  }> {
+    try {
+      const res = await authFetch('/api/items/next-code');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.next_code) {
+          return data;
+        }
+      }
+    } catch {
+      // Offline fallback: compute highest numeric item code from local IndexedDB
+    }
+    const localItems = await offlineStorage.getAll<any>('items');
+    let maxNum = 10000;
+    let latestPrefix = '';
+    for (const it of localItems) {
+      const code = String(it?.item_code || '').trim();
+      const m = code.match(/^([^\d]*?)(\d+)$/);
+      if (m) {
+        latestPrefix = m[1] || '';
+        const n = parseInt(m[2], 10);
+        if (!Number.isNaN(n) && n > maxNum) {
+          maxNum = n;
+        }
+      }
+    }
+    const nextNum = maxNum + 1;
+    const nextCode = `${latestPrefix}${nextNum}`;
+    return {
+      success: true,
+      prefix: latestPrefix,
+      next_number: nextNum,
+      next_code: nextCode,
+    };
+  },
+
+  /**
    * Items Master - Check if Item Code exists
    */
   async checkItemCode(code: string, excludeId?: number): Promise<{ exists: boolean }> {
@@ -1204,7 +1248,8 @@ export const api = {
 
     const allItems = await offlineStorage.getAll<any>('items');
     const maxId = allItems.reduce((m, i) => Math.max(m, Number(i.id || 0)), 0);
-    const nextCode = item.item_code || `MED-${String(maxId + 1).padStart(4, '0')}`;
+    const codeInfo = await this.getNextItemCode();
+    const nextCode = String(item.item_code || '').trim() || codeInfo.next_code;
     const localItem: any = {
       id: maxId + 1,
       item_code: nextCode,
@@ -1677,6 +1722,102 @@ export const api = {
       next_code: nextCode,
       next_number: nextNum,
       account_type: accountGroup || 'Customer',
+    };
+  },
+
+  /**
+   * Accounts Master - Fetch all existing Party Cities from database & saved party records
+   */
+  async getPartyCities(): Promise<{ success: boolean; cities: string[] }> {
+    try {
+      const res = await authFetch('/api/accounts/cities');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.cities)) {
+          offlineStorage.cacheApiData('party_cities_list', data.cities).catch(() => {});
+          return data;
+        }
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = (await offlineStorage.getCachedApiData<string[]>('party_cities_list')) || [];
+    const allAccs = await offlineStorage.getAll<any>('accounts').catch(() => []);
+    const byKey = new Map<string, string>();
+    for (const c of cached) {
+      const clean = String(c || '').trim().replace(/\s+/g, ' ');
+      if (clean && !byKey.has(clean.toLowerCase())) {
+        byKey.set(clean.toLowerCase(), clean);
+      }
+    }
+    for (const acc of allAccs) {
+      for (const raw of [acc?.city, acc?.town_name]) {
+        const clean = String(raw || '').trim().replace(/\s+/g, ' ');
+        if (clean && !byKey.has(clean.toLowerCase())) {
+          byKey.set(clean.toLowerCase(), clean);
+        }
+      }
+    }
+    const cities = Array.from(byKey.values()).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+    return { success: true, cities };
+  },
+
+  /**
+   * Accounts Master - Permanently add a new Party City to database with duplicate prevention
+   */
+  async createPartyCity(cityName: string): Promise<{
+    success: boolean;
+    city: string;
+    cities: string[];
+    message?: string;
+  }> {
+    const cleanCity = String(cityName || '').trim().replace(/\s+/g, ' ');
+    if (!cleanCity) {
+      throw new Error('City name is required.');
+    }
+    try {
+      const res = await authFetch('/api/accounts/cities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ city_name: cleanCity }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (Array.isArray(data.cities)) {
+          offlineStorage.cacheApiData('party_cities_list', data.cities).catch(() => {});
+        }
+        return data;
+      }
+      if (res.status >= 400 && res.status < 500 && data.error) {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      if (
+        err?.message &&
+        !err.message.includes('Failed to fetch') &&
+        !err.message.includes('NetworkError') &&
+        (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ) {
+        throw err;
+      }
+    }
+
+    const current = await this.getPartyCities();
+    const dup = current.cities.find((c) => c.toLowerCase() === cleanCity.toLowerCase());
+    if (dup) {
+      throw new Error(`City "${dup}" already exists.`);
+    }
+    const updated = [...current.cities, cleanCity].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+    await offlineStorage.cacheApiData('party_cities_list', updated).catch(() => {});
+    return {
+      success: true,
+      city: cleanCity,
+      cities: updated,
+      message: `City "${cleanCity}" added successfully.`,
     };
   },
 

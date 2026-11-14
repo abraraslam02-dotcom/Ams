@@ -2,6 +2,11 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
 import { triggerPreChangeBackupIfEnabled } from '../services/backupService.ts';
+import {
+  previewNextItemCode,
+  allocateNextItemCode,
+  ensureItemCodeSequenceTable,
+} from '../utils/itemCodeGenerator.ts';
 
 export const itemsRouter = Router();
 
@@ -189,6 +194,24 @@ itemsRouter.get('/', (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/items/next-code
+ * Preview the next automatic sequential Item Code from the persistent SQLite database
+ */
+itemsRouter.get('/next-code', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const codeInfo = previewNextItemCode(db);
+    return res.json({
+      success: true,
+      ...codeInfo,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: `Failed to generate next item code: ${errorMsg}` });
+  }
+});
+
+/**
  * GET /api/items/check-code/:code
  * Real-time check to prevent duplicate Item Codes
  */
@@ -267,9 +290,6 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     } = req.body;
 
     // Required fields validation
-    if (!item_code || String(item_code).trim().length === 0) {
-      return res.status(400).json({ success: false, error: 'Item Code is required.' });
-    }
     if (!company_name || String(company_name).trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Company Name is required.' });
     }
@@ -281,19 +301,6 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     }
     if (!packing || String(packing).trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Packing is required.' });
-    }
-
-    // Check for duplicate Item Code
-    const cleanCode = String(item_code).trim();
-    const existing = db
-      .prepare('SELECT id, item_code FROM items WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))')
-      .get(cleanCode) as { id: number; item_code: string } | undefined;
-
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        error: `Item Code "${cleanCode}" already exists. Duplicate Item Codes are strictly prevented.`,
-      });
     }
 
     // Decimal numbers parsing
@@ -314,36 +321,52 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     const mStock = Math.round((parseFloat(minimum_stock) || 0.0) * 100) / 100;
     const itemStatus = status === 'Inactive' ? 'Inactive' : 'Active';
 
-    const insertSql = `
-      INSERT INTO items (
-        item_code, company_name, item_name, generic_name, category, packing, barcode,
-        purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
-        opening_stock, minimum_stock, rack_number, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    const createItemTx = db.transaction(() => {
+      const requestedCode = item_code ? String(item_code).trim() : '';
+      // Atomically allocate a guaranteed unique sequential item code
+      // (If requestedCode is empty or already taken due to simultaneous creation, allocateNextItemCode advances to the next unused sequential code)
+      const allocated = allocateNextItemCode(db, requestedCode);
+      const finalCode = allocated.next_code;
 
-    const result = db.prepare(insertSql).run(
-      cleanCode,
-      String(company_name).trim(),
-      String(item_name).trim(),
-      generic_name ? String(generic_name).trim() : null,
-      String(category).trim(),
-      String(packing).trim(),
-      barcode ? String(barcode).trim() : null,
-      pPrice,
-      tPrice,
-      wPrice,
-      rPrice,
-      lRate,
-      dPercent,
-      tPercent,
-      oStock,
-      mStock,
-      rack_number ? String(rack_number).trim() : null,
-      itemStatus
-    );
+      const insertSql = `
+        INSERT INTO items (
+          item_code, company_name, item_name, generic_name, category, packing, barcode,
+          purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+          opening_stock, minimum_stock, rack_number, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
 
-    const newItem = db.prepare('SELECT * FROM items WHERE id = ?').get(result.lastInsertRowid) as ItemRow;
+      const result = db.prepare(insertSql).run(
+        finalCode,
+        String(company_name).trim(),
+        String(item_name).trim(),
+        generic_name ? String(generic_name).trim() : null,
+        String(category).trim(),
+        String(packing).trim(),
+        barcode ? String(barcode).trim() : null,
+        pPrice,
+        tPrice,
+        wPrice,
+        rPrice,
+        lRate,
+        dPercent,
+        tPercent,
+        oStock,
+        mStock,
+        rack_number ? String(rack_number).trim() : null,
+        itemStatus
+      );
+
+      const newItemId = Number(result.lastInsertRowid);
+      db.prepare('UPDATE item_code_history SET item_id = ? WHERE LOWER(item_code) = LOWER(?)').run(
+        newItemId,
+        finalCode
+      );
+
+      return db.prepare('SELECT * FROM items WHERE id = ?').get(newItemId) as ItemRow;
+    });
+
+    const newItem = createItemTx();
 
     return res.status(201).json({
       success: true,
@@ -817,6 +840,7 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
     });
 
     insertOrUpdate();
+    ensureItemCodeSequenceTable(db);
 
     return res.json({
       success: true,
