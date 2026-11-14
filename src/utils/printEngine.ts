@@ -66,28 +66,28 @@ function getMarginMm(paperSize: PaperSizeOption, margin: PageMarginOption = 'sta
   if (paperSize === '80mm' || paperSize === '58mm') {
     if (margin === 'none') return '0mm';
     if (margin === 'minimum') return '1mm';
-    if (margin === 'compact') return '2mm';
-    return '2.5mm';
+    if (margin === 'compact') return '1.5mm';
+    return '2mm';
   }
   switch (margin) {
     case 'none':
       return '0mm';
     case 'minimum':
-      return '5mm';
+      return '4mm';
     case 'compact':
-      return '8mm';
+      return '6mm';
     case 'standard':
     default:
-      return '10mm';
+      return '8mm';
   }
 }
 
 function getFontZoomPercent(scale: FontSizeScaleOption = 'normal'): string {
   switch (scale) {
     case 'small':
-      return '90%';
+      return '92%';
     case 'large':
-      return '110%';
+      return '112%';
     case 'normal':
     default:
       return '100%';
@@ -201,6 +201,7 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
         font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif !important;
+        line-height: 1.35 !important;
         zoom: ${zoomPercent};
       }
       .ams-print-root {
@@ -237,6 +238,7 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       }
       th, td {
         word-break: normal !important;
+        overflow-wrap: break-word !important;
       }
       .print\\:hidden, .no-print, button {
         display: none !important;

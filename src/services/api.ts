@@ -951,10 +951,13 @@ export const api = {
             return merged;
           });
 
-          // Preserve ALL local/Firestore-restored items not yet in SQLite (both pending/failed AND synced)
+          // Preserve ONLY genuinely unsynced offline items (pending/syncing/failed) not yet pushed to server
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
+            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+              continue;
+            }
             const locCode = String(loc?.item_code || '').toLowerCase();
             if (seenIds.has(Number(loc.id)) || (locCode && seenCodes.has(locCode))) {
               continue;
@@ -992,7 +995,6 @@ export const api = {
           }
 
           if (mergedExtraCount > 0) {
-            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
             const sortKey = params?.sortBy || 'item_name';
             const dir = params?.sortOrder === 'desc' ? -1 : 1;
             enrichedItems.sort((a: any, b: any) => {
@@ -1526,15 +1528,13 @@ export const api = {
           const seenIds = new Set<number>(
             data.accounts.map((a: any) => Number(a?.id || 0)).filter((n: number) => n > 0)
           );
-          let extraLocal = 0;
           for (const loc of existingLocal) {
+            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+              continue;
+            }
             const code = String(loc?.account_code || '').toLowerCase();
             if ((code && seenCodes.has(code)) || seenIds.has(Number(loc?.id || 0))) continue;
             data.accounts.push(loc);
-            extraLocal++;
-          }
-          if (extraLocal > 0) {
-            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
           }
           offlineStorage.bulkPut('accounts', data.accounts).catch(() => {});
         }
@@ -2070,6 +2070,9 @@ export const api = {
           );
           let extraCount = 0;
           for (const loc of existingLocal) {
+            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+              continue;
+            }
             const bNo = String(loc?.bill_number || loc?.invoice_number || '').toLowerCase();
             if (bNo && seenBills.has(bNo)) continue;
             srvList.push(loc);
@@ -2083,7 +2086,6 @@ export const api = {
             offlineStorage.bulkPut('purchases', toStore).catch(() => {});
           }
           if (extraCount > 0) {
-            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
             data.purchases = srvList;
             data.data = srvList;
           }
@@ -2710,10 +2712,13 @@ export const api = {
             return merged;
           });
 
-          // Include ALL local/Firestore-restored invoices not yet in SQLite (both pending/failed AND synced)
+          // Include ONLY genuinely unsynced offline invoices (pending/syncing/failed) not yet pushed to server
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
+            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+              continue;
+            }
             const key = String(loc?.client_tx_id || '');
             const invNoLower = String(loc?.invoice_number || '').toLowerCase();
             if ((key && seenKeys.has(key)) || (invNoLower && seenInvNos.has(invNoLower))) {
@@ -2752,7 +2757,6 @@ export const api = {
           }
 
           if (mergedExtraCount > 0) {
-            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
             enriched.sort((a: any, b: any) => {
               const da = String(a.invoice_date || a.sale_date || '');
               const db = String(b.invoice_date || b.sale_date || '');

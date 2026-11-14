@@ -226,10 +226,10 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
   const fontScaleClass =
     fontSizeScale === 'small'
-      ? 'text-[13px]'
+      ? 'text-[12.5px]'
       : fontSizeScale === 'large'
       ? 'text-[16px]'
-      : 'text-xs';
+      : 'text-[14px]';
 
   // Saved Database Totals (Never recalculated differently during printing)
   const savedGross = isReturn
@@ -594,9 +594,9 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                ========================================================= */
             <div
               ref={printAreaRef}
-              className={`bg-white border border-slate-300 shadow-sm w-full ${
+              className={`ams-sales-print-a4 bg-white border border-slate-300 shadow-sm w-full ${
                 orientation === 'landscape' ? 'max-w-[285mm]' : 'max-w-[210mm]'
-              } p-6 lg:p-8 text-slate-900 ${fontScaleClass} relative print:border-0 print:shadow-none print:p-2 print:max-w-none`}
+              } p-6 lg:p-7 text-slate-900 ${fontScaleClass} leading-snug relative print:border-0 print:shadow-none print:p-2 print:max-w-none`}
             >
               {/* CANCELLED WATERMARK OVERLAY */}
               {isCancelled && (
@@ -615,7 +615,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     <span>CANCELLED DOCUMENT — NOT VALID FOR FINANCIAL CLAIM OR STOCK DELIVERY</span>
                   </div>
                   {docRecord.cancelled_at && (
-                    <span className="text-[10px] font-mono">
+                    <span className="text-xs font-mono">
                       Cancelled: {String(docRecord.cancelled_at).slice(0, 19)}
                     </span>
                   )}
@@ -633,15 +633,15 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     />
                   )}
                   <div>
-                    <h1 className="text-2xl font-black tracking-tight text-slate-950 uppercase">
+                    <h1 className="text-3xl font-black tracking-tight text-slate-950 uppercase leading-tight">
                       {storeName}
                     </h1>
                     {invoiceSubtitle && (
-                      <p className="text-[11px] font-semibold text-slate-700 tracking-wide">{invoiceSubtitle}</p>
+                      <p className="text-sm font-semibold text-slate-700 tracking-wide mt-0.5">{invoiceSubtitle}</p>
                     )}
-                    <p className="text-xs font-semibold text-slate-700 mt-0.5">{storeAddress}</p>
-                    <p className="text-[11px] text-slate-600 mt-0.5">
-                      Phone: <span className="font-semibold">{storePhone}</span>
+                    <p className="text-sm font-semibold text-slate-700 mt-0.5">{storeAddress}</p>
+                    <p className="text-xs text-slate-700 mt-1">
+                      Phone: <span className="font-semibold text-slate-900">{storePhone}</span>
                       {storeMobile ? ` · Mobile: ${storeMobile}` : ''}
                       {fields.showDrugLicense && drugLicense
                         ? ` · Drug License: ${drugLicense}`
@@ -652,19 +652,19 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                 </div>
 
                 <div className="text-right shrink-0">
-                  <div className="inline-block px-3 py-1 rounded bg-slate-900 text-white text-xs font-black tracking-wider uppercase">
+                  <div className="inline-block px-3.5 py-1.5 rounded bg-slate-900 text-white text-sm font-black tracking-wider uppercase">
                     {isReturn
                       ? 'SALES RETURN / CREDIT NOTE'
                       : `${docRecord.invoice_type || 'RETAIL'} — ${invoiceHeading}`}
                   </div>
-                  <div className="mt-2 text-sm font-black font-mono text-slate-900">
+                  <div className="mt-2 text-lg font-black font-mono text-slate-950">
                     {isReturn
                       ? `Return #: ${docRecord.return_number}`
                       : `Invoice #: ${docRecord.invoice_number}`}
                   </div>
-                  <div className="text-xs text-slate-600">
+                  <div className="text-sm text-slate-700 mt-0.5">
                     Date:{' '}
-                    <span className="font-semibold text-slate-900">
+                    <span className="font-bold text-slate-950">
                       {isReturn ? docRecord.return_date : docRecord.invoice_date}
                     </span>
                   </div>
@@ -677,23 +677,23 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               </div>
 
               {/* Customer & Billing Details Grid */}
-              <div className="grid grid-cols-2 gap-4 mb-4 p-3 rounded-lg bg-slate-50 border border-slate-200">
+              <div className="grid grid-cols-2 gap-4 mb-4 p-3.5 rounded-lg bg-slate-50 border border-slate-300">
                 <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
                     Customer Details
                   </div>
-                  <div className="text-sm font-bold text-slate-900 mt-0.5">
+                  <div className="text-lg font-black text-slate-950 mt-0.5 leading-snug">
                     {docRecord.customer_name || 'Walk-in Cash Customer'}
                   </div>
-                  <div className="text-[11px] text-slate-600 mt-0.5">
+                  <div className="text-[13px] text-slate-700 mt-1">
                     {docRecord.customer_code ? `Account Code: ${docRecord.customer_code} · ` : ''}
                     Tax Status:{' '}
-                    <span className="font-semibold">
+                    <span className="font-semibold text-slate-900">
                       {docRecord.customer_filer_status || 'Filer'}
                     </span>
                   </div>
                   {((showCustPhone && docRecord.customer_phone) || (showCustAddress && docRecord.customer_address)) && (
-                    <div className="text-[11px] text-slate-600 mt-0.5">
+                    <div className="text-[13px] text-slate-700 mt-0.5">
                       {showCustPhone && docRecord.customer_phone ? `Contact: ${docRecord.customer_phone}` : ''}
                       {showCustPhone && docRecord.customer_phone && showCustAddress && docRecord.customer_address ? ' · ' : ''}
                       {showCustAddress && docRecord.customer_address ? `Address: ${docRecord.customer_address}` : ''}
@@ -702,33 +702,33 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                 </div>
 
                 <div className="text-right">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
                     Payment & Billing Info
                   </div>
-                  <div className="text-xs font-bold text-slate-900 mt-0.5">
+                  <div className="text-sm font-bold text-slate-950 mt-0.5">
                     {isReturn ? 'Settlement Mode' : 'Payment Method'}:{' '}
                     <span className="uppercase">{paymentMethodLabel}</span>
                   </div>
                   {isReturn ? (
-                    <div className="text-[11px] text-slate-600 mt-0.5">
+                    <div className="text-[13px] text-slate-700 mt-1">
                       Reason: {docRecord.return_reason || 'Customer Return'}
                     </div>
                   ) : (
                     <>
                       {fields.showSalesman && (
-                        <div className="text-[11px] text-slate-600 mt-0.5">
-                          Salesman: <span className="font-semibold text-slate-800">{docRecord.salesman || 'Counter Pharmacist'}</span>
+                        <div className="text-[13px] text-slate-700 mt-1">
+                          Salesman: <span className="font-semibold text-slate-900">{docRecord.salesman || 'Counter Pharmacist'}</span>
                         </div>
                       )}
                       {fields.showDeliveryman && docRecord.deliveryman_name && (
-                        <div className="text-[11px] text-slate-600 mt-0.5">
-                          Deliveryman: <span className="font-semibold text-slate-800">{docRecord.deliveryman_name}</span>
+                        <div className="text-[13px] text-slate-700 mt-0.5">
+                          Deliveryman: <span className="font-semibold text-slate-900">{docRecord.deliveryman_name}</span>
                           {docRecord.delivery_status ? ` (${docRecord.delivery_status})` : ''}
                         </div>
                       )}
                     </>
                   )}
-                  <div className="text-[11px] text-slate-600 mt-0.5">
+                  <div className="text-[13px] text-slate-700 mt-0.5">
                     Document Status:{' '}
                     <span
                       className={`font-bold uppercase ${
@@ -742,39 +742,39 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               </div>
 
               {/* Line Items Table (Supports Multi-Page Automatic Header Repetition) */}
-              <table className="w-full border-collapse border border-slate-300 mb-4">
+              <table className="w-full border-collapse border border-slate-300 mb-4 tabular-nums">
                 <thead>
-                  <tr className="bg-slate-900 text-white text-[10px] uppercase tracking-wider">
-                    <th className="py-2 px-2 text-left border border-slate-700 w-8">#</th>
+                  <tr className="bg-slate-900 text-white text-xs font-bold uppercase tracking-wide">
+                    <th className="py-2.5 px-1.5 text-left border border-slate-700 w-7">#</th>
                     {fields.showItemCode && (
-                      <th className="py-2 px-2 text-left border border-slate-700">Code</th>
+                      <th className="py-2.5 px-1.5 text-left border border-slate-700">Code</th>
                     )}
-                    <th className="py-2 px-2 text-left border border-slate-700">
+                    <th className="py-2.5 px-1.5 text-left border border-slate-700">
                       Item Description
                     </th>
                     {fields.showPacking && (
-                      <th className="py-2 px-2 text-center border border-slate-700">Packing</th>
+                      <th className="py-2.5 px-1.5 text-center border border-slate-700">Packing</th>
                     )}
                     {fields.showBatchExpiry && (
-                      <th className="py-2 px-2 text-left border border-slate-700">
+                      <th className="py-2.5 px-1.5 text-left border border-slate-700">
                         Batch / Expiry
                       </th>
                     )}
-                    <th className="py-2 px-2 text-right border border-slate-700">
+                    <th className="py-2.5 px-1.5 text-right border border-slate-700">
                       {isReturn ? 'Ret. Qty' : 'Pack Qty'}
                     </th>
                     {!isReturn && (
-                      <th className="py-2 px-2 text-right border border-slate-700">Bonus</th>
+                      <th className="py-2.5 px-1.5 text-right border border-slate-700">Bonus</th>
                     )}
-                    <th className="py-2 px-2 text-right border border-slate-700">Loose</th>
-                    <th className="py-2 px-2 text-right border border-slate-700">Rate</th>
+                    <th className="py-2.5 px-1.5 text-right border border-slate-700">Loose</th>
+                    <th className="py-2.5 px-1.5 text-right border border-slate-700">Rate</th>
                     {fields.showDiscount && (
-                      <th className="py-2 px-2 text-right border border-slate-700">Disc</th>
+                      <th className="py-2.5 px-1.5 text-right border border-slate-700">Disc</th>
                     )}
                     {fields.showTax && (
-                      <th className="py-2 px-2 text-right border border-slate-700">Tax</th>
+                      <th className="py-2.5 px-1.5 text-right border border-slate-700">Tax</th>
                     )}
-                    <th className="py-2 px-2 text-right border border-slate-700">Line Total</th>
+                    <th className="py-2.5 px-1.5 text-right border border-slate-700">Line Total</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -792,59 +792,59 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                       : Number(line.tax_amount ?? 0);
 
                     return (
-                      <tr key={line.id || idx} className="text-[11px]">
-                        <td className="py-1.5 px-2 border border-slate-200 font-mono text-slate-500">
+                      <tr key={line.id || idx} className="text-[13px] leading-snug">
+                        <td className="py-2 px-1.5 border border-slate-200 font-mono text-slate-600 font-semibold">
                           {idx + 1}
                         </td>
                         {fields.showItemCode && (
-                          <td className="py-1.5 px-2 border border-slate-200 font-mono font-semibold">
+                          <td className="py-2 px-1.5 border border-slate-200 font-mono font-semibold text-slate-800">
                             {line.item_code}
                           </td>
                         )}
-                        <td className="py-1.5 px-2 border border-slate-200">
-                          <div className="font-bold text-slate-900">{line.item_name}</div>
+                        <td className="py-2 px-1.5 border border-slate-200">
+                          <div className="font-bold text-[13.5px] text-slate-950">{line.item_name}</div>
                           {fields.showCompany && line.company_name && (
-                            <div className="text-[10px] text-slate-500">{line.company_name}</div>
+                            <div className="text-[11.5px] text-slate-600 mt-0.5">{line.company_name}</div>
                           )}
                         </td>
                         {fields.showPacking && (
-                          <td className="py-1.5 px-2 border border-slate-200 text-center font-mono">
+                          <td className="py-2 px-1.5 border border-slate-200 text-center font-mono">
                             {line.packing}
                           </td>
                         )}
                         {fields.showBatchExpiry && (
-                          <td className="py-1.5 px-2 border border-slate-200 font-mono text-[10px]">
-                            <div>{line.batch_number || '-'}</div>
+                          <td className="py-2 px-1.5 border border-slate-200 font-mono text-[11.5px]">
+                            <div className="font-semibold text-slate-800">{line.batch_number || '-'}</div>
                             {line.expiry_date && (
-                              <div className="text-slate-500">Exp: {line.expiry_date}</div>
+                              <div className="text-slate-600">Exp: {line.expiry_date}</div>
                             )}
                           </td>
                         )}
-                        <td className="py-1.5 px-2 border border-slate-200 text-right font-mono font-semibold">
+                        <td className="py-2 px-1.5 border border-slate-200 text-right font-mono font-bold text-slate-950">
                           {packQty}
                         </td>
                         {!isReturn && (
-                          <td className="py-1.5 px-2 border border-slate-200 text-right font-mono font-semibold text-emerald-800">
+                          <td className="py-2 px-1.5 border border-slate-200 text-right font-mono font-bold text-emerald-800">
                             {Number(line.bonus_quantity || 0) > 0 ? Number(line.bonus_quantity) : '-'}
                           </td>
                         )}
-                        <td className="py-1.5 px-2 border border-slate-200 text-right font-mono">
+                        <td className="py-2 px-1.5 border border-slate-200 text-right font-mono">
                           {looseQty > 0 ? looseQty : '-'}
                         </td>
-                        <td className="py-1.5 px-2 border border-slate-200 text-right font-mono">
+                        <td className="py-2 px-1.5 border border-slate-200 text-right font-mono font-semibold">
                           {fmtMoney(line.unit_price)}
                         </td>
                         {fields.showDiscount && (
-                          <td className="py-1.5 px-2 border border-slate-200 text-right font-mono">
+                          <td className="py-2 px-1.5 border border-slate-200 text-right font-mono">
                             {discAmt > 0 ? `${fmtMoney(discAmt)} (${discPct}%)` : '-'}
                           </td>
                         )}
                         {fields.showTax && (
-                          <td className="py-1.5 px-2 border border-slate-200 text-right font-mono">
+                          <td className="py-2 px-1.5 border border-slate-200 text-right font-mono">
                             {taxAmt > 0 ? fmtMoney(taxAmt) : '-'}
                           </td>
                         )}
-                        <td className="py-1.5 px-2 border border-slate-200 text-right font-mono font-bold text-slate-900">
+                        <td className="py-2 px-1.5 border border-slate-200 text-right font-mono font-bold text-[13.5px] text-slate-950">
                           {fmtMoney(line.line_total)}
                         </td>
                       </tr>
@@ -855,34 +855,34 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
               {/* Totals, Previous Balance, Paid & Remaining Summary */}
               <div className="grid grid-cols-12 gap-6 items-start ams-avoid-break">
-                <div className="col-span-7 space-y-2">
+                <div className="col-span-7 space-y-2.5">
                   {showRemarks && docRecord.remarks && (
-                    <div className="p-2.5 rounded bg-slate-50 border border-slate-200 text-[11px]">
-                      <span className="font-bold text-slate-700">Remarks: </span>
-                      <span className="text-slate-600">{docRecord.remarks}</span>
+                    <div className="p-2.5 rounded bg-slate-50 border border-slate-200 text-[13px]">
+                      <span className="font-bold text-slate-800">Remarks: </span>
+                      <span className="text-slate-700">{docRecord.remarks}</span>
                     </div>
                   )}
 
                   {showFooterNote && (footerMessage || customTerms || thankYouMessage) && (
-                    <div className="p-2.5 rounded border border-slate-200 text-[10px] text-slate-600 space-y-1.5">
+                    <div className="p-3 rounded border border-slate-200 text-xs text-slate-700 space-y-1.5">
                       {footerMessage && (
                         <div>
-                          <div className="font-bold text-slate-800 uppercase text-[9.5px]">
+                          <div className="font-bold text-slate-900 uppercase text-[11px]">
                             Terms & Store Policy:
                           </div>
-                          <p className="whitespace-pre-line text-slate-600">{footerMessage}</p>
+                          <p className="whitespace-pre-line text-slate-700 leading-snug">{footerMessage}</p>
                         </div>
                       )}
                       {customTerms && (
                         <div className="pt-1 border-t border-slate-200">
-                          <div className="font-bold text-slate-800 uppercase text-[9.5px]">
+                          <div className="font-bold text-slate-900 uppercase text-[11px]">
                             Custom Terms & Conditions:
                           </div>
-                          <p className="whitespace-pre-line text-slate-600">{customTerms}</p>
+                          <p className="whitespace-pre-line text-slate-700 leading-snug">{customTerms}</p>
                         </div>
                       )}
                       {thankYouMessage && (
-                        <div className="pt-1 text-emerald-800 font-bold text-[10px]">
+                        <div className="pt-1 text-emerald-800 font-bold text-[13px]">
                           {thankYouMessage}
                         </div>
                       )}
@@ -891,85 +891,85 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
                   {fields.showSignature && (
                     <div className="pt-8 grid grid-cols-2 gap-8 text-center">
-                      <div className="border-t border-slate-400 pt-1 text-[10px] font-semibold text-slate-600">
+                      <div className="border-t border-slate-400 pt-1 text-xs font-semibold text-slate-700">
                         Customer Signature
                       </div>
-                      <div className="border-t border-slate-400 pt-1 text-[10px] font-semibold text-slate-600">
+                      <div className="border-t border-slate-400 pt-1 text-xs font-semibold text-slate-700">
                         Authorized Pharmacist / Signature
                       </div>
                     </div>
                   )}
                 </div>
 
-                <div className="col-span-5 bg-slate-50 rounded-lg border border-slate-300 p-3 space-y-1.5 text-xs">
+                <div className="col-span-5 bg-slate-50 rounded-lg border border-slate-300 p-3.5 space-y-2 text-sm tabular-nums">
                   <div className="flex justify-between">
-                    <span className="text-slate-600">
+                    <span className="text-slate-700 font-medium">
                       {isReturn ? 'Gross Return Amount:' : 'Gross Amount:'}
                     </span>
-                    <span className="font-mono font-semibold">Rs. {fmtMoney(savedGross)}</span>
+                    <span className="font-mono font-bold text-slate-900">Rs. {fmtMoney(savedGross)}</span>
                   </div>
 
                   {fields.showDiscount && (savedItemDisc > 0 || savedTotalDisc > 0) && (
                     <>
                       {savedItemDisc > 0 && (
-                        <div className="flex justify-between text-slate-600">
+                        <div className="flex justify-between text-slate-700">
                           <span>Item Discounts:</span>
-                          <span className="font-mono">- Rs. {fmtMoney(savedItemDisc)}</span>
+                          <span className="font-mono font-semibold">- Rs. {fmtMoney(savedItemDisc)}</span>
                         </div>
                       )}
                       {savedInvoiceDisc > 0 && (
-                        <div className="flex justify-between text-slate-600">
+                        <div className="flex justify-between text-slate-700">
                           <span>
                             Invoice Discount ({Number(docRecord.invoice_discount_percent || 0)}%):
                           </span>
-                          <span className="font-mono">- Rs. {fmtMoney(savedInvoiceDisc)}</span>
+                          <span className="font-mono font-semibold">- Rs. {fmtMoney(savedInvoiceDisc)}</span>
                         </div>
                       )}
                       {savedItemDisc === 0 && savedInvoiceDisc === 0 && savedTotalDisc > 0 && (
-                        <div className="flex justify-between text-slate-600">
+                        <div className="flex justify-between text-slate-700">
                           <span>Discount Adjustment:</span>
-                          <span className="font-mono">- Rs. {fmtMoney(savedTotalDisc)}</span>
+                          <span className="font-mono font-semibold">- Rs. {fmtMoney(savedTotalDisc)}</span>
                         </div>
                       )}
                     </>
                   )}
 
-                  <div className="flex justify-between border-t border-slate-200 pt-1">
-                    <span className="text-slate-700 font-semibold">Taxable Amount:</span>
-                    <span className="font-mono font-semibold">Rs. {fmtMoney(savedTaxable)}</span>
+                  <div className="flex justify-between border-t border-slate-200 pt-1.5">
+                    <span className="text-slate-800 font-semibold">Taxable Amount:</span>
+                    <span className="font-mono font-bold text-slate-900">Rs. {fmtMoney(savedTaxable)}</span>
                   </div>
 
                   {fields.showTax && (
                     <>
                       {savedGst > 0 && (
-                        <div className="flex justify-between text-slate-600">
+                        <div className="flex justify-between text-slate-700">
                           <span>GST / Sales Tax:</span>
-                          <span className="font-mono">+ Rs. {fmtMoney(savedGst)}</span>
+                          <span className="font-mono font-semibold">+ Rs. {fmtMoney(savedGst)}</span>
                         </div>
                       )}
                       {(Number(docRecord.advance_tax_applicable) === 1 || savedAdvTax > 0) && (
-                        <div className="flex justify-between text-slate-600">
+                        <div className="flex justify-between text-slate-700">
                           <span>Advance Tax ({savedAdvTaxRate}%):</span>
-                          <span className="font-mono">+ Rs. {fmtMoney(savedAdvTax)}</span>
+                          <span className="font-mono font-semibold">+ Rs. {fmtMoney(savedAdvTax)}</span>
                         </div>
                       )}
                     </>
                   )}
 
-                  <div className="flex justify-between border-t-2 border-slate-900 pt-1.5 text-sm font-black text-slate-950">
+                  <div className="flex justify-between items-baseline border-t-2 border-slate-900 pt-2 text-lg font-black text-slate-950">
                     <span>{isReturn ? 'Net Return Amount:' : 'Net Invoice Amount:'}</span>
                     <span className="font-mono">Rs. {fmtMoney(savedNetTotal)}</span>
                   </div>
 
                   {!isReturn && showPrevBalance && (
                     <>
-                      <div className="flex justify-between text-slate-600 pt-1 border-t border-slate-200">
+                      <div className="flex justify-between text-slate-700 pt-1.5 border-t border-slate-200">
                         <span>Previous Customer Balance:</span>
-                        <span className="font-mono">
+                        <span className="font-mono font-semibold">
                           Rs. {fmtMoney(savedPrevBalance)} ({savedPrevBalanceType})
                         </span>
                       </div>
-                      <div className="flex justify-between font-bold text-slate-800">
+                      <div className="flex justify-between font-bold text-slate-900">
                         <span>Total Receivable:</span>
                         <span className="font-mono">Rs. {fmtMoney(savedTotalReceivable)}</span>
                       </div>
@@ -977,7 +977,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   )}
 
                   {showPaid && (
-                    <div className="flex justify-between text-emerald-700 font-bold pt-1 border-t border-slate-200">
+                    <div className="flex justify-between text-emerald-800 font-bold pt-1.5 border-t border-slate-200">
                       <span>
                         {isReturn
                           ? `Refunded (${paymentMethodLabel}):`
@@ -988,7 +988,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   )}
 
                   {!isReturn && showRemaining && (
-                    <div className="flex justify-between border-t border-slate-300 pt-1 font-black text-slate-900">
+                    <div className="flex justify-between border-t border-slate-300 pt-1.5 text-[15px] font-black text-slate-950">
                       <span>Remaining Balance:</span>
                       <span className="font-mono">Rs. {fmtMoney(savedRemainingBalance)}</span>
                     </div>
@@ -1042,10 +1042,10 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                ========================================================= */
             <div
               ref={printAreaRef}
-              className={`bg-white border border-slate-300 shadow-sm text-slate-950 font-mono ${
+              className={`thermal-receipt bg-white border border-slate-300 shadow-sm text-slate-950 font-sans tabular-nums leading-snug ${
                 format === '80mm'
-                  ? 'w-[302px] p-3.5 text-[11px]'
-                  : 'w-[218px] p-2 text-[9.5px]'
+                  ? 'thermal-80mm w-[302px] p-3 text-[13px]'
+                  : 'thermal-58mm w-[218px] p-2 text-[11.5px]'
               } relative print:border-0 print:shadow-none`}
             >
               {isCancelled && (
@@ -1055,97 +1055,153 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               )}
 
               {/* Thermal Store Header */}
-              <div className="text-center border-b border-dashed border-slate-900 pb-2 mb-2">
+              <div className="text-center border-b border-dashed border-slate-900 pb-2.5 mb-2.5">
                 {fields.showLogo && logoDataUrl && (
                   <img
                     src={logoDataUrl}
                     alt={storeName}
-                    className="w-10 h-10 object-contain mx-auto mb-1"
+                    className="w-11 h-11 object-contain mx-auto mb-1"
                   />
                 )}
-                <div className="font-black text-sm uppercase tracking-tight">{storeName}</div>
-                <div className="text-[9.5px] leading-tight mt-0.5">{storeAddress}</div>
-                <div className="text-[9.5px] mt-0.5">Tel: {storePhone}</div>
+                <div
+                  className={`font-black uppercase tracking-tight leading-tight ${
+                    format === '80mm' ? 'text-lg' : 'text-[15px]'
+                  }`}
+                >
+                  {storeName}
+                </div>
+                <div
+                  className={`leading-snug mt-0.5 font-medium text-slate-800 ${
+                    format === '80mm' ? 'text-xs' : 'text-[10.5px]'
+                  }`}
+                >
+                  {storeAddress}
+                </div>
+                <div
+                  className={`mt-0.5 font-medium text-slate-800 ${
+                    format === '80mm' ? 'text-xs' : 'text-[10.5px]'
+                  }`}
+                >
+                  Tel: {storePhone}
+                </div>
                 {(fields.showDrugLicense || fields.showNtn) && (
-                  <div className="text-[9px] text-slate-700">
+                  <div
+                    className={`text-slate-700 mt-0.5 ${
+                      format === '80mm' ? 'text-[11px]' : 'text-[10.5px]'
+                    }`}
+                  >
                     {fields.showDrugLicense && drugLicense ? `DL: ${drugLicense}` : ''}
                     {fields.showDrugLicense && fields.showNtn ? ' | ' : ''}
                     {fields.showNtn && ntnNumber ? `NTN: ${ntnNumber}` : ''}
                   </div>
                 )}
-                <div className="mt-1 font-bold uppercase border-t border-slate-300 pt-1">
+                <div
+                  className={`mt-1.5 font-black uppercase border-t border-slate-400 pt-1 tracking-wide ${
+                    format === '80mm' ? 'text-[13px]' : 'text-xs'
+                  }`}
+                >
                   {isReturn ? 'SALES RETURN SLIP' : `${docRecord.invoice_type || 'RETAIL'} RECEIPT`}
                 </div>
               </div>
 
               {/* Thermal Meta */}
-              <div className="space-y-0.5 border-b border-dashed border-slate-900 pb-2 mb-2 text-[10px]">
-                <div className="flex justify-between">
-                  <span>{isReturn ? 'Ret #:' : 'Inv #:'}</span>
-                  <span className="font-bold">
+              <div
+                className={`space-y-1 border-b border-dashed border-slate-900 pb-2.5 mb-2.5 ${
+                  format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
+                }`}
+              >
+                <div className="flex justify-between gap-2">
+                  <span className="font-semibold shrink-0">{isReturn ? 'Ret #:' : 'Inv #:'}</span>
+                  <span
+                    className={`font-black font-mono text-right ${
+                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                    }`}
+                  >
                     {isReturn ? docRecord.return_number : docRecord.invoice_number}
                   </span>
                 </div>
                 {isReturn && docRecord.original_invoice_number && (
-                  <div className="flex justify-between">
-                    <span>Orig Inv:</span>
-                    <span>{docRecord.original_invoice_number}</span>
+                  <div className="flex justify-between gap-2">
+                    <span className="shrink-0">Orig Inv:</span>
+                    <span className="font-mono font-semibold text-right">
+                      {docRecord.original_invoice_number}
+                    </span>
                   </div>
                 )}
-                <div className="flex justify-between">
-                  <span>Date:</span>
-                  <span>{isReturn ? docRecord.return_date : docRecord.invoice_date}</span>
+                <div className="flex justify-between gap-2">
+                  <span className="shrink-0">Date:</span>
+                  <span className="font-semibold text-right">
+                    {isReturn ? docRecord.return_date : docRecord.invoice_date}
+                  </span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Customer:</span>
-                  <span className="font-bold truncate max-w-[145px]">
+                <div className="flex justify-between items-start gap-2">
+                  <span className="shrink-0 font-semibold">Customer:</span>
+                  <span
+                    className={`font-black text-right break-words ${
+                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                    }`}
+                  >
                     {docRecord.customer_name || 'Walk-in Cash'}
                   </span>
                 </div>
                 {showCustPhone && docRecord.customer_phone && (
-                  <div className="flex justify-between">
-                    <span>Contact:</span>
-                    <span>{docRecord.customer_phone}</span>
+                  <div className="flex justify-between gap-2">
+                    <span className="shrink-0">Contact:</span>
+                    <span className="text-right font-medium">{docRecord.customer_phone}</span>
                   </div>
                 )}
                 {showCustAddress && docRecord.customer_address && (
-                  <div className="flex justify-between text-[9px] text-slate-700">
-                    <span>Address:</span>
-                    <span className="truncate max-w-[140px]">{docRecord.customer_address}</span>
+                  <div
+                    className={`flex justify-between items-start gap-2 text-slate-800 ${
+                      format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
+                    }`}
+                  >
+                    <span className="shrink-0">Address:</span>
+                    <span className="text-right break-words">{docRecord.customer_address}</span>
                   </div>
                 )}
-                <div className="flex justify-between">
-                  <span>Payment:</span>
-                  <span className="font-bold uppercase">{paymentMethodLabel}</span>
+                <div className="flex justify-between gap-2">
+                  <span className="shrink-0">Payment:</span>
+                  <span className="font-bold uppercase text-right">{paymentMethodLabel}</span>
                 </div>
                 {!isReturn && fields.showSalesman && docRecord.salesman && (
-                  <div className="flex justify-between">
-                    <span>Salesman:</span>
-                    <span className="truncate max-w-[140px]">{docRecord.salesman}</span>
+                  <div className="flex justify-between items-start gap-2">
+                    <span className="shrink-0">Salesman:</span>
+                    <span className="text-right font-medium break-words">{docRecord.salesman}</span>
                   </div>
                 )}
                 {!isReturn && fields.showDeliveryman && docRecord.deliveryman_name && (
-                  <div className="flex justify-between">
-                    <span>Deliveryman:</span>
-                    <span className="truncate max-w-[140px]">{docRecord.deliveryman_name}</span>
+                  <div className="flex justify-between items-start gap-2">
+                    <span className="shrink-0">Deliveryman:</span>
+                    <span className="text-right font-medium break-words">
+                      {docRecord.deliveryman_name}
+                    </span>
                   </div>
                 )}
                 {showRemarks && docRecord.remarks && (
-                  <div className="flex justify-between text-[9px] text-slate-700 border-t border-slate-300 pt-0.5 mt-0.5">
-                    <span>Remarks:</span>
-                    <span className="truncate max-w-[140px]">{docRecord.remarks}</span>
+                  <div
+                    className={`flex justify-between items-start gap-2 text-slate-800 border-t border-slate-300 pt-1 mt-1 ${
+                      format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
+                    }`}
+                  >
+                    <span className="shrink-0 font-semibold">Remarks:</span>
+                    <span className="text-right break-words">{docRecord.remarks}</span>
                   </div>
                 )}
               </div>
 
               {/* Thermal Items Table */}
-              <div className="border-b border-dashed border-slate-900 pb-2 mb-2">
-                <div className="grid grid-cols-12 font-bold border-b border-slate-400 pb-1 mb-1">
-                  <span className="col-span-6">Item</span>
-                  <span className="col-span-2 text-right">Qty</span>
+              <div className="border-b border-dashed border-slate-900 pb-2.5 mb-2.5">
+                <div
+                  className={`grid grid-cols-12 font-black border-b-2 border-slate-800 pb-1 mb-1.5 uppercase ${
+                    format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
+                  }`}
+                >
+                  <span className="col-span-5">Item</span>
+                  <span className="col-span-3 text-right">Qty</span>
                   <span className="col-span-4 text-right">Total</span>
                 </div>
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   {items.map((line, idx) => {
                     const packQty = isReturn
                       ? Number(line.return_quantity ?? line.quantity ?? 0)
@@ -1159,17 +1215,32 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                       : Number(line.tax_amount ?? 0);
 
                     return (
-                      <div key={line.id || idx} className="leading-tight">
-                        <div className="font-bold text-slate-950">
+                      <div
+                        key={line.id || idx}
+                        className="leading-snug border-b border-dotted border-slate-300 pb-1.5 last:border-b-0 last:pb-0"
+                      >
+                        <div
+                          className={`font-bold text-slate-950 break-words ${
+                            format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                          }`}
+                        >
                           {idx + 1}. {showItemCode ? `[${line.item_code}] ` : ''}
                           {line.item_name}
                           {showItemCompany && line.company_name ? ` (${line.company_name})` : ''}
                         </div>
-                        <div className="grid grid-cols-12 text-[9.5px] text-slate-700">
-                          <span className="col-span-6">
+                        <div
+                          className={`grid grid-cols-12 items-baseline mt-0.5 ${
+                            format === '80mm' ? 'text-[12px]' : 'text-[10.5px]'
+                          } text-slate-800`}
+                        >
+                          <span className="col-span-5 pr-1 break-words">
                             {showPacking && line.packing ? `${line.packing} ` : ''}
                             {(showBatch && line.batch_number) || (showExpiry && line.expiry_date) ? (
-                              <span className="block text-[8.5px] text-slate-500">
+                              <span
+                                className={`block text-slate-700 ${
+                                  format === '80mm' ? 'text-[11px]' : 'text-[10.5px]'
+                                }`}
+                              >
                                 {showBatch && line.batch_number ? `B:${line.batch_number} ` : ''}
                                 {showExpiry && line.expiry_date ? `Exp:${line.expiry_date}` : ''}
                               </span>
@@ -1180,12 +1251,20 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                               : ''}
                             {showTax && taxAmt > 0 ? ` (+T:${taxAmt.toFixed(0)})` : ''}
                           </span>
-                          <span className="col-span-2 text-right">
+                          <span
+                            className={`col-span-3 text-right font-mono font-bold text-slate-900 ${
+                              format === '80mm' ? 'text-[12.5px]' : 'text-[11px]'
+                            }`}
+                          >
                             {packQty > 0 ? `${packQty}P` : ''}
                             {!isReturn && showBonus && Number(line.bonus_quantity || 0) > 0 ? ` +${line.bonus_quantity}B` : ''}
                             {showLoose && looseQty > 0 ? ` ${looseQty}L` : ''}
                           </span>
-                          <span className="col-span-4 text-right font-bold text-slate-950">
+                          <span
+                            className={`col-span-4 text-right font-mono font-black text-slate-950 ${
+                              format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                            }`}
+                          >
                             {fmtMoney(line.line_total)}
                           </span>
                         </div>
@@ -1196,61 +1275,101 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               </div>
 
               {/* Thermal Totals */}
-              <div className="space-y-0.5 border-b border-dashed border-slate-900 pb-2 mb-2">
+              <div
+                className={`space-y-1 border-b border-dashed border-slate-900 pb-2.5 mb-2.5 ${
+                  format === '80mm' ? 'text-[13px]' : 'text-[11.5px]'
+                }`}
+              >
                 <div className="flex justify-between">
-                  <span>Gross Total:</span>
-                  <span>{fmtMoney(savedGross)}</span>
+                  <span className="font-medium">Gross Total:</span>
+                  <span className="font-mono font-semibold">{fmtMoney(savedGross)}</span>
                 </div>
                 {showDiscount && savedTotalDisc > 0 && (
                   <div className="flex justify-between">
-                    <span>Discount:</span>
-                    <span>- {fmtMoney(savedTotalDisc)}</span>
+                    <span className="font-medium">Discount:</span>
+                    <span className="font-mono font-semibold">- {fmtMoney(savedTotalDisc)}</span>
                   </div>
                 )}
                 {showTax && savedTotalTax > 0 && (
                   <div className="flex justify-between">
-                    <span>Tax (GST/Adv):</span>
-                    <span>+ {fmtMoney(savedTotalTax)}</span>
+                    <span className="font-medium">Tax (GST/Adv):</span>
+                    <span className="font-mono font-semibold">+ {fmtMoney(savedTotalTax)}</span>
                   </div>
                 )}
-                <div className="flex justify-between font-black text-xs border-t border-slate-900 pt-1 mt-1">
+                <div
+                  className={`flex justify-between items-baseline font-black border-t-2 border-slate-950 pt-1.5 mt-1.5 ${
+                    format === '80mm' ? 'text-base' : 'text-sm'
+                  }`}
+                >
                   <span>{isReturn ? 'NET RETURN:' : 'NET TOTAL:'}</span>
-                  <span>Rs. {fmtMoney(savedNetTotal)}</span>
+                  <span className="font-mono">Rs. {fmtMoney(savedNetTotal)}</span>
                 </div>
                 {!isReturn && showPrevBalance && savedPrevBalance > 0 && (
-                  <div className="flex justify-between">
+                  <div className="flex justify-between pt-0.5">
                     <span>Prev Balance:</span>
-                    <span>{fmtMoney(savedPrevBalance)}</span>
+                    <span className="font-mono font-semibold">{fmtMoney(savedPrevBalance)}</span>
                   </div>
                 )}
                 {showPaid && (
-                  <div className="flex justify-between font-bold">
+                  <div
+                    className={`flex justify-between font-bold ${
+                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                    }`}
+                  >
                     <span>{isReturn ? 'Refunded:' : 'Paid:'}</span>
-                    <span>Rs. {fmtMoney(savedPaidAmount)}</span>
+                    <span className="font-mono">Rs. {fmtMoney(savedPaidAmount)}</span>
                   </div>
                 )}
                 {!isReturn && showRemaining && (
-                  <div className="flex justify-between font-bold">
+                  <div
+                    className={`flex justify-between font-bold ${
+                      format === '80mm' ? 'text-[13.5px]' : 'text-xs'
+                    }`}
+                  >
                     <span>Balance Due:</span>
-                    <span>Rs. {fmtMoney(savedRemainingBalance)}</span>
+                    <span className="font-mono">Rs. {fmtMoney(savedRemainingBalance)}</span>
                   </div>
                 )}
               </div>
 
               {/* Thermal Signature & Footer */}
               {fields.showSignature && (
-                <div className="pt-3 pb-1 text-center text-[9px] text-slate-700">
-                  <div className="border-t border-slate-400 w-3/4 mx-auto pt-0.5">
+                <div
+                  className={`pt-4 pb-1.5 text-center text-slate-800 ${
+                    format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
+                  }`}
+                >
+                  <div className="border-t border-slate-500 w-3/4 mx-auto pt-1 font-semibold">
                     Authorized Signature
                   </div>
                 </div>
               )}
 
               {showFooterNote && (
-                <div className="text-center text-[9px] leading-snug text-slate-700 mt-1 space-y-1">
+                <div
+                  className={`text-center leading-snug text-slate-800 mt-1.5 space-y-1 ${
+                    format === '80mm' ? 'text-[11.5px]' : 'text-[10.5px]'
+                  }`}
+                >
                   {footerMessage && <p className="whitespace-pre-line">{footerMessage}</p>}
-                  {customTerms && <p className="whitespace-pre-line text-[8px] text-slate-600">{customTerms}</p>}
-                  {thankYouMessage && <p className="font-bold mt-1 text-slate-900">{thankYouMessage}</p>}
+                  {customTerms && (
+                    <p
+                      className={`whitespace-pre-line text-slate-700 ${
+                        format === '80mm' ? 'text-[11px]' : 'text-[10.5px]'
+                      }`}
+                    >
+                      {customTerms}
+                    </p>
+                  )}
+                  {thankYouMessage && (
+                    <p
+                      className={`font-black mt-1 text-slate-950 ${
+                        format === '80mm' ? 'text-[13px]' : 'text-xs'
+                      }`}
+                    >
+                      {thankYouMessage}
+                    </p>
+                  )}
                 </div>
               )}
             </div>

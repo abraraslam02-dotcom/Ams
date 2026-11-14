@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   RefreshCw, ChevronRight, Home, Wifi, WifiOff, Clock, ChevronDown,
-  Users2, ShieldCheck, Trash2, LogOut, CheckCircle2, AlertTriangle, CloudUpload, Download, Database, SlidersHorizontal,
+  Users2, ShieldCheck, Trash2, LogOut, CheckCircle2, AlertTriangle, CloudUpload, Download, Database, SlidersHorizontal, Cloud,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useFirebase } from '../../context/FirebaseContext';
 import { DatabaseDiagnostics } from '../../types/database';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
 
@@ -25,6 +26,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onNavigateToUsers, onNavigateToMoreOptions, onNavigateToAudit, onNavigateToClearDemoData, compact = false,
 }) => {
   const { user, isSuperAdmin, logout } = useAuth();
+  const { firebaseUser, firestoreStatus, signInWithGoogle, signOutFirebase } = useFirebase();
   const [now, setNow] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncPopoverOpen, setSyncPopoverOpen] = useState(false);
@@ -280,7 +282,18 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             {isSuperAdmin && onNavigateToMoreOptions && item(<SlidersHorizontal className="w-4 h-4 text-emerald-600" />, 'Sales Invoice More Options', onNavigateToMoreOptions)}
             {item(<ShieldCheck className="w-4 h-4 text-slate-600" />, 'System Logs', onNavigateToAudit)}
             {item(<Database className="w-4 h-4 text-slate-600" />, 'Database Status', onNavigateToClearDemoData)}
-            
+            {item(
+              <Cloud className={`w-4 h-4 ${firestoreStatus === 'connected' ? 'text-indigo-600' : 'text-slate-400'}`} />,
+              firebaseUser ? `Google: ${firebaseUser.email?.split('@')[0]} (Sign Out)` : 'Connect Google Cloud',
+              () => {
+                if (firebaseUser) {
+                  void signOutFirebase();
+                } else {
+                  void signInWithGoogle().catch(() => {});
+                }
+              }
+            )}
+
             <div className="my-1 border-t border-slate-100" />
             {item(<LogOut className="w-4 h-4 text-rose-600" />, 'Log Out', () => { logout(); }, true)}
           </div>

@@ -933,10 +933,10 @@ systemRouter.post('/backups/verify', authenticateToken, async (req: Request, res
  * Restores a verified backup after creating an automatic pre-restoration safety backup.
  */
 systemRouter.post('/backups/restore', authenticateToken, async (req: Request, res: Response) => {
-  if (req.user?.role !== 'Super Admin' && req.user?.role !== 'Administrator') {
+  if (req.user?.role !== 'Super Admin') {
     return res.status(403).json({
       success: false,
-      error: 'Access Denied: Only Super Admin or Administrator can restore the database.',
+      error: 'Access Denied: Only Super Admin can restore the database.',
     });
   }
 

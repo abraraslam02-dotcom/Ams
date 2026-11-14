@@ -30,6 +30,7 @@ import {
   Download,
   ArrowLeft,
   MessageSquare,
+  PackageSearch,
 } from 'lucide-react';
 import { Item } from '../../types/item';
 import { Account, FilerStatus } from '../../types/account';
@@ -55,6 +56,7 @@ import { PurchaseReportsPanel } from './PurchaseReportsPanel';
 import { NumericInput } from '../common/NumericInput';
 import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
+import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { generatePurchaseOrderSmsText } from '../../utils/invoiceSms';
 
 export type PurchaseSubTab =
@@ -303,6 +305,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [rowItemSearchQuery, setRowItemSearchQuery] = useState<string>('');
   const [rowItemHighlightIndex, setRowItemHighlightIndex] = useState<number>(0);
   const purchaseSearchReqIdRef = useRef<number>(0);
+
+  // Shared Item Selection List Modal State (Reuses Sales ItemListSelectionModal)
+  const [showPurchaseItemListModal, setShowPurchaseItemListModal] = useState<boolean>(false);
+  const [purchaseItemListTargetRowIdx, setPurchaseItemListTargetRowIdx] = useState<number | null>(null);
+  const suppressItemListReopenRef = useRef<boolean>(false);
+  const purchaseItemListOriginRef = useRef<'pos_row' | 'access_row' | 'top'>('top');
+  const lastPurchaseItemListTriggerElIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
@@ -706,6 +715,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   // Unified High-Performance Instant Item Search Engine (Pre-indexed, <1ms query response)
   const indexedPurchaseItems = useMemo(() => prepareItemIndex(items), [items]);
+
+  const stockPacksByItemId = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const b of batches) {
+      const itemId = Number(b.item_id);
+      if (!itemId) continue;
+      map.set(itemId, round2((map.get(itemId) || 0) + Number(b.current_pack_qty || 0)));
+    }
+    return map;
+  }, [batches]);
 
   const computeFilteredItems = useCallback(
     (queryStr: string, showDefaultWhenEmpty: boolean = true): Item[] => {
@@ -1226,7 +1245,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     focusTargetElementById(prompt.nextFocusTargetId);
   };
 
-  // Populate a specific row with an Item (used by inline datasheet cells, preventing unnecessary duplicates)
+  // Populate a specific row with an Item (used by Item Selection List modal & inline cells, preventing unnecessary duplicates)
   const populatePurchaseRowWithItem = (idx: number, found: Item, fromPosRow: boolean = true) => {
     const existingDuplicateIdx = lines.findIndex((l, i) => i !== idx && l.item_id === found.id);
     if (existingDuplicateIdx >= 0) {
@@ -1243,6 +1262,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setRowItemSearchQuery('');
       setPurchaseSearchQuery('');
       setShowPurchaseSearchDropdown(false);
+      if (purchaseViewMode === 'pos' && fromPosRow) {
+        posDatasheetMouseActivatedRef.current = true;
+      }
       setTimeout(() => {
         if (purchaseViewMode === 'pos') {
           if (fromPosRow) {
@@ -1259,13 +1281,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         } else {
           focusPurchaseCell(existingDuplicateIdx, 'quantity', 'pur_cell');
         }
-      }, 25);
+      }, 35);
       return;
     }
 
     setLines((prev) => {
       const copy = [...prev];
-      copy[idx] = buildPopulatedLineFromItem(found, copy[idx]);
+      const existingSameItem = copy[idx]?.item_id === found.id ? copy[idx] : undefined;
+      while (copy.length <= idx) {
+        copy.push(createBlankPurchaseLine());
+      }
+      copy[idx] = buildPopulatedLineFromItem(found, existingSameItem);
       return ensureMinimumPurchaseRows(copy, visibleRowCapacityRef.current, idx);
     });
     setSelectedPurchaseLineIndex(idx);
@@ -1273,6 +1299,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setRowItemSearchQuery('');
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
+    if (purchaseViewMode === 'pos' && fromPosRow) {
+      posDatasheetMouseActivatedRef.current = true;
+    }
     setTimeout(() => {
       if (purchaseViewMode === 'pos') {
         if (fromPosRow) {
@@ -1287,7 +1316,72 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       } else {
         focusPurchaseCell(idx, 'quantity', 'pur_cell');
       }
-    }, 25);
+    }, 35);
+  };
+
+  const openPurchaseItemListForRow = (
+    rowIdx: number | null,
+    origin: 'pos_row' | 'access_row' | 'top' = 'top',
+    triggerElId?: string
+  ) => {
+    if (suppressItemListReopenRef.current || showPurchaseItemListModal) return;
+    setShowPurchaseSearchDropdown(false);
+    setActiveRowItemSearchIdx(null);
+    setRowItemSearchQuery('');
+    if (rowIdx !== null) {
+      setSelectedPurchaseLineIndex(rowIdx);
+    }
+    if (origin === 'pos_row') {
+      posDatasheetMouseActivatedRef.current = true;
+    }
+    purchaseItemListOriginRef.current = origin;
+    lastPurchaseItemListTriggerElIdRef.current = triggerElId || null;
+    setPurchaseItemListTargetRowIdx(rowIdx);
+    setShowPurchaseItemListModal(true);
+  };
+
+  const closePurchaseItemListModal = () => {
+    const triggerElId = lastPurchaseItemListTriggerElIdRef.current;
+    suppressItemListReopenRef.current = true;
+    setShowPurchaseItemListModal(false);
+    setPurchaseItemListTargetRowIdx(null);
+    if (triggerElId) {
+      setTimeout(() => {
+        const el = document.getElementById(triggerElId) as HTMLInputElement | null;
+        el?.focus();
+      }, 10);
+    }
+    setTimeout(() => {
+      suppressItemListReopenRef.current = false;
+    }, 260);
+  };
+
+  const handleSelectItemFromPurchaseListModal = (chosen: Item) => {
+    suppressItemListReopenRef.current = true;
+    setTimeout(() => {
+      suppressItemListReopenRef.current = false;
+    }, 260);
+
+    const origin = purchaseItemListOriginRef.current;
+    const targetRowIdx = purchaseItemListTargetRowIdx;
+    setShowPurchaseItemListModal(false);
+    setPurchaseItemListTargetRowIdx(null);
+
+    if (targetRowIdx !== null) {
+      const fromPosRow = purchaseViewMode === 'pos' && origin === 'pos_row';
+      populatePurchaseRowWithItem(targetRowIdx, chosen, fromPosRow);
+      return;
+    }
+
+    const existingDuplicateIdx = lines.findIndex((l) => l.item_id === chosen.id);
+    const emptyIdx = lines.findIndex((l) => !l.item_id || l.item_id === 0);
+    const rowIdxToFill =
+      existingDuplicateIdx >= 0
+        ? existingDuplicateIdx
+        : emptyIdx >= 0
+        ? emptyIdx
+        : lines.length;
+    populatePurchaseRowWithItem(rowIdxToFill, chosen, false);
   };
 
   const handleLineChange = (
@@ -1353,6 +1447,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     } else {
       setLines((prev) => [...prev, createBlankPurchaseLine()]);
       setSelectedPurchaseLineIndex(targetIdx);
+    }
+    if (purchaseViewMode === 'pos') {
+      posDatasheetMouseActivatedRef.current = true;
     }
     const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
     setTimeout(() => {
@@ -1599,15 +1696,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   };
 
   // POS Active Strip Enter Key Sequence:
-  // 1. Quantity -> 2. Bonus -> 3. Purchase Rate -> 4. Discount % -> 5. GST % -> 6. Batch # -> 7. Expiry -> Enter -> returns focus to Item Search!
+  // 1.Qty -> 2.Discount -> 3.Bonus -> 4.Batch # -> 5.Expiry -> 6.Purchase Rate -> 7.MRP -> 8.GST -> Enter -> returns focus to Item Search!
   const posActiveFieldOrder = [
     'pos_active_quantity',
-    'pos_active_bonus_quantity',
-    'pos_active_purchase_rate',
     'pos_active_discount_percent',
-    'pos_active_tax_percent',
+    'pos_active_bonus_quantity',
     'pos_active_batch_number',
     'pos_active_expiry_date',
+    'pos_active_purchase_rate',
+    'pos_active_mrp_rate',
+    'pos_active_tax_percent',
   ];
 
   const handlePosActiveFieldKeyDown = (
@@ -1618,7 +1716,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
       e.preventDefault();
       if (fieldId === 'pos_active_purchase_rate') {
-        const nextTarget = posActiveFieldOrder[idx + 1] || 'pos_active_discount_percent';
+        const nextTarget = posActiveFieldOrder[idx + 1] || 'pos_active_mrp_rate';
         if (checkAndTriggerPurchasePriceChange(selectedPurchaseLineIndex, nextTarget)) {
           return;
         }
@@ -1693,30 +1791,30 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   };
 
   // Datasheet Cell Keyboard Navigation Sequence (Both POS Table & MS Access Datasheet)
-  // Access Column Sequence: Item Code -> Item Name -> Qty -> Discount -> Loose Qty -> Price -> Bonus Qty -> Loose Rate -> Batch # -> Expiry Date -> GST %
+  // Column Sequence: Item Code -> Item Name -> Qty -> Discount -> Bonus -> Gross Amount -> Net Amount -> Packing -> Batch/Expiry -> Purchase Rate -> MRP -> GST -> Taxable -> Line Total
   const purchaseAccessColOrder = [
     'item_code',
     'item_name',
     'quantity',
     'discount_percent',
-    'loose_quantity',
-    'purchase_rate',
     'bonus_quantity',
-    'loose_rate',
     'batch_number',
     'expiry_date',
+    'purchase_rate',
+    'mrp_rate',
     'tax_percent',
   ];
 
   const purchasePosColOrder = [
     'item_code',
     'item_name',
+    'quantity',
+    'discount_percent',
+    'bonus_quantity',
     'batch_number',
     'expiry_date',
-    'quantity',
-    'bonus_quantity',
     'purchase_rate',
-    'discount_percent',
+    'mrp_rate',
     'tax_percent',
   ];
 
@@ -1867,8 +1965,22 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
 
     if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+      if (
+        e.key === 'Enter' &&
+        (field === 'item_code' || field === 'item_name') &&
+        (!lines[rowIdx]?.item_id || lines[rowIdx]?.item_id === 0)
+      ) {
+        e.preventDefault();
+        suppressItemListReopenRef.current = false;
+        openPurchaseItemListForRow(
+          rowIdx,
+          prefix === 'pos_row' ? 'pos_row' : 'access_row',
+          `${prefix}_${rowIdx}_${field}`
+        );
+        return;
+      }
       if (field === 'purchase_rate') {
-        const nextCol = colOrder[curColIdx + 1] || 'discount_percent';
+        const nextCol = colOrder[curColIdx + 1] || 'mrp_rate';
         if (
           checkAndTriggerPurchasePriceChange(rowIdx, `${prefix}_${rowIdx}_${nextCol}`)
         ) {
@@ -3385,6 +3497,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                   <button
                     type="button"
+                    onClick={() => openPurchaseItemListForRow(null, 'top')}
+                    className="px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 shadow-sm h-6"
+                    title="Open Full Item List to select or replace an item"
+                  >
+                    <PackageSearch className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Item List</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={addLineRow}
                     className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 shadow-sm h-6"
                     title="Add New Empty Row to Purchase Bill"
@@ -3417,12 +3538,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </span>
                   </div>
 
-                  {/* Fast Stepper Controls for Active Row: 1. Qty -> 2. Bonus -> 3. Pur. Rate -> 4. Disc % -> 5. GST % -> 6. Batch # -> 7. Expiry -> Next Item */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-1.5 items-end">
-                    {/* 1. Quantity */}
+                  {/* Fast Stepper Controls for Active Row: Qty -> Discount -> Bonus -> Batch/Expiry -> Purchase Rate -> MRP -> GST -> Next Item */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-9 gap-1.5 items-end">
+                    {/* 1. Qty */}
                     <div>
                       <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        1. Qty (Packs)
+                        1. Qty
                       </label>
                       <div className="flex items-center border border-slate-300 rounded-lg bg-white overflow-hidden h-5">
                         <button
@@ -3451,10 +3572,32 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       </div>
                     </div>
 
-                    {/* 2. Bonus Qty */}
+                    {/* 2. Discount */}
+                    <div>
+                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
+                        2. Discount %
+                      </label>
+                      <NumericInput
+                        id="pos_active_discount_percent"
+                        value={activePurchaseRow.discount_percent}
+                        onChange={(e) =>
+                          handleLineChange(
+                            selectedPurchaseLineIndex,
+                            'discount_percent',
+                            e.target.value
+                          )
+                        }
+                        onKeyDown={(e) =>
+                          handlePosActiveFieldKeyDown(e, 'pos_active_discount_percent')
+                        }
+                        className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
+                      />
+                    </div>
+
+                    {/* 3. Bonus */}
                     <div>
                       <label className="block text-[9px] font-bold uppercase text-teal-800 leading-none mb-0.5">
-                        2. Bonus Qty
+                        3. Bonus
                       </label>
                       <div className="flex items-center border border-teal-300 rounded-lg bg-white overflow-hidden h-5">
                         <button
@@ -3489,10 +3632,48 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       </div>
                     </div>
 
-                    {/* 3. Purchase Rate */}
+                    {/* 4. Batch # */}
                     <div>
                       <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        3. Pur. Rate
+                        4. Batch #
+                      </label>
+                      <input
+                        id="pos_active_batch_number"
+                        type="text"
+                        value={activePurchaseRow.batch_number}
+                        onChange={(e) =>
+                          handleLineChange(
+                            selectedPurchaseLineIndex,
+                            'batch_number',
+                            e.target.value
+                          )
+                        }
+                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_batch_number')}
+                        className="w-full px-1.5 py-0 font-mono font-bold text-[11px] rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
+                      />
+                    </div>
+
+                    {/* 5. Expiry Date */}
+                    <div>
+                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
+                        5. Expiry
+                      </label>
+                      <input
+                        id="pos_active_expiry_date"
+                        type="date"
+                        value={activePurchaseRow.expiry_date}
+                        onChange={(e) =>
+                          handleLineChange(selectedPurchaseLineIndex, 'expiry_date', e.target.value)
+                        }
+                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_expiry_date')}
+                        className="w-full px-1 py-0 font-mono text-[10px] rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
+                      />
+                    </div>
+
+                    {/* 6. Purchase Rate */}
+                    <div>
+                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
+                        6. Purchase Rate
                       </label>
                       <NumericInput
                         id="pos_active_purchase_rate"
@@ -3514,32 +3695,30 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       />
                     </div>
 
-                    {/* 4. Discount % */}
+                    {/* 7. MRP */}
                     <div>
                       <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        4. Disc %
+                        7. MRP
                       </label>
                       <NumericInput
-                        id="pos_active_discount_percent"
-                        value={activePurchaseRow.discount_percent}
+                        id="pos_active_mrp_rate"
+                        value={activePurchaseRow.mrp_rate}
                         onChange={(e) =>
                           handleLineChange(
                             selectedPurchaseLineIndex,
-                            'discount_percent',
+                            'mrp_rate',
                             e.target.value
                           )
                         }
-                        onKeyDown={(e) =>
-                          handlePosActiveFieldKeyDown(e, 'pos_active_discount_percent')
-                        }
+                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_mrp_rate')}
                         className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
                       />
                     </div>
 
-                    {/* 5. GST % */}
+                    {/* 8. GST % */}
                     <div>
                       <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        5. GST %
+                        8. GST %
                       </label>
                       <NumericInput
                         id="pos_active_tax_percent"
@@ -3549,44 +3728,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         }
                         onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_tax_percent')}
                         className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 6. Batch # */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        6. Batch #
-                      </label>
-                      <input
-                        id="pos_active_batch_number"
-                        type="text"
-                        value={activePurchaseRow.batch_number}
-                        onChange={(e) =>
-                          handleLineChange(
-                            selectedPurchaseLineIndex,
-                            'batch_number',
-                            e.target.value
-                          )
-                        }
-                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_batch_number')}
-                        className="w-full px-1.5 py-0 font-mono font-bold text-[11px] rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 7. Expiry Date */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        7. Expiry
-                      </label>
-                      <input
-                        id="pos_active_expiry_date"
-                        type="date"
-                        value={activePurchaseRow.expiry_date}
-                        onChange={(e) =>
-                          handleLineChange(selectedPurchaseLineIndex, 'expiry_date', e.target.value)
-                        }
-                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_expiry_date')}
-                        className="w-full px-1 py-0 font-mono text-[10px] rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
                       />
                     </div>
 
@@ -3636,22 +3777,25 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   }}
                   className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative"
                 >
-                  <table className="w-full min-w-[1500px] text-left text-[11px] border-collapse leading-none">
+                  <table className="w-full min-w-[1680px] text-left text-[11px] border-collapse leading-none">
                     <thead className="sticky top-0 z-10 bg-slate-100 border-b border-slate-200 text-slate-600 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
                       <tr className="h-6">
-                        <th className="py-0 px-2 w-10 text-center h-6">#</th>
-                        <th className="py-0 px-2 w-32 h-6">Item Code</th>
-                        <th className="py-0 px-2 min-w-[280px] h-6">Item Name &amp; Company</th>
-                        <th className="py-0 px-2 w-20 text-center h-6">Pack</th>
-                        <th className="py-0 px-2 w-32 h-6">Batch #</th>
-                        <th className="py-0 px-2 w-28 h-6">Expiry</th>
-                        <th className="py-0 px-2 w-24 text-center h-6">1. Qty</th>
-                        <th className="py-0 px-2 w-24 text-center h-6">2. Bonus</th>
-                        <th className="py-0 px-2 w-28 text-right h-6">3. Pur. Rate</th>
-                        <th className="py-0 px-2 w-28 text-right h-6">4. Disc %</th>
-                        <th className="py-0 px-2 w-20 text-right h-6">5. GST %</th>
-                        <th className="py-0 px-2 w-32 text-right h-6">Total (PKR)</th>
-                        <th className="py-0 px-2 w-12 text-center h-6"></th>
+                        <th className="py-0 px-2 w-8 text-center h-6">#</th>
+                        <th className="py-0 px-2 w-28 h-6">Item Code</th>
+                        <th className="py-0 px-2 min-w-[240px] h-6">Item Name</th>
+                        <th className="py-0 px-2 w-20 text-right h-6">Qty</th>
+                        <th className="py-0 px-2 w-20 text-right h-6">Discount</th>
+                        <th className="py-0 px-2 w-20 text-right h-6">Bonus</th>
+                        <th className="py-0 px-2 w-24 text-right h-6">Gross Amount</th>
+                        <th className="py-0 px-2 w-24 text-right h-6">Net Amount</th>
+                        <th className="py-0 px-2 w-20 text-center h-6">Packing</th>
+                        <th className="py-0 px-2 w-56 h-6">Batch/Expiry</th>
+                        <th className="py-0 px-2 w-28 text-right h-6">Purchase Rate</th>
+                        <th className="py-0 px-2 w-24 text-right h-6">MRP</th>
+                        <th className="py-0 px-2 w-20 text-right h-6">GST</th>
+                        <th className="py-0 px-2 w-24 text-right h-6">Taxable</th>
+                        <th className="py-0 px-2 w-28 text-right h-6">Line Total</th>
+                        <th className="py-0 px-2 w-10 text-center h-6"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
@@ -3682,8 +3826,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     ? rowItemSearchQuery
                                     : line.item_code
                                 }
+                                onMouseDown={() => {
+                                  suppressItemListReopenRef.current = false;
+                                  posDatasheetMouseActivatedRef.current = true;
+                                }}
+                                onClick={() => {
+                                  setSelectedPurchaseLineIndex(rIdx);
+                                  openPurchaseItemListForRow(
+                                    rIdx,
+                                    'pos_row',
+                                    `pos_row_${rIdx}_item_code`
+                                  );
+                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(rIdx);
+                                  posDatasheetMouseActivatedRef.current = true;
+                                  openPurchaseItemListForRow(
+                                    rIdx,
+                                    'pos_row',
+                                    `pos_row_${rIdx}_item_code`
+                                  );
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
@@ -3754,7 +3916,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   handlePurchaseCellKeyDown(e, rIdx, 'item_code', 'pos_row');
                                 }}
                                 placeholder="Code..."
-                                className="w-full px-1 py-0 font-mono font-bold text-[11px] text-emerald-800 bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 font-mono font-bold text-[11px] text-emerald-800 bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none cursor-pointer"
                               />
                             </td>
                             <td className="p-0 h-[16px] align-middle relative min-w-[200px]">
@@ -3768,8 +3930,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     ? `${line.item_name}${line.company_name ? ` (${line.company_name})` : ''}`
                                     : ''
                                 }
+                                onMouseDown={() => {
+                                  suppressItemListReopenRef.current = false;
+                                  posDatasheetMouseActivatedRef.current = true;
+                                }}
+                                onClick={() => {
+                                  setSelectedPurchaseLineIndex(rIdx);
+                                  openPurchaseItemListForRow(
+                                    rIdx,
+                                    'pos_row',
+                                    `pos_row_${rIdx}_item_name`
+                                  );
+                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(rIdx);
+                                  posDatasheetMouseActivatedRef.current = true;
+                                  openPurchaseItemListForRow(
+                                    rIdx,
+                                    'pos_row',
+                                    `pos_row_${rIdx}_item_name`
+                                  );
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
@@ -3839,44 +4019,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   }
                                   handlePurchaseCellKeyDown(e, rIdx, 'item_name', 'pos_row');
                                 }}
-                                placeholder="Search Item Name, Company, Code, Barcode..."
-                                className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
+                                placeholder="Click or Focus for Item List..."
+                                className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none cursor-pointer"
                               />
                               {renderRowItemSearchCombobox(rIdx, true)}
                             </td>
-                            <td className="py-0 px-1 text-center font-mono text-[10px] text-slate-700 h-[16px] align-middle">
-                              {line.item_id ? line.packing : ''}
-                            </td>
-                            <td className="p-0 h-[16px] align-middle">
-                              <input
-                                id={`pos_row_${rIdx}_batch_number`}
-                                type="text"
-                                value={line.batch_number}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(rIdx, 'batch_number', e.target.value)
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'batch_number', 'pos_row')
-                                }
-                                className="w-full px-1 py-0 font-mono text-[10px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
-                            <td className="p-0 h-[16px] align-middle">
-                              <input
-                                id={`pos_row_${rIdx}_expiry_date`}
-                                type="date"
-                                value={line.item_id ? line.expiry_date : ''}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(rIdx, 'expiry_date', e.target.value)
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'expiry_date', 'pos_row')
-                                }
-                                className="w-full px-1 py-0 font-mono text-[10px] text-slate-700 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
+                            {/* 3. Qty */}
                             <td className="p-0 h-[16px] align-middle">
                               <NumericInput
                                 id={`pos_row_${rIdx}_quantity`}
@@ -3892,9 +4040,31 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 onKeyDown={(e) =>
                                   handlePurchaseCellKeyDown(e, rIdx, 'quantity', 'pos_row')
                                 }
-                                className="w-full px-1 py-0 text-center font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                               />
                             </td>
+
+                            {/* 4. Discount */}
+                            <td className="p-0 text-right h-[16px] align-middle">
+                              <NumericInput
+                                id={`pos_row_${rIdx}_discount_percent`}
+                                value={line.item_id ? line.discount_percent : 0}
+                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                onChange={(e) =>
+                                  handleLineChange(
+                                    rIdx,
+                                    'discount_percent',
+                                    parseFloat(e.target.value) || 0
+                                  )
+                                }
+                                onKeyDown={(e) =>
+                                  handlePurchaseCellKeyDown(e, rIdx, 'discount_percent', 'pos_row')
+                                }
+                                className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                              />
+                            </td>
+
+                            {/* 5. Bonus */}
                             <td className="p-0 h-[16px] align-middle">
                               <NumericInput
                                 id={`pos_row_${rIdx}_bonus_quantity`}
@@ -3910,9 +4080,63 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 onKeyDown={(e) =>
                                   handlePurchaseCellKeyDown(e, rIdx, 'bonus_quantity', 'pos_row')
                                 }
-                                className="w-full px-1 py-0 text-center font-mono font-bold text-[11px] text-teal-900 border border-transparent focus:border-teal-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-teal-900 border border-transparent focus:border-teal-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                               />
                             </td>
+
+                            {/* 6. Gross Amount */}
+                            <td className="py-0 px-1.5 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle">
+                              {line.item_id && line.gross_amount > 0
+                                ? formatPKR(line.gross_amount)
+                                : ''}
+                            </td>
+
+                            {/* 7. Net Amount */}
+                            <td className="py-0 px-1.5 text-right font-mono font-semibold text-slate-900 text-[11px] h-[16px] align-middle">
+                              {line.item_id && line.taxable_amount > 0
+                                ? formatPKR(line.taxable_amount)
+                                : ''}
+                            </td>
+
+                            {/* 8. Packing */}
+                            <td className="py-0 px-1 text-center font-mono text-[10px] text-slate-700 h-[16px] align-middle">
+                              {line.item_id ? line.packing : ''}
+                            </td>
+
+                            {/* 9. Batch/Expiry */}
+                            <td className="p-0 h-[16px] align-middle">
+                              <div className="flex items-center gap-0.5 h-[15px]">
+                                <input
+                                  id={`pos_row_${rIdx}_batch_number`}
+                                  type="text"
+                                  placeholder="Batch #"
+                                  value={line.batch_number}
+                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                  onChange={(e) =>
+                                    handleLineChange(rIdx, 'batch_number', e.target.value)
+                                  }
+                                  onKeyDown={(e) =>
+                                    handlePurchaseCellKeyDown(e, rIdx, 'batch_number', 'pos_row')
+                                  }
+                                  className="w-24 px-1 py-0 font-mono text-[10px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                />
+                                <input
+                                  id={`pos_row_${rIdx}_expiry_date`}
+                                  type="date"
+                                  value={line.item_id ? line.expiry_date : ''}
+                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                  onChange={(e) =>
+                                    handleLineChange(rIdx, 'expiry_date', e.target.value)
+                                  }
+                                  onKeyDown={(e) =>
+                                    handlePurchaseCellKeyDown(e, rIdx, 'expiry_date', 'pos_row')
+                                  }
+                                  className="w-28 px-1 py-0 font-mono text-[10px] text-slate-700 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                />
+                              </div>
+                            </td>
+
+                            {/* 10. Purchase Rate */}
                             <td className="p-0 text-right h-[16px] align-middle">
                               <NumericInput
                                 id={`pos_row_${rIdx}_purchase_rate`}
@@ -3934,24 +4158,28 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                               />
                             </td>
+
+                            {/* 11. MRP */}
                             <td className="p-0 text-right h-[16px] align-middle">
                               <NumericInput
-                                id={`pos_row_${rIdx}_discount_percent`}
-                                value={line.item_id ? line.discount_percent : 0}
+                                id={`pos_row_${rIdx}_mrp_rate`}
+                                value={line.item_id ? line.mrp_rate : 0}
                                 onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
                                 onChange={(e) =>
                                   handleLineChange(
                                     rIdx,
-                                    'discount_percent',
+                                    'mrp_rate',
                                     parseFloat(e.target.value) || 0
                                   )
                                 }
                                 onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'discount_percent', 'pos_row')
+                                  handlePurchaseCellKeyDown(e, rIdx, 'mrp_rate', 'pos_row')
                                 }
-                                className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-700 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                               />
                             </td>
+
+                            {/* 12. GST */}
                             <td className="p-0 text-right h-[16px] align-middle">
                               <NumericInput
                                 id={`pos_row_${rIdx}_tax_percent`}
@@ -3970,21 +4198,48 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                               />
                             </td>
+
+                            {/* 13. Taxable */}
+                            <td className="py-0 px-1.5 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle">
+                              {line.item_id && line.taxable_amount > 0
+                                ? formatPKR(line.taxable_amount)
+                                : ''}
+                            </td>
+
+                            {/* 14. Line Total */}
                             <td className="py-0 px-1.5 text-right font-mono font-black text-slate-900 text-[11px] h-[16px] align-middle">
                               {line.line_total > 0 ? formatPKR(line.line_total) : ''}
                             </td>
-                            <td className="py-0 px-1 text-center h-[16px] align-middle">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  removeLineRow(rIdx);
-                                }}
-                                className="p-0 text-slate-400 hover:text-rose-600 cursor-pointer leading-none"
-                                title="Delete item row"
-                              >
-                                <Trash2 className="w-3 h-3 inline" />
-                              </button>
+                            <td className="py-0 px-1 text-center h-[16px] align-middle whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    suppressItemListReopenRef.current = false;
+                                    openPurchaseItemListForRow(
+                                      rIdx,
+                                      'pos_row',
+                                      `pos_row_${rIdx}_item_code`
+                                    );
+                                  }}
+                                  className="p-0 text-slate-400 hover:text-emerald-700 cursor-pointer leading-none"
+                                  title="Select or change item from Item List"
+                                >
+                                  <PackageSearch className="w-3 h-3 inline" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    removeLineRow(rIdx);
+                                  }}
+                                  className="p-0 text-slate-400 hover:text-rose-600 cursor-pointer leading-none"
+                                  title="Delete item row"
+                                >
+                                  <Trash2 className="w-3 h-3 inline" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -4624,6 +4879,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
+                      onClick={() =>
+                        openPurchaseItemListForRow(selectedPurchaseLineIndex, 'access_row')
+                      }
+                      className="px-2 py-0 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
+                      title="Open Item List to select or change item for the selected row"
+                    >
+                      <PackageSearch className="w-3 h-3 text-emerald-400" />
+                      Item List
+                    </button>
+                    <button
+                      type="button"
                       onClick={addLineRow}
                       className="px-2 py-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
                     >
@@ -4648,7 +4914,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   ref={accessGridViewportRef}
                   className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative"
                 >
-                  <table className="w-full min-w-[1620px] border-collapse text-[11px] font-sans leading-none">
+                  <table className="w-full min-w-[1680px] border-collapse text-[11px] font-sans leading-none">
                     <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                       <tr className="h-6">
                         <th className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 w-7 text-center font-mono h-6">
@@ -4657,7 +4923,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         <th className="border-r border-slate-300 px-1 py-0 w-28 text-left h-6">
                           Item Code
                         </th>
-                        <th className="border-r border-slate-300 px-1 py-0 min-w-[260px] text-left h-6">
+                        <th className="border-r border-slate-300 px-1 py-0 min-w-[240px] text-left h-6">
                           Item Name
                         </th>
                         <th className="border-r border-slate-300 px-1 py-0 w-20 text-right bg-emerald-100/60 text-emerald-950 h-6">
@@ -4666,35 +4932,35 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         <th className="border-r border-slate-300 px-1 py-0 w-20 text-right h-6">
                           Discount
                         </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right bg-teal-100/60 text-teal-950 h-6">
-                          Loose Qty
+                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-right bg-emerald-100/70 text-emerald-950 h-6">
+                          Bonus
                         </th>
                         <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
-                          Price
+                          Gross Amount
                         </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-right bg-emerald-100/70 text-emerald-950 h-6">
-                          Bonus Qty
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right bg-blue-100/60 text-blue-950 h-6">
-                          Loose Rate
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-32 text-left h-6">
-                          Company
+                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
+                          Net Amount
                         </th>
                         <th className="border-r border-slate-300 px-1 py-0 w-20 text-center h-6">
                           Packing
                         </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-28 text-left h-6">
-                          Batch #
+                        <th className="border-r border-slate-300 px-1 py-0 w-56 text-left h-6">
+                          Batch/Expiry
                         </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-28 text-left h-6">
-                          Expiry Date
+                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
+                          Purchase Rate
+                        </th>
+                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
+                          MRP
                         </th>
                         <th className="border-r border-slate-300 px-1 py-0 w-20 text-right h-6">
-                          GST %
+                          GST
+                        </th>
+                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
+                          Taxable
                         </th>
                         <th className="border-r border-slate-300 px-1 py-0 w-28 text-right bg-slate-300/60 font-black h-6">
-                          Amount
+                          Line Total
                         </th>
                         <th className="px-1 py-0 w-8 text-center h-6">Del</th>
                       </tr>
@@ -4723,7 +4989,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               )}
                             </td>
 
-                            {/* 1. Item Code (Searchable Cell; never pops open on focus/click) */}
+                            {/* 1. Item Code (Opens Shared Item Selection List on click or focus) */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                               <input
                                 id={`pur_cell_${idx}_item_code`}
@@ -4733,8 +4999,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     ? rowItemSearchQuery
                                     : line.item_code
                                 }
+                                onMouseDown={() => {
+                                  suppressItemListReopenRef.current = false;
+                                }}
+                                onClick={() => {
+                                  setSelectedPurchaseLineIndex(idx);
+                                  openPurchaseItemListForRow(
+                                    idx,
+                                    'access_row',
+                                    `pur_cell_${idx}_item_code`
+                                  );
+                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(idx);
+                                  openPurchaseItemListForRow(
+                                    idx,
+                                    'access_row',
+                                    `pur_cell_${idx}_item_code`
+                                  );
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
@@ -4805,11 +5087,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   handlePurchaseCellKeyDown(e, idx, 'item_code', 'pur_cell');
                                 }}
                                 placeholder="Code..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none cursor-pointer"
                               />
                             </td>
 
-                            {/* 2. Item Name (Excel-Style Searchable Combobox Cell; never overwrites saved name on typing/Esc) */}
+                            {/* 2. Item Name (Opens Shared Item Selection List on click or focus) */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                               <input
                                 id={`pur_cell_${idx}_item_name`}
@@ -4819,8 +5101,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     ? rowItemSearchQuery
                                     : line.item_name
                                 }
+                                onMouseDown={() => {
+                                  suppressItemListReopenRef.current = false;
+                                }}
+                                onClick={() => {
+                                  setSelectedPurchaseLineIndex(idx);
+                                  openPurchaseItemListForRow(
+                                    idx,
+                                    'access_row',
+                                    `pur_cell_${idx}_item_name`
+                                  );
+                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(idx);
+                                  openPurchaseItemListForRow(
+                                    idx,
+                                    'access_row',
+                                    `pur_cell_${idx}_item_name`
+                                  );
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
@@ -4890,8 +5188,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   }
                                   handlePurchaseCellKeyDown(e, idx, 'item_name', 'pur_cell');
                                 }}
-                                placeholder="Search Item Name, Company, Code..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                placeholder="Click or Focus for Item List..."
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none cursor-pointer"
                               />
                               {renderRowItemSearchCombobox(idx, false)}
                             </td>
@@ -4934,27 +5232,77 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
 
-                            {/* 5. Loose Qty */}
-                            <td className="border-r border-slate-300 p-0 bg-teal-50/20 h-[16px] align-middle">
+                            {/* 5. Bonus */}
+                            <td className="border-r border-slate-300 p-0 bg-emerald-50/40 h-[16px] align-middle">
                               <NumericInput
-                                id={`pur_cell_${idx}_loose_quantity`}
-                                value={line.item_id ? Number(line.loose_quantity || 0) : 0}
+                                id={`pur_cell_${idx}_bonus_quantity`}
+                                value={line.item_id ? line.bonus_quantity : 0}
                                 onFocus={() => setSelectedPurchaseLineIndex(idx)}
                                 onChange={(e) =>
                                   handleLineChange(
                                     idx,
-                                    'loose_quantity',
+                                    'bonus_quantity',
                                     parseFloat(e.target.value) || 0
                                   )
                                 }
                                 onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'loose_quantity')
+                                  handlePurchaseCellKeyDown(e, idx, 'bonus_quantity')
                                 }
-                                className="w-full px-1 py-0 border border-transparent focus:border-teal-600 focus:bg-white text-right font-mono font-bold text-teal-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                               />
                             </td>
 
-                            {/* 6. Price (Purchase Rate) */}
+                            {/* 6. Gross Amount */}
+                            <td className="border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle">
+                              {line.item_id && line.gross_amount > 0
+                                ? line.gross_amount.toFixed(2)
+                                : ''}
+                            </td>
+
+                            {/* 7. Net Amount */}
+                            <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-900 text-[11px] h-[16px] align-middle">
+                              {line.item_id && line.taxable_amount > 0
+                                ? line.taxable_amount.toFixed(2)
+                                : ''}
+                            </td>
+
+                            {/* 8. Packing */}
+                            <td className="border-r border-slate-300 px-1 py-0 text-center font-mono text-[9.5px] text-slate-800 h-[16px] align-middle">
+                              {line.item_id ? line.packing : ''}
+                            </td>
+
+                            {/* 9. Batch/Expiry */}
+                            <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
+                              <div className="flex items-center gap-0.5 h-[15px]">
+                                <input
+                                  id={`pur_cell_${idx}_batch_number`}
+                                  type="text"
+                                  placeholder="Batch #"
+                                  value={line.batch_number}
+                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                  onChange={(e) =>
+                                    handleLineChange(idx, 'batch_number', e.target.value)
+                                  }
+                                  onKeyDown={(e) =>
+                                    handlePurchaseCellKeyDown(e, idx, 'batch_number')
+                                  }
+                                  className="w-24 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
+                                />
+                                <input
+                                  id={`pur_cell_${idx}_expiry_date`}
+                                  type="date"
+                                  value={line.item_id ? line.expiry_date : ''}
+                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                  onChange={(e) =>
+                                    handleLineChange(idx, 'expiry_date', e.target.value)
+                                  }
+                                  onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'expiry_date')}
+                                  className="w-28 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
+                                />
+                              </div>
+                            </td>
+
+                            {/* 10. Purchase Rate */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
                               <NumericInput
                                 id={`pur_cell_${idx}_purchase_rate`}
@@ -4977,87 +5325,27 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
 
-                            {/* 7. Bonus Qty */}
-                            <td className="border-r border-slate-300 p-0 bg-emerald-50/40 h-[16px] align-middle">
+                            {/* 11. MRP */}
+                            <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
                               <NumericInput
-                                id={`pur_cell_${idx}_bonus_quantity`}
-                                value={line.item_id ? line.bonus_quantity : 0}
+                                id={`pur_cell_${idx}_mrp_rate`}
+                                value={line.item_id ? line.mrp_rate : 0}
                                 onFocus={() => setSelectedPurchaseLineIndex(idx)}
                                 onChange={(e) =>
                                   handleLineChange(
                                     idx,
-                                    'bonus_quantity',
+                                    'mrp_rate',
                                     parseFloat(e.target.value) || 0
                                   )
                                 }
                                 onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'bonus_quantity')
+                                  handlePurchaseCellKeyDown(e, idx, 'mrp_rate')
                                 }
-                                className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-800 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                               />
                             </td>
 
-                            {/* 8. Loose Rate */}
-                            <td className="border-r border-slate-300 p-0 bg-blue-50/20 h-[16px] align-middle">
-                              <NumericInput
-                                id={`pur_cell_${idx}_loose_rate`}
-                                value={line.item_id ? Number(line.loose_rate || 0) : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'loose_rate',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'loose_rate')}
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-blue-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 9. Company */}
-                            <td className="border-r border-slate-300 px-1 py-0 text-slate-700 truncate text-[10px] h-[16px] align-middle max-w-[110px]">
-                              {line.company_name || ''}
-                            </td>
-
-                            {/* 10. Packing */}
-                            <td className="border-r border-slate-300 px-1 py-0 text-center font-mono text-[9.5px] text-slate-800 h-[16px] align-middle">
-                              {line.item_id ? line.packing : ''}
-                            </td>
-
-                            {/* 11. Batch # */}
-                            <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
-                              <input
-                                id={`pur_cell_${idx}_batch_number`}
-                                type="text"
-                                value={line.batch_number}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(idx, 'batch_number', e.target.value)
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'batch_number')
-                                }
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 12. Expiry Date */}
-                            <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
-                              <input
-                                id={`pur_cell_${idx}_expiry_date`}
-                                type="date"
-                                value={line.item_id ? line.expiry_date : ''}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(idx, 'expiry_date', e.target.value)
-                                }
-                                onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'expiry_date')}
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 13. GST % */}
+                            {/* 12. GST */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
                               <NumericInput
                                 id={`pur_cell_${idx}_tax_percent`}
@@ -5075,21 +5363,46 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
 
-                            {/* 14. Amount */}
+                            {/* 13. Taxable */}
+                            <td className="border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle">
+                              {line.item_id && line.taxable_amount > 0
+                                ? line.taxable_amount.toFixed(2)
+                                : ''}
+                            </td>
+
+                            {/* 14. Line Total */}
                             <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-slate-900 bg-slate-50/50 text-[11px] h-[16px] align-middle">
                               {line.line_total > 0 ? line.line_total.toFixed(2) : ''}
                             </td>
 
-                            {/* Delete Row */}
-                            <td className="px-1 py-0 text-center h-[16px] align-middle">
-                              <button
-                                type="button"
-                                onClick={() => removeLineRow(idx)}
-                                className="text-rose-600 hover:text-rose-900 font-bold text-[9.5px] cursor-pointer px-0.5 leading-none"
-                                title="Delete line"
-                              >
-                                ✕
-                              </button>
+                            {/* Select Item List / Delete Row */}
+                            <td className="px-1 py-0 text-center h-[16px] align-middle whitespace-nowrap">
+                              <div className="inline-flex items-center justify-center gap-0.5 h-[15px]">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    suppressItemListReopenRef.current = false;
+                                    openPurchaseItemListForRow(
+                                      idx,
+                                      'access_row',
+                                      `pur_cell_${idx}_item_code`
+                                    );
+                                  }}
+                                  className="text-emerald-700 hover:text-emerald-950 font-bold text-[9.5px] cursor-pointer px-0.5 leading-none"
+                                  title="Select or change item from Item List"
+                                >
+                                  <PackageSearch className="w-3 h-3 inline" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeLineRow(idx)}
+                                  className="text-rose-600 hover:text-rose-900 font-bold text-[9.5px] cursor-pointer px-0.5 leading-none"
+                                  title="Delete line"
+                                >
+                                  ✕
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -6089,6 +6402,36 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           onClose={() => setShowPurchaseSmsModal(false)}
         />
       )}
+
+      {/* Shared Item Selection List Modal (Reused from Sales Module) */}
+      <ItemListSelectionModal
+        isOpen={showPurchaseItemListModal}
+        items={items}
+        indexedItems={indexedPurchaseItems}
+        targetRowIndex={purchaseItemListTargetRowIdx}
+        targetRowItem={
+          purchaseItemListTargetRowIdx !== null
+            ? lines[purchaseItemListTargetRowIdx]
+            : null
+        }
+        invoiceLabel="Purchase Invoice"
+        getItemRate={(it) =>
+          round2(
+            Number(it.purchase_price) ||
+              Number(it.trade_price) ||
+              Number(it.retail_price) ||
+              0
+          )
+        }
+        getItemStock={(it) =>
+          stockPacksByItemId.has(Number(it.id))
+            ? stockPacksByItemId.get(Number(it.id)) || 0
+            : Number(it.opening_stock || 0)
+        }
+        onSelectItem={handleSelectItemFromPurchaseListModal}
+        onSwitchToAddNewLine={() => setPurchaseItemListTargetRowIdx(null)}
+        onClose={closePurchaseItemListModal}
+      />
     </div>
   );
 };

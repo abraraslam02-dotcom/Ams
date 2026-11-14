@@ -1734,11 +1734,25 @@ syncRouter.get('/audit-logs', (req: Request, res: Response) => {
 
 /**
  * POST /api/sync/restore-cloud-records
- * Non-destructively restores client IndexedDB records (items, accounts, inventory, sales, purchases, cashBookVouchers)
- * into server SQLite whenever a newly republished Cloud Run container starts up empty.
+ * Manual Super Admin endpoint only. Automatic IndexedDB-to-server restoration is disabled
+ * so stale browser caches can never overwrite active database records on startup or republish.
  */
-syncRouter.post('/restore-cloud-records', async (req: Request, res: Response) => {
+syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request, res: Response) => {
   try {
+    const authUser = (req as Request & { user?: { id?: number; username?: string; role?: string } }).user;
+    if (!authUser || authUser.role !== 'Super Admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Automatic record restoration is disabled. Only Super Admin can perform a confirmed manual restore.',
+      });
+    }
+    if (req.body?.confirmRestore !== true) {
+      return res.status(400).json({
+        success: false,
+        error: 'Explicit confirmation (confirmRestore: true) is required to restore records manually.',
+      });
+    }
+
     ensureSyncTables();
     const rawBodyItems = Array.isArray(req.body?.items) ? req.body.items : [];
     const rawBodyInvoices = Array.isArray(req.body?.invoices)

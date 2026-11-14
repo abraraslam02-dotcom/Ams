@@ -388,15 +388,9 @@ self.addEventListener('fetch', (event) => {
   app.listen(config.port, '0.0.0.0', () => {
     console.log(`[AMS Ready] Listening on http://0.0.0.0:${config.port}`);
 
-    // Initialize central database persistence check after port 3000 is open
+    // Initialize persistence check after port 3000 is open (automatic restore disabled)
     initCloudPersistence()
-      .then(async (cloudInit) => {
-        if (cloudInit.restored) {
-          const postMig = runMigrations();
-          if (postMig.newlyAppliedCount > 0) {
-            await syncDatabaseToCloudSQL('post_migration_startup');
-          }
-        }
+      .then(() => {
         try {
           const dailyBackup = ensureDailyAutomaticBackup();
           if (dailyBackup) {

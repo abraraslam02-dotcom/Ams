@@ -1,0 +1,350 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Pillar 0: Default-Deny Global Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Hardened Global Helpers
+    // -------------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidStoreId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'abrar.aslam02@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidUserPublic(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'role', 'status', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && data.role in ['staff', 'admin']
+        && data.status in ['active', 'disabled']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivate(data) {
+      return data.keys().hasAll(['uid', 'email', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'photoUrl', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'email', 'grantedBy', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'grantedBy', 'createdAt'])
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && isValidId(data.grantedBy)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidStoreMeta(data) {
+      return data.keys().hasAll(['storeId', 'name', 'ownerUid', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['storeId', 'name', 'ownerUid', 'status', 'createdAt', 'updatedAt'])
+        && isValidStoreId(data.storeId)
+        && data.name is string
+        && data.name.size() >= 1
+        && data.name.size() <= 120
+        && isValidId(data.ownerUid)
+        && data.status in ['active', 'archived']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSyncNote(data) {
+      return data.keys().hasAll(['storeId', 'ownerUid', 'title', 'note', 'status', 'recordCount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['storeId', 'ownerUid', 'title', 'note', 'status', 'recordCount', 'createdAt', 'updatedAt'])
+        && isValidStoreId(data.storeId)
+        && isValidId(data.ownerUid)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 120
+        && data.note is string
+        && data.note.size() >= 1
+        && data.note.size() <= 1000
+        && data.status in ['active', 'archived']
+        && data.recordCount is int
+        && data.recordCount >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Rules
+    // -------------------------------------------------------------------------
+
+    // 1. Public Operator Profiles (Non-PII)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (
+        (isVerifiedUser() && request.auth.uid == userId) ||
+        isAdmin()
+      );
+
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPublic(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (request.auth.uid == userId && incoming().role == 'staff' && incoming().status == 'active') ||
+          isAdmin()
+        );
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserPublic(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            request.auth.uid == userId
+            && incoming().role == existing().role
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+          ) ||
+          isAdmin()
+        );
+
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid;
+
+      // 1b. Isolated Private PII Subcollection (email, photoUrl)
+      match /private/{docId} {
+        allow get: if isValidId(userId)
+          && isValidId(docId)
+          && docId == 'info'
+          && ((isVerifiedUser() && request.auth.uid == userId) || isAdmin());
+
+        allow list: if false;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'info'
+          && isValidUserPrivate(incoming())
+          && incoming().uid == userId
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (request.auth.uid == userId || isAdmin());
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'info'
+          && isValidUserPrivate(incoming())
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (
+            (
+              request.auth.uid == userId
+              && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'photoUrl', 'updatedAt'])
+            ) ||
+            isAdmin()
+          );
+
+        allow delete: if isAdmin() && isValidId(userId) && isValidId(docId);
+      }
+    }
+
+    // 2. Trusted Admin Allowlist
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (
+        (isVerifiedUser() && request.auth.uid == userId) ||
+        isAdmin()
+      );
+
+      allow list: if false;
+
+      allow create: if isAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming())
+        && incoming().uid == userId
+        && incoming().grantedBy == request.auth.uid
+        && incoming().createdAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'grantedBy']);
+
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid;
+    }
+
+    // 3. Store Workspaces (Master Gate Parent) & Cloud Sync Notes Subcollection
+    match /stores/{storeId} {
+      allow get: if isValidStoreId(storeId) && (
+        (isVerifiedUser() && existing().ownerUid == request.auth.uid) ||
+        isAdmin()
+      );
+
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidStoreId(storeId)
+        && isValidStoreMeta(incoming())
+        && incoming().storeId == storeId
+        && incoming().ownerUid == request.auth.uid
+        && incoming().status == 'active'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidStoreId(storeId)
+        && isValidStoreMeta(incoming())
+        && incoming().storeId == existing().storeId
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            existing().ownerUid == request.auth.uid
+            && existing().status != 'archived'
+            && (
+              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'updatedAt']) ||
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                && incoming().status == 'archived'
+              )
+            )
+          ) ||
+          isAdmin()
+        );
+
+      allow delete: if isAdmin() && isValidStoreId(storeId);
+
+      // 3b. Store Sync Notes Subcollection
+      match /syncNotes/{noteId} {
+        allow get: if isValidStoreId(storeId)
+          && isValidId(noteId)
+          && (
+            (
+              isVerifiedUser()
+              && existing().ownerUid == request.auth.uid
+              && exists(/databases/$(database)/documents/stores/$(storeId))
+              && get(/databases/$(database)/documents/stores/$(storeId)).data.ownerUid == request.auth.uid
+            ) ||
+            isAdmin()
+          );
+
+        allow list: if isVerifiedUser() && (
+          resource.data.ownerUid == request.auth.uid ||
+          isBootstrappedAdmin()
+        );
+
+        allow create: if isVerifiedUser()
+          && isValidStoreId(storeId)
+          && isValidId(noteId)
+          && isValidSyncNote(incoming())
+          && incoming().storeId == storeId
+          && incoming().ownerUid == request.auth.uid
+          && incoming().status == 'active'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/stores/$(storeId))
+          && (
+            (
+              get(/databases/$(database)/documents/stores/$(storeId)).data.ownerUid == request.auth.uid
+              && get(/databases/$(database)/documents/stores/$(storeId)).data.status == 'active'
+            ) ||
+            isAdmin()
+          );
+
+        allow update: if isVerifiedUser()
+          && isValidStoreId(storeId)
+          && isValidId(noteId)
+          && isValidSyncNote(incoming())
+          && incoming().storeId == existing().storeId
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            (
+              existing().ownerUid == request.auth.uid
+              && existing().status != 'archived'
+              && exists(/databases/$(database)/documents/stores/$(storeId))
+              && get(/databases/$(database)/documents/stores/$(storeId)).data.ownerUid == request.auth.uid
+              && get(/databases/$(database)/documents/stores/$(storeId)).data.status == 'active'
+              && (
+                incoming().diff(existing()).affectedKeys().hasOnly(['title', 'note', 'recordCount', 'updatedAt']) ||
+                (
+                  incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                  && incoming().status == 'archived'
+                )
+              )
+            ) ||
+            isAdmin()
+          );
+
+        allow delete: if isValidStoreId(storeId)
+          && isValidId(noteId)
+          && (
+            (
+              isVerifiedUser()
+              && existing().ownerUid == request.auth.uid
+              && exists(/databases/$(database)/documents/stores/$(storeId))
+              && get(/databases/$(database)/documents/stores/$(storeId)).data.ownerUid == request.auth.uid
+            ) ||
+            isAdmin()
+          );
+      }
+    }
+
+    // 4. Boot Connection Check Probe (Single doc get only, no list, no writes)
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+      allow list, create, update, delete: if false;
+    }
+  }
+}

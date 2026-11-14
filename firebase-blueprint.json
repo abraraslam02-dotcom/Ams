@@ -1,0 +1,245 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Non-PII Firebase user profile document stored separately from private contact fields.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public operator display label.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "description": "Firebase workspace role.",
+          "enum": ["staff", "admin"]
+        },
+        "status": {
+          "type": "string",
+          "description": "Account status flag.",
+          "enum": ["active", "disabled"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest profile update."
+        }
+      },
+      "required": ["uid", "displayName", "role", "status", "createdAt", "updatedAt"]
+    },
+    "UserPrivateProfile": {
+      "title": "UserPrivateProfile",
+      "description": "Isolated PII subcollection document containing user email and avatar URL.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID matching the parent user document.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google account email address.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "Optional Google profile photo URL.",
+          "maxLength": 500
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest private profile update."
+        }
+      },
+      "required": ["uid", "email", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted admin allowlist entry authorizing elevated Firestore administration.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID of the admin user.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified admin email address.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "grantedBy": {
+          "type": "string",
+          "description": "UID of the admin who granted access.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was granted."
+        }
+      },
+      "required": ["uid", "email", "grantedBy", "createdAt"]
+    },
+    "StoreMeta": {
+      "title": "StoreMeta",
+      "description": "Master store workspace metadata governing subcollection sync notes.",
+      "type": "object",
+      "properties": {
+        "storeId": {
+          "type": "string",
+          "description": "Store workspace identifier matching the document ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the medical store branch or workspace.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Authentication UID of the workspace owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "description": "Lifecycle status of the store workspace.",
+          "enum": ["active", "archived"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the store workspace was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the store workspace was last modified."
+        }
+      },
+      "required": ["storeId", "name", "ownerUid", "status", "createdAt", "updatedAt"]
+    },
+    "StoreSyncNote": {
+      "title": "StoreSyncNote",
+      "description": "Cloud-synced store checkpoint note or diagnostic record attached to a store workspace.",
+      "type": "object",
+      "properties": {
+        "storeId": {
+          "type": "string",
+          "description": "Parent store workspace identifier.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Authentication UID of the author who created the note.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short summary heading for the cloud checkpoint note.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "note": {
+          "type": "string",
+          "description": "Detailed operational note or backup checkpoint summary.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "status": {
+          "type": "string",
+          "description": "Note lifecycle status; archived notes are locked for non-admin edits.",
+          "enum": ["active", "archived"]
+        },
+        "recordCount": {
+          "type": "integer",
+          "description": "Non-negative snapshot record count recorded at checkpoint time."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the note was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the note was last updated."
+        }
+      },
+      "required": ["storeId", "ownerUid", "title", "note", "status", "recordCount", "createdAt", "updatedAt"]
+    },
+    "ConnectionProbe": {
+      "title": "ConnectionProbe",
+      "description": "Read-only connection verification document at /test/connection.",
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "description": "Probe status boolean."
+        }
+      },
+      "required": ["ok"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublicProfile" },
+      "description": "Non-PII Firebase operator profiles keyed by Auth UID."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateProfile" },
+      "description": "Isolated PII subcollection storing email and avatar URL exclusively for owner or admin."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Trusted admin allowlist documents managed only by existing or bootstrapped admins."
+    },
+    "/stores/{storeId}": {
+      "schema": { "$ref": "#/entities/StoreMeta" },
+      "description": "Parent store workspace documents enforcing Master Gate ownership."
+    },
+    "/stores/{storeId}/syncNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/StoreSyncNote" },
+      "description": "Cloud-synced store checkpoint notes and audit summaries scoped under a store workspace."
+    },
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/ConnectionProbe" },
+      "description": "Read-only boot connection check probe for /test/connection."
+    }
+  }
+}

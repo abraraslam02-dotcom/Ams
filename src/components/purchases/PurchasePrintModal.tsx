@@ -562,7 +562,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                     {fields.showItemCode && (
                       <th className="py-2 px-2 font-semibold">Item Code</th>
                     )}
-                    <th className="py-2 px-2 font-semibold">Medicine / Item Name</th>
+                    <th className="py-2 px-2 font-semibold">Item Name</th>
                     {mode === 'invoice' ? (
                       <>
                         <th className="py-2 px-2 font-semibold text-right">Qty</th>
@@ -594,11 +594,11 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                       <th className="py-2 px-2 font-semibold">Packing</th>
                     )}
                     {fields.showBatchExpiry && (
-                      <th className="py-2 px-2 font-semibold">Batch & Expiry</th>
+                      <th className="py-2 px-2 font-semibold">Batch/Expiry</th>
                     )}
                     {mode === 'invoice' && (
                       <>
-                        <th className="py-2 px-2 font-semibold text-right">Pur. Rate</th>
+                        <th className="py-2 px-2 font-semibold text-right">Purchase Rate</th>
                         <th className="py-2 px-2 font-semibold text-right">MRP</th>
                       </>
                     )}

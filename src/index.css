@@ -48,7 +48,8 @@
   body {
     background: #ffffff !important;
     color: #0f172a !important;
-    font-size: 10.5pt !important;
+    font-size: 11pt !important;
+    line-height: 1.35 !important;
     margin: 0 !important;
     padding: 0 !important;
   }
@@ -141,13 +142,15 @@
     max-width: 74mm !important;
     width: 74mm !important;
     margin: 0 auto !important;
-    font-size: 10px !important;
+    font-size: 13px !important;
+    line-height: 1.3 !important;
   }
   .thermal-58mm {
     max-width: 52mm !important;
     width: 52mm !important;
     margin: 0 auto !important;
-    font-size: 9px !important;
+    font-size: 11.5px !important;
+    line-height: 1.28 !important;
   }
 }
 
@@ -260,5 +263,43 @@
     font-size: 20px !important;
     line-height: 1.25 !important;
   }
+
+  /* Compact chrome for Sales POS toolbars/headers so they never crush the POS Item Grid */
+  .ams-readable-invoice-scope .ams-pos-compact-chrome button:not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome input:not([type="checkbox"]):not([type="radio"]):not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome select:not(.print-modal-container *) {
+    font-size: 13px !important;
+    min-height: 26px !important;
+    height: auto !important;
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-compact-chrome label:not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome span:not(.ams-total-highlight):not(.print-modal-container *) {
+    font-size: 13px !important;
+    line-height: 1.2 !important;
+  }
+
+  /* Guaranteed visibility & sizing for the Sales POS Item Grid across all laptop & desktop screens */
+  .ams-readable-invoice-scope .ams-pos-item-grid-card {
+    display: flex !important;
+    flex-direction: column !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    min-height: 250px !important;
+    flex: 1 1 250px !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-item-grid-scroll {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    min-height: 210px !important;
+    flex: 1 1 auto !important;
+    overflow-y: auto !important;
+    overflow-x: auto !important;
+  }
 }
+
 

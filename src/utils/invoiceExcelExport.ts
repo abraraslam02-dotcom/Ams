@@ -475,30 +475,27 @@ export function exportPurchaseInvoicesToExcel(
     'Account / Party Name',
     'Item Code',
     'Item Name',
-    'Company',
-    'Packing',
-    'Batch Number',
-    'Expiry Date',
-    'Quantity',
-    'Loose Quantity',
-    'Bonus',
-    'Rate',
-    'Gross Amount',
-    'Discount %',
+    'Qty',
     'Discount',
-    'Tax %',
-    'Tax',
-    'Amount',
-    'Net Total',
+    'Bonus',
+    'Gross Amount',
+    'Net Amount',
+    'Packing',
+    'Batch/Expiry',
+    'Purchase Rate',
+    'MRP',
+    'GST',
+    'Taxable',
+    'Line Total',
     'Paid Amount',
     'Balance',
   ];
 
   let detQty = 0;
-  let detLooseQty = 0;
   let detBonus = 0;
   let detGross = 0;
   let detDisc = 0;
+  let detTaxable = 0;
   let detTax = 0;
   let detLineAmount = 0;
 
@@ -522,21 +519,18 @@ export function exportPurchaseInvoicesToExcel(
         'Account / Party Name': partyName,
         'Item Code': '',
         'Item Name': '(No line items)',
-        Company: '',
-        Packing: '',
-        'Batch Number': '',
-        'Expiry Date': '',
-        Quantity: 0,
-        'Loose Quantity': 0,
-        Bonus: 0,
-        Rate: 0,
-        'Gross Amount': toNum(pur.gross_total ?? 0),
-        'Discount %': 0,
+        Qty: 0,
         Discount: toNum(pur.discount_amount ?? 0),
-        'Tax %': 0,
-        Tax: toNum((pur.gst_amount ?? 0) + (pur.advance_tax_amount ?? 0)),
-        Amount: invNetTotal,
-        'Net Total': invNetTotal,
+        Bonus: 0,
+        'Gross Amount': toNum(pur.gross_total ?? 0),
+        'Net Amount': toNum(pur.taxable_amount ?? 0),
+        Packing: '',
+        'Batch/Expiry': '',
+        'Purchase Rate': 0,
+        MRP: 0,
+        GST: toNum(pur.gst_amount ?? 0),
+        Taxable: toNum(pur.taxable_amount ?? 0),
+        'Line Total': invNetTotal,
         'Paid Amount': invPaid,
         Balance: invBalance,
       });
@@ -545,22 +539,25 @@ export function exportPurchaseInvoicesToExcel(
 
     for (const item of items) {
       const qty = toNum(item.quantity);
-      const looseQty = toNum(item.loose_quantity);
       const bonus = toNum(item.bonus_quantity);
       const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
+      const mrp = toNum(item.mrp_rate ?? item.mrp);
       const grossAmt = toNum(item.gross_amount ?? qty * rate);
       const discPct = toNum(item.discount_percent);
       const discAmt = toNum(item.discount_amount ?? (grossAmt * discPct) / 100);
-      const taxableAmt = Math.max(0, toNum(grossAmt - discAmt));
+      const taxableAmt = Math.max(0, toNum(item.taxable_amount ?? (grossAmt - discAmt)));
       const taxPct = toNum(item.tax_percent);
       const taxAmt = toNum(item.tax_amount ?? (taxableAmt * taxPct) / 100);
       const lineAmount = toNum(item.line_total ?? taxableAmt + taxAmt);
+      const batchExp = [String(item.batch_number || '').trim(), cleanDate(item.expiry_date)]
+        .filter(Boolean)
+        .join(' / ');
 
       detQty = toNum(detQty + qty);
-      detLooseQty = toNum(detLooseQty + looseQty);
       detBonus = toNum(detBonus + bonus);
       detGross = toNum(detGross + grossAmt);
       detDisc = toNum(detDisc + discAmt);
+      detTaxable = toNum(detTaxable + taxableAmt);
       detTax = toNum(detTax + taxAmt);
       detLineAmount = toNum(detLineAmount + lineAmount);
 
@@ -570,21 +567,18 @@ export function exportPurchaseInvoicesToExcel(
         'Account / Party Name': partyName,
         'Item Code': String(item.item_code || ''),
         'Item Name': String(item.item_name || ''),
-        Company: String(item.company_name || item.company || ''),
-        Packing: String(item.packing || ''),
-        'Batch Number': String(item.batch_number || ''),
-        'Expiry Date': cleanDate(item.expiry_date),
-        Quantity: qty,
-        'Loose Quantity': looseQty,
-        Bonus: bonus,
-        Rate: rate,
-        'Gross Amount': grossAmt,
-        'Discount %': discPct,
+        Qty: qty,
         Discount: discAmt,
-        'Tax %': taxPct,
-        Tax: taxAmt,
-        Amount: lineAmount,
-        'Net Total': invNetTotal,
+        Bonus: bonus,
+        'Gross Amount': grossAmt,
+        'Net Amount': taxableAmt,
+        Packing: String(item.packing || ''),
+        'Batch/Expiry': batchExp,
+        'Purchase Rate': rate,
+        MRP: mrp,
+        GST: taxAmt,
+        Taxable: taxableAmt,
+        'Line Total': lineAmount,
         'Paid Amount': invPaid,
         Balance: invBalance,
       });
@@ -598,21 +592,18 @@ export function exportPurchaseInvoicesToExcel(
       'Account / Party Name': `${detailRows.length} Line Items`,
       'Item Code': '',
       'Item Name': '',
-      Company: '',
-      Packing: '',
-      'Batch Number': '',
-      'Expiry Date': '',
-      Quantity: detQty,
-      'Loose Quantity': detLooseQty,
-      Bonus: detBonus,
-      Rate: '',
-      'Gross Amount': detGross,
-      'Discount %': '',
+      Qty: detQty,
       Discount: detDisc,
-      'Tax %': '',
-      Tax: detTax,
-      Amount: detLineAmount,
-      'Net Total': sumNetTotal,
+      Bonus: detBonus,
+      'Gross Amount': detGross,
+      'Net Amount': detTaxable,
+      Packing: '',
+      'Batch/Expiry': '',
+      'Purchase Rate': '',
+      MRP: '',
+      GST: detTax,
+      Taxable: detTaxable,
+      'Line Total': detLineAmount,
       'Paid Amount': sumPaid,
       Balance: sumBalance,
     });

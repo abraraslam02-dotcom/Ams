@@ -134,61 +134,12 @@ class OfflineSyncManager {
   }
 
   /**
-   * Automatically re-hydrates the server SQLite database from local IndexedDB records
-   * whenever a newly republished Cloud Run container starts up empty or is missing local records.
+   * Automatic server rehydration from client IndexedDB is disabled to prevent stale
+   * browser caches from ever overwriting or restoring old records on startup/republish.
+   * Genuine offline mutations push solely via authenticated idempotent /api/sync/push.
    */
   public async rehydrateServerFromLocal(): Promise<number> {
-    if (this.isRehydrating) return 0;
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
-
-    this.isRehydrating = true;
-    try {
-      const [items, accounts, inventory, sales, purchases, cashBookVouchers] = await Promise.all([
-        offlineStorage.getAll<any>('items').catch(() => []),
-        offlineStorage.getAll<any>('accounts').catch(() => []),
-        offlineStorage.getAll<any>('inventory').catch(() => []),
-        offlineStorage.getAll<any>('sales').catch(() => []),
-        offlineStorage.getAll<any>('purchases').catch(() => []),
-        offlineStorage.getAll<any>('cash_book').catch(() => []),
-      ]);
-
-      const customAccounts = accounts.filter((a) => !a?.is_system_account);
-
-      if (
-        items.length === 0 &&
-        customAccounts.length === 0 &&
-        inventory.length === 0 &&
-        sales.length === 0 &&
-        purchases.length === 0 &&
-        cashBookVouchers.length === 0
-      ) {
-        return 0;
-      }
-
-      const res = await fetch('/api/sync/restore-cloud-records', {
-        method: 'POST',
-        headers: getStoredAuthHeaders(),
-        cache: 'no-store',
-        body: JSON.stringify({
-          items,
-          invoices: sales,
-          accounts: customAccounts,
-          inventory,
-          purchases,
-          cashBookVouchers,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        return Number(data?.totalRestored || 0);
-      }
-      return 0;
-    } catch {
-      return 0;
-    } finally {
-      this.isRehydrating = false;
-    }
+    return 0;
   }
 
   public async setTerminalDesignation(
@@ -336,15 +287,34 @@ class OfflineSyncManager {
     if (!Array.isArray(remoteRows)) return;
 
     const localRows = await offlineStorage.getAll<any>(storeName);
-    if (!isIncremental && remoteRows.length === 0 && localRows.length > 0) {
-      return;
+    const remoteIds = new Set<number>(
+      remoteRows.map((r) => Number(r?.id || 0)).filter((id) => !Number.isNaN(id) && id > 0)
+    );
+
+    if (!isIncremental) {
+      // Full pull from authoritative server: purge previously-synced local cache rows that no longer exist on server,
+      // while strictly preserving any genuinely pending / failed / syncing offline mutations.
+      for (const loc of localRows) {
+        const locId = Number(loc?.id || 0);
+        if (
+          !remoteIds.has(locId) &&
+          !protectedIds.has(locId) &&
+          loc?.sync_status !== 'pending' &&
+          loc?.sync_status !== 'syncing' &&
+          loc?.sync_status !== 'failed'
+        ) {
+          await offlineStorage.delete(storeName, locId).catch(() => {});
+        }
+      }
     }
+
     if (remoteRows.length === 0) {
+      const remaining = isIncremental ? localRows : await offlineStorage.getAll<any>(storeName);
       await offlineStorage.setTableSyncMeta(storeName, {
         lastSyncedAt: serverSyncTime,
-        rowCount: localRows.length,
+        rowCount: remaining.length,
         latestUpdatedAt: serverSyncTime,
-        maxId: localRows.reduce((m, r) => Math.max(m, Number(r?.id || 0)), 0),
+        maxId: remaining.reduce((m, r) => Math.max(m, Number(r?.id || 0)), 0),
         status: 'synced',
       });
       return;
@@ -398,7 +368,7 @@ class OfflineSyncManager {
 
     await offlineStorage.setTableSyncMeta(storeName, {
       lastSyncedAt: serverSyncTime,
-      rowCount: Math.max(remoteRows.length, localById.size),
+      rowCount: isIncremental ? Math.max(remoteRows.length, localById.size) : remoteRows.length,
       latestUpdatedAt: latestUpdatedAt || serverSyncTime,
       maxId,
       status: 'synced',
@@ -415,15 +385,42 @@ class OfflineSyncManager {
     if (!Array.isArray(remoteRows)) return;
 
     const localRows = await offlineStorage.getAll<any>(storeName);
-    if (!isIncremental && remoteRows.length === 0 && localRows.length > 0) {
-      return;
+    const remoteTxIds = new Set<string>(
+      remoteRows.map((r) => String(r?.client_tx_id || '')).filter(Boolean)
+    );
+    const remoteServerIds = new Set<number>(
+      remoteRows.map((r) => Number(r?.server_id || r?.id || 0)).filter((id) => id > 0)
+    );
+
+    if (!isIncremental) {
+      // Full pull from authoritative server: purge previously-synced stale rows not on server,
+      // while preserving genuinely unsynced offline mutations.
+      for (const loc of localRows) {
+        const locTxId = String(loc?.client_tx_id || '');
+        const locSrvId = Number(loc?.server_id || loc?.id || 0);
+        const matchesRemote =
+          (locTxId && remoteTxIds.has(locTxId)) || (locSrvId > 0 && remoteServerIds.has(locSrvId));
+        if (
+          !matchesRemote &&
+          !pendingTxIds.has(locTxId) &&
+          loc?.sync_status !== 'pending' &&
+          loc?.sync_status !== 'syncing' &&
+          loc?.sync_status !== 'failed'
+        ) {
+          if (locTxId) {
+            await offlineStorage.delete(storeName, locTxId).catch(() => {});
+          }
+        }
+      }
     }
+
     if (remoteRows.length === 0) {
+      const remaining = isIncremental ? localRows : await offlineStorage.getAll<any>(storeName);
       await offlineStorage.setTableSyncMeta(storeName, {
         lastSyncedAt: serverSyncTime,
-        rowCount: localRows.length,
+        rowCount: remaining.length,
         latestUpdatedAt: serverSyncTime,
-        maxId: localRows.reduce((m, r) => Math.max(m, Number(r?.server_id || r?.id || 0)), 0),
+        maxId: remaining.reduce((m, r) => Math.max(m, Number(r?.server_id || r?.id || 0)), 0),
         status: 'synced',
       });
       return;
@@ -487,7 +484,7 @@ class OfflineSyncManager {
 
     await offlineStorage.setTableSyncMeta(storeName, {
       lastSyncedAt: serverSyncTime,
-      rowCount: Math.max(remoteRows.length, localByTxId.size),
+      rowCount: isIncremental ? Math.max(remoteRows.length, localByTxId.size) : remoteRows.length,
       latestUpdatedAt: latestUpdatedAt || serverSyncTime,
       maxId,
       status: 'synced',
@@ -737,8 +734,8 @@ class OfflineSyncManager {
         }
       }
 
-      // Step 2.5: Ensure server SQLite has all records from local IndexedDB (prevents data loss after Cloud Run Republish)
-      await this.rehydrateServerFromLocal().catch(() => 0);
+      // Step 2.5: Automatic IndexedDB-to-server rehydration is permanently disabled
+      // so stale local caches never overwrite authoritative server records.
 
       // Step 3: Build protected IDs for any remaining pending/failed local records
       const [remainingPending, remainingFailed] = await Promise.all([
@@ -818,6 +815,18 @@ class OfflineSyncManager {
           }
           if (Array.isArray(pullData.inventory)) {
             const localBatches = await offlineStorage.getAll<any>('inventory');
+            if (!isIncremental) {
+              const remoteBatchIds = new Set<number>(
+                pullData.inventory.map((b: any) => Number(b?.id || 0)).filter((id: number) => id > 0)
+              );
+              for (const locB of localBatches) {
+                const locId = Number(locB?.id || 0);
+                const locItemId = Number(locB?.item_id || 0);
+                if (!remoteBatchIds.has(locId) && !pendingItemIds.has(locItemId)) {
+                  await offlineStorage.delete('inventory', locId).catch(() => {});
+                }
+              }
+            }
             const safeRemoteBatches = pullData.inventory.filter(
               (b: any) => !pendingItemIds.has(Number(b.item_id))
             );

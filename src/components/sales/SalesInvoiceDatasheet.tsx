@@ -17,6 +17,7 @@ import { SalesDsrReportModal } from './SalesDsrReportModal';
 import { NumericInput } from '../common/NumericInput';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar } from '../common/SimpleSyncStatusBar';
+import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { WhatsAppDocumentPayload } from '../../utils/whatsapp';
 import {
   Search,
@@ -375,8 +376,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [editingItemCode, setEditingItemCode] = useState<{ rowIdx: number; value: string } | null>(null);
   const [editingItemName, setEditingItemName] = useState<{ rowIdx: number; value: string } | null>(null);
   const [showItemListModal, setShowItemListModal] = useState<boolean>(false);
-  const [itemListQuery, setItemListQuery] = useState<string>('');
-  const [itemListHighlightIdx, setItemListHighlightIdx] = useState<number>(0);
   const [itemListTargetRowIdx, setItemListTargetRowIdx] = useState<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const posSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -1150,18 +1149,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     if (focusQuantityAfter) {
       const targetId =
         invoiceViewMode === 'pos'
-          ? 'pos_active_quantity'
+          ? `pos_row_${rowIdx}_quantity`
           : `cell_${rowIdx}_quantity`;
       pendingFocusTargetRef.current = targetId;
       setTimeout(() => {
+        const rowQtyEl = document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null;
+        rowQtyEl?.closest('tr')?.scrollIntoView({ block: 'nearest' });
         const qtyEl =
           (document.getElementById(targetId) as HTMLInputElement | null) ||
           (invoiceViewMode === 'pos'
-            ? (document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null)
+            ? (document.getElementById('pos_active_quantity') as HTMLInputElement | null)
             : null);
         if (qtyEl) {
           qtyEl.focus();
           qtyEl.select?.();
+          qtyEl.closest('tr')?.scrollIntoView({ block: 'nearest' });
         }
       }, 30);
     }
@@ -1225,16 +1227,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   const openItemListForRow = (rowIdx: number | null) => {
     setShowSearchDropdown(false);
+    if (rowIdx === null) {
+      setActiveSearchRowIdx(null);
+    }
     setItemListTargetRowIdx(rowIdx);
-    setItemListQuery('');
-    setItemListHighlightIdx(0);
     setShowItemListModal(true);
   };
 
   // Add item from top Quick Search / Barcode Scanner Bar or Inline Cell Search -> focus Qty immediately
   const handleSelectFromTopSearch = (item: FastSearchItem, targetRowOverride?: number) => {
     const existingDuplicateIdx = rows.findIndex((r) => r.item_id === item.id);
-    const activeIdx = targetRowOverride !== undefined ? targetRowOverride : activeSearchRowIdx;
+    const activeIdx =
+      targetRowOverride !== undefined
+        ? targetRowOverride
+        : activeSearchRowIdx !== null && rows[activeSearchRowIdx]?.item_id === null
+        ? activeSearchRowIdx
+        : null;
 
     if (existingDuplicateIdx >= 0 && existingDuplicateIdx !== activeIdx) {
       // If user was typing in an empty row and picked an item already on the invoice, clear temporary typing and focus existing row's Qty
@@ -1256,18 +1264,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       const qtyId =
         invoiceViewMode === 'pos'
-          ? 'pos_active_quantity'
+          ? `pos_row_${existingDuplicateIdx}_quantity`
           : `cell_${existingDuplicateIdx}_quantity`;
       pendingFocusTargetRef.current = qtyId;
       setTimeout(() => {
         const qtyEl =
           (document.getElementById(qtyId) as HTMLInputElement | null) ||
           (invoiceViewMode === 'pos'
-            ? (document.getElementById(`pos_row_${existingDuplicateIdx}_quantity`) as HTMLInputElement | null)
+            ? (document.getElementById('pos_active_quantity') as HTMLInputElement | null)
             : null);
         if (qtyEl) {
           qtyEl.focus();
           qtyEl.select?.();
+          qtyEl.closest('tr')?.scrollIntoView({ block: 'nearest' });
         }
       }, 30);
       return;
@@ -1283,7 +1292,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
 
     const rowIdxToFill = targetIdx >= 0 ? targetIdx : rows.length;
-    // Always populate row and automatically focus Qty (POS -> pos_active_quantity, Access -> cell_{rowIdx}_quantity)
+    // Always populate row and automatically focus Qty
     populateRowWithItem(rowIdxToFill, item, true);
   };
 
@@ -2309,7 +2318,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setQuickSearchQuery('');
 
     if (mode === 'pos') {
-      setActiveSearchRowIdx(targetRowIdx);
+      setActiveSearchRowIdx(null);
       pendingFocusTargetRef.current = 'pos_item_search_input';
       setTimeout(() => {
         const rowEl = document.getElementById(`pos_row_${targetRowIdx}_quantity`);
@@ -2670,7 +2679,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         handleSaveInvoice('completed');
       } else if (e.key === 'F2') {
         e.preventDefault();
-        openItemListForRow(selectedRowIndex);
+        if (invoiceViewMode === 'pos' && rows[selectedRowIndex]?.item_id !== null) {
+          openItemListForRow(null);
+        } else {
+          openItemListForRow(selectedRowIndex);
+        }
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
         e.preventDefault();
         handleSaveInvoice('completed', 'a4');
@@ -2830,8 +2843,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       )}
 
       {/* ================= TOP FULL-SCREEN HEADER & INTERFACE SELECTOR BAR ================= */}
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white rounded-lg border border-slate-700/80 shadow-md shrink-0 px-3 py-1.5">
-        <div className="flex flex-wrap items-center gap-2">
+      <div className="ams-pos-compact-chrome flex flex-wrap items-center justify-between gap-1.5 bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white rounded-lg border border-slate-700/80 shadow-md shrink-0 px-2.5 py-1">
+        <div className="flex flex-wrap items-center gap-1.5">
           {onBackToDashboard && (
             <button
               type="button"
@@ -2971,11 +2984,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       {/* ================= OPTION 1: TRADITIONAL POS INTERFACE ================= */}
       {invoiceViewMode === 'pos' && (
-        <div className="flex-1 min-h-0 flex flex-col gap-1 overflow-hidden">
+        <div className="flex-1 min-h-0 flex flex-col gap-1.5 overflow-y-auto">
           {/* POS Header: Customer, Salesman, Deliveryman, Type & Mode */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-3.5 py-2 space-y-1.5 shrink-0">
+          <div className="ams-pos-compact-chrome bg-white rounded-xl border border-slate-200 shadow-sm px-3 py-1.5 space-y-1 shrink-0">
             {/* Top row: Badges, Bill #, Date & Action Shortcuts */}
-            <div className="flex flex-wrap items-center justify-between gap-1.5 pb-1 border-b border-slate-100">
+            <div className="flex flex-wrap items-center justify-between gap-1 pb-1 border-b border-slate-100">
               <div className="flex items-center gap-1.5">
                 <span className="px-2 py-0.5 rounded-lg bg-emerald-700 text-white text-[11px] font-black uppercase tracking-wider flex items-center gap-1">
                   <Zap className="w-3 h-3 text-amber-300" />
@@ -3462,7 +3475,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
           {/* Active Item Counter Entry Strip */}
           {activeRow && activeRow.item_id ? (
-            <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border border-emerald-500/80 rounded-lg px-2.5 py-1 shadow-sm space-y-1 shrink-0">
+            <div className="ams-pos-compact-chrome bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border border-emerald-500/80 rounded-lg px-2.5 py-1 shadow-sm space-y-1 shrink-0">
               <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <div className="flex items-center gap-1.5">
                   <span className="px-1.5 py-0 rounded-lg bg-emerald-700 text-white font-mono text-[10px] font-bold">
@@ -3505,11 +3518,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
                     1. Qty (Packs)
                   </label>
-                  <div className="flex items-center border border-slate-300 rounded-lg bg-white overflow-hidden h-5">
+                  <div className="flex items-center border border-slate-300 rounded-lg bg-white overflow-hidden min-h-[28px]">
                     <button
                       type="button"
                       onClick={() => handleDecrementQty(selectedRowIndex)}
-                      className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-r border-slate-300 h-full"
+                      className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-r border-slate-300"
                     >
                       -
                     </button>
@@ -3518,12 +3531,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       value={activeRow.quantity}
                       onChange={(e) => updateRowField(selectedRowIndex, 'quantity', e.target.value)}
                       onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'quantity', false)}
-                      className="w-full text-center font-mono font-bold text-[11px] text-slate-900 outline-none py-0 h-full"
+                      className="w-full text-center font-mono font-bold text-[11px] text-slate-900 outline-none py-0"
                     />
                     <button
                       type="button"
                       onClick={() => handleIncrementQty(selectedRowIndex)}
-                      className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-l border-slate-300 h-full"
+                      className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-l border-slate-300"
                     >
                       +
                     </button>
@@ -3540,7 +3553,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     value={activeRow.discount_percent}
                     onChange={(e) => updateRowField(selectedRowIndex, 'discount_percent', e.target.value)}
                     onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'discount_percent', false)}
-                    className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
+                    className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none"
                   />
                 </div>
 
@@ -3550,22 +3563,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     {isSyrupItem(activeRow) ? '3. Loose Mode' : '3. Loose Qty'}
                   </label>
                   {isSyrupItem(activeRow) ? (
-                    <div className="px-1.5 py-0 rounded-lg bg-amber-50/80 border border-amber-300 text-amber-900 text-[10px] font-bold text-center select-none h-5 flex items-center justify-center">
+                    <div className="px-1.5 py-0 rounded-lg bg-amber-50/80 border border-amber-300 text-amber-900 text-[10px] font-bold text-center select-none min-h-[28px] flex items-center justify-center">
                       Bottle Only
                     </div>
                   ) : (
-                    <div className="flex items-center border border-teal-300 rounded-lg bg-white overflow-hidden h-5">
+                    <div className="flex items-center border border-teal-300 rounded-lg bg-white overflow-hidden min-h-[28px]">
                       <NumericInput
                         id="pos_active_loose_quantity"
                         value={activeRow.loose_quantity}
                         onChange={(e) => updateRowField(selectedRowIndex, 'loose_quantity', e.target.value)}
                         onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'loose_quantity', false)}
-                        className="w-full text-center font-mono font-bold text-[11px] text-teal-950 outline-none py-0 h-full"
+                        className="w-full text-center font-mono font-bold text-[11px] text-teal-950 outline-none py-0"
                       />
                       <button
                         type="button"
                         onClick={() => handleAddStripToRow(selectedRowIndex, 1)}
-                        className="px-1 py-0 bg-teal-600 hover:bg-teal-700 text-white font-mono text-[9px] font-bold cursor-pointer shrink-0 h-full"
+                        className="px-1 py-0 bg-teal-600 hover:bg-teal-700 text-white font-mono text-[9px] font-bold cursor-pointer shrink-0"
                         title={`Add 1 Strip (+${activeRow.units_per_strip || 1} Tabs)`}
                       >
                         +1S
@@ -3584,7 +3597,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     value={activeRow.unit_price}
                     onChange={(e) => updateRowField(selectedRowIndex, 'unit_price', e.target.value)}
                     onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'unit_price', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
+                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none"
                   />
                 </div>
 
@@ -3598,7 +3611,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     value={activeRow.bonus_quantity ?? 0}
                     onChange={(e) => updateRowField(selectedRowIndex, 'bonus_quantity', e.target.value)}
                     onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'bonus_quantity', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-center rounded-lg border border-emerald-300 bg-emerald-50/50 focus:bg-white text-emerald-950 focus:border-emerald-600 outline-none h-5"
+                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-center rounded-lg border border-emerald-300 bg-emerald-50/50 focus:bg-white text-emerald-950 focus:border-emerald-600 outline-none"
                     title="Bonus Quantity (Free items deducted from stock)"
                   />
                 </div>
@@ -3614,7 +3627,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     value={activeRow.loose_rate}
                     onChange={(e) => updateRowField(selectedRowIndex, 'loose_rate', e.target.value)}
                     onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'loose_rate', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-blue-400 bg-blue-50/30 focus:bg-white text-blue-950 focus:border-blue-600 outline-none disabled:opacity-50 h-5"
+                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-blue-400 bg-blue-50/30 focus:bg-white text-blue-950 focus:border-blue-600 outline-none disabled:opacity-50"
                     title="Edit Loose Rate for this line item and press Enter to add next item"
                   />
                 </div>
@@ -3624,7 +3637,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <label className="block text-[9px] font-bold uppercase text-slate-500 leading-none mb-0.5">
                     Line Total
                   </label>
-                  <div className="px-1.5 py-0 bg-emerald-100/70 border border-emerald-300 rounded-lg font-mono font-black text-[11px] text-emerald-950 text-right h-5 flex items-center justify-end">
+                  <div className="px-1.5 py-0 bg-emerald-100/70 border border-emerald-300 rounded-lg font-mono font-black text-[11px] text-emerald-950 text-right min-h-[28px] flex items-center justify-end">
                     {formatPKR(activeRow.line_total)}
                   </div>
                 </div>
@@ -3634,7 +3647,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <button
                     type="button"
                     onClick={() => advanceToNewRowItemSearch(selectedRowIndex, 'pos')}
-                    className="w-full rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer shadow-sm h-5"
+                    className="w-full rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer shadow-sm min-h-[28px]"
                     title="Add a new empty row and focus Item Search (or press Enter in Loose Rate)"
                   >
                     <Plus className="w-3 h-3" />
@@ -3644,39 +3657,44 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
           ) : (
-            <div className="bg-slate-50 border border-dashed border-slate-300 rounded-lg px-2.5 py-0.5 text-center text-[11px] text-slate-500 shrink-0">
-              Scan a barcode or type in the search bar above to load an item into the counter billing strip.
+            <div className="ams-pos-compact-chrome bg-slate-50 border border-dashed border-slate-300 rounded-lg px-2.5 py-1 text-center text-[11px] text-slate-600 shrink-0">
+              Scan a barcode, type in the search bar above, or click <strong>Item Code / Item Name</strong> in the grid below to select items.
             </div>
           )}
 
-          {/* Compact Invoice Items Grid (~20 Visible Rows, Internal Scroll, Fixed Headers) */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col flex-1 min-h-0">
-            <div className="px-3.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-[11px] shrink-0">
-              <span className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">
-                Counter Invoice Items ({rows.filter((r) => r.item_id).length} Active / {rows.length} Rows)
-              </span>
-              <span className="font-mono text-slate-600 text-[10px]">
+          {/* Sales POS Item Grid (Guaranteed Visible, Internal Scroll, Fixed Headers) */}
+          <div className="ams-pos-item-grid-card bg-white rounded-xl border-2 border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-[250px] sm:min-h-[290px] lg:min-h-[340px] shrink-0 relative z-10">
+            <div className="ams-pos-compact-chrome px-3 py-1 bg-slate-100 border-b border-slate-300 flex items-center justify-between text-[11px] shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="font-black text-slate-800 uppercase tracking-wider text-[11px]">
+                  Sales POS Item Grid ({rows.filter((r) => r.item_id).length} Active / {rows.length} Rows)
+                </span>
+                <span className="text-slate-500 text-[11px] hidden sm:inline">
+                  • Click Item Code / Item Name or press F2 to open Item List
+                </span>
+              </div>
+              <span className="font-mono font-bold text-slate-700 text-[11px]">
                 Total Units: {rows.reduce((s, r) => s + (r.total_units || 0), 0)}
               </span>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative">
+            <div className="ams-pos-item-grid-scroll flex-1 min-h-[210px] sm:min-h-[250px] overflow-y-auto overflow-x-auto relative bg-white">
               <table className="w-full text-left text-xs border-collapse leading-normal min-w-[1150px]">
-                <thead className="sticky top-0 z-10 bg-slate-100 border-b border-slate-200 text-slate-700 text-[11px] font-bold uppercase tracking-wider leading-normal shadow-sm">
+                <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[11px] font-bold uppercase tracking-wider leading-normal shadow-sm">
                   <tr className="h-8">
-                    <th className="py-0 px-1.5 w-8 text-center h-8">#</th>
-                    <th className="py-0 px-1.5 w-24 h-8">Item Code</th>
-                    <th className="py-0 px-1.5 w-32 h-8">Company</th>
-                    <th className="py-0 px-1.5 min-w-[200px] h-8">Item Name</th>
-                    <th className="py-0 px-1.5 w-20 text-center bg-emerald-100/50 text-emerald-950 h-8">Qty</th>
-                    <th className="py-0 px-1.5 w-20 text-right h-8">Discount</th>
-                    <th className="py-0 px-1.5 w-24 text-center bg-teal-100/50 text-teal-950 h-8">Loose Qty</th>
-                    <th className="py-0 px-1.5 w-24 text-right h-8">Price</th>
-                    <th className="py-0 px-1.5 w-20 text-center bg-emerald-100/70 text-emerald-950 h-8">Bonus</th>
-                    <th className="py-0 px-1.5 w-24 text-right bg-blue-100/50 text-blue-950 h-8">Loose Rate</th>
-                    <th className="py-0 px-1.5 w-26 text-right h-8">Gross Amount</th>
-                    <th className="py-0 px-1.5 w-28 text-right bg-slate-200/70 font-black h-8">Net Amount</th>
-                    <th className="py-0 px-1 w-8 text-center h-8"></th>
+                    <th className="py-1 px-1.5 w-9 text-center border-r border-slate-300 h-8">#</th>
+                    <th className="py-1 px-1.5 w-28 border-r border-slate-300 h-8">Item Code</th>
+                    <th className="py-1 px-1.5 w-32 border-r border-slate-300 h-8">Company</th>
+                    <th className="py-1 px-1.5 min-w-[220px] border-r border-slate-300 h-8">Item Name</th>
+                    <th className="py-1 px-1.5 w-20 text-center bg-emerald-100/70 text-emerald-950 border-r border-slate-300 h-8">Quantity</th>
+                    <th className="py-1 px-1.5 w-20 text-right border-r border-slate-300 h-8">Discount</th>
+                    <th className="py-1 px-1.5 w-24 text-center bg-teal-100/70 text-teal-950 border-r border-slate-300 h-8">Loose Qty</th>
+                    <th className="py-1 px-1.5 w-24 text-right border-r border-slate-300 h-8">Price</th>
+                    <th className="py-1 px-1.5 w-20 text-center bg-emerald-100/80 text-emerald-950 border-r border-slate-300 h-8">Bonus</th>
+                    <th className="py-1 px-1.5 w-24 text-right bg-blue-100/70 text-blue-950 border-r border-slate-300 h-8">Loose Rate</th>
+                    <th className="py-1 px-1.5 w-26 text-right border-r border-slate-300 h-8">Gross Amount</th>
+                    <th className="py-1 px-1.5 w-28 text-right bg-slate-300/70 font-black border-r border-slate-300 h-8">Amount</th>
+                    <th className="py-1 px-1 w-14 text-center h-8">Act</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -3687,7 +3705,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       <tr
                         key={row.row_id}
                         onClick={() => setSelectedRowIndex(rIdx)}
-                        className={`cursor-pointer transition-colors h-8 leading-none ${
+                        className={`cursor-pointer transition-colors border-b border-slate-200 h-9 leading-none ${
                           isSelected
                             ? 'bg-emerald-50/90 font-medium'
                             : rIdx % 2 === 0
@@ -3695,12 +3713,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             : 'bg-slate-50/50 hover:bg-slate-100/60'
                         }`}
                       >
-                        <td className="py-0 px-1 text-center font-mono text-slate-500 text-[10px] h-8 align-middle">
-                          {rIdx + 1}
+                        <td className="py-0 px-1 text-center font-mono text-slate-600 text-[11px] border-r border-slate-200 h-9 align-middle bg-slate-50/80">
+                          {isSelected ? (
+                            <span className="text-emerald-700 font-black">▶ {rIdx + 1}</span>
+                          ) : (
+                            <span>{rIdx + 1}</span>
+                          )}
                         </td>
 
-                        {/* 1. Item Code (Explicit validation before updating item) */}
-                        <td className="p-0 h-8 align-middle whitespace-nowrap">
+                        {/* 1. Item Code */}
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle whitespace-nowrap relative">
                           <input
                             id={`pos_row_${rIdx}_item_code`}
                             type="text"
@@ -3715,61 +3737,107 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               cancelledCodeEditRef.current = false;
                               committedCodeEditRef.current = false;
                             }}
-                            onChange={(e) => {
+                            onClick={() => {
                               setSelectedRowIndex(rIdx);
-                              setShowSearchDropdown(false);
+                              if (!row.item_id && (!editingItemCode || editingItemCode.rowIdx !== rIdx)) {
+                                openItemListForRow(rIdx);
+                              }
+                            }}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSelectedRowIndex(rIdx);
                               committedCodeEditRef.current = false;
-                              setEditingItemCode({ rowIdx: rIdx, value: e.target.value });
+                              setEditingItemCode({ rowIdx: rIdx, value: val });
+                              if (val.trim().length > 0) {
+                                setActiveSearchRowIdx(rIdx);
+                                setShowSearchDropdown(true);
+                                runFastSearch(val);
+                              } else {
+                                setShowSearchDropdown(false);
+                                setSearchResults([]);
+                                setActiveSearchRowIdx(null);
+                              }
                             }}
                             onBlur={() => {
-                              if (cancelledCodeEditRef.current || committedCodeEditRef.current) {
-                                cancelledCodeEditRef.current = false;
-                                committedCodeEditRef.current = false;
-                                setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
-                                return;
-                              }
-                              if (editingItemCode && editingItemCode.rowIdx === rIdx) {
-                                commitItemCodeChange(rIdx, editingItemCode.value, false);
-                              }
+                              setTimeout(() => {
+                                setShowSearchDropdown(false);
+                                setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
+                                if (cancelledCodeEditRef.current || committedCodeEditRef.current) {
+                                  cancelledCodeEditRef.current = false;
+                                  committedCodeEditRef.current = false;
+                                  setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                  return;
+                                }
+                                if (editingItemCode && editingItemCode.rowIdx === rIdx) {
+                                  commitItemCodeChange(rIdx, editingItemCode.value, false);
+                                }
+                              }, 160);
                             }}
                             onKeyDown={(e) => {
+                              const isDropdownActive =
+                                showSearchDropdown && activeSearchRowIdx === rIdx;
                               if (e.key === 'Escape') {
                                 e.preventDefault();
                                 cancelledCodeEditRef.current = true;
+                                setShowSearchDropdown(false);
+                                setActiveSearchRowIdx(null);
                                 setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                return;
+                              }
+                              if (e.key === 'ArrowDown' && isDropdownActive && searchResults.length > 0) {
+                                e.preventDefault();
+                                setSearchHighlightIdx((prev) => Math.min(searchResults.length - 1, prev + 1));
+                                return;
+                              }
+                              if (e.key === 'ArrowUp' && isDropdownActive && searchResults.length > 0) {
+                                e.preventDefault();
+                                setSearchHighlightIdx((prev) => Math.max(0, prev - 1));
                                 return;
                               }
                               if (e.key === 'Enter') {
                                 e.preventDefault();
+                                if (isDropdownActive && searchResults.length > 0) {
+                                  const chosen = searchResults[searchHighlightIdx] || searchResults[0];
+                                  if (chosen) {
+                                    committedCodeEditRef.current = true;
+                                    handleSelectFromTopSearch(chosen, rIdx);
+                                    return;
+                                  }
+                                }
                                 if (editingItemCode && editingItemCode.rowIdx === rIdx) {
                                   committedCodeEditRef.current = true;
                                   const ok = commitItemCodeChange(rIdx, editingItemCode.value, true);
                                   if (!ok && row.item_id) {
                                     focusCell(rIdx, 'quantity', 'pos_row');
+                                  } else if (!ok && !row.item_id) {
+                                    openItemListForRow(rIdx);
                                   }
-                                } else {
+                                } else if (row.item_id) {
                                   focusCell(rIdx, 'quantity', 'pos_row');
+                                } else {
+                                  openItemListForRow(rIdx);
                                 }
                               }
                             }}
-                            placeholder="Code..."
-                            className="w-24 px-1.5 py-0 font-mono font-bold text-slate-800 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-full leading-none outline-none"
+                            placeholder="Code / Click..."
+                            className="w-full px-1.5 py-0 font-mono font-bold text-slate-800 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-full leading-none outline-none"
                           />
                         </td>
 
                         {/* 2. Company */}
-                        <td className="py-0 px-1.5 text-slate-700 h-8 align-middle truncate max-w-[140px]" title={row.company_name}>
+                        <td className="py-0 px-1.5 text-slate-700 border-r border-slate-200 h-9 align-middle truncate max-w-[140px]" title={row.company_name}>
                           {row.company_name || ''}
                         </td>
 
-                        {/* 3. Item Name (Read-only display; selection only selects row, never opens suggestions) */}
-                        <td className="p-0 h-8 align-middle relative min-w-[200px]">
+                        {/* 3. Item Name (Supports clicking to open Item Selection List or typing to search) */}
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle relative min-w-[220px]">
                           <input
                             id={`pos_row_${rIdx}_item_name`}
                             type="text"
-                            readOnly
                             value={
-                              row.item_name
+                              editingItemName?.rowIdx === rIdx
+                                ? editingItemName.value
+                                : row.item_name
                                 ? `${row.item_name}${row.packing ? ` (${row.packing})` : ''}`
                                 : ''
                             }
@@ -3777,10 +3845,67 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
                             }}
+                            onClick={() => {
+                              setSelectedRowIndex(rIdx);
+                              if (!row.item_id && (!editingItemName || editingItemName.rowIdx !== rIdx)) {
+                                openItemListForRow(rIdx);
+                              }
+                            }}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSelectedRowIndex(rIdx);
+                              setEditingItemName({ rowIdx: rIdx, value: val });
+                              if (val.trim().length > 0) {
+                                setActiveSearchRowIdx(rIdx);
+                                setShowSearchDropdown(true);
+                                runFastSearch(val);
+                              } else {
+                                setShowSearchDropdown(false);
+                                setSearchResults([]);
+                                setActiveSearchRowIdx(null);
+                              }
+                            }}
+                            onBlur={() => {
+                              setTimeout(() => {
+                                setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                setShowSearchDropdown(false);
+                                setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
+                              }, 160);
+                            }}
                             onKeyDown={(e) => {
+                              const isDropdownActive =
+                                showSearchDropdown && activeSearchRowIdx === rIdx;
+                              if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                setShowSearchDropdown(false);
+                                setActiveSearchRowIdx(null);
+                                return;
+                              }
+                              if (e.key === 'ArrowDown' && isDropdownActive && searchResults.length > 0) {
+                                e.preventDefault();
+                                setSearchHighlightIdx((prev) => Math.min(searchResults.length - 1, prev + 1));
+                                return;
+                              }
+                              if (e.key === 'ArrowUp' && isDropdownActive && searchResults.length > 0) {
+                                e.preventDefault();
+                                setSearchHighlightIdx((prev) => Math.max(0, prev - 1));
+                                return;
+                              }
                               if (e.key === 'Enter') {
                                 e.preventDefault();
-                                focusCell(rIdx, 'quantity', 'pos_row');
+                                if (isDropdownActive && searchResults.length > 0) {
+                                  const chosen = searchResults[searchHighlightIdx] || searchResults[0];
+                                  if (chosen) {
+                                    handleSelectFromTopSearch(chosen, rIdx);
+                                    return;
+                                  }
+                                }
+                                if (row.item_id) {
+                                  focusCell(rIdx, 'quantity', 'pos_row');
+                                } else {
+                                  openItemListForRow(rIdx);
+                                }
                               } else if (e.key === 'ArrowUp' && rIdx > 0) {
                                 e.preventDefault();
                                 setSelectedRowIndex(rIdx - 1);
@@ -3791,13 +3916,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 focusCell(rIdx + 1, 'item_name', 'pos_row');
                               }
                             }}
-                            placeholder="Use Item Search, Item List, or Item Code..."
+                            placeholder="Click to open Item List or type to search..."
                             className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-full leading-none outline-none cursor-pointer"
                           />
+                          {renderSalesExcelItemCombobox('row', rIdx)}
                         </td>
 
                         {/* 4. Qty */}
-                        <td className="p-0 h-8 align-middle bg-emerald-50/20">
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle bg-emerald-50/20">
                           <NumericInput
                             id={`pos_row_${rIdx}_quantity`}
                             value={row.quantity}
@@ -3809,7 +3935,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 5. Discount */}
-                        <td className="p-0 text-right h-8 align-middle">
+                        <td className="p-0 text-right border-r border-slate-200 h-9 align-middle">
                           <NumericInput
                             id={`pos_row_${rIdx}_discount_percent`}
                             value={row.discount_percent}
@@ -3821,7 +3947,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 6. Loose Qty */}
-                        <td className="p-0 text-center h-8 align-middle bg-teal-50/20">
+                        <td className="p-0 text-center border-r border-slate-200 h-9 align-middle bg-teal-50/20">
                           {isSyrupItem(row) ? (
                             <span className="text-[10px] font-bold text-amber-800">Bottle</span>
                           ) : (
@@ -3837,7 +3963,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 7. Price */}
-                        <td className="p-0 text-right h-8 align-middle">
+                        <td className="p-0 text-right border-r border-slate-200 h-9 align-middle">
                           <NumericInput
                             id={`pos_row_${rIdx}_unit_price`}
                             value={row.unit_price}
@@ -3849,7 +3975,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 8. Bonus */}
-                        <td className="p-0 h-8 align-middle bg-emerald-50/40">
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle bg-emerald-50/40">
                           <NumericInput
                             id={`pos_row_${rIdx}_bonus_quantity`}
                             value={row.bonus_quantity ?? 0}
@@ -3862,7 +3988,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 9. Loose Rate */}
-                        <td className="p-0 text-right h-8 align-middle bg-blue-50/20">
+                        <td className="p-0 text-right border-r border-slate-200 h-9 align-middle bg-blue-50/20">
                           <NumericInput
                             id={`pos_row_${rIdx}_loose_rate`}
                             disabled={isSyrupItem(row)}
@@ -3875,16 +4001,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 10. Gross Amount */}
-                        <td className="py-0 px-1.5 text-right font-mono font-semibold text-slate-700 text-[11px] h-8 align-middle whitespace-nowrap">
-                          {row.gross_amount > 0 ? row.gross_amount.toFixed(2) : ''}
+                        <td className="py-0 px-1.5 text-right font-mono font-semibold text-slate-700 text-[11px] border-r border-slate-200 h-9 align-middle whitespace-nowrap">
+                          {row.gross_amount > 0 ? row.gross_amount.toFixed(2) : '0.00'}
                         </td>
 
                         {/* 11. Net Amount */}
-                        <td className="py-0 px-1.5 text-right font-mono font-black text-slate-900 bg-slate-50/60 text-[11px] h-8 align-middle whitespace-nowrap">
-                          {row.line_total > 0 ? row.line_total.toFixed(2) : ''}
+                        <td className="py-0 px-1.5 text-right font-mono font-black text-slate-900 bg-slate-50/80 text-[11px] border-r border-slate-200 h-9 align-middle whitespace-nowrap">
+                          {row.line_total > 0 ? row.line_total.toFixed(2) : '0.00'}
                         </td>
 
-                        <td className="py-0 px-1 text-center h-8 align-middle whitespace-nowrap">
+                        <td className="py-0 px-1 text-center h-9 align-middle whitespace-nowrap">
                           <div className="inline-flex items-center gap-1">
                             <button
                               type="button"
@@ -3893,7 +4019,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 setSelectedRowIndex(rIdx);
                                 openItemListForRow(rIdx);
                               }}
-                              className="p-0.5 text-slate-400 hover:text-emerald-700 cursor-pointer leading-none"
+                              className="p-0.5 text-slate-500 hover:text-emerald-700 cursor-pointer leading-none"
                               title="Select or change item from Item List"
                             >
                               <PackageSearch className="w-3.5 h-3.5 inline" />
@@ -3904,7 +4030,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 e.stopPropagation();
                                 handleDeleteRow(rIdx);
                               }}
-                              className="p-0.5 text-slate-400 hover:text-rose-600 cursor-pointer leading-none"
+                              className="p-0.5 text-slate-500 hover:text-rose-600 cursor-pointer leading-none"
                               title="Delete item"
                             >
                               <Trash2 className="w-3.5 h-3.5 inline" />
@@ -3919,7 +4045,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
 
             {/* POS Record Navigator Bar */}
-            <div className="bg-slate-100 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
+            <div className="ams-pos-compact-chrome bg-slate-100 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
               <div className="flex items-center gap-1">
                 <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
                 <button
@@ -3991,9 +4117,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           </div>
 
           {/* Full-Width POS Bottom Totals & Payment Action Bar (No Cramped Side-by-Side Split) */}
-          <div className="w-full bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 text-white rounded-xl border border-slate-700 px-3.5 py-2 shadow-lg shrink-0 space-y-2">
+          <div className="ams-pos-compact-chrome w-full bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 text-white rounded-xl border border-slate-700 px-3 py-1.5 shadow-lg shrink-0 space-y-1.5">
             {/* Row 1: Full-Width Financial Totals & Quick Cash Tender */}
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-1.5">
               <div className="flex flex-wrap items-center gap-4 text-xs">
                 <div className="flex items-center gap-1.5">
                   <span className="text-slate-400 font-semibold">Gross:</span>
@@ -6323,151 +6449,36 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       )}
 
       {/* ================= MODAL 8: EXPLICIT ITEM LIST SELECTOR ================= */}
-      {showItemListModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-4xl p-5 text-xs space-y-3 max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3 shrink-0">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <PackageSearch className="w-4 h-4 text-emerald-600" />
-                  <span>Item List</span>
-                </h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  {itemListTargetRowIdx !== null && rows[itemListTargetRowIdx]?.item_id
-                    ? `Select an item to update Row #${itemListTargetRowIdx + 1} ([${rows[itemListTargetRowIdx].item_code}] ${rows[itemListTargetRowIdx].item_name}).`
-                    : itemListTargetRowIdx !== null
-                    ? `Select an item to place into Row #${itemListTargetRowIdx + 1}.`
-                    : 'Select an item to add to the Sales Invoice.'}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {itemListTargetRowIdx !== null && rows[itemListTargetRowIdx]?.item_id && (
-                  <button
-                    type="button"
-                    onClick={() => setItemListTargetRowIdx(null)}
-                    className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] cursor-pointer"
-                  >
-                    Switch to Add New Line
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setShowItemListModal(false)}
-                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            {(() => {
-              const itemListResults = itemListQuery.trim()
-                ? searchItems(indexedCatalog, itemListQuery, 100)
-                : catalogItems.slice(0, 100);
-              const selectFromItemListModal = (chosen: FastSearchItem) => {
-                if (itemListTargetRowIdx !== null) {
-                  populateRowWithItem(itemListTargetRowIdx, chosen, true);
-                } else {
-                  handleSelectFromTopSearch(chosen);
-                }
-                setShowItemListModal(false);
-                setItemListTargetRowIdx(null);
-              };
-              return (
-                <>
-                  <div className="relative shrink-0">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                    <input
-                      type="text"
-                      autoFocus
-                      value={itemListQuery}
-                      onChange={(e) => {
-                        setItemListQuery(e.target.value);
-                        setItemListHighlightIdx(0);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          setItemListHighlightIdx((prev) => Math.min(Math.max(0, itemListResults.length - 1), prev + 1));
-                        } else if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          setItemListHighlightIdx((prev) => Math.max(0, prev - 1));
-                        } else if (e.key === 'Enter') {
-                          e.preventDefault();
-                          const chosen = itemListResults[itemListHighlightIdx] || itemListResults[0];
-                          if (chosen) selectFromItemListModal(chosen);
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setShowItemListModal(false);
-                          setItemListTargetRowIdx(null);
-                        }
-                      }}
-                      placeholder="Filter Item List by Item Code, Item Name, Company, or Barcode... (↑/↓ Navigate, Enter Select, Esc Close)"
-                      className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-600"
-                    />
-                  </div>
-
-                  <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl">
-                    <table className="w-full text-left border-collapse text-[11px]">
-                      <thead className="bg-slate-900 text-white sticky top-0 z-10">
-                        <tr>
-                          <th className="px-3 py-2">Code</th>
-                          <th className="px-3 py-2">Item Name</th>
-                          <th className="px-3 py-2">Company</th>
-                          <th className="px-3 py-2">Packing</th>
-                          <th className="px-3 py-2 text-right">Stock</th>
-                          <th className="px-3 py-2 text-right">Rate</th>
-                          <th className="px-3 py-2 text-right">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {itemListResults.map((it, idx) => {
-                          const rate =
-                            invoiceType === 'Wholesale'
-                              ? round2(it.wholesale_price || it.trade_price || it.retail_price)
-                              : round2(it.retail_price);
-                          const isHighlighted = idx === itemListHighlightIdx;
-                          return (
-                            <tr
-                              key={it.id}
-                              onMouseEnter={() => setItemListHighlightIdx(idx)}
-                              className={`transition-colors ${
-                                isHighlighted ? 'bg-emerald-100 font-semibold' : 'hover:bg-emerald-50/60'
-                              }`}
-                            >
-                              <td className="px-3 py-2 font-mono font-bold text-emerald-700">
-                                {it.item_code}
-                              </td>
-                              <td className="px-3 py-2 font-semibold text-slate-900">{it.item_name}</td>
-                              <td className="px-3 py-2 text-slate-600">{it.company_name || '—'}</td>
-                              <td className="px-3 py-2 text-slate-500">{it.packing || '1x1'}</td>
-                              <td className="px-3 py-2 text-right font-mono">
-                                {it.total_available_packs ?? it.default_batch?.available_packs ?? 0}P
-                              </td>
-                              <td className="px-3 py-2 text-right font-mono font-bold">
-                                {formatPKR(rate)}
-                              </td>
-                              <td className="px-3 py-2 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => selectFromItemListModal(it)}
-                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
-                                >
-                                  Select
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+      <ItemListSelectionModal
+        isOpen={showItemListModal}
+        items={catalogItems}
+        indexedItems={indexedCatalog}
+        targetRowIndex={itemListTargetRowIdx}
+        targetRowItem={itemListTargetRowIdx !== null ? rows[itemListTargetRowIdx] : null}
+        invoiceLabel="Sales Invoice"
+        getItemRate={(it) =>
+          invoiceType === 'Wholesale'
+            ? round2(it.wholesale_price || it.trade_price || it.retail_price)
+            : round2(it.retail_price)
+        }
+        getItemStock={(it) =>
+          it.total_available_packs ?? it.default_batch?.available_packs ?? 0
+        }
+        onSelectItem={(chosen) => {
+          if (itemListTargetRowIdx !== null) {
+            populateRowWithItem(itemListTargetRowIdx, chosen, true);
+          } else {
+            handleSelectFromTopSearch(chosen);
+          }
+          setShowItemListModal(false);
+          setItemListTargetRowIdx(null);
+        }}
+        onSwitchToAddNewLine={() => setItemListTargetRowIdx(null)}
+        onClose={() => {
+          setShowItemListModal(false);
+          setItemListTargetRowIdx(null);
+        }}
+      />
     </div>
   );
 };

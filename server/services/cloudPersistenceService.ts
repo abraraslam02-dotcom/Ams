@@ -338,36 +338,16 @@ function restoreSnapshotIntoLocalSqlite(tables: Record<string, any[]>): number {
   return restoredRows;
 }
 
-function shouldRestoreFromRemoteSnapshot(remoteTables: Record<string, any[]>): boolean {
-  if (!remoteTables || typeof remoteTables !== 'object') return false;
-  const db = getDatabase();
-  const localResetEpoch = getDbResetEpoch(db);
-  const localResetAt = getDbResetTimestamp(db);
+export const AUTO_CLOUD_RESTORE_ENABLED = false;
 
-  const remoteStateRows = Array.isArray(remoteTables.app_system_state)
-    ? remoteTables.app_system_state
-    : [];
-  const remoteEpochRow = remoteStateRows.find((r: any) => r?.state_key === 'db_reset_epoch');
-  const remoteResetEpoch = remoteEpochRow ? String(remoteEpochRow.state_value || '') : '';
-
-  if (localResetEpoch && remoteResetEpoch !== localResetEpoch) {
+function shouldRestoreFromRemoteSnapshot(_remoteTables: Record<string, any[]>): boolean {
+  // Automatic snapshot restoration on startup / republish is permanently disabled
+  // to prevent live database records from ever being wiped or replaced by old snapshots.
+  // Restoration is only allowed when Super Admin explicitly confirms a manual restore.
+  if (!AUTO_CLOUD_RESTORE_ENABLED) {
     return false;
   }
-
-  const localMetrics = getLocalActivityMetrics();
-  const remoteSales = Array.isArray(remoteTables.sales) ? remoteTables.sales.length : 0;
-  const remotePurchases = Array.isArray(remoteTables.purchases) ? remoteTables.purchases.length : 0;
-  const remoteItems = Array.isArray(remoteTables.items) ? remoteTables.items.length : 0;
-
-  if (localResetAt && remoteSales === 0 && remoteItems === 0) {
-    return false;
-  }
-
-  return (
-    (localMetrics.itemsCount === 0 && remoteItems > 0) ||
-    (localMetrics.salesCount === 0 && remoteSales > 0) ||
-    (localMetrics.purchasesCount === 0 && remotePurchases > 0)
-  );
+  return false;
 }
 
 /**
@@ -921,27 +901,11 @@ async function runInitCloudPersistence(): Promise<{
       syncState.enabled = true;
       syncState.provider = 'postgres-cloudsql';
       syncState.connected = true;
+      syncState.restoredFromCloud = false;
       syncState.lastError = null;
 
-      const res = await pool.query(
-        `SELECT compressed_data, checksum, row_count, updated_at FROM ams_cloud_snapshots WHERE snapshot_key = 'primary'`
-      );
-      if (res.rows.length > 0) {
-        const remoteRow = res.rows[0];
-        lastUploadedChecksum = String(remoteRow.checksum || '');
-        const jsonStr = zlib
-          .gunzipSync(Buffer.from(remoteRow.compressed_data, 'base64'))
-          .toString('utf-8');
-        const tables = JSON.parse(jsonStr);
-        if (shouldRestoreFromRemoteSnapshot(tables)) {
-          const restoredCount = restoreSnapshotIntoLocalSqlite(tables);
-          syncState.restoredFromCloud = true;
-          syncState.lastRestoredAt = new Date().toISOString();
-          syncState.totalRowsSynced = restoredCount;
-          return { provider: 'postgres-cloudsql', restored: true, rowsRestored: restoredCount };
-        }
-      }
-
+      // Automatic startup/republish restoration is disabled (AUTO_CLOUD_RESTORE_ENABLED = false).
+      // Preserve existing active database records unconditionally; only manual Super Admin restore may replace data.
       return { provider: 'postgres-cloudsql', restored: false, rowsRestored: 0 };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -955,6 +919,7 @@ async function runInitCloudPersistence(): Promise<{
   syncState.enabled = false;
   syncState.provider = 'sqlite-persistent-central';
   syncState.connected = true;
+  syncState.restoredFromCloud = false;
   syncState.lastError = null;
   syncRuntimeToSeedDatabase();
   return { provider: 'sqlite-persistent-central', restored: false, rowsRestored: 0 };
@@ -971,9 +936,17 @@ export async function syncDatabaseToCloudSQL(_reason?: string): Promise<boolean>
     return false;
   }
 
+  const metrics = getLocalActivityMetrics();
+  if (metrics.accountsCount === 0) {
+    return false;
+  }
+
   isSyncing = true;
   try {
     const snapshot = exportLocalDatabaseSnapshot();
+    if (snapshot.rowCount === 0) {
+      return false;
+    }
     if (lastUploadedChecksum && lastUploadedChecksum === snapshot.checksum) {
       return true;
     }
