@@ -127,7 +127,7 @@ export function createEmptyRow(): DatasheetRow {
   };
 }
 
-export const MIN_DATASHEET_ROWS = 10;
+export const MIN_DATASHEET_ROWS = 15;
 
 function isSalesRowPopulated(row?: DatasheetRow): boolean {
   if (!row) return false;
