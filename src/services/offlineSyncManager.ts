@@ -4,16 +4,35 @@
  * Supports multiple counters/devices with unique Device IDs and idempotent transactions.
  */
 
-import { offlineStorage } from './offlineStorage';
+import { offlineStorage, SyncErrorLogRecord } from './offlineStorage';
 import { prepareItemIndex, searchItems } from '../utils/itemSearch';
+import { firestoreSyncService } from './firestoreSyncService';
+import { subscribeFirestoreConnection } from '../lib/firebase';
 
 export type SyncStatusType = 'synced' | 'pending' | 'syncing' | 'failed' | 'offline';
 
+export interface ModuleSyncStats {
+  total: number;
+  pending: number;
+  syncing: number;
+  synced: number;
+  failed: number;
+}
+
 export interface SyncState {
   isOnline: boolean;
+  firestoreConnected: boolean;
+  serverConnected: boolean;
+  lastFirestoreCheckedAt: string | null;
+  firestoreLatencyMs: number | null;
   syncStatus: SyncStatusType;
   pendingCount: number;
+  syncingCount: number;
+  syncedCount: number;
   failedCount: number;
+  itemsStats: ModuleSyncStats;
+  invoicesStats: ModuleSyncStats;
+  diagnosticLogs: SyncErrorLogRecord[];
   syncProgress: { current: number; total: number } | null;
   failedItems: Array<{
     client_tx_id: string;
@@ -53,10 +72,19 @@ function getStoredAuthHeaders(): Record<string, string> {
 }
 
 class OfflineSyncManager {
-  private isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  private isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+  private firestoreConnected = false;
+  private serverConnected = false;
+  private lastFirestoreCheckedAt: string | null = null;
+  private firestoreLatencyMs: number | null = null;
   private syncStatus: SyncStatusType = 'synced';
   private pendingCount = 0;
+  private syncingCount = 0;
+  private syncedCount = 0;
   private failedCount = 0;
+  private itemsStats: ModuleSyncStats = { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 };
+  private invoicesStats: ModuleSyncStats = { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 };
+  private diagnosticLogs: SyncErrorLogRecord[] = [];
   private syncProgress: { current: number; total: number } | null = null;
   private failedItems: Array<{
     client_tx_id: string;
@@ -84,6 +112,22 @@ class OfflineSyncManager {
     // Step 1: Initialize IndexedDB immediately
     await offlineStorage.getDb().catch(() => {});
 
+    firestoreSyncService.setOnRecordStatusChange(() => {
+      this.refreshPendingCount().catch(() => {});
+    });
+
+    subscribeFirestoreConnection((conn) => {
+      this.firestoreConnected = conn.connected;
+      this.lastFirestoreCheckedAt = conn.lastCheckedAt;
+      this.firestoreLatencyMs = conn.latencyMs;
+      const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+      this.isOnline = browserOnline && (this.firestoreConnected || this.serverConnected);
+      if (conn.lastError && !this.firestoreConnected && !this.serverConnected) {
+        this.lastError = conn.lastError;
+      }
+      this.notify();
+    });
+
     // Step 2: Load locally stored metadata & pending transactions immediately
     this.deviceId = await offlineStorage.getOrCreateDeviceId();
     const savedCounterName = await offlineStorage.getMeta('counter_name');
@@ -102,22 +146,25 @@ class OfflineSyncManager {
 
     window.addEventListener('offline', () => {
       this.isOnline = false;
+      this.firestoreConnected = false;
+      this.serverConnected = false;
       this.syncStatus = 'offline';
       this.notify();
     });
 
     // Start background sync timer (every 15 seconds)
     this.syncTimer = setInterval(() => {
-      if (this.isOnline && !this.isSyncing) {
+      const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+      if (browserOnline && !this.isSyncing) {
         this.syncNow();
       }
     }, 15000);
 
-    // Step 3: Startup Procedure (Online vs Offline)
-    if (this.isOnline) {
-      // Connect to cloud database immediately and synchronize changes safely into IndexedDB
+    // Step 3: Startup Procedure (Verify Firestore connection & synchronize immediately)
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       this.syncNow();
     } else {
+      this.isOnline = false;
       this.syncStatus = 'offline';
       this.notify();
     }
@@ -161,9 +208,18 @@ class OfflineSyncManager {
   public getState(): SyncState {
     return {
       isOnline: this.isOnline,
+      firestoreConnected: this.firestoreConnected,
+      serverConnected: this.serverConnected,
+      lastFirestoreCheckedAt: this.lastFirestoreCheckedAt,
+      firestoreLatencyMs: this.firestoreLatencyMs,
       syncStatus: !this.isOnline ? 'offline' : this.syncStatus,
       pendingCount: this.pendingCount,
+      syncingCount: this.syncingCount,
+      syncedCount: this.syncedCount,
       failedCount: this.failedCount,
+      itemsStats: this.itemsStats,
+      invoicesStats: this.invoicesStats,
+      diagnosticLogs: this.diagnosticLogs,
       syncProgress: this.syncProgress,
       failedItems: this.failedItems,
       lastSyncedAt: this.lastSyncedAt,
@@ -188,18 +244,73 @@ class OfflineSyncManager {
 
   public async refreshPendingCount(): Promise<number> {
     try {
-      const items = await offlineStorage.getPendingSyncItems();
-      const failed = await offlineStorage.getFailedSyncItems();
-      this.pendingCount = items.length;
-      this.failedCount = failed.length;
-      this.failedItems = failed.map((f) => ({
-        client_tx_id: f.client_tx_id,
-        action: f.action,
-        error: f.error || 'Sync failed',
-        created_at: f.created_at,
-      }));
-      if (this.pendingCount > 0 && this.syncStatus === 'synced') {
-        this.syncStatus = 'pending';
+      const [queueItems, queueFailed, itemsStats, invoicesStats, logs, allItems, allSales] =
+        await Promise.all([
+          offlineStorage.getPendingSyncItems(),
+          offlineStorage.getFailedSyncItems(),
+          firestoreSyncService.getModuleStats('items'),
+          firestoreSyncService.getModuleStats('invoices'),
+          offlineStorage.getSyncErrorLogs(30),
+          offlineStorage.getAll<any>('items'),
+          offlineStorage.getAll<any>('sales'),
+        ]);
+
+      this.itemsStats = itemsStats;
+      this.invoicesStats = invoicesStats;
+      this.diagnosticLogs = logs;
+      this.syncingCount = itemsStats.syncing + invoicesStats.syncing;
+      this.syncedCount = itemsStats.synced + invoicesStats.synced;
+
+      const failedItemRows = allItems.filter((i) => i?.sync_status === 'failed');
+      const failedSaleRows = allSales.filter((s) => s?.sync_status === 'failed');
+
+      const recordPending = itemsStats.pending + invoicesStats.pending;
+      const queueOnlyPending = queueItems.filter(
+        (q) => q.entity !== 'items' && q.entity !== 'sales' && q.status === 'pending'
+      ).length;
+
+      this.pendingCount = recordPending + queueOnlyPending;
+      this.failedCount =
+        itemsStats.failed +
+        invoicesStats.failed +
+        queueFailed.filter((q) => q.entity !== 'items' && q.entity !== 'sales').length;
+
+      const combinedFailed: SyncState['failedItems'] = [
+        ...queueFailed
+          .filter((q) => q.entity !== 'items' && q.entity !== 'sales')
+          .map((f) => ({
+            client_tx_id: f.client_tx_id,
+            action: f.action,
+            error: f.error || 'Sync failed',
+            created_at: f.created_at,
+          })),
+        ...failedItemRows.map((it) => ({
+          client_tx_id: `ITEM-${it.id}`,
+          action: `ITEM (${it.item_code || it.item_name})`,
+          error: it.sync_error || 'Firestore item sync failed',
+          created_at: it.updated_at || it.created_at || new Date().toISOString(),
+        })),
+        ...failedSaleRows.map((sl) => ({
+          client_tx_id: String(sl.client_tx_id || sl.id),
+          action: `INVOICE (${sl.invoice_number || sl.client_tx_id})`,
+          error: sl.sync_error || 'Firestore invoice sync failed',
+          created_at: sl.updated_at || sl.created_at || new Date().toISOString(),
+        })),
+      ];
+      this.failedItems = combinedFailed;
+
+      if (!this.isSyncing) {
+        if (!this.isOnline) {
+          this.syncStatus = 'offline';
+        } else if (this.syncingCount > 0) {
+          this.syncStatus = 'syncing';
+        } else if (this.failedCount > 0) {
+          this.syncStatus = 'failed';
+        } else if (this.pendingCount > 0) {
+          this.syncStatus = 'pending';
+        } else {
+          this.syncStatus = 'synced';
+        }
       }
       this.notify();
       return this.pendingCount;
@@ -210,6 +321,24 @@ class OfflineSyncManager {
 
   public async retryFailed(): Promise<boolean> {
     await offlineStorage.retryFailedSyncItems();
+    try {
+      const [allItems, allSales] = await Promise.all([
+        offlineStorage.getAll<any>('items'),
+        offlineStorage.getAll<any>('sales'),
+      ]);
+      for (const it of allItems) {
+        if (it?.sync_status === 'failed') {
+          await offlineStorage.put('items', { ...it, sync_status: 'pending', sync_error: null });
+        }
+      }
+      for (const sl of allSales) {
+        if (sl?.sync_status === 'failed') {
+          await offlineStorage.put('sales', { ...sl, sync_status: 'pending', sync_error: null });
+        }
+      }
+    } catch {
+      // ignore
+    }
     this.lastError = null;
     await this.refreshPendingCount();
     return this.syncNow();
@@ -265,7 +394,7 @@ class OfflineSyncManager {
 
       const existing = localById.get(id);
       if (existing) {
-        if (existing.sync_status === 'pending') {
+        if (existing.sync_status === 'pending' || existing.sync_status === 'syncing' || existing.sync_status === 'failed') {
           continue;
         }
         const localTs = this.normalizeTimestamp(existing.updated_at || existing.created_at);
@@ -275,9 +404,21 @@ class OfflineSyncManager {
         }
       }
 
+      const preserveCloud =
+        existing &&
+        existing.cloud_synced_at &&
+        (!remoteTs || this.normalizeTimestamp(existing.updated_at || existing.created_at) >= remoteTs);
+
       toUpsert.push({
         ...remote,
-        sync_status: 'synced',
+        cloud_doc_id: existing?.cloud_doc_id ?? remote.cloud_doc_id,
+        cloud_synced_at: preserveCloud ? existing.cloud_synced_at : null,
+        sync_status:
+          storeName === 'items'
+            ? preserveCloud
+              ? 'synced'
+              : 'pending'
+            : 'synced',
         local_modified: false,
       });
     }
@@ -350,13 +491,31 @@ class OfflineSyncManager {
       }
 
       const existingByTx = localByTxId.get(remoteTxId);
-      if (existingByTx && existingByTx.sync_status === 'pending') {
+      if (
+        existingByTx &&
+        (existingByTx.sync_status === 'pending' ||
+          existingByTx.sync_status === 'syncing' ||
+          existingByTx.sync_status === 'failed')
+      ) {
         continue;
       }
 
+      const preserveCloud =
+        existingByTx &&
+        existingByTx.cloud_synced_at &&
+        (!remoteTs ||
+          this.normalizeTimestamp(existingByTx.updated_at || existingByTx.created_at) >= remoteTs);
+
       toUpsert.push({
         ...remote,
-        sync_status: 'synced',
+        cloud_doc_id: existingByTx?.cloud_doc_id ?? remote.cloud_doc_id,
+        cloud_synced_at: preserveCloud ? existingByTx.cloud_synced_at : null,
+        sync_status:
+          storeName === 'sales'
+            ? preserveCloud
+              ? 'synced'
+              : 'pending'
+            : 'synced',
       });
     }
 
@@ -452,8 +611,10 @@ class OfflineSyncManager {
    */
   public async syncNow(): Promise<boolean> {
     if (this.isSyncing) return false;
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       this.isOnline = false;
+      this.firestoreConnected = false;
+      this.serverConnected = false;
       this.syncStatus = 'offline';
       this.notify();
       return false;
@@ -464,298 +625,293 @@ class OfflineSyncManager {
     this.syncStatus = 'syncing';
     this.notify();
 
+    let expressSyncError: string | null = null;
+    let serverSyncTime = new Date().toISOString();
+
     try {
       await offlineStorage.getDb();
 
-      // Register terminal heartbeat with LAN / Cloud server
-      fetch('/api/sync/register-terminal', {
-        method: 'POST',
-        headers: getStoredAuthHeaders(),
-        cache: 'no-store',
-        body: JSON.stringify({
-          deviceId: this.deviceId,
-          counterName: this.counterName,
-          terminalType: this.terminalType,
-        }),
-      }).catch(() => {});
+      // Step 1: Verify live Firebase Firestore server connection
+      const conn = await firestoreSyncService.verifyConnection();
+      this.firestoreConnected = conn.connected;
+      this.lastFirestoreCheckedAt = conn.lastCheckedAt;
+      this.firestoreLatencyMs = conn.latencyMs;
 
-      // Step 1: Push any pending offline transactions in chronological order
-      const pendingItems = await offlineStorage.getPendingSyncItems();
-      const pendingByTxId = new Map(pendingItems.map((p) => [p.client_tx_id, p]));
-
-      if (pendingItems.length > 0) {
-        this.syncProgress = { current: 0, total: pendingItems.length };
-        this.notify();
-
-        const res = await fetch('/api/sync/push', {
+      // Step 2: Try Express SQLite LAN/Cloud sync (optional when logged in — never block Firestore sync if Express returns 401/offline)
+      try {
+        fetch('/api/sync/register-terminal', {
           method: 'POST',
           headers: getStoredAuthHeaders(),
           cache: 'no-store',
           body: JSON.stringify({
             deviceId: this.deviceId,
             counterName: this.counterName,
-            items: pendingItems,
+            terminalType: this.terminalType,
           }),
-        });
+        }).catch(() => {});
 
-        if (!res.ok) {
-          throw new Error(`Push failed with HTTP ${res.status}`);
-        }
+        const pendingItems = await offlineStorage.getPendingSyncItems();
+        const pendingByTxId = new Map(pendingItems.map((p) => [p.client_tx_id, p]));
 
-        const data = await res.json();
-        if (data.success && Array.isArray(data.results)) {
-          let processed = 0;
-          for (const resItem of data.results) {
-            processed++;
-            this.syncProgress = { current: processed, total: pendingItems.length };
-            this.notify();
-            await offlineStorage.updateSyncItemStatus(resItem.client_tx_id, resItem.status, {
-              server_id: resItem.server_id,
-              server_invoice_number: resItem.invoice_number,
-              error: resItem.error,
-            });
+        if (pendingItems.length > 0) {
+          this.syncProgress = { current: 0, total: pendingItems.length };
+          this.notify();
 
-            // Reconcile local IndexedDB record on successful push to prevent duplicate temporary IDs
-            if (resItem.status === 'synced') {
-              const origQueueItem = pendingByTxId.get(resItem.client_tx_id);
-              if (origQueueItem) {
-                const { entity, local_id } = origQueueItem;
-                const srvId = Number(resItem.server_id || 0);
-                try {
-                  if (entity === 'items' && Number(local_id) > 0 && srvId > 0 && Number(local_id) !== srvId) {
-                    await offlineStorage.delete('items', Number(local_id));
-                  } else if (
-                    entity === 'accounts' &&
-                    Number(local_id) > 0 &&
-                    srvId > 0 &&
-                    Number(local_id) !== srvId
-                  ) {
-                    await offlineStorage.delete('accounts', Number(local_id));
-                  } else if (
-                    entity === 'sales' ||
-                    entity === 'purchases' ||
-                    entity === 'cash_book' ||
-                    entity === 'sale_returns' ||
-                    entity === 'purchase_returns'
-                  ) {
-                    const existingTx = await offlineStorage.get<any>(entity, resItem.client_tx_id);
-                    if (existingTx) {
-                      existingTx.sync_status = 'synced';
-                      if (srvId > 0) {
-                        existingTx.id = srvId;
-                        existingTx.server_id = srvId;
+          const res = await fetch('/api/sync/push', {
+            method: 'POST',
+            headers: getStoredAuthHeaders(),
+            cache: 'no-store',
+            body: JSON.stringify({
+              deviceId: this.deviceId,
+              counterName: this.counterName,
+              items: pendingItems,
+            }),
+          });
+
+          if (res.ok) {
+            this.serverConnected = true;
+            const data = await res.json();
+            if (data.success && Array.isArray(data.results)) {
+              let processed = 0;
+              for (const resItem of data.results) {
+                processed++;
+                this.syncProgress = { current: processed, total: pendingItems.length };
+                this.notify();
+                await offlineStorage.updateSyncItemStatus(resItem.client_tx_id, resItem.status, {
+                  server_id: resItem.server_id,
+                  server_invoice_number: resItem.invoice_number,
+                  error: resItem.error,
+                });
+
+                if (resItem.status === 'synced') {
+                  const origQueueItem = pendingByTxId.get(resItem.client_tx_id);
+                  if (origQueueItem) {
+                    const { entity, local_id } = origQueueItem;
+                    const srvId = Number(resItem.server_id || 0);
+                    try {
+                      if (entity === 'items' && Number(local_id) > 0 && srvId > 0 && Number(local_id) !== srvId) {
+                        const oldLocal = await offlineStorage.get<any>('items', Number(local_id));
+                        if (oldLocal) {
+                          await offlineStorage.put('items', {
+                            ...oldLocal,
+                            id: srvId,
+                            server_id: srvId,
+                            sync_status: oldLocal.cloud_synced_at ? 'synced' : 'pending',
+                          });
+                        }
+                        await offlineStorage.delete('items', Number(local_id));
+                      } else if (
+                        entity === 'accounts' &&
+                        Number(local_id) > 0 &&
+                        srvId > 0 &&
+                        Number(local_id) !== srvId
+                      ) {
+                        await offlineStorage.delete('accounts', Number(local_id));
+                      } else if (
+                        entity === 'sales' ||
+                        entity === 'purchases' ||
+                        entity === 'cash_book' ||
+                        entity === 'sale_returns' ||
+                        entity === 'purchase_returns'
+                      ) {
+                        const existingTx = await offlineStorage.get<any>(entity, resItem.client_tx_id);
+                        if (existingTx) {
+                          existingTx.sync_status =
+                            entity === 'sales'
+                              ? existingTx.cloud_synced_at
+                                ? 'synced'
+                                : 'pending'
+                              : 'synced';
+                          if (srvId > 0) {
+                            existingTx.id = srvId;
+                            existingTx.server_id = srvId;
+                          }
+                          if (resItem.invoice_number) {
+                            existingTx.invoice_number = resItem.invoice_number;
+                            if (entity === 'purchases') existingTx.bill_number = resItem.invoice_number;
+                            if (entity === 'cash_book') existingTx.voucher_number = resItem.invoice_number;
+                          }
+                          await offlineStorage.put(entity, existingTx);
+                        }
                       }
-                      if (resItem.invoice_number) {
-                        existingTx.invoice_number = resItem.invoice_number;
-                        if (entity === 'purchases') existingTx.bill_number = resItem.invoice_number;
-                        if (entity === 'cash_book') existingTx.voucher_number = resItem.invoice_number;
-                      }
-                      await offlineStorage.put(entity, existingTx);
+                    } catch {
+                      // ignore reconciliation warning
                     }
                   }
-                } catch {
-                  // ignore reconciliation warning
                 }
               }
             }
           }
         }
-      }
 
-      // Step 2: Pull latest items, accounts, inventory, sales, purchases, cash_book, users, settings to IndexedDB
-      // Never overwrite local records that still have pending unsynced changes
-      const remainingPending = await offlineStorage.getPendingSyncItems();
-      const pendingTxIds = new Set(remainingPending.map((p) => p.client_tx_id));
-      const pendingItemIds = new Set(
-        remainingPending
-          .filter(
-            (p) =>
-              p.entity === 'items' ||
-              p.entity === 'inventory' ||
-              p.action === 'STOCK_ADJUSTMENT'
-          )
-          .map((p) => Number(p.local_id || p.payload?.item_id || p.payload?.id))
-          .filter((id) => !Number.isNaN(id) && id > 0)
-      );
-      // Also protect items referenced in pending offline sales or purchases
-      for (const p of remainingPending) {
-        if (p.entity === 'sales' || p.entity === 'purchases') {
-          const lines = Array.isArray(p.payload?.items)
-            ? p.payload.items
-            : Array.isArray(p.payload?.lines)
-            ? p.payload.lines
-            : [];
-          for (const ln of lines) {
-            const iid = Number(ln?.item_id || 0);
-            if (iid > 0) pendingItemIds.add(iid);
-          }
-        }
-      }
-
-      const pendingAccountIds = new Set(
-        remainingPending
-          .filter((p) => p.entity === 'accounts')
-          .map((p) => Number(p.local_id || p.payload?.id))
-          .filter((id) => !Number.isNaN(id) && id > 0)
-      );
-      for (const p of remainingPending) {
-        const custId = Number(p.payload?.customer_account_id || 0);
-        const supId = Number(p.payload?.supplier_account_id || 0);
-        const headId = Number(p.payload?.head_account_id || 0);
-        const cbId = Number(p.payload?.cash_bank_account_id || 0);
-        if (custId > 0) pendingAccountIds.add(custId);
-        if (supId > 0) pendingAccountIds.add(supId);
-        if (headId > 0) pendingAccountIds.add(headId);
-        if (cbId > 0) pendingAccountIds.add(cbId);
-      }
-
-      const lastTombstoneId = Number((await offlineStorage.getMeta('last_tombstone_id')) || 0);
-
-      const pullRes = await fetch(
-        `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(this.counterName)}&last_tombstone_id=${lastTombstoneId}&_t=${Date.now()}`,
-        {
-          headers: getStoredAuthHeaders(),
-          cache: 'no-store',
-        }
-      );
-      if (!pullRes.ok) {
-        throw new Error(`Pull failed with HTTP ${pullRes.status}`);
-      }
-
-      const pullData = await pullRes.json();
-      if (!pullData || !pullData.success) {
-        throw new Error(pullData?.error || 'Synchronization pull returned invalid response');
-      }
-
-      const serverSyncTime = String(pullData.serverTime || new Date().toISOString());
-
-      // Validate that all required tables are present in pullData before marking sync complete
-      const requiredArrays = [
-        'items',
-        'accounts',
-        'inventory',
-        'sales',
-        'purchases',
-        'offlineUsers',
-      ];
-      for (const reqKey of requiredArrays) {
-        if (!Array.isArray(pullData[reqKey])) {
-          throw new Error(`Incomplete synchronization response: missing required table '${reqKey}'`);
-        }
-      }
-
-      // 1. Apply deletion tombstones first
-      if (Array.isArray(pullData.tombstones) && pullData.tombstones.length > 0) {
-        await this.applyTombstones(
-          pullData.tombstones,
-          pendingItemIds,
-          pendingAccountIds,
-          pendingTxIds
+        const remainingPending = await offlineStorage.getPendingSyncItems();
+        const pendingTxIds = new Set(remainingPending.map((p) => p.client_tx_id));
+        const pendingItemIds = new Set(
+          remainingPending
+            .filter(
+              (p) =>
+                p.entity === 'items' ||
+                p.entity === 'inventory' ||
+                p.action === 'STOCK_ADJUSTMENT'
+            )
+            .map((p) => Number(p.local_id || p.payload?.item_id || p.payload?.id))
+            .filter((id) => !Number.isNaN(id) && id > 0)
         );
-      }
-      if (typeof pullData.maxTombstoneId === 'number') {
-        await offlineStorage.setMeta('last_tombstone_id', pullData.maxTombstoneId);
-      }
-
-      // 2. Synchronize Items & Accounts with conflict protection
-      await this.mergeIdKeyedTable('items', pullData.items, pendingItemIds, serverSyncTime);
-      await this.mergeIdKeyedTable('accounts', pullData.accounts, pendingAccountIds, serverSyncTime);
-
-      // 3. Synchronize Inventory (Stock Batches) for all items without pending local stock mutations
-      if (Array.isArray(pullData.inventory)) {
-        const localBatches = await offlineStorage.getAll<any>('inventory');
-        if (pullData.inventory.length > 0 || localBatches.length === 0) {
-          const safeRemoteBatches = pullData.inventory.filter(
-            (b: any) => !pendingItemIds.has(Number(b.item_id))
-          );
-          const remoteBatchIds = new Set(
-            pullData.inventory.map((b: any) => Number(b.id)).filter((id: number) => id > 0)
-          );
-          // Remove stale local batches that were consolidated/removed on server (only for non-pending items)
-          for (const lb of localBatches) {
-            const lbId = Number(lb?.id || 0);
-            const lbItemId = Number(lb?.item_id || 0);
-            if (
-              lbId > 0 &&
-              !pendingItemIds.has(lbItemId) &&
-              !remoteBatchIds.has(lbId) &&
-              pullData.inventory.length > 0
-            ) {
-              await offlineStorage.delete('inventory', lbId).catch(() => {});
+        for (const p of remainingPending) {
+          if (p.entity === 'sales' || p.entity === 'purchases') {
+            const lines = Array.isArray(p.payload?.items)
+              ? p.payload.items
+              : Array.isArray(p.payload?.lines)
+              ? p.payload.lines
+              : [];
+            for (const ln of lines) {
+              const iid = Number(ln?.item_id || 0);
+              if (iid > 0) pendingItemIds.add(iid);
             }
           }
-          if (safeRemoteBatches.length > 0) {
-            await offlineStorage.bulkPut('inventory', safeRemoteBatches);
-          }
-          await offlineStorage.setTableSyncMeta('inventory', {
-            lastSyncedAt: serverSyncTime,
-            rowCount: pullData.inventory.length,
-            latestUpdatedAt: pullData.tableMeta?.inventory?.latestUpdatedAt || serverSyncTime,
-            maxId: pullData.tableMeta?.inventory?.maxId || 0,
-            status: 'synced',
-          });
         }
-      }
 
-      // 4. Synchronize Transactions (Sales, Purchases, Cash Book, Returns) with deduplication & conflict protection
-      await this.mergeTxKeyedTable('sales', pullData.sales, pendingTxIds, serverSyncTime);
-      await this.mergeTxKeyedTable('purchases', pullData.purchases, pendingTxIds, serverSyncTime);
-      if (Array.isArray(pullData.cashBookVouchers)) {
-        await this.mergeTxKeyedTable('cash_book', pullData.cashBookVouchers, pendingTxIds, serverSyncTime);
-      }
-      if (Array.isArray(pullData.saleReturns)) {
-        await this.mergeTxKeyedTable('sale_returns', pullData.saleReturns, pendingTxIds, serverSyncTime);
-      }
-      if (Array.isArray(pullData.purchaseReturns)) {
-        await this.mergeTxKeyedTable(
-          'purchase_returns',
-          pullData.purchaseReturns,
-          pendingTxIds,
-          serverSyncTime
+        const pendingAccountIds = new Set(
+          remainingPending
+            .filter((p) => p.entity === 'accounts')
+            .map((p) => Number(p.local_id || p.payload?.id))
+            .filter((id) => !Number.isNaN(id) && id > 0)
         );
-      }
-
-      // 5. Synchronize Salesmen, Supply, Payroll, Users & Settings
-      if (Array.isArray(pullData.salesmen)) {
-        await this.mergeIdKeyedTable('salesmen', pullData.salesmen, new Set(), serverSyncTime);
-      }
-      if (pullData.supplySnapshot) {
-        await offlineStorage.cacheApiData('supply_snapshot', pullData.supplySnapshot);
-      }
-      if (pullData.payrollSnapshot) {
-        await offlineStorage.cacheApiData('payroll_snapshot', pullData.payrollSnapshot);
-      }
-      if (Array.isArray(pullData.offlineUsers) && pullData.offlineUsers.length > 0) {
-        await offlineStorage.bulkPut('auth_vault', pullData.offlineUsers);
-        await offlineStorage.setTableSyncMeta('auth_vault', {
-          lastSyncedAt: serverSyncTime,
-          rowCount: pullData.offlineUsers.length,
-          latestUpdatedAt: serverSyncTime,
-          maxId: pullData.tableMeta?.auth_vault?.maxId || 0,
-          status: 'synced',
-        });
-        try {
-          localStorage.setItem('ams_offline_auth_vault_v2', JSON.stringify(pullData.offlineUsers));
-          localStorage.setItem('ams_workstation_authorized_v2', '1');
-        } catch {
-          // ignore storage quota errors
+        for (const p of remainingPending) {
+          const custId = Number(p.payload?.customer_account_id || 0);
+          const supId = Number(p.payload?.supplier_account_id || 0);
+          const headId = Number(p.payload?.head_account_id || 0);
+          const cbId = Number(p.payload?.cash_bank_account_id || 0);
+          if (custId > 0) pendingAccountIds.add(custId);
+          if (supId > 0) pendingAccountIds.add(supId);
+          if (headId > 0) pendingAccountIds.add(headId);
+          if (cbId > 0) pendingAccountIds.add(cbId);
         }
-      }
-      if (pullData.companySettings) {
-        await offlineStorage.put('company_settings', pullData.companySettings);
-        await offlineStorage.setTableSyncMeta('company_settings', {
-          lastSyncedAt: serverSyncTime,
-          rowCount: 1,
-          latestUpdatedAt: this.normalizeTimestamp(pullData.companySettings.updated_at) || serverSyncTime,
-          maxId: Number(pullData.companySettings.id || 1),
-          status: 'synced',
-        });
-      }
-      if (pullData.advanceTaxSettings) {
-        await offlineStorage.cacheApiData('advance_tax_settings', pullData.advanceTaxSettings);
+
+        const lastTombstoneId = Number((await offlineStorage.getMeta('last_tombstone_id')) || 0);
+        const pullRes = await fetch(
+          `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(this.counterName)}&last_tombstone_id=${lastTombstoneId}&_t=${Date.now()}`,
+          {
+            headers: getStoredAuthHeaders(),
+            cache: 'no-store',
+          }
+        );
+
+        if (pullRes.ok) {
+          this.serverConnected = true;
+          const pullData = await pullRes.json();
+          if (pullData && pullData.success) {
+            serverSyncTime = String(pullData.serverTime || serverSyncTime);
+            if (Array.isArray(pullData.tombstones) && pullData.tombstones.length > 0) {
+              await this.applyTombstones(
+                pullData.tombstones,
+                pendingItemIds,
+                pendingAccountIds,
+                pendingTxIds
+              );
+            }
+            if (typeof pullData.maxTombstoneId === 'number') {
+              await offlineStorage.setMeta('last_tombstone_id', pullData.maxTombstoneId);
+            }
+
+            if (Array.isArray(pullData.items)) {
+              await this.mergeIdKeyedTable('items', pullData.items, pendingItemIds, serverSyncTime);
+            }
+            if (Array.isArray(pullData.accounts)) {
+              await this.mergeIdKeyedTable('accounts', pullData.accounts, pendingAccountIds, serverSyncTime);
+            }
+            if (Array.isArray(pullData.inventory)) {
+              const localBatches = await offlineStorage.getAll<any>('inventory');
+              if (pullData.inventory.length > 0 || localBatches.length === 0) {
+                const safeRemoteBatches = pullData.inventory.filter(
+                  (b: any) => !pendingItemIds.has(Number(b.item_id))
+                );
+                if (safeRemoteBatches.length > 0) {
+                  await offlineStorage.bulkPut('inventory', safeRemoteBatches);
+                }
+                await offlineStorage.setTableSyncMeta('inventory', {
+                  lastSyncedAt: serverSyncTime,
+                  rowCount: pullData.inventory.length,
+                  latestUpdatedAt: pullData.tableMeta?.inventory?.latestUpdatedAt || serverSyncTime,
+                  maxId: pullData.tableMeta?.inventory?.maxId || 0,
+                  status: 'synced',
+                });
+              }
+            }
+            if (Array.isArray(pullData.sales)) {
+              await this.mergeTxKeyedTable('sales', pullData.sales, pendingTxIds, serverSyncTime);
+            }
+            if (Array.isArray(pullData.purchases)) {
+              await this.mergeTxKeyedTable('purchases', pullData.purchases, pendingTxIds, serverSyncTime);
+            }
+            if (Array.isArray(pullData.cashBookVouchers)) {
+              await this.mergeTxKeyedTable('cash_book', pullData.cashBookVouchers, pendingTxIds, serverSyncTime);
+            }
+            if (Array.isArray(pullData.saleReturns)) {
+              await this.mergeTxKeyedTable('sale_returns', pullData.saleReturns, pendingTxIds, serverSyncTime);
+            }
+            if (Array.isArray(pullData.purchaseReturns)) {
+              await this.mergeTxKeyedTable(
+                'purchase_returns',
+                pullData.purchaseReturns,
+                pendingTxIds,
+                serverSyncTime
+              );
+            }
+            if (Array.isArray(pullData.salesmen)) {
+              await this.mergeIdKeyedTable('salesmen', pullData.salesmen, new Set(), serverSyncTime);
+            }
+            if (pullData.supplySnapshot) {
+              await offlineStorage.cacheApiData('supply_snapshot', pullData.supplySnapshot);
+            }
+            if (pullData.payrollSnapshot) {
+              await offlineStorage.cacheApiData('payroll_snapshot', pullData.payrollSnapshot);
+            }
+            if (Array.isArray(pullData.offlineUsers) && pullData.offlineUsers.length > 0) {
+              await offlineStorage.bulkPut('auth_vault', pullData.offlineUsers);
+              await offlineStorage.setTableSyncMeta('auth_vault', {
+                lastSyncedAt: serverSyncTime,
+                rowCount: pullData.offlineUsers.length,
+                latestUpdatedAt: serverSyncTime,
+                maxId: pullData.tableMeta?.auth_vault?.maxId || 0,
+                status: 'synced',
+              });
+              try {
+                localStorage.setItem('ams_offline_auth_vault_v2', JSON.stringify(pullData.offlineUsers));
+                localStorage.setItem('ams_workstation_authorized_v2', '1');
+              } catch {
+                // ignore quota
+              }
+            }
+            if (pullData.companySettings) {
+              await offlineStorage.put('company_settings', pullData.companySettings);
+              await offlineStorage.setTableSyncMeta('company_settings', {
+                lastSyncedAt: serverSyncTime,
+                rowCount: 1,
+                latestUpdatedAt: this.normalizeTimestamp(pullData.companySettings.updated_at) || serverSyncTime,
+                maxId: Number(pullData.companySettings.id || 1),
+                status: 'synced',
+              });
+            }
+            if (pullData.advanceTaxSettings) {
+              await offlineStorage.cacheApiData('advance_tax_settings', pullData.advanceTaxSettings);
+            }
+          }
+        } else if (pullRes.status !== 401) {
+          expressSyncError = `Backend sync HTTP ${pullRes.status}`;
+        }
+      } catch (expressErr) {
+        this.serverConnected = false;
+        expressSyncError = expressErr instanceof Error ? expressErr.message : String(expressErr);
       }
 
-      // 6. Invalidate stale dynamic API response caches so offline mode always computes from latest IndexedDB tables
+      // Step 3: Bidirectional Firestore Cloud Sync for Items and Invoices (with server write verification!)
+      const firestoreSummary = await firestoreSyncService.syncAll(this.deviceId, {
+        includeFailed: false,
+        includeUnsyncedCatalog: true,
+      });
+      this.firestoreConnected = firestoreSummary.connected;
+
       await offlineStorage.invalidateDynamicApiCache([
         'inventory_',
         'stock_',
@@ -769,15 +925,31 @@ class OfflineSyncManager {
       ]);
 
       const now = new Date().toISOString();
-      this.lastSyncedAt = now;
+      this.isOnline = this.firestoreConnected || this.serverConnected;
+      if (this.isOnline) {
+        this.lastSyncedAt = now;
+        await offlineStorage.setMeta('last_synced_at', now);
+      }
       this.syncProgress = null;
-      await offlineStorage.setMeta('last_synced_at', now);
       await this.refreshPendingCount();
 
-      this.isOnline = true;
-      this.syncStatus = this.failedCount > 0 ? 'failed' : this.pendingCount === 0 ? 'synced' : 'pending';
-      this.lastError = this.failedCount > 0 ? `${this.failedCount} record(s) need attention` : null;
-      if (hadPendingBefore && this.pendingCount === 0) {
+      if (!this.isOnline) {
+        this.syncStatus = 'offline';
+        this.lastError = conn.lastError || expressSyncError || 'Network offline';
+      } else if (this.failedCount > 0 || firestoreSummary.errors.length > 0) {
+        this.syncStatus = 'failed';
+        this.lastError =
+          firestoreSummary.errors[0] ||
+          `${this.failedCount} record(s) failed Firestore sync verification`;
+      } else if (this.pendingCount > 0) {
+        this.syncStatus = 'pending';
+        this.lastError = null;
+      } else {
+        this.syncStatus = 'synced';
+        this.lastError = null;
+      }
+
+      if (hadPendingBefore && this.pendingCount === 0 && this.failedCount === 0 && this.firestoreConnected) {
         this.justCompletedSync = true;
         setTimeout(() => {
           this.justCompletedSync = false;
@@ -786,23 +958,31 @@ class OfflineSyncManager {
       }
       this.notify();
 
-      if (typeof window !== 'undefined') {
+      if (typeof window !== 'undefined' && this.isOnline) {
         window.dispatchEvent(
           new CustomEvent('ams-data-synchronized', {
-            detail: { syncedAt: now, serverTime: serverSyncTime },
+            detail: { syncedAt: now, serverTime: serverSyncTime, firestoreConnected: this.firestoreConnected },
           })
         );
       }
-      return true;
+      return this.firestoreConnected || this.serverConnected;
     } catch (err: unknown) {
       this.syncProgress = null;
       const errorMsg = err instanceof Error ? err.message : String(err);
+      await offlineStorage.addSyncErrorLog({
+        entity: 'sync',
+        record_key: 'syncNow',
+        operation: 'syncNow',
+        code: 'sync-cycle-error',
+        message: errorMsg,
+      });
       if (
         errorMsg.includes('Failed to fetch') ||
         errorMsg.includes('NetworkError') ||
-        (typeof navigator !== 'undefined' && !navigator.onLine)
+        (typeof navigator !== 'undefined' && navigator.onLine === false)
       ) {
         this.isOnline = false;
+        this.firestoreConnected = false;
         this.syncStatus = 'offline';
       } else {
         this.lastError = errorMsg;
@@ -852,6 +1032,7 @@ class OfflineSyncManager {
       ? payload.lines
       : [];
 
+    const nowIso = now.toISOString();
     const fullSale = {
       id: Date.now(),
       ...payload,
@@ -861,10 +1042,12 @@ class OfflineSyncManager {
       client_tx_id: clientTxId,
       client_request_id: clientTxId,
       invoice_number: localInvNo,
-      invoice_date: payload.invoice_date || now.toISOString().slice(0, 10),
+      invoice_date: payload.invoice_date || nowIso.slice(0, 10),
       status: isHeldOrDraft ? 'held' : 'completed',
       sync_status: 'pending',
-      created_at: now.toISOString(),
+      local_modified: true,
+      created_at: payload.created_at || nowIso,
+      updated_at: nowIso,
     };
 
     // 1. Store in local sales object store

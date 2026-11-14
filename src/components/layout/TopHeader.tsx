@@ -28,20 +28,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const [now, setNow] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncPopoverOpen, setSyncPopoverOpen] = useState(false);
-  const [syncState, setSyncState] = useState<SyncState>({
-    isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
-    syncStatus: typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'synced',
-    pendingCount: 0,
-    failedCount: 0,
-    syncProgress: null,
-    failedItems: [],
-    lastSyncedAt: null,
-    deviceId: 'POS-LOCAL',
-    counterName: 'Computer 1: Main Counter',
-    terminalType: 'Main Counter',
-    lastError: null,
-    justCompletedSync: false,
-  });
+  const [syncState, setSyncState] = useState<SyncState>(() => offlineSyncManager.getState());
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
 
   const menuRef = useRef<HTMLDivElement>(null);
@@ -88,9 +75,11 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const date = now.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
   const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
+  const effectiveOnline = syncState.firestoreConnected || syncState.isOnline;
+
   // Determine exact status label & styling per specification
   const getSyncBadgeInfo = () => {
-    if (!syncState.isOnline || syncState.syncStatus === 'offline') {
+    if (!effectiveOnline || syncState.syncStatus === 'offline') {
       return {
         label: 'OFFLINE – Working Locally',
         badgeClass: 'bg-amber-50 text-amber-800 border border-amber-300',
@@ -98,7 +87,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         icon: <WifiOff className="w-3.5 h-3.5 text-amber-600" />,
       };
     }
-    if (syncState.syncStatus === 'syncing') {
+    if (syncState.syncStatus === 'syncing' || syncState.syncingCount > 0) {
       return {
         label: 'SYNCING – Uploading Pending Data',
         badgeClass: 'bg-blue-50 text-blue-800 border border-blue-200',
@@ -106,9 +95,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         icon: <CloudUpload className="w-3.5 h-3.5 text-blue-600 animate-bounce" />,
       };
     }
-    if (syncState.syncStatus === 'failed') {
+    if (syncState.syncStatus === 'failed' || syncState.failedCount > 0) {
       return {
-        label: 'SYNC ERROR – Details Available',
+        label: 'SYNC FAILED – Details Available',
         badgeClass: 'bg-rose-50 text-rose-800 border border-rose-300',
         dotClass: 'bg-rose-500',
         icon: <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />,
@@ -116,14 +105,14 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
     }
     if (syncState.justCompletedSync) {
       return {
-        label: 'SYNC COMPLETE – All Data Synchronized',
+        label: 'SYNCED – Firestore Verified',
         badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-300',
         dotClass: 'bg-emerald-500',
         icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />,
       };
     }
     return {
-      label: 'ONLINE – Connected',
+      label: syncState.firestoreConnected ? 'ONLINE – Firestore Connected' : 'ONLINE – Connected',
       badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-200',
       dotClass: 'bg-emerald-500',
       icon: <Wifi className="w-3.5 h-3.5 text-emerald-600" />,
@@ -202,14 +191,28 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   ? 'bg-amber-600 text-white'
                   : 'bg-white/80 text-slate-700 border border-slate-200'
               }`}
-              title="Number of pending transactions waiting to synchronize"
+              title="Pending Sync records waiting for Firestore verification"
             >
               Pending: {syncState.pendingCount}
+            </span>
+            {(syncState.syncStatus === 'syncing' || syncState.syncingCount > 0) && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-blue-600 text-white"
+                title="Currently syncing to Firestore"
+              >
+                Syncing: {Math.max(syncState.syncingCount, 1)}
+              </span>
+            )}
+            <span
+              className="hidden xl:inline-block px-1.5 py-0.5 rounded text-[11px] font-bold bg-white/80 text-emerald-700 border border-emerald-200"
+              title="Verified Synced records in Firestore"
+            >
+              Synced: {syncState.syncedCount}
             </span>
             {syncState.failedCount > 0 && (
               <span
                 className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-rose-600 text-white"
-                title="Failed sync records requiring retry"
+                title="Sync Failed records requiring retry"
               >
                 Failed: {syncState.failedCount}
               </span>
@@ -217,23 +220,67 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           </button>
 
           {syncPopoverOpen && (
-            <div className="absolute right-0 top-full mt-2 w-96 bg-white rounded-xl border border-slate-200 shadow-2xl p-4 z-50 text-xs text-slate-700">
+            <div className="absolute right-0 top-full mt-2 w-[26rem] bg-white rounded-xl border border-slate-200 shadow-2xl p-4 z-50 text-xs text-slate-700">
               <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-slate-100">
                 <div className="flex items-center gap-2 font-bold text-slate-900 text-sm">
                   <Database className="w-4 h-4 text-emerald-600" />
-                  <span>Connection & Sync Dashboard</span>
+                  <span>Firestore & Offline Sync Dashboard</span>
                 </div>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                  syncState.isOnline ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                  effectiveOnline ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
                 }`}>
-                  {syncState.isOnline ? 'ONLINE' : 'OFFLINE'}
+                  {effectiveOnline ? 'ONLINE' : 'OFFLINE'}
                 </span>
+              </div>
+
+              {/* Separate 4-state Sync Counters */}
+              <div className="grid grid-cols-4 gap-1.5 mb-3 text-center">
+                <div className="p-2 rounded-lg bg-amber-50 border border-amber-200">
+                  <div className="text-[10px] font-semibold text-amber-700">Pending Sync</div>
+                  <div className="text-sm font-bold font-mono text-amber-900">{syncState.pendingCount}</div>
+                </div>
+                <div className="p-2 rounded-lg bg-blue-50 border border-blue-200">
+                  <div className="text-[10px] font-semibold text-blue-700">Syncing</div>
+                  <div className="text-sm font-bold font-mono text-blue-900">
+                    {syncState.syncStatus === 'syncing' ? Math.max(syncState.syncingCount, 1) : syncState.syncingCount}
+                  </div>
+                </div>
+                <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200">
+                  <div className="text-[10px] font-semibold text-emerald-700">Synced</div>
+                  <div className="text-sm font-bold font-mono text-emerald-900">{syncState.syncedCount}</div>
+                </div>
+                <div className={`p-2 rounded-lg border ${
+                  syncState.failedCount > 0 ? 'bg-rose-50 border-rose-300' : 'bg-slate-50 border-slate-200'
+                }`}>
+                  <div className={`text-[10px] font-semibold ${syncState.failedCount > 0 ? 'text-rose-700' : 'text-slate-500'}`}>
+                    Sync Failed
+                  </div>
+                  <div className={`text-sm font-bold font-mono ${syncState.failedCount > 0 ? 'text-rose-900' : 'text-slate-700'}`}>
+                    {syncState.failedCount}
+                  </div>
+                </div>
               </div>
 
               <div className="space-y-1.5 mb-3">
                 <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Connection Status:</span>
-                  <span className="font-semibold text-slate-900">{badgeInfo.label}</span>
+                  <span className="text-slate-500">Firestore Cloud Status:</span>
+                  <span className={`font-semibold ${syncState.firestoreConnected ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {syncState.firestoreConnected
+                      ? `ONLINE${syncState.firestoreLatencyMs !== null ? ` (${syncState.firestoreLatencyMs}ms)` : ''}`
+                      : 'OFFLINE / Checking'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
+                  <span className="text-slate-500">Items (Synced / Pending / Failed):</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {syncState.itemsStats.synced} / {syncState.itemsStats.pending} / {syncState.itemsStats.failed}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
+                  <span className="text-slate-500">Invoices (Synced / Pending / Failed):</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {syncState.invoicesStats.synced} / {syncState.invoicesStats.pending} / {syncState.invoicesStats.failed}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
                   <span className="text-slate-500">Counter / Device ID:</span>
@@ -242,28 +289,12 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   </span>
                 </div>
                 <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Pending Sync Records:</span>
-                  <span className={`font-bold ${syncState.pendingCount > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
-                    {syncState.pendingCount} record(s)
-                  </span>
-                </div>
-                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Failed Sync Records:</span>
-                  <span className={`font-bold ${syncState.failedCount > 0 ? 'text-rose-600' : 'text-slate-600'}`}>
-                    {syncState.failedCount} record(s)
-                  </span>
-                </div>
-                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Last Successful Sync:</span>
+                  <span className="text-slate-500">Last Verified Sync:</span>
                   <span className="font-medium text-slate-800">
                     {syncState.lastSyncedAt
                       ? `${new Date(syncState.lastSyncedAt).toLocaleDateString('en-GB')} ${new Date(syncState.lastSyncedAt).toLocaleTimeString()}`
                       : 'Not synced yet'}
                   </span>
-                </div>
-                <div className="flex justify-between items-center py-1 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500">Local IndexedDB Storage:</span>
-                  <span className="font-semibold text-emerald-700">Active & Persistent</span>
                 </div>
               </div>
 
@@ -293,15 +324,17 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                 </div>
               )}
 
-              {syncState.lastError && (
+              {(syncState.lastError || syncState.diagnosticLogs.length > 0) && (
                 <div className="mb-3 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px]">
-                  <div className="font-bold mb-0.5">Sync Issue Details:</div>
-                  <div>{syncState.lastError}</div>
-                  {syncState.failedItems.length > 0 && (
-                    <div className="mt-1.5 max-h-24 overflow-y-auto space-y-1 border-t border-rose-200 pt-1">
-                      {syncState.failedItems.slice(0, 5).map((fi) => (
-                        <div key={fi.client_tx_id} className="text-[10px] font-mono">
-                          • {fi.action}: {fi.error}
+                  <div className="font-bold mb-0.5">
+                    Diagnostic Logs ({syncState.diagnosticLogs.length}):
+                  </div>
+                  {syncState.lastError && <div className="mb-1 break-all">{syncState.lastError}</div>}
+                  {syncState.diagnosticLogs.length > 0 && (
+                    <div className="mt-1 max-h-28 overflow-y-auto space-y-1 border-t border-rose-200 pt-1">
+                      {syncState.diagnosticLogs.slice(0, 6).map((log, idx) => (
+                        <div key={log.id ?? idx} className="text-[10px] font-mono break-all">
+                          • [{log.entity}/{log.operation}] {log.code}: {log.message}
                         </div>
                       ))}
                     </div>
@@ -312,7 +345,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
-                  disabled={!syncState.isOnline || syncState.syncStatus === 'syncing'}
+                  disabled={syncState.syncStatus === 'syncing'}
                   onClick={() => offlineSyncManager.syncNow()}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold cursor-pointer transition-colors"
                 >
@@ -322,7 +355,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                 {syncState.failedCount > 0 && (
                   <button
                     type="button"
-                    disabled={!syncState.isOnline || syncState.syncStatus === 'syncing'}
+                    disabled={syncState.syncStatus === 'syncing'}
                     onClick={() => offlineSyncManager.retryFailed()}
                     className="py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold cursor-pointer transition-colors"
                   >

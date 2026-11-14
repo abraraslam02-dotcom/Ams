@@ -10,7 +10,7 @@
  */
 
 const DB_NAME = 'AbrarMedicalStore_LocalDB';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export type OfflineSyncAction =
   | 'CREATE_SALE'
@@ -63,6 +63,18 @@ export interface OfflineMetaRecord {
   key: string;
   value: any;
   updated_at: string;
+}
+
+export interface SyncErrorLogRecord {
+  id?: number;
+  timestamp: string;
+  entity: 'items' | 'invoices' | 'connection' | 'sync' | string;
+  record_key: string;
+  cloud_doc_id?: string;
+  operation: string;
+  code: string;
+  message: string;
+  details?: string;
 }
 
 class OfflineStorage {
@@ -210,6 +222,16 @@ class OfflineStorage {
         // 17. Local Backups Store (Added in v3)
         if (!db.objectStoreNames.contains('local_backups')) {
           db.createObjectStore('local_backups', { keyPath: 'id' });
+        }
+
+        // 18. Firestore Sync Error & Diagnostic Logs Store (Added in v4, non-destructive)
+        if (!db.objectStoreNames.contains('sync_error_logs')) {
+          const logStore = db.createObjectStore('sync_error_logs', {
+            keyPath: 'id',
+            autoIncrement: true,
+          });
+          logStore.createIndex('timestamp', 'timestamp', { unique: false });
+          logStore.createIndex('entity', 'entity', { unique: false });
         }
       };
 
@@ -513,6 +535,48 @@ class OfflineStorage {
       }
     } catch {
       // ignore cache cleanup errors
+    }
+  }
+
+  // --- DIAGNOSTIC SYNC ERROR LOGGING (NON-DESTRUCTIVE) ---
+
+  async addSyncErrorLog(entry: Omit<SyncErrorLogRecord, 'id' | 'timestamp'> & { timestamp?: string }): Promise<SyncErrorLogRecord> {
+    const fullEntry: SyncErrorLogRecord = {
+      timestamp: entry.timestamp || new Date().toISOString(),
+      entity: entry.entity,
+      record_key: entry.record_key,
+      cloud_doc_id: entry.cloud_doc_id,
+      operation: entry.operation,
+      code: entry.code,
+      message: entry.message,
+      details: entry.details,
+    };
+    try {
+      const db = await this.getDb();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('sync_error_logs', 'readwrite');
+        const store = tx.objectStore('sync_error_logs');
+        const req = store.add(fullEntry);
+        req.onsuccess = () => {
+          fullEntry.id = Number(req.result);
+          resolve();
+        };
+        req.onerror = () => reject(req.error);
+      });
+    } catch {
+      // Fallback safely if store unavailable
+    }
+    return fullEntry;
+  }
+
+  async getSyncErrorLogs(limit = 50): Promise<SyncErrorLogRecord[]> {
+    try {
+      const all = await this.getAll<SyncErrorLogRecord>('sync_error_logs');
+      return all
+        .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+        .slice(0, limit);
+    } catch {
+      return [];
     }
   }
 

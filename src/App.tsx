@@ -47,6 +47,7 @@ import {
   PayrollTabId,
 } from './components/payroll/PayrollHRWorkspace';
 import { api } from './services/api';
+import { subscribeFirestoreConnection } from './lib/firebase';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
 import {
@@ -121,10 +122,17 @@ function AppContent() {
 
   const [, setHealth] = useState<HealthResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DatabaseDiagnostics | null>(null);
+  const [firestoreConnected, setFirestoreConnected] = useState<boolean>(false);
   const [tables, setTables] = useState<TableDetail[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    return subscribeFirestoreConnection((state) => {
+      setFirestoreConnected(state.connected);
+    });
+  }, []);
 
   // Enforce Super Admin and Individual User RBAC Permissions
   const canAccessTab = useCallback(
@@ -732,7 +740,7 @@ function AppContent() {
           activeTab={activeTab}
           onSelectTab={handleSelectTab}
           roleName={user?.role}
-          databaseConnected={diagnostics?.connected ?? false}
+          databaseConnected={Boolean(diagnostics?.connected || firestoreConnected)}
           totalTables={tables.length}
           hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
         />

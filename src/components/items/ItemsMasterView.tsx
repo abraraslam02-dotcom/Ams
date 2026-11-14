@@ -28,6 +28,7 @@ import { exportItemsToExcel } from '../../utils/excel';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { FirestoreSyncStatusBar, RecordSyncBadge } from '../common/FirestoreSyncStatusBar';
 
 interface ItemsMasterViewProps {
   initialOpenImport?: boolean;
@@ -298,6 +299,9 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
         </div>
       )}
 
+      {/* Live Firestore Sync Status & Manual Sync Controls */}
+      <FirestoreSyncStatusBar entity="items" onSyncCompleted={fetchItems} />
+
       {/* Summary KPI Cards Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs">
@@ -528,6 +532,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                 <th className="py-2.5 px-2 text-center">Min</th>
                 <th className="py-2.5 px-2.5">Rack</th>
                 <th className="py-2.5 px-2.5 text-center">Status</th>
+                <th className="py-2.5 px-2.5 text-center">Cloud Sync</th>
                 <th className="py-2.5 px-3 text-right sticky right-0 bg-slate-50 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.05)] print:hidden">
                   Actions
                 </th>
@@ -537,14 +542,14 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
             <tbody className="divide-y divide-slate-100">
               {loading && items.length === 0 ? (
                 <tr>
-                  <td colSpan={16} className="py-12 text-center text-slate-500">
+                  <td colSpan={17} className="py-12 text-center text-slate-500">
                     <RefreshCw className="w-5 h-5 animate-spin mx-auto text-emerald-600 mb-2" />
                     <span>Loading items from database...</span>
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={16} className="py-12 text-center text-slate-500">
+                  <td colSpan={17} className="py-12 text-center text-slate-500">
                     <div className="max-w-md mx-auto space-y-3">
                       <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 mx-auto flex items-center justify-center">
                         <Package className="w-6 h-6" />
@@ -733,6 +738,16 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                         </span>
                       </td>
 
+                      {/* Cloud Sync Status */}
+                      <td className="py-2 px-2.5 text-center whitespace-nowrap">
+                        <RecordSyncBadge
+                          syncStatus={(item as any).sync_status}
+                          cloudSyncedAt={(item as any).cloud_synced_at}
+                          syncError={(item as any).sync_error}
+                          cloudDocId={(item as any).cloud_doc_id}
+                        />
+                      </td>
+
                       {/* Actions */}
                       <td className="py-2 px-3 text-right whitespace-nowrap sticky right-0 bg-white/95 group-hover:bg-slate-50/95 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.05)] print:hidden">
                         <div className="flex items-center justify-end gap-1">
@@ -766,7 +781,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
             Showing <strong>{items.length}</strong> items in catalog
           </span>
           <span className="text-[11px] font-mono text-slate-400">
-            Database: ams_medical.db &bull; Table: items
+            Database: Firestore Cloud + Local IndexedDB &bull; Collection: items
           </span>
         </div>
       </div>
