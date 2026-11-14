@@ -992,6 +992,7 @@ export const api = {
           }
 
           if (mergedExtraCount > 0) {
+            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
             const sortKey = params?.sortBy || 'item_name';
             const dir = params?.sortOrder === 'desc' ? -1 : 1;
             enrichedItems.sort((a: any, b: any) => {
@@ -1518,6 +1519,23 @@ export const api = {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.accounts)) {
+          const existingLocal = await offlineStorage.getAll<any>('accounts').catch(() => []);
+          const seenCodes = new Set<string>(
+            data.accounts.map((a: any) => String(a?.account_code || '').toLowerCase()).filter(Boolean)
+          );
+          const seenIds = new Set<number>(
+            data.accounts.map((a: any) => Number(a?.id || 0)).filter((n: number) => n > 0)
+          );
+          let extraLocal = 0;
+          for (const loc of existingLocal) {
+            const code = String(loc?.account_code || '').toLowerCase();
+            if ((code && seenCodes.has(code)) || seenIds.has(Number(loc?.id || 0))) continue;
+            data.accounts.push(loc);
+            extraLocal++;
+          }
+          if (extraLocal > 0) {
+            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
+          }
           offlineStorage.bulkPut('accounts', data.accounts).catch(() => {});
         }
         return data;
@@ -2039,6 +2057,36 @@ export const api = {
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
+          const srvList = Array.isArray(data.purchases)
+            ? data.purchases
+            : Array.isArray(data.data)
+            ? data.data
+            : [];
+          const existingLocal = await offlineStorage.getAll<any>('purchases').catch(() => []);
+          const seenBills = new Set<string>(
+            srvList
+              .map((p: any) => String(p?.bill_number || p?.invoice_number || '').toLowerCase())
+              .filter(Boolean)
+          );
+          let extraCount = 0;
+          for (const loc of existingLocal) {
+            const bNo = String(loc?.bill_number || loc?.invoice_number || '').toLowerCase();
+            if (bNo && seenBills.has(bNo)) continue;
+            srvList.push(loc);
+            extraCount++;
+          }
+          if (srvList.length > 0) {
+            const toStore = srvList.map((p: any) => ({
+              ...p,
+              client_tx_id: p.client_tx_id || `PUR-${p.id || p.bill_number || p.invoice_number || Date.now()}`,
+            }));
+            offlineStorage.bulkPut('purchases', toStore).catch(() => {});
+          }
+          if (extraCount > 0) {
+            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
+            data.purchases = srvList;
+            data.data = srvList;
+          }
           return data;
         }
       }
@@ -2171,6 +2219,21 @@ export const api = {
       });
       const data = await res.json();
       if (res.ok && data.success) {
+        const savedPur = data.purchase || data.data || {};
+        const purRecord = {
+          ...payload,
+          ...savedPur,
+          id: savedPur.id || data.purchaseId || Date.now(),
+          bill_number: savedPur.bill_number || savedPur.invoice_number || data.billNumber || payload.bill_number,
+          invoice_number: savedPur.invoice_number || savedPur.bill_number || data.billNumber || payload.invoice_number,
+          client_tx_id:
+            payload.client_tx_id ||
+            savedPur.client_tx_id ||
+            `PUR-${savedPur.id || data.purchaseId || Date.now()}`,
+          items: Array.isArray(payload.items) ? payload.items : savedPur.items || [],
+          sync_status: 'synced',
+        };
+        offlineStorage.put('purchases', purRecord).catch(() => {});
         return data;
       }
       if (res.status >= 400 && res.status < 500 && data.error) {
@@ -2215,6 +2278,16 @@ export const api = {
       });
       const data = await res.json();
       if (res.ok && data.success) {
+        const savedPur = data.purchase || data.data || {};
+        const purRecord = {
+          ...payload,
+          ...savedPur,
+          id: savedPur.id || id,
+          client_tx_id: savedPur.client_tx_id || payload.client_tx_id || `PUR-${id}`,
+          items: Array.isArray(payload.items) ? payload.items : savedPur.items || [],
+          sync_status: 'synced',
+        };
+        offlineStorage.put('purchases', purRecord).catch(() => {});
         return data;
       }
       if (res.status >= 400 && res.status < 500 && data.error) {
@@ -2679,6 +2752,7 @@ export const api = {
           }
 
           if (mergedExtraCount > 0) {
+            offlineSyncManager.rehydrateServerFromLocal().catch(() => 0);
             enriched.sort((a: any, b: any) => {
               const da = String(a.invoice_date || a.sale_date || '');
               const db = String(b.invoice_date || b.sale_date || '');

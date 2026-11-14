@@ -646,16 +646,6 @@ syncRouter.post('/push', (req: Request, res: Response) => {
   try {
     ensureSyncTables();
     const db = getDatabase();
-    const serverResetEpoch = getDbResetEpoch(db);
-    const clientResetEpoch = String(req.body?.resetEpoch || req.headers['x-reset-epoch'] || '').trim();
-    if (serverResetEpoch && clientResetEpoch !== serverResetEpoch) {
-      return res.status(409).json({
-        success: false,
-        code: 'RESET_EPOCH_MISMATCH',
-        serverResetEpoch,
-        error: 'Client offline cache predates the latest database reset or restore. Syncing clean state first.',
-      });
-    }
 
     const deviceId = req.body?.deviceId || req.body?.device_id || 'POS-TERMINAL';
     const items = req.body?.items || req.body?.operations;
@@ -1744,60 +1734,46 @@ syncRouter.get('/audit-logs', (req: Request, res: Response) => {
 
 /**
  * POST /api/sync/restore-cloud-records
- * Non-destructively restores items & invoices from Firestore and/or provided records into SQLite
+ * Non-destructively restores client IndexedDB records (items, accounts, inventory, sales, purchases, cashBookVouchers)
+ * into server SQLite whenever a newly republished Cloud Run container starts up empty.
  */
-syncRouter.post('/restore-cloud-records', authenticateToken, async (req: Request, res: Response) => {
+syncRouter.post('/restore-cloud-records', async (req: Request, res: Response) => {
   try {
     ensureSyncTables();
-    const db = getDatabase();
-    const serverResetEpoch = getDbResetEpoch(db);
-    const serverResetAt = getDbResetTimestamp(db);
-    const clientResetEpoch = String(req.body?.resetEpoch || req.headers['x-reset-epoch'] || '').trim();
-
-    if (serverResetEpoch && clientResetEpoch && clientResetEpoch !== serverResetEpoch) {
-      return res.status(409).json({
-        success: false,
-        code: 'RESET_EPOCH_MISMATCH',
-        serverResetEpoch,
-        error: 'Stale client cache cannot rehydrate records from before database reset.',
-      });
-    }
-
     const rawBodyItems = Array.isArray(req.body?.items) ? req.body.items : [];
-    const rawBodyInvoices = Array.isArray(req.body?.invoices) ? req.body.invoices : [];
+    const rawBodyInvoices = Array.isArray(req.body?.invoices)
+      ? req.body.invoices
+      : Array.isArray(req.body?.sales)
+      ? req.body.sales
+      : [];
+    const rawAccounts = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
+    const rawInventory = Array.isArray(req.body?.inventory) ? req.body.inventory : [];
+    const rawPurchases = Array.isArray(req.body?.purchases) ? req.body.purchases : [];
+    const rawVouchers = Array.isArray(req.body?.cashBookVouchers) ? req.body.cashBookVouchers : [];
 
-    // Filter out any pre-reset records if resetAt is established
-    const filterPostReset = (arr: any[]) => {
-      if (!serverResetAt) return arr;
-      const cutoff = serverResetAt.replace(' ', 'T');
-      return arr.filter((rec) => {
-        const ts = String(rec?.updated_at || rec?.updatedAt || rec?.created_at || rec?.createdAt || '')
-          .trim()
-          .replace(' ', 'T');
-        return Boolean(ts && ts > cutoff);
-      });
-    };
+    const result = hydrateSqliteFromCloudRecords(rawBodyItems, rawBodyInvoices, {
+      accounts: rawAccounts,
+      inventory: rawInventory,
+      purchases: rawPurchases,
+      cashBookVouchers: rawVouchers,
+    });
 
-    const bodyItems = filterPostReset(rawBodyItems);
-    const bodyInvoices = filterPostReset(rawBodyInvoices);
+    const totalRestored =
+      result.restoredItems +
+      result.restoredInvoices +
+      result.restoredAccounts +
+      result.restoredInventory +
+      result.restoredPurchases +
+      result.restoredVouchers;
 
-    let restoredItems = 0;
-    let restoredInvoices = 0;
-
-    if (bodyItems.length > 0 || bodyInvoices.length > 0) {
-      const r1 = hydrateSqliteFromCloudRecords(bodyItems, bodyInvoices);
-      restoredItems += r1.restoredItems;
-      restoredInvoices += r1.restoredInvoices;
-    }
-
-    if (restoredItems > 0 || restoredInvoices > 0) {
+    if (totalRestored > 0) {
       syncDatabaseToCloudSQL('restore-cloud-records').catch(() => {});
     }
 
     return res.json({
       success: true,
-      restoredItems,
-      restoredInvoices,
+      ...result,
+      totalRestored,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);

@@ -5,6 +5,7 @@
  */
 
 import { offlineStorage } from './offlineStorage';
+import { prepareItemIndex, searchItems } from '../utils/itemSearch';
 
 export type SyncStatusType = 'synced' | 'pending' | 'syncing' | 'failed' | 'offline';
 
@@ -45,7 +46,28 @@ export function parseLocalUnitsPerPack(packingStr?: string | null): number {
 }
 
 function getStoredAuthHeaders(): Record<string, string> {
-  return { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (typeof window !== 'undefined') {
+    try {
+      const rawSession =
+        window.sessionStorage.getItem('ams_active_tab_session_v2') ||
+        window.localStorage.getItem('ams_active_auth_session_v2');
+      if (rawSession) {
+        const parsed = JSON.parse(rawSession);
+        if (parsed?.token) {
+          headers['Authorization'] = `Bearer ${parsed.token}`;
+          return headers;
+        }
+      }
+      const legacyToken = window.localStorage.getItem('ams_session_token');
+      if (legacyToken) {
+        headers['Authorization'] = `Bearer ${legacyToken}`;
+      }
+    } catch {
+      // ignore storage parse error
+    }
+  }
+  return headers;
 }
 
 class OfflineSyncManager {
@@ -63,6 +85,7 @@ class OfflineSyncManager {
   private listeners: Set<SyncListener> = new Set();
   private syncTimer: any = null;
   private isSyncing = false;
+  private isRehydrating = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -107,6 +130,64 @@ class OfflineSyncManager {
       this.isOnline = false;
       this.syncStatus = 'offline';
       this.notify();
+    }
+  }
+
+  /**
+   * Automatically re-hydrates the server SQLite database from local IndexedDB records
+   * whenever a newly republished Cloud Run container starts up empty or is missing local records.
+   */
+  public async rehydrateServerFromLocal(): Promise<number> {
+    if (this.isRehydrating) return 0;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
+
+    this.isRehydrating = true;
+    try {
+      const [items, accounts, inventory, sales, purchases, cashBookVouchers] = await Promise.all([
+        offlineStorage.getAll<any>('items').catch(() => []),
+        offlineStorage.getAll<any>('accounts').catch(() => []),
+        offlineStorage.getAll<any>('inventory').catch(() => []),
+        offlineStorage.getAll<any>('sales').catch(() => []),
+        offlineStorage.getAll<any>('purchases').catch(() => []),
+        offlineStorage.getAll<any>('cash_book').catch(() => []),
+      ]);
+
+      const customAccounts = accounts.filter((a) => !a?.is_system_account);
+
+      if (
+        items.length === 0 &&
+        customAccounts.length === 0 &&
+        inventory.length === 0 &&
+        sales.length === 0 &&
+        purchases.length === 0 &&
+        cashBookVouchers.length === 0
+      ) {
+        return 0;
+      }
+
+      const res = await fetch('/api/sync/restore-cloud-records', {
+        method: 'POST',
+        headers: getStoredAuthHeaders(),
+        cache: 'no-store',
+        body: JSON.stringify({
+          items,
+          invoices: sales,
+          accounts: customAccounts,
+          inventory,
+          purchases,
+          cashBookVouchers,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return Number(data?.totalRestored || 0);
+      }
+      return 0;
+    } catch {
+      return 0;
+    } finally {
+      this.isRehydrating = false;
     }
   }
 
@@ -485,9 +566,10 @@ class OfflineSyncManager {
 
   /**
    * Main sync method:
-   * 1. Checks server reset epoch
+   * 1. Checks server connection status (never wipes local IndexedDB on container restart/republish)
    * 2. Auto-retries previously failed queue items and pushes pending changes in small batches (20 per batch)
-   * 3. Pulls incremental delta updates since lastSyncedAt + last_tombstone_id
+   * 3. Rehydrates server SQLite from local IndexedDB if a newly republished container started empty
+   * 4. Pulls incremental delta updates since lastSyncedAt + last_tombstone_id
    */
   public async syncNow(): Promise<boolean> {
     if (this.isSyncing) return false;
@@ -510,9 +592,7 @@ class OfflineSyncManager {
     try {
       await offlineStorage.getDb();
 
-      // Step 1: Check central database status & reset epoch
-      let serverResetEpoch: string | null = null;
-      let skipPreResetPush = false;
+      // Step 1: Check central database status
       try {
         const statusRes = await fetch(`/api/sync/status?_t=${Date.now()}`, {
           headers: getStoredAuthHeaders(),
@@ -523,23 +603,6 @@ class OfflineSyncManager {
         }
         this.serverConnected = true;
         this.isOnline = true;
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          if (statusData?.dbResetEpoch) {
-            serverResetEpoch = String(statusData.dbResetEpoch);
-            const localEpoch = String(
-              (await offlineStorage.getMeta('db_reset_epoch')) ||
-                (typeof window !== 'undefined' ? window.localStorage.getItem('ams_db_reset_epoch') || '' : '')
-            );
-            if (localEpoch !== serverResetEpoch) {
-              await offlineStorage.purgeBusinessDataForReset(serverResetEpoch);
-              this.lastSyncedAt = null;
-              await offlineStorage.setMeta('last_synced_at', null);
-              await this.refreshPendingCount();
-              skipPreResetPush = true;
-            }
-          }
-        }
       } catch (connErr: unknown) {
         const msg = connErr instanceof Error ? connErr.message : String(connErr);
         this.serverConnected = false;
@@ -562,134 +625,120 @@ class OfflineSyncManager {
       }).catch(() => {});
 
       // Step 2: Re-queue any previously failed records automatically on reconnect / Sync Now, then push in batches
-      if (!skipPreResetPush) {
-        await offlineStorage.retryFailedSyncItems();
-        const pendingItems = await offlineStorage.getPendingSyncItems();
-        const activeLocalEpoch = String(
-          (await offlineStorage.getMeta('db_reset_epoch')) ||
-            (typeof window !== 'undefined' ? window.localStorage.getItem('ams_db_reset_epoch') || '' : '')
-        );
+      await offlineStorage.retryFailedSyncItems();
+      const pendingItems = await offlineStorage.getPendingSyncItems();
 
-        for (let i = 0; i < pendingItems.length; i += SYNC_BATCH_SIZE) {
-          const batch = pendingItems.slice(i, i + SYNC_BATCH_SIZE);
-          const batchByTxId = new Map(batch.map((p) => [p.client_tx_id, p]));
+      for (let i = 0; i < pendingItems.length; i += SYNC_BATCH_SIZE) {
+        const batch = pendingItems.slice(i, i + SYNC_BATCH_SIZE);
+        const batchByTxId = new Map(batch.map((p) => [p.client_tx_id, p]));
 
-          const res = await fetch('/api/sync/push', {
-            method: 'POST',
-            headers: getStoredAuthHeaders(),
-            cache: 'no-store',
-            body: JSON.stringify({
-              deviceId: this.deviceId,
-              counterName: this.counterName,
-              resetEpoch: activeLocalEpoch || undefined,
-              items: batch,
-            }),
-          });
+        const res = await fetch('/api/sync/push', {
+          method: 'POST',
+          headers: getStoredAuthHeaders(),
+          cache: 'no-store',
+          body: JSON.stringify({
+            deviceId: this.deviceId,
+            counterName: this.counterName,
+            items: batch,
+          }),
+        });
 
-          if (res.status === 409) {
-            const conflictData = await res.json().catch(() => ({}));
-            if (conflictData?.code === 'RESET_EPOCH_MISMATCH' && conflictData?.serverResetEpoch) {
-              serverResetEpoch = String(conflictData.serverResetEpoch);
-              await offlineStorage.purgeBusinessDataForReset(serverResetEpoch);
-              this.lastSyncedAt = null;
-              await offlineStorage.setMeta('last_synced_at', null);
-              await this.refreshPendingCount();
-              break;
-            }
-          } else if (res.ok) {
-            const data = await res.json();
-            if (data.success && Array.isArray(data.results)) {
-              for (const resItem of data.results) {
-                await offlineStorage.updateSyncItemStatus(resItem.client_tx_id, resItem.status, {
-                  server_id: resItem.server_id,
-                  server_invoice_number: resItem.invoice_number,
-                  error: resItem.error,
-                });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.results)) {
+            for (const resItem of data.results) {
+              await offlineStorage.updateSyncItemStatus(resItem.client_tx_id, resItem.status, {
+                server_id: resItem.server_id,
+                server_invoice_number: resItem.invoice_number,
+                error: resItem.error,
+              });
 
-                const origQueueItem = batchByTxId.get(resItem.client_tx_id);
-                if (!origQueueItem) continue;
-                const { entity, local_id } = origQueueItem;
-                const srvId = Number(resItem.server_id || 0);
+              const origQueueItem = batchByTxId.get(resItem.client_tx_id);
+              if (!origQueueItem) continue;
+              const { entity, local_id } = origQueueItem;
+              const srvId = Number(resItem.server_id || 0);
 
-                if (resItem.status === 'synced') {
-                  try {
-                    if (entity === 'items' && Number(local_id) > 0) {
-                      const oldLocal = await offlineStorage.get<any>('items', Number(local_id));
-                      if (oldLocal) {
-                        if (srvId > 0 && Number(local_id) !== srvId) {
-                          await offlineStorage.put('items', {
-                            ...oldLocal,
-                            id: srvId,
-                            server_id: srvId,
-                            sync_status: 'synced',
-                            local_modified: false,
-                          });
-                          await offlineStorage.delete('items', Number(local_id));
-                        } else {
-                          await offlineStorage.put('items', {
-                            ...oldLocal,
-                            sync_status: 'synced',
-                            local_modified: false,
-                          });
-                        }
-                      }
-                    } else if (entity === 'accounts' && Number(local_id) > 0) {
-                      const oldAcc = await offlineStorage.get<any>('accounts', Number(local_id));
+              if (resItem.status === 'synced') {
+                try {
+                  if (entity === 'items' && Number(local_id) > 0) {
+                    const oldLocal = await offlineStorage.get<any>('items', Number(local_id));
+                    if (oldLocal) {
                       if (srvId > 0 && Number(local_id) !== srvId) {
-                        if (oldAcc) {
-                          await offlineStorage.put('accounts', {
-                            ...oldAcc,
-                            id: srvId,
-                            server_id: srvId,
-                            sync_status: 'synced',
-                            local_modified: false,
-                          });
-                        }
-                        await offlineStorage.delete('accounts', Number(local_id));
-                      } else if (oldAcc) {
-                        await offlineStorage.put('accounts', {
-                          ...oldAcc,
+                        await offlineStorage.put('items', {
+                          ...oldLocal,
+                          id: srvId,
+                          server_id: srvId,
+                          sync_status: 'synced',
+                          local_modified: false,
+                        });
+                        await offlineStorage.delete('items', Number(local_id));
+                      } else {
+                        await offlineStorage.put('items', {
+                          ...oldLocal,
                           sync_status: 'synced',
                           local_modified: false,
                         });
                       }
-                    } else if (
-                      entity === 'sales' ||
-                      entity === 'purchases' ||
-                      entity === 'cash_book' ||
-                      entity === 'sale_returns' ||
-                      entity === 'purchase_returns'
-                    ) {
-                      const existingTx = await offlineStorage.get<any>(entity, resItem.client_tx_id);
-                      if (existingTx) {
-                        existingTx.sync_status = 'synced';
-                        existingTx.local_modified = false;
-                        if (srvId > 0) {
-                          existingTx.id = srvId;
-                          existingTx.server_id = srvId;
-                        }
-                        if (resItem.invoice_number) {
-                          existingTx.invoice_number = resItem.invoice_number;
-                          if (entity === 'purchases') existingTx.bill_number = resItem.invoice_number;
-                          if (entity === 'cash_book') existingTx.voucher_number = resItem.invoice_number;
-                        }
-                        await offlineStorage.put(entity, existingTx);
-                      }
                     }
-                  } catch {
-                    // ignore local store update warning
+                  } else if (entity === 'accounts' && Number(local_id) > 0) {
+                    const oldAcc = await offlineStorage.get<any>('accounts', Number(local_id));
+                    if (srvId > 0 && Number(local_id) !== srvId) {
+                      if (oldAcc) {
+                        await offlineStorage.put('accounts', {
+                          ...oldAcc,
+                          id: srvId,
+                          server_id: srvId,
+                          sync_status: 'synced',
+                          local_modified: false,
+                        });
+                      }
+                      await offlineStorage.delete('accounts', Number(local_id));
+                    } else if (oldAcc) {
+                      await offlineStorage.put('accounts', {
+                        ...oldAcc,
+                        sync_status: 'synced',
+                        local_modified: false,
+                      });
+                    }
+                  } else if (
+                    entity === 'sales' ||
+                    entity === 'purchases' ||
+                    entity === 'cash_book' ||
+                    entity === 'sale_returns' ||
+                    entity === 'purchase_returns'
+                  ) {
+                    const existingTx = await offlineStorage.get<any>(entity, resItem.client_tx_id);
+                    if (existingTx) {
+                      existingTx.sync_status = 'synced';
+                      existingTx.local_modified = false;
+                      if (srvId > 0) {
+                        existingTx.id = srvId;
+                        existingTx.server_id = srvId;
+                      }
+                      if (resItem.invoice_number) {
+                        existingTx.invoice_number = resItem.invoice_number;
+                        if (entity === 'purchases') existingTx.bill_number = resItem.invoice_number;
+                        if (entity === 'cash_book') existingTx.voucher_number = resItem.invoice_number;
+                      }
+                      await offlineStorage.put(entity, existingTx);
+                    }
                   }
-                } else {
-                  syncErrorMsg = resItem.error || 'One or more changes failed to sync.';
+                } catch {
+                  // ignore local store update warning
                 }
+              } else {
+                syncErrorMsg = resItem.error || 'One or more changes failed to sync.';
               }
             }
-          } else if (res.status !== 401) {
-            syncErrorMsg = `Sync push HTTP ${res.status}`;
-            break;
           }
+        } else if (res.status !== 401) {
+          syncErrorMsg = `Sync push HTTP ${res.status}`;
+          break;
         }
       }
+
+      // Step 2.5: Ensure server SQLite has all records from local IndexedDB (prevents data loss after Cloud Run Republish)
+      await this.rehydrateServerFromLocal().catch(() => 0);
 
       // Step 3: Build protected IDs for any remaining pending/failed local records
       const [remainingPending, remainingFailed] = await Promise.all([
@@ -733,11 +782,10 @@ class OfflineSyncManager {
       // Step 4: Incremental pull using since + last_tombstone_id
       const lastTombstoneId = Number((await offlineStorage.getMeta('last_tombstone_id')) || 0);
       const sinceParam = this.lastSyncedAt ? `&since=${encodeURIComponent(this.lastSyncedAt)}` : '';
-      const epochParam = serverResetEpoch ? `&reset_epoch=${encodeURIComponent(serverResetEpoch)}` : '';
       const pullRes = await fetch(
         `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(
           this.counterName
-        )}&last_tombstone_id=${lastTombstoneId}${sinceParam}${epochParam}&_t=${Date.now()}`,
+        )}&last_tombstone_id=${lastTombstoneId}${sinceParam}&_t=${Date.now()}`,
         {
           headers: getStoredAuthHeaders(),
           cache: 'no-store',
@@ -747,16 +795,6 @@ class OfflineSyncManager {
       if (pullRes.ok) {
         const pullData = await pullRes.json();
         if (pullData && pullData.success) {
-          if (pullData.dbResetEpoch) {
-            const pullEpoch = String(pullData.dbResetEpoch);
-            const curLocalEpoch = String(
-              (await offlineStorage.getMeta('db_reset_epoch')) ||
-                (typeof window !== 'undefined' ? window.localStorage.getItem('ams_db_reset_epoch') || '' : '')
-            );
-            if (curLocalEpoch !== pullEpoch) {
-              await offlineStorage.purgeBusinessDataForReset(pullEpoch);
-            }
-          }
           serverSyncTime = String(pullData.serverTime || serverSyncTime);
           const isIncremental = Boolean(pullData.isIncremental);
 
