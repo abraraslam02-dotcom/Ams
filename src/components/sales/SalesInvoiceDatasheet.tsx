@@ -154,6 +154,16 @@ export function ensureMinimumRows(list: DatasheetRow[], minCount: number = MIN_D
   return result;
 }
 
+/**
+ * Pure helper for MS Access-style continuous data entry:
+ * finds the next blank row after `fromRowIdx` (never overwriting existing populated rows),
+ * or returns `list.length` if a new blank row needs to be appended.
+ */
+export function findNextBlankSalesRowIndex(list: DatasheetRow[], fromRowIdx: number): number {
+  const existingEmptyIdx = list.findIndex((r, idx) => idx > fromRowIdx && !isSalesRowPopulated(r));
+  return existingEmptyIdx >= 0 ? existingEmptyIdx : list.length;
+}
+
 export function isSyrupItem(
   itemOrRow:
     | {
@@ -1162,11 +1172,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       setTimeout(() => {
         const rowQtyEl = document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null;
         rowQtyEl?.closest('tr')?.scrollIntoView({ block: 'nearest' });
-        const qtyEl =
-          (document.getElementById(targetId) as HTMLInputElement | null) ||
-          (invoiceViewMode === 'pos'
-            ? (document.getElementById('pos_active_quantity') as HTMLInputElement | null)
-            : null);
+        const qtyEl = document.getElementById(targetId) as HTMLInputElement | null;
         if (qtyEl) {
           qtyEl.focus();
           qtyEl.select?.();
@@ -1275,11 +1281,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           : `cell_${existingDuplicateIdx}_quantity`;
       pendingFocusTargetRef.current = qtyId;
       setTimeout(() => {
-        const qtyEl =
-          (document.getElementById(qtyId) as HTMLInputElement | null) ||
-          (invoiceViewMode === 'pos'
-            ? (document.getElementById('pos_active_quantity') as HTMLInputElement | null)
-            : null);
+        const qtyEl = document.getElementById(qtyId) as HTMLInputElement | null;
         if (qtyEl) {
           qtyEl.focus();
           qtyEl.select?.();
@@ -1313,7 +1315,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       <div
         className={
           context === 'top'
-            ? 'absolute left-0 right-0 top-full mt-1 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl min-w-[580px] max-w-[850px] overflow-hidden'
+            ? 'absolute right-0 top-full mt-1 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl w-[640px] max-w-[92vw] overflow-hidden'
             : 'absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl min-w-[540px] max-w-[700px] overflow-hidden'
         }
       >
@@ -1678,7 +1680,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             );
             setTimeout(() => {
               const targetId =
-                invoiceViewMode === 'pos' ? 'pos_active_quantity' : `cell_${focusIdx}_quantity`;
+                invoiceViewMode === 'pos' ? `pos_row_${focusIdx}_quantity` : `cell_${focusIdx}_quantity`;
               const qtyEl = document.getElementById(targetId) as HTMLInputElement | null;
               qtyEl?.focus();
             }, 25);
@@ -2353,46 +2355,32 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
-  // Create/move to a new empty item row and focus Item Search without replacing any existing items
+  // Microsoft Access-style continuous entry:
+  // Move to the next blank row below without modifying existing rows and focus its Item Name field
   const advanceToNewRowItemSearch = (fromRowIdx: number, mode: 'pos' | 'access') => {
-    const existingEmptyIdx = rows.findIndex((r, idx) => idx > fromRowIdx && r.item_id === null);
-    const targetRowIdx = existingEmptyIdx >= 0 ? existingEmptyIdx : rows.length;
+    const targetRowIdx = findNextBlankSalesRowIndex(rows, fromRowIdx);
 
-    if (existingEmptyIdx < 0) {
+    if (targetRowIdx >= rows.length) {
       setRows((prev) => [...prev, createEmptyRow()]);
     }
 
     setSelectedRowIndex(targetRowIdx);
+    setRecordJumpInput(String(targetRowIdx + 1));
     setShowSearchDropdown(false);
     setQuickSearchQuery('');
+    setActiveSearchRowIdx(targetRowIdx);
 
-    if (mode === 'pos') {
-      setActiveSearchRowIdx(null);
-      pendingFocusTargetRef.current = 'pos_item_search_input';
-      setTimeout(() => {
-        const rowEl = document.getElementById(`pos_row_${targetRowIdx}_quantity`);
-        rowEl?.closest('tr')?.scrollIntoView({ block: 'nearest' });
-        const searchEl =
-          posSearchInputRef.current ||
-          (document.getElementById('pos_item_search_input') as HTMLInputElement | null);
-        if (searchEl) {
-          searchEl.focus();
-          searchEl.select?.();
-        }
-      }, 25);
-    } else {
-      setActiveSearchRowIdx(targetRowIdx);
-      const cellId = `cell_${targetRowIdx}_item_code`;
-      pendingFocusTargetRef.current = cellId;
-      setTimeout(() => {
-        const el = document.getElementById(cellId) as HTMLInputElement | null;
-        if (el) {
-          el.focus();
-          el.select?.();
-          el.closest('tr')?.scrollIntoView({ block: 'nearest' });
-        }
-      }, 25);
-    }
+    const prefix = mode === 'pos' ? 'pos_row' : 'cell';
+    const itemNameId = `${prefix}_${targetRowIdx}_item_name`;
+    pendingFocusTargetRef.current = itemNameId;
+    setTimeout(() => {
+      const el = document.getElementById(itemNameId) as HTMLInputElement | null;
+      if (el) {
+        el.focus();
+        el.select?.();
+        el.closest('tr')?.scrollIntoView({ block: 'nearest' });
+      }
+    }, 25);
   };
 
   // POS View Keyboard Navigation: 1. Quantity -> 2. Discount -> 3. Price -> 4. Loose Quantity -> 5. Loose Rate -> Enter -> New Row & Item Search
@@ -2827,7 +2815,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   };
 
   return (
-    <div className="ams-readable-invoice-scope w-full h-full flex-1 min-h-0 flex flex-col gap-1 overflow-y-auto overflow-x-hidden px-1.5 py-1 bg-slate-100" style={{ zoom: 1 }}>
+    <div className="ams-readable-invoice-scope w-full h-full flex-1 min-h-0 flex flex-col gap-1 overflow-hidden px-1.5 py-1 bg-slate-100" style={{ zoom: 1 }}>
       {/* Status Banners */}
       {errorMsg && (
         <div className="px-2.5 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 flex flex-wrap items-center justify-between gap-2 text-xs shadow-sm shrink-0 mb-1">
@@ -2891,48 +2879,48 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         </div>
       )}
 
-      {/* ================= TOP FULL-SCREEN HEADER & INTERFACE SELECTOR BAR ================= */}
-      <div className="ams-pos-compact-chrome flex flex-wrap items-center justify-between gap-1.5 bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white rounded-lg border border-slate-700/80 shadow-md shrink-0 px-2.5 py-1">
+      {/* ================= COMPACT TOP BAR & INTERFACE SWITCHER ================= */}
+      <div className="ams-pos-compact-chrome flex flex-wrap items-center justify-between gap-1 bg-slate-900 text-white rounded-md border border-slate-700/80 shadow-xs shrink-0 px-2 py-0.5">
         <div className="flex flex-wrap items-center gap-1.5">
           {onBackToDashboard && (
             <button
               type="button"
               onClick={onBackToDashboard}
-              className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
-              title="Return to Previous Dashboard / Menu"
+              className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold flex items-center gap-1 cursor-pointer"
+              title="Return to Dashboard"
             >
-              <ArrowLeft className="w-4 h-4" />
-              <span>Back to Dashboard</span>
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back</span>
             </button>
           )}
-          <span className="text-xs font-black uppercase tracking-wider text-emerald-400">
-            FULL-SCREEN SALES INVOICE
+          <span className="font-black uppercase tracking-wider text-emerald-400">
+            SALES INVOICE
           </span>
-          <div className="inline-flex rounded-lg p-0.5 bg-slate-800 border border-slate-700">
+          <div className="inline-flex rounded p-0.5 bg-slate-800 border border-slate-700">
             <button
               type="button"
               onClick={() => toggleInvoiceViewMode('pos')}
-              className={`px-2.5 py-0.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+              className={`px-2 py-0 rounded font-bold transition-all flex items-center gap-1 cursor-pointer ${
                 invoiceViewMode === 'pos'
-                  ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
+                  ? 'bg-emerald-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
               }`}
-              title="Switch to Traditional Desktop POS Billing Interface"
+              title="Switch to POS View"
             >
-              <ShoppingCart className="w-3.5 h-3.5" />
+              <ShoppingCart className="w-3 h-3" />
               <span>1. POS View</span>
             </button>
             <button
               type="button"
               onClick={() => toggleInvoiceViewMode('access')}
-              className={`px-2.5 py-0.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+              className={`px-2 py-0 rounded font-bold transition-all flex items-center gap-1 cursor-pointer ${
                 invoiceViewMode === 'access'
-                  ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-400'
+                  ? 'bg-blue-600 text-white'
                   : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
               }`}
-              title="Switch to Microsoft Access-Style Desktop Datasheet Form"
+              title="Switch to MS Access Datasheet View"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <FileSpreadsheet className="w-3 h-3" />
               <span>2. MS Access View</span>
             </button>
           </div>
@@ -2940,37 +2928,37 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             <button
               type="button"
               onClick={onNavigateToSalesHistory}
-              className="px-2.5 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
-              title="Open Sales Invoice Register & History"
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
+              title="Open Sales History"
             >
-              <History className="w-3.5 h-3.5 text-amber-400" />
-              <span>Sales History</span>
+              <History className="w-3 h-3 text-amber-400" />
+              <span>History</span>
             </button>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+        <div className="flex flex-wrap items-center gap-1 text-slate-300">
           <button
             type="button"
             disabled={exportingExcel}
             onClick={handleExportCurrentSaleToExcel}
-            className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
-            title="Export Current Sales Invoice (or Saved Invoices) to Excel (.xlsx)"
+            className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Export Current Invoice (.xlsx)"
           >
-            <Download className="w-3.5 h-3.5" />
-            <span>{exportingExcel ? 'Exporting...' : 'Export to Excel (.xlsx)'}</span>
+            <Download className="w-3 h-3" />
+            <span>{exportingExcel ? 'Exporting...' : 'Excel'}</span>
           </button>
           <button
             type="button"
             disabled={exportingExcel}
             onClick={handleExportAllSalesToExcel}
-            className="px-2.5 py-1 rounded-lg bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
-            title="Export All Saved Sales Invoices with Line Items to Excel (.xlsx)"
+            className="px-2 py-0.5 rounded bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Export All Saved Sales (.xlsx)"
           >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Export All Sales (.xlsx)</span>
+            <FileSpreadsheet className="w-3 h-3" />
+            <span>All Excel</span>
           </button>
           <label
-            className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-xs font-bold cursor-pointer transition-colors ${
+            className={`flex items-center gap-1 px-1.5 py-0.5 rounded border font-bold cursor-pointer transition-colors ${
               allowNegativeStock
                 ? 'bg-amber-500/20 border-amber-400/60 text-amber-300'
                 : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
@@ -2981,184 +2969,183 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               type="checkbox"
               checked={allowNegativeStock}
               onChange={(e) => handleToggleNegativeStock(e.target.checked)}
-              className="rounded-lg text-amber-500 focus:ring-0 cursor-pointer"
+              className="rounded text-amber-500 focus:ring-0 cursor-pointer"
             />
-            <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span>Allow Neg Stock</span>
+            <span>Neg Stock</span>
           </label>
           <button
             type="button"
             onClick={() => handleOpenCurrentInvoicePreview('a4')}
-            className="px-2.5 py-0.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-            title="Print Preview for Currently Open Sales Invoice (A4 & Thermal)"
+            className="px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Print Preview (A4 & Thermal)"
           >
-            <Eye className="w-3.5 h-3.5" />
-            <span>Print Preview</span>
+            <Eye className="w-3 h-3" />
+            <span>Preview</span>
           </button>
           <button
             type="button"
             onClick={handleOpenDsrReport}
-            className="px-2.5 py-0.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-            title="Open DSR – Daily Stock Requisition Report for Current Invoice"
+            className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Open DSR Report"
           >
-            <ClipboardList className="w-3.5 h-3.5" />
+            <ClipboardList className="w-3 h-3" />
             <span>DSR</span>
           </button>
           <button
             type="button"
             onClick={handleOpenSalesSms}
-            className="px-2.5 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-            title="Send Customer SMS for Current Sales Invoice"
+            className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Send Customer SMS"
           >
-            <MessageSquare className="w-3.5 h-3.5" />
-            <span>Send SMS</span>
+            <MessageSquare className="w-3 h-3" />
+            <span>SMS</span>
           </button>
           <SimpleSyncStatusBar compact dark onSyncCompleted={loadReferenceData} />
-          <span className="bg-slate-800 px-2 py-0.5 rounded-lg text-emerald-400 font-mono font-bold">
+          <span className="bg-slate-800 px-1.5 py-0.5 rounded text-emerald-400 font-mono font-bold">
             {rows.filter((r) => r.item_id).length} Items
           </span>
-          {onBackToDashboard && (
-            <button
-              type="button"
-              onClick={onBackToDashboard}
-              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-200 hover:text-white border border-slate-600 text-xs font-black flex items-center gap-1 cursor-pointer"
-              title="Close Full-Screen Invoice and Return to Dashboard"
-            >
-              <X className="w-3.5 h-3.5" />
-              <span>Close</span>
-            </button>
-          )}
         </div>
       </div>
 
-      {/* ================= OPTION 1: TRADITIONAL POS INTERFACE ================= */}
+      {/* ================= OPTION 1: POS INTERFACE (THREE-SECTION MS ACCESS LAYOUT) ================= */}
       {invoiceViewMode === 'pos' && (
-        <div className="flex-1 min-h-0 flex flex-col gap-1">
-          {/* POS Header: Customer, Salesman, Deliveryman, Type & Mode */}
-          <div className="ams-pos-compact-chrome bg-white rounded-xl border border-slate-200 shadow-sm px-3 py-1.5 space-y-1 shrink-0">
-            {/* Top row: Badges, Bill #, Date & Action Shortcuts */}
-            <div className="flex flex-wrap items-center justify-between gap-1 pb-1 border-b border-slate-100">
-              <div className="flex items-center gap-1.5">
-                <span className="px-2 py-0.5 rounded-lg bg-emerald-700 text-white text-[11px] font-black uppercase tracking-wider flex items-center gap-1">
-                  <Zap className="w-3 h-3 text-amber-300" />
-                  {invoiceType} POS COUNTER
+        <div className="flex-1 min-h-0 flex flex-col gap-1 overflow-hidden">
+          {/* SECTION A (TOP): COMPACT INVOICE HEADER */}
+          <div className="ams-pos-compact-chrome bg-white rounded-md border border-slate-300 shadow-xs px-2.5 py-1 space-y-1 shrink-0">
+            {/* Header Row 1: Invoice #, Date, Customer, Mode & Compact Actions */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-1.5 items-center">
+              {/* Invoice # & Date */}
+              <div className="md:col-span-4 flex flex-wrap items-center gap-1">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-black uppercase">
+                  {invoiceType}
                 </span>
-                <span className="font-mono text-[11px] font-black text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded-lg border border-slate-300">
+                <span
+                  className="font-mono font-black text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-300"
+                  title="Invoice Number"
+                >
                   {invoiceNumber}
                 </span>
                 {editingSaleId ? (
-                  <div className="flex items-center gap-1.5 bg-amber-500 text-white px-2 py-0.5 rounded-lg border border-amber-600 shadow-xs">
-                    <Pencil className="w-3 h-3 text-amber-100" />
-                    <span className="text-[10px] font-black uppercase tracking-wider">
-                      EDITING #{editingSaleId} ({invoiceNumber})
-                    </span>
-                    <button
-                      type="button"
-                      onClick={resetToNewInvoice}
-                      className="ml-1 px-1.5 py-0.2 rounded bg-amber-700 hover:bg-amber-800 text-[10px] font-bold text-white cursor-pointer"
-                      title="Cancel editing and create new bill"
-                    >
-                      Cancel / New Bill
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={resetToNewInvoice}
+                    className="px-1.5 py-0.5 rounded bg-amber-500 hover:bg-amber-600 text-white font-bold cursor-pointer"
+                    title="Editing Saved Invoice — Click to Cancel / New Bill"
+                  >
+                    Edit #{editingSaleId} ✕
+                  </button>
                 ) : null}
-                <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-0">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase">Date:</span>
-                  <input
-                    type="date"
-                    value={invoiceDate}
-                    onChange={(e) => setInvoiceDate(e.target.value)}
-                    className="text-[11px] font-mono font-semibold text-slate-800 bg-transparent outline-none cursor-pointer h-5"
-                  />
-                </div>
+                <input
+                  type="date"
+                  value={invoiceDate}
+                  onChange={(e) => setInvoiceDate(e.target.value)}
+                  className="px-1.5 py-0 font-mono font-semibold text-slate-800 bg-slate-50 border border-slate-300 rounded outline-none cursor-pointer"
+                  title="Invoice Date"
+                />
               </div>
 
-              {/* Quick Header Actions */}
-              <div className="flex items-center gap-1">
-                <label
-                  className={`px-2 py-0.5 rounded-lg border text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-                    allowNegativeStock
-                      ? 'bg-amber-50 border-amber-300 text-amber-900'
-                      : 'bg-slate-100 border-slate-200 text-slate-600 hover:bg-slate-200'
-                  }`}
-                  title="Allow Negative Stock for Sales"
+              {/* Customer Selector + Prev Bal */}
+              <div className="md:col-span-5 flex items-center gap-1">
+                <label className="font-bold text-slate-600 shrink-0">Customer:</label>
+                <select
+                  value={customerAccountId}
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    setCustomerAccountId(id);
+                    if (id > 0) {
+                      refreshCustomerBalanceSummary(id, editingSaleId);
+                      const chosenCust = customers.find((c) => Number(c.id) === id);
+                      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
+                        setSalesmanId(Number(chosenCust.assigned_salesman_id));
+                        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
+                      }
+                    } else {
+                      setLiveBalanceSummary(null);
+                    }
+                  }}
+                  className="flex-1 min-w-0 px-1.5 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 >
-                  <input
-                    type="checkbox"
-                    checked={allowNegativeStock}
-                    onChange={(e) => handleToggleNegativeStock(e.target.checked)}
-                    className="rounded-lg text-amber-600 focus:ring-0 cursor-pointer"
-                  />
-                  <ShieldAlert className="w-3 h-3 text-amber-600" />
-                  <span>Allow Neg Stock</span>
-                </label>
+                  <option value={0}>Walk-in Cash Customer</option>
+                  {customers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      [{c.account_code}] {c.account_name} {c.town_name ? `• ${c.town_name}` : ''}
+                    </option>
+                  ))}
+                </select>
+                {customerAccountId > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => openCustomerShortcut('ledger')}
+                    className="px-1.5 py-0 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono font-bold cursor-pointer shrink-0"
+                    title="Open Customer Ledger"
+                  >
+                    Bal: {formatPKR(Math.abs(prevCustomerBalance))}
+                  </button>
+                )}
+              </div>
+
+              {/* Type Toggle, Mode & Compact Header Actions */}
+              <div className="md:col-span-3 flex flex-wrap items-center justify-end gap-1">
+                <div className="inline-flex rounded p-0.5 bg-slate-100 border border-slate-300">
+                  <button
+                    type="button"
+                    onClick={() => setInvoiceType('Retail')}
+                    className={`px-1.5 py-0 rounded font-bold cursor-pointer ${
+                      invoiceType === 'Retail' ? 'bg-emerald-600 text-white' : 'text-slate-700'
+                    }`}
+                  >
+                    Retail
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInvoiceType('Wholesale')}
+                    className={`px-1.5 py-0 rounded font-bold cursor-pointer ${
+                      invoiceType === 'Wholesale' ? 'bg-blue-600 text-white' : 'text-slate-700'
+                    }`}
+                  >
+                    Wholesale
+                  </button>
+                </div>
+                <select
+                  value={paymentMode}
+                  onChange={(e) => setPaymentMode(e.target.value as SalesPaymentMode)}
+                  className="px-1.5 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900"
+                  title="Payment Mode"
+                >
+                  <option value="Cash">Cash</option>
+                  <option value="Bank">Bank</option>
+                  <option value="Credit">Credit</option>
+                </select>
                 <button
                   type="button"
                   onClick={resetToNewInvoice}
-                  className="px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="New Blank Invoice (Ctrl+N)"
+                  className="px-1.5 py-0 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold flex items-center gap-0.5 cursor-pointer"
+                  title="New Invoice (Ctrl+N)"
                 >
                   <Plus className="w-3 h-3 text-emerald-600" />
-                  New (Ctrl+N)
+                  New
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowEditSearchModal(true)}
-                  className="px-2 py-0.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Find & Edit Completed or Held Sales Invoice (Ctrl+E)"
+                  className="px-1.5 py-0 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold flex items-center gap-0.5 cursor-pointer"
+                  title="Find / Edit (Ctrl+E)"
                 >
                   <Pencil className="w-3 h-3 text-amber-700" />
-                  Find / Edit (Ctrl+E)
+                  Edit
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowHeldDrawer(true)}
-                  className="px-2 py-0.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="View Held Invoices"
+                  className="px-1.5 py-0 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold cursor-pointer"
+                  title="Held Invoices"
                 >
-                  <History className="w-3 h-3 text-amber-700" />
                   Held ({heldInvoices.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                  className="px-2.5 py-0.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-                  title="Print Preview for Current Sales Invoice (A4 & Thermal)"
-                >
-                  <Eye className="w-3 h-3" />
-                  <span>Print Preview</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenDsrReport}
-                  className="px-2.5 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-                  title="Open DSR – Daily Stock Requisition Picking Report for Current Invoice"
-                >
-                  <ClipboardList className="w-3 h-3" />
-                  <span>DSR</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenSalesSms}
-                  className="px-2.5 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-                  title="Send Customer SMS for Current Sales Invoice"
-                >
-                  <MessageSquare className="w-3 h-3" />
-                  <span>Send SMS</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleReprintLastInvoice}
-                  className="px-2 py-0.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                  title="Reprint Last Invoice"
-                >
-                  <Printer className="w-3 h-3 text-blue-700" />
-                  Reprint
                 </button>
                 {(lastSavedWhatsappPayload || rows.some((r) => r.item_id)) && (
                   <WhatsAppSendButton
                     compact
-                    label="WhatsApp"
+                    label="WA"
                     payload={
                       rows.some((r) => r.item_id)
                         ? {
@@ -3200,135 +3187,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            {/* Middle row: Customer Selection with Live Previous Ledger Balance */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
-              {/* Customer Selector */}
-              <div className="md:col-span-5 flex items-center gap-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 flex items-center gap-1 shrink-0">
-                  <Users2 className="w-3 h-3 text-emerald-600" />
-                  <span>Customer:</span>
-                </label>
-                <select
-                  value={customerAccountId}
-                  onChange={(e) => {
-                    const id = Number(e.target.value);
-                    setCustomerAccountId(id);
-                    if (id > 0) {
-                      refreshCustomerBalanceSummary(id, editingSaleId);
-                      const chosenCust = customers.find((c) => Number(c.id) === id);
-                      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
-                        setSalesmanId(Number(chosenCust.assigned_salesman_id));
-                        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
-                      }
-                    } else {
-                      setLiveBalanceSummary(null);
-                    }
-                  }}
-                  className="w-full px-2 py-0.5 text-xs font-bold rounded-lg border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6"
-                >
-                  <option value={0}>— Select Customer (Walk-in Cash) —</option>
-                  {customers.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      [{c.account_code}] {c.account_name} {c.town_name ? `• ${c.town_name}` : ''} {c.area_name ? `(${c.area_name})` : ''} {c.phone ? `• ${c.phone}` : ''}
-                    </option>
-                  ))}
-                </select>
-                {customerAccountId > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomerAccountId(0);
-                      setLiveBalanceSummary(null);
-                    }}
-                    className="text-[10px] text-slate-500 hover:text-slate-800 cursor-pointer shrink-0"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-
-              {/* Live Customer Previous Balance & Last Payment Badge */}
-              <div className="md:col-span-4 bg-slate-900 text-white rounded-lg px-2 py-0.5 flex items-center justify-between shadow-sm h-6">
-                <div className="flex items-center gap-1.5 truncate">
-                  <span className="text-[9px] uppercase tracking-wider text-slate-400 shrink-0">
-                    Prev Bal:
-                  </span>
-                  <span
-                    className={`font-mono text-[11px] font-black ${
-                      prevCustomerBalance > 0
-                        ? 'text-amber-400'
-                        : prevCustomerBalance < 0
-                        ? 'text-emerald-400'
-                        : 'text-slate-300'
-                    }`}
-                  >
-                    {formatPKR(Math.abs(prevCustomerBalance))} ({prevBalanceType})
-                  </span>
-                  {liveBalanceSummary?.lastPayment && (
-                    <span className="text-[9px] text-slate-400 hidden sm:inline truncate">
-                      • Last: {formatPKR(liveBalanceSummary.lastPayment.amount)}
-                    </span>
-                  )}
-                </div>
-                {customerAccountId > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => openCustomerShortcut('ledger')}
-                    className="px-1.5 py-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold flex items-center gap-0.5 cursor-pointer shrink-0"
-                    title="Open Detailed Ledger for this Customer"
-                  >
-                    <BookOpen className="w-2.5 h-2.5" />
-                    <span>Ledger</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Type Toggle & Payment Mode */}
-              <div className="md:col-span-3 flex items-center justify-end gap-1.5">
-                {/* Retail / Wholesale */}
-                <div className="inline-flex rounded-lg p-0.5 bg-slate-100 border border-slate-300">
-                  <button
-                    type="button"
-                    onClick={() => setInvoiceType('Retail')}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold cursor-pointer ${
-                      invoiceType === 'Retail'
-                        ? 'bg-emerald-600 text-white'
-                        : 'text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    Retail
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setInvoiceType('Wholesale')}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold cursor-pointer ${
-                      invoiceType === 'Wholesale'
-                        ? 'bg-blue-600 text-white'
-                        : 'text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    Wholesale
-                  </button>
-                </div>
-
-                {/* Payment Mode */}
-                <select
-                  value={paymentMode}
-                  onChange={(e) => setPaymentMode(e.target.value as SalesPaymentMode)}
-                  className="px-2 py-0.5 text-[11px] font-bold rounded-lg border border-slate-300 bg-white text-slate-900 h-6"
-                >
-                  <option value="Cash">Cash</option>
-                  <option value="Bank">Bank / Online</option>
-                  <option value="Credit">Credit (Udhar)</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Bottom Header row: Salesman & Deliveryman (Strictly Separate) */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-1.5 pt-0.5 border-t border-slate-100 text-[11px]">
-              <div className="flex items-center gap-1">
-                <UserCheck className="w-3 h-3 text-blue-600 shrink-0" />
-                <span className="text-[10px] font-bold text-slate-500 uppercase shrink-0">Salesman:</span>
+            {/* Header Row 2: Salesman, Deliveryman, Prescription & Compact F3 Quick Add */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-12 gap-1.5 pt-1 border-t border-slate-200 items-center">
+              <div className="md:col-span-3 flex items-center gap-1">
+                <span className="font-bold text-slate-600 shrink-0">Salesman:</span>
                 <select
                   value={salesmanId || ''}
                   onChange={(e) => {
@@ -3337,9 +3199,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const sm = salesmenList.find((s) => s.id === id);
                     if (sm) setSalesman(sm.name);
                   }}
-                  className="w-full px-1.5 py-0 text-[11px] font-semibold rounded-lg border border-slate-200 bg-slate-50 h-5"
+                  className="w-full px-1.5 py-0 font-semibold rounded border border-slate-300 bg-slate-50"
                 >
-                  <option value="">— Counter Pharmacist —</option>
+                  <option value="">Counter Pharmacist</option>
                   {salesmenList.map((sm) => (
                     <option key={sm.id} value={sm.id}>
                       {sm.name || sm.full_name} ({sm.salesman_code})
@@ -3348,9 +3210,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </select>
               </div>
 
-              <div className="flex items-center gap-1">
-                <Truck className="w-3 h-3 text-amber-600 shrink-0" />
-                <span className="text-[10px] font-bold text-slate-500 uppercase shrink-0">Delivery:</span>
+              <div className="md:col-span-3 flex items-center gap-1">
+                <span className="font-bold text-slate-600 shrink-0">Delivery:</span>
                 <select
                   value={deliverymanId || ''}
                   onChange={(e) => {
@@ -3359,9 +3220,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const dm = deliverymenList.find((d) => d.id === id);
                     if (dm) setDeliverymanName(dm.name);
                   }}
-                  className="w-full px-1.5 py-0 text-[11px] font-semibold rounded-lg border border-slate-200 bg-slate-50 h-5"
+                  className="w-full px-1.5 py-0 font-semibold rounded border border-slate-300 bg-slate-50"
                 >
-                  <option value="">— No Delivery / Counter Pickup —</option>
+                  <option value="">Counter Pickup</option>
                   {deliverymenList.map((dm) => (
                     <option key={dm.id} value={dm.id}>
                       {dm.name} ({dm.deliveryman_code})
@@ -3370,364 +3231,102 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </select>
               </div>
 
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-bold text-slate-500 uppercase shrink-0">Delivery Fee:</span>
-                <NumericInput
-                  value={deliveryCharges}
-                  onChange={(e) => setDeliveryCharges(Math.max(0, Number(e.target.value || 0)))}
-                  className="w-full px-1.5 py-0 text-[11px] font-mono font-bold rounded-lg border border-slate-200 bg-slate-50 text-right h-5"
-                />
-              </div>
-
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-bold text-slate-500 uppercase shrink-0">Prescription:</span>
+              <div className="md:col-span-2 flex items-center gap-1">
+                <span className="font-bold text-slate-600 shrink-0">Ref:</span>
                 <input
                   type="text"
                   value={remarks}
                   onChange={(e) => setRemarks(e.target.value)}
-                  placeholder="Dr. note / Patient ref..."
-                  className="w-full px-1.5 py-0 text-[11px] rounded-lg border border-slate-200 bg-slate-50 h-5"
+                  placeholder="Dr. / Patient note..."
+                  className="w-full px-1.5 py-0 rounded border border-slate-300 bg-slate-50"
                 />
               </div>
-            </div>
-          </div>
 
-          {/* Fast Item Search & Barcode Scan Bar */}
-          <div className="relative bg-slate-900 rounded-lg px-2 py-1 shadow-sm text-white shrink-0">
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Barcode className="w-4 h-4 text-emerald-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  id="pos_item_search_input"
-                  ref={posSearchInputRef}
-                  type="text"
-                  value={quickSearchQuery}
-                  onFocus={() => {
-                    setActiveSearchRowIdx(null);
-                    if (quickSearchQuery.trim().length > 0) {
-                      setShowSearchDropdown(true);
-                      runFastSearch(quickSearchQuery);
-                    } else {
-                      setShowSearchDropdown(false);
-                    }
-                  }}
-                  onBlur={() => {
-                    setTimeout(() => {
-                      setShowSearchDropdown(false);
-                    }, 160);
-                  }}
-                  onChange={(e) => {
-                    const q = e.target.value;
-                    setActiveSearchRowIdx(null);
-                    setQuickSearchQuery(q);
-                    if (q.trim().length > 0) {
-                      setShowSearchDropdown(true);
-                      runFastSearch(q);
-                    } else {
-                      setShowSearchDropdown(false);
-                      setSearchResults([]);
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'ArrowDown') {
-                      if (quickSearchQuery.trim().length === 0) return;
-                      e.preventDefault();
-                      if (!showSearchDropdown) {
+              {/* Compact F3 Quick Barcode / Item Add inside Header */}
+              <div className="md:col-span-4 relative flex items-center gap-1">
+                <div className="relative flex-1">
+                  <Barcode className="w-3.5 h-3.5 text-emerald-600 absolute left-1.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    id="pos_item_search_input"
+                    ref={posSearchInputRef}
+                    type="text"
+                    value={quickSearchQuery}
+                    onFocus={() => {
+                      setActiveSearchRowIdx(null);
+                      if (quickSearchQuery.trim().length > 0) {
                         setShowSearchDropdown(true);
                         runFastSearch(quickSearchQuery);
-                        return;
+                      } else {
+                        setShowSearchDropdown(false);
                       }
-                      setSearchHighlightIdx((prev) => {
-                        const next = Math.min(searchResults.length - 1, prev + 1);
-                        setTimeout(() => {
-                          document
-                            .querySelector(`[data-sales-search-idx="${next}"]`)
-                            ?.scrollIntoView({ block: 'nearest' });
-                        }, 0);
-                        return next;
-                      });
-                    } else if (e.key === 'ArrowUp') {
-                      if (quickSearchQuery.trim().length === 0) return;
-                      e.preventDefault();
-                      if (!showSearchDropdown) {
+                    }}
+                    onBlur={() => {
+                      setTimeout(() => {
+                        setShowSearchDropdown(false);
+                      }, 160);
+                    }}
+                    onChange={(e) => {
+                      const q = e.target.value;
+                      setActiveSearchRowIdx(null);
+                      setQuickSearchQuery(q);
+                      if (q.trim().length > 0) {
                         setShowSearchDropdown(true);
-                        return;
+                        runFastSearch(q);
+                      } else {
+                        setShowSearchDropdown(false);
+                        setSearchResults([]);
                       }
-                      setSearchHighlightIdx((prev) => {
-                        const next = Math.max(0, prev - 1);
-                        setTimeout(() => {
-                          document
-                            .querySelector(`[data-sales-search-idx="${next}"]`)
-                            ?.scrollIntoView({ block: 'nearest' });
-                        }, 0);
-                        return next;
-                      });
-                    } else if (e.key === 'Enter') {
-                      e.preventDefault();
-                      if (quickSearchQuery.trim().length > 0 && showSearchDropdown && searchResults.length > 0) {
-                        const chosen =
-                          searchResults[searchHighlightIdx] || searchResults[0];
-                        if (chosen) {
-                          handleSelectFromTopSearch(chosen);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'ArrowDown') {
+                        if (quickSearchQuery.trim().length === 0) return;
+                        e.preventDefault();
+                        if (!showSearchDropdown) {
+                          setShowSearchDropdown(true);
+                          runFastSearch(quickSearchQuery);
                           return;
                         }
+                        setSearchHighlightIdx((prev) => Math.min(searchResults.length - 1, prev + 1));
+                      } else if (e.key === 'ArrowUp') {
+                        if (quickSearchQuery.trim().length === 0) return;
+                        e.preventDefault();
+                        setSearchHighlightIdx((prev) => Math.max(0, prev - 1));
+                      } else if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (quickSearchQuery.trim().length > 0 && showSearchDropdown && searchResults.length > 0) {
+                          const chosen = searchResults[searchHighlightIdx] || searchResults[0];
+                          if (chosen) {
+                            handleSelectFromTopSearch(chosen);
+                            return;
+                          }
+                        }
+                        focusCell(selectedRowIndex, 'item_name', 'pos_row');
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setShowSearchDropdown(false);
                       }
-                      focusCell(selectedRowIndex, 'quantity', 'pos_row');
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault();
-                      setShowSearchDropdown(false);
-                    }
-                  }}
-                  placeholder="Scan Barcode or Type Item Name / Code to Search..."
-                  className="w-full pl-8 pr-7 py-1 rounded-lg bg-slate-800 border border-slate-700 text-white placeholder-slate-400 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:bg-slate-750 h-6"
-                />
-                {quickSearchQuery && (
-                  <button
-                    type="button"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setQuickSearchQuery('');
-                      setSearchHighlightIdx(0);
-                      setShowSearchDropdown(false);
-                      setSearchResults([]);
-                      posSearchInputRef.current?.focus();
                     }}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
+                    placeholder="Barcode / Quick Search (F3)..."
+                    className="w-full pl-6 pr-2 py-0 rounded border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 outline-none"
+                  />
+                  {renderSalesExcelItemCombobox('top')}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openItemListForRow(selectedRowIndex)}
+                  className="px-2 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                  title="Open Item List (F2)"
+                >
+                  <PackageSearch className="w-3 h-3 text-emerald-400" />
+                  <span>Items</span>
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => openItemListForRow(null)}
-                className="px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 shadow-sm h-6"
-                title="Open Full Item List to select or replace an item"
-              >
-                <PackageSearch className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Item List</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => advanceToNewRowItemSearch(rows.length - 1, 'pos')}
-                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 shadow-sm h-6"
-                title="Add New Empty Row to Bill"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>+ Blank Line</span>
-              </button>
             </div>
-
-            {/* Fast Excel-Style Search Combobox Results */}
-            {renderSalesExcelItemCombobox('top')}
           </div>
 
-          {/* Active Item Counter Entry Strip */}
-          {activeRow && activeRow.item_id ? (
-            <div className="ams-pos-compact-chrome bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border border-emerald-500/80 rounded-lg px-2.5 py-1 shadow-sm space-y-1 shrink-0">
-              <div className="flex flex-wrap items-center justify-between gap-1.5">
-                <div className="flex items-center gap-1.5">
-                  <span className="px-1.5 py-0 rounded-lg bg-emerald-700 text-white font-mono text-[10px] font-bold">
-                    Active Line #{selectedRowIndex + 1}
-                  </span>
-                  <span className="font-bold text-slate-900 text-xs">
-                    [{activeRow.item_code}] {activeRow.item_name}
-                  </span>
-                  <span className="text-[11px] text-slate-600 font-medium">
-                    ({activeRow.packing}) • {activeRow.company_name}
-                  </span>
-                  <span className="px-1.5 py-0 rounded-lg bg-emerald-200 text-emerald-950 font-mono text-[10px] font-bold">
-                    Stock: {activeRow.available_stock_packs} Packs ({activeRow.available_stock_units} Units)
-                  </span>
-                </div>
-
-                {/* Customer-Wise Last Sale History Badge right in the Entry Strip */}
-                {activeItemHistory?.hasCustomerHistory && activeItemHistory.lastCustomerSale && (
-                  <div className="flex items-center gap-1 bg-amber-100 border border-amber-300 rounded-lg px-1.5 py-0 text-[10px] text-amber-950">
-                    <span className="font-bold uppercase">Customer Last Sale:</span>
-                    <span className="font-mono font-bold">
-                      Rs. {activeItemHistory.lastCustomerSale.unit_price} (Disc {activeItemHistory.lastCustomerSale.discount_percent}%) on {activeItemHistory.lastCustomerSale.invoice_date}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => applyCustomerLastRateToRow(selectedRowIndex)}
-                      className="ml-1 px-1.5 py-0 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[9px] font-bold cursor-pointer"
-                      title="Apply this customer's previous purchase rate"
-                    >
-                      Apply Rate
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Fast Stepper Controls for Active Row — Ordered: 1. Qty -> 2. Discount -> 3. Loose Qty -> 4. Price -> 5. Bonus Qty -> 6. Loose Rate -> Enter (Next Item) */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-1.5 items-end">
-                {/* 1. Quantity */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                    1. Qty (Packs)
-                  </label>
-                  <div className="flex items-center border border-slate-300 rounded-lg bg-white overflow-hidden min-h-[28px]">
-                    <button
-                      type="button"
-                      onClick={() => handleDecrementQty(selectedRowIndex)}
-                      className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-r border-slate-300"
-                    >
-                      -
-                    </button>
-                    <NumericInput
-                      id="pos_active_quantity"
-                      value={activeRow.quantity}
-                      onChange={(e) => updateRowField(selectedRowIndex, 'quantity', e.target.value)}
-                      onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'quantity', false)}
-                      className="w-full text-center font-mono font-bold text-[11px] text-slate-900 outline-none py-0"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handleIncrementQty(selectedRowIndex)}
-                      className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-l border-slate-300"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-
-                {/* 2. Discount % */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                    2. Discount %
-                  </label>
-                  <NumericInput
-                    id="pos_active_discount_percent"
-                    value={activeRow.discount_percent}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'discount_percent', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'discount_percent', false)}
-                    className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none"
-                  />
-                </div>
-
-                {/* 3. Loose Quantity */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-teal-800 leading-none mb-0.5">
-                    {isSyrupItem(activeRow) ? '3. Loose Mode' : '3. Loose Qty'}
-                  </label>
-                  {isSyrupItem(activeRow) ? (
-                    <div className="px-1.5 py-0 rounded-lg bg-amber-50/80 border border-amber-300 text-amber-900 text-[10px] font-bold text-center select-none min-h-[28px] flex items-center justify-center">
-                      Bottle Only
-                    </div>
-                  ) : (
-                    <div className="flex items-center border border-teal-300 rounded-lg bg-white overflow-hidden min-h-[28px]">
-                      <NumericInput
-                        id="pos_active_loose_quantity"
-                        value={activeRow.loose_quantity}
-                        onChange={(e) => updateRowField(selectedRowIndex, 'loose_quantity', e.target.value)}
-                        onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'loose_quantity', false)}
-                        className="w-full text-center font-mono font-bold text-[11px] text-teal-950 outline-none py-0"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleAddStripToRow(selectedRowIndex, 1)}
-                        className="px-1 py-0 bg-teal-600 hover:bg-teal-700 text-white font-mono text-[9px] font-bold cursor-pointer shrink-0"
-                        title={`Add 1 Strip (+${activeRow.units_per_strip || 1} Tabs)`}
-                      >
-                        +1S
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* 4. Price (PKR) */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                    4. Price (PKR)
-                  </label>
-                  <NumericInput
-                    id="pos_active_unit_price"
-                    value={activeRow.unit_price}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'unit_price', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'unit_price', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none"
-                  />
-                </div>
-
-                {/* 5. Bonus Qty */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-emerald-800 leading-none mb-0.5">
-                    5. Bonus Qty
-                  </label>
-                  <NumericInput
-                    id="pos_active_bonus_quantity"
-                    value={activeRow.bonus_quantity ?? 0}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'bonus_quantity', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'bonus_quantity', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-center rounded-lg border border-emerald-300 bg-emerald-50/50 focus:bg-white text-emerald-950 focus:border-emerald-600 outline-none"
-                    title="Bonus Quantity (Free items deducted from stock)"
-                  />
-                </div>
-
-                {/* 6. Loose Rate */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-blue-800 leading-none mb-0.5">
-                    6. Loose Rate
-                  </label>
-                  <NumericInput
-                    id="pos_active_loose_rate"
-                    disabled={isSyrupItem(activeRow)}
-                    value={activeRow.loose_rate}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'loose_rate', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'loose_rate', false)}
-                    className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-blue-400 bg-blue-50/30 focus:bg-white text-blue-950 focus:border-blue-600 outline-none disabled:opacity-50"
-                    title="Edit Loose Rate for this line item and press Enter to add next item"
-                  />
-                </div>
-
-                {/* Line Total Preview */}
-                <div>
-                  <label className="block text-[9px] font-bold uppercase text-slate-500 leading-none mb-0.5">
-                    Line Total
-                  </label>
-                  <div className="px-1.5 py-0 bg-emerald-100/70 border border-emerald-300 rounded-lg font-mono font-black text-[11px] text-emerald-950 text-right min-h-[28px] flex items-center justify-end">
-                    {formatPKR(activeRow.line_total)}
-                  </div>
-                </div>
-
-                {/* Add Next Item Button */}
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => advanceToNewRowItemSearch(selectedRowIndex, 'pos')}
-                    className="w-full rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer shadow-sm min-h-[28px]"
-                    title="Add a new empty row and focus Item Search (or press Enter in Loose Rate)"
-                  >
-                    <Plus className="w-3 h-3" />
-                    <span>Next Item ↵</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="ams-pos-compact-chrome bg-slate-50 border border-dashed border-slate-300 rounded-lg px-2.5 py-1 text-center text-[11px] text-slate-600 shrink-0">
-              Scan a barcode, type in the search bar above, or click <strong>Item Code / Item Name</strong> in the grid below to select items.
-            </div>
-          )}
-
-          {/* Sales POS Item Grid (Minimum 10 Visible Rows, Internal Scroll, Fixed Headers) */}
-          <div className="ams-pos-item-grid-card bg-white rounded-xl border-2 border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-[375px] relative z-10">
-            <div className="ams-pos-compact-chrome px-3 py-1 bg-slate-100 border-b border-slate-300 flex items-center justify-between text-[11px] shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="font-black text-slate-800 uppercase tracking-wider text-[11px]">
-                  Sales POS Item Grid ({rows.filter((r) => r.item_id).length} Active / {rows.length} Rows)
-                </span>
-                <span className="text-slate-500 text-[11px] hidden sm:inline">
-                  • Click Item Code / Item Name or press F2 to open Item List
-                </span>
-              </div>
-              <span className="font-mono font-bold text-slate-700 text-[11px]">
-                Total Units: {rows.reduce((s, r) => s + (r.total_units || 0), 0)}
-              </span>
-            </div>
-
-            <div className="ams-pos-item-grid-scroll flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative bg-white">
+          {/* SECTION B (CENTER): INVOICE ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS) */}
+          <div className="ams-pos-item-grid-card bg-white rounded-md border border-slate-300 shadow-xs overflow-hidden flex flex-col flex-1 min-h-[356px] relative z-10">
+            <div className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white">
               <table className="ams-compact-10-grid w-full text-left text-xs border-collapse leading-normal min-w-[1150px]">
                 <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[11px] font-bold uppercase tracking-wider leading-normal shadow-sm">
                   <tr className="h-8">
@@ -3792,12 +3391,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               setShowSearchDropdown(false);
                               cancelledCodeEditRef.current = false;
                               committedCodeEditRef.current = false;
-                            }}
-                            onClick={() => {
-                              setSelectedRowIndex(rIdx);
-                              if (!row.item_id && (!editingItemCode || editingItemCode.rowIdx !== rIdx)) {
-                                openItemListForRow(rIdx);
-                              }
                             }}
                             onChange={(e) => {
                               const val = e.target.value;
@@ -3871,11 +3464,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 } else if (row.item_id) {
                                   focusCell(rIdx, 'quantity', 'pos_row');
                                 } else {
-                                  openItemListForRow(rIdx);
+                                  focusCell(rIdx, 'item_name', 'pos_row');
                                 }
                               }
                             }}
-                            placeholder="Code / Click..."
+                            placeholder="Code..."
                             className="w-full px-1.5 py-0 font-mono font-bold text-slate-800 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-full leading-none outline-none"
                           />
                         </td>
@@ -3885,7 +3478,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           {row.company_name || ''}
                         </td>
 
-                        {/* 3. Item Name (Supports clicking to open Item Selection List or typing to search) */}
+                        {/* 3. Item Name (Continuous MS Access data entry: type to search, Enter selects -> Qty; F2 for full Item List) */}
                         <td className="p-0 border-r border-slate-200 h-9 align-middle relative min-w-[220px]">
                           <input
                             id={`pos_row_${rIdx}_item_name`}
@@ -3900,12 +3493,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => {
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
-                            }}
-                            onClick={() => {
-                              setSelectedRowIndex(rIdx);
-                              if (!row.item_id && (!editingItemName || editingItemName.rowIdx !== rIdx)) {
-                                openItemListForRow(rIdx);
-                              }
                             }}
                             onChange={(e) => {
                               const val = e.target.value;
@@ -3962,6 +3549,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 } else {
                                   openItemListForRow(rIdx);
                                 }
+                              } else if (e.key === 'Tab' && !e.shiftKey && row.item_id) {
+                                e.preventDefault();
+                                focusCell(rIdx, 'quantity', 'pos_row');
                               } else if (e.key === 'ArrowUp' && rIdx > 0) {
                                 e.preventDefault();
                                 setSelectedRowIndex(rIdx - 1);
@@ -3972,8 +3562,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 focusCell(rIdx + 1, 'item_name', 'pos_row');
                               }
                             }}
-                            placeholder="Click to open Item List or type to search..."
-                            className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-full leading-none outline-none cursor-pointer"
+                            placeholder="Type Item Name / Code (or F2)..."
+                            className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-full leading-none outline-none"
                           />
                           {renderSalesExcelItemCombobox('row', rIdx)}
                         </td>
@@ -4183,241 +3773,285 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           </div>
 
-          {/* Full-Width POS Bottom Totals & Payment Action Bar (No Cramped Side-by-Side Split) */}
-          <div className="ams-pos-compact-chrome w-full bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 text-white rounded-xl border border-slate-700 px-3 py-1.5 shadow-lg shrink-0 space-y-1.5">
-            {/* Row 1: Full-Width Financial Totals & Quick Cash Tender */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-1.5">
-              <div className="flex flex-wrap items-center gap-4 text-xs">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 font-semibold">Gross:</span>
+          {/* SECTION C (BOTTOM): COMPACT POS FOOTER */}
+          <div className="ams-pos-compact-chrome w-full bg-slate-900 text-white rounded-md border border-slate-700 px-2.5 py-1.5 shrink-0 space-y-1">
+            {/* Row 1: Essential Totals & Payment Settlement */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-1">
+              <div className="flex flex-wrap items-center gap-3 text-xs tabular-nums">
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Grand Total:</span>
                   <span className="font-mono font-bold text-white">{formatPKR(grossAmount)}</span>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-rose-400 font-semibold">Discounts:</span>
+                <div className="flex items-center gap-1">
+                  <span className="text-rose-400">Discount:</span>
                   <span className="font-mono font-bold text-rose-300">
-                    -{formatPKR(itemDiscountTotal + computedInvoiceDiscAmt)}
+                    -{formatPKR(totalDiscount)}
                   </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 font-semibold">Bill Disc %:</span>
                   <NumericInput
                     value={invoiceDiscountPercent}
-                    onChange={(e) => setInvoiceDiscountPercent(Math.max(0, Number(e.target.value || 0)))}
-                    className="w-16 px-1.5 py-0.5 rounded-lg bg-slate-800 border border-slate-600 font-mono text-xs text-white text-right"
+                    onChange={(e) => {
+                      const pct = Math.max(0, Math.min(100, Number(e.target.value || 0)));
+                      setInvoiceDiscountPercent(pct);
+                      setInvoiceDiscountAmount(round2((subtotalAfterItemDisc * pct) / 100));
+                    }}
+                    placeholder="%"
+                    title="Invoice Discount %"
+                    className="w-12 px-1 py-0 rounded bg-slate-800 border border-slate-600 font-mono text-white text-right"
                   />
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 font-semibold">Prev Ledger ({prevBalanceType}):</span>
-                  <span className="font-mono font-bold text-amber-300">{formatPKR(prevCustomerBalance)}</span>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Cash Load:</span>
+                  <NumericInput
+                    value={deliveryCharges}
+                    onChange={(e) => setDeliveryCharges(Math.max(0, Number(e.target.value || 0)))}
+                    title="Delivery / Cash Load Charges"
+                    className="w-16 px-1 py-0 rounded bg-slate-800 border border-slate-600 font-mono text-amber-300 text-right"
+                  />
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 font-semibold">Tax / Deliv:</span>
-                  <span className="font-mono font-bold text-amber-300">
-                    +{formatPKR(advanceTaxAmount + deliveryCharges)}
-                  </span>
+                {totalTax > 0 && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-400">Tax:</span>
+                    <span className="font-mono font-bold text-amber-300">+{formatPKR(totalTax)}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Prev Bal ({prevBalanceType}):</span>
+                  <span className="font-mono font-bold text-amber-300">{formatPKR(prevCustomerBalance)}</span>
                 </div>
               </div>
 
-              {/* Highlighted Net Total, Received & Balance */}
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="px-3 py-1 rounded-lg bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-2">
-                  <span className="text-xs font-black uppercase text-emerald-300">Net Total:</span>
-                  <span className="font-mono text-lg font-black text-emerald-300 ams-total-highlight">
+              <div className="flex flex-wrap items-center gap-2 tabular-nums">
+                <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1.5">
+                  <span className="font-bold uppercase text-emerald-300">Net Amount:</span>
+                  <span className="font-mono font-black text-emerald-300 ams-total-highlight">
                     {formatPKR(netInvoiceAmount)}
                   </span>
                 </div>
-                <div className="px-3 py-1 rounded-lg bg-sky-500/15 border border-sky-400/40 flex items-center gap-2">
-                  <span className="text-xs font-black uppercase text-sky-300">Receivable:</span>
-                  <span className="font-mono text-lg font-black text-sky-300 ams-total-highlight">
+                <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1.5">
+                  <span className="font-bold uppercase text-sky-300">Receivable:</span>
+                  <span className="font-mono font-black text-sky-300 ams-total-highlight">
                     {formatPKR(totalReceivable)}
                   </span>
                 </div>
-                <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-lg border border-emerald-500">
-                  <span className="text-xs font-bold text-emerald-300 whitespace-nowrap">Paid:</span>
+                <div className="flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded border border-emerald-500">
+                  <span className="font-bold text-emerald-300 whitespace-nowrap">Cash Received:</span>
                   <NumericInput
                     value={paidAmountInput}
                     onChange={(e) => {
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
                     }}
-                    className="w-28 px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono font-black text-white text-right outline-none"
+                    className="w-24 px-1.5 py-0 rounded bg-slate-900 border border-slate-700 font-mono font-black text-white text-right outline-none"
                   />
                   <button
                     type="button"
                     onClick={handleExactCash}
-                    className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold cursor-pointer"
+                    className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
                   >
                     Exact
                   </button>
                 </div>
                 <div
-                  className={`px-3 py-1 rounded-lg border flex items-center gap-2 ${
+                  className={`px-2 py-0.5 rounded border flex items-center gap-1.5 ${
                     paidAmount >= totalReceivable
                       ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300'
                       : 'bg-amber-950/80 border-amber-500/60 text-amber-300'
                   }`}
                 >
-                  <span className="text-xs font-bold uppercase">
-                    {paidAmount >= totalReceivable ? 'Change:' : 'Balance:'}
+                  <span className="font-bold uppercase">
+                    {paidAmount >= totalReceivable ? 'Change:' : 'Remaining:'}
                   </span>
-                  <span className="font-mono text-lg font-black ams-total-highlight">
+                  <span className="font-mono font-black ams-total-highlight">
                     {formatPKR(Math.abs(paidAmount - totalReceivable))}
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Row 2: Full-Width Primary Action Buttons */}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-1.5">
+            {/* Row 2: Compact Professional Action Buttons */}
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap items-center gap-1">
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed')}
-                  className={`py-1.5 px-4 rounded-xl ${
+                  className={`px-3 py-0.5 rounded ${
                     editingSaleId
-                      ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500'
-                      : 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500'
-                  } text-white font-black text-sm shadow-md flex items-center gap-1.5 cursor-pointer`}
-                  title={editingSaleId ? 'Update & Save Invoice (Ctrl+S)' : 'Complete & Save Invoice (Ctrl+S)'}
+                      ? 'bg-amber-600 hover:bg-amber-500'
+                      : 'bg-emerald-600 hover:bg-emerald-500'
+                  } text-white font-bold flex items-center gap-1 cursor-pointer`}
+                  title={editingSaleId ? 'Update Invoice (Ctrl+S)' : 'Save Invoice (Ctrl+S)'}
                 >
-                  <Save className="w-4 h-4" />
-                  <span>{editingSaleId ? 'Update Invoice (Ctrl+S)' : 'Save Invoice (Ctrl+S)'}</span>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{editingSaleId ? 'Update (Ctrl+S)' : 'Save Invoice (Ctrl+S)'}</span>
                 </button>
-
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', 'a4')}
-                  className="py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-slate-600"
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white font-bold flex items-center gap-1 cursor-pointer border border-slate-600"
                   title="Save & Print A4 Invoice (Ctrl+P)"
                 >
-                  <Printer className="w-4 h-4 text-emerald-400" />
-                  <span>Save &amp; Print A4</span>
+                  <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>A4 Print</span>
                 </button>
-
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', '80mm')}
-                  className="py-1.5 px-2.5 rounded-lg bg-teal-800 hover:bg-teal-700 text-teal-100 font-bold text-xs flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-teal-800 hover:bg-teal-700 text-teal-100 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-teal-300" />
+                  <Printer className="w-3 h-3 text-teal-300" />
                   <span>80mm</span>
                 </button>
-
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', '58mm')}
-                  className="py-1.5 px-2.5 rounded-lg bg-amber-800 hover:bg-amber-700 text-amber-100 font-bold text-xs flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-amber-800 hover:bg-amber-700 text-amber-100 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-amber-300" />
+                  <Printer className="w-3 h-3 text-amber-300" />
                   <span>58mm</span>
                 </button>
-
-                <button
-                  type="button"
-                  disabled={exportingExcel}
-                  onClick={handleExportCurrentSaleToExcel}
-                  className="py-1.5 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-emerald-500/60"
-                  title="Export Sales Invoice to Excel (.xlsx)"
-                >
-                  <Download className="w-4 h-4 text-emerald-200" />
-                  <span>Export to Excel</span>
-                </button>
-
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('held')}
-                  className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs flex items-center gap-1 cursor-pointer border border-slate-600"
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold flex items-center gap-1 cursor-pointer border border-slate-600"
                 >
-                  <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Hold</span>
+                  <PauseCircle className="w-3 h-3 text-amber-400" />
+                  <span>Hold (F9)</span>
                 </button>
-
                 <button
                   type="button"
                   onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                  className="py-1.5 px-2.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-sky-500/50"
+                  className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Eye className="w-3.5 h-3.5 text-sky-200" />
-                  <span>Print Preview</span>
+                  <Eye className="w-3 h-3" />
+                  <span>Preview</span>
                 </button>
-
                 <button
                   type="button"
                   onClick={handleOpenDsrReport}
-                  className="py-1.5 px-2.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-emerald-500/50"
+                  className="px-2 py-0.5 rounded bg-emerald-800 hover:bg-emerald-700 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <ClipboardList className="w-3.5 h-3.5 text-emerald-200" />
+                  <ClipboardList className="w-3 h-3" />
                   <span>DSR</span>
                 </button>
-
                 <button
                   type="button"
                   onClick={handleOpenSalesSms}
-                  className="py-1.5 px-3 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-indigo-500/60"
-                  title="Send Customer SMS for Current Sales Invoice"
+                  className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <MessageSquare className="w-3.5 h-3.5 text-indigo-200" />
-                  <span>Send SMS</span>
+                  <MessageSquare className="w-3 h-3" />
+                  <span>SMS</span>
                 </button>
-              </div>
-
-              {onBackToDashboard && (
                 <button
                   type="button"
-                  onClick={onBackToDashboard}
-                  className="py-1.5 px-3 rounded-lg bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                  onClick={handleReprintLastInvoice}
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Back / Close</span>
+                  <Printer className="w-3 h-3" />
+                  <span>Reprint</span>
                 </button>
-              )}
+                {(lastSavedWhatsappPayload || rows.some((r) => r.item_id)) && (
+                  <WhatsAppSendButton
+                    compact
+                    label="WhatsApp"
+                    payload={
+                      rows.some((r) => r.item_id)
+                        ? {
+                            storeName: storeDisplayName,
+                            documentType: 'invoice',
+                            invoiceId: editingSaleId || null,
+                            documentNumber: invoiceNumber,
+                            documentDate: invoiceDate,
+                            customerAccountId: customerAccountId || null,
+                            customerName:
+                              selectedCustomer?.account_name || 'Walk-in Cash Customer',
+                            customerPhone: selectedCustomer?.phone || '',
+                            totalAmount: netInvoiceAmount,
+                            paidAmount: paidAmount,
+                            remainingBalance: remainingBalance,
+                            items: rows
+                              .filter((r) => r.item_id)
+                              .map((r) => ({
+                                item_name: r.item_name,
+                                packing: r.packing,
+                                quantity: r.quantity,
+                                loose_quantity: r.loose_quantity,
+                                unit_price: r.unit_price,
+                                line_total: r.line_total,
+                              })),
+                          }
+                        : lastSavedWhatsappPayload!
+                    }
+                    onPhoneSaved={(newPhone) => {
+                      if (lastSavedWhatsappPayload) {
+                        setLastSavedWhatsappPayload((prev) =>
+                          prev ? { ...prev, customerPhone: newPhone } : prev
+                        );
+                      }
+                      loadReferenceData();
+                    }}
+                  />
+                )}
+              </div>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setShowDiscardConfirm(true)}
+                  className="px-2 py-0.5 rounded bg-rose-900/80 hover:bg-rose-800 text-rose-200 border border-rose-700 font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Discard</span>
+                </button>
+                {onBackToDashboard && (
+                  <button
+                    type="button"
+                    onClick={onBackToDashboard}
+                    className="px-2 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3 h-3" />
+                    <span>Close</span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* ================= OPTION 2: MICROSOFT ACCESS-STYLE INTERFACE (FULL-SCREEN DESKTOP FORM) ================= */}
+      {/* ================= OPTION 2: MICROSOFT ACCESS-STYLE INTERFACE (THREE-SECTION COMPACT FORM) ================= */}
       {invoiceViewMode === 'access' && (
-        <div className="flex-1 flex flex-col min-h-0 bg-slate-200 border-2 border-slate-400 rounded-sm shadow-xs select-none">
-          {/* Access Window Title Bar & Ribbon Toolbar Combined Compact Strip */}
-          <div className="bg-gradient-to-r from-slate-800 via-slate-850 to-slate-900 text-white px-2.5 py-0.5 flex flex-wrap items-center justify-between gap-1 border-b border-slate-700 text-[11px] shrink-0 select-none">
-            <div className="flex items-center gap-2 font-mono">
+        <div className="ams-pos-compact-chrome flex-1 flex flex-col min-h-0 overflow-hidden bg-slate-200 border border-slate-400 rounded-md shadow-xs select-none">
+          {/* SECTION A (TOP): COMPACT MS ACCESS FORM HEADER */}
+          <div className="bg-slate-800 text-white px-2 py-0.5 flex flex-wrap items-center justify-between gap-1 border-b border-slate-700 shrink-0">
+            <div className="flex items-center gap-1.5 font-mono">
               <FileSpreadsheet className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-              <span className="font-bold text-slate-200 tracking-tight">frm_SalesInvoice : Form</span>
-              <span className="text-[10px] bg-emerald-700 px-1.5 py-0.2 rounded-lg text-white font-bold uppercase">
+              <span className="font-bold text-slate-200">frm_SalesInvoice</span>
+              <span className="bg-emerald-700 px-1.5 py-0 rounded text-white font-bold uppercase">
                 {invoiceType}
               </span>
               <span className="font-bold text-amber-300">{invoiceNumber}</span>
               {editingSaleId && (
-                <div className="flex items-center gap-1 bg-amber-600 text-white text-[9px] px-1.5 py-0.2 rounded-lg font-bold">
-                  <Pencil className="w-2.5 h-2.5" />
-                  <span>EDIT #{editingSaleId}</span>
-                  <button
-                    type="button"
-                    onClick={resetToNewInvoice}
-                    className="ml-1 px-1 py-0 bg-amber-800 hover:bg-amber-900 rounded text-[9px] text-white cursor-pointer"
-                    title="Cancel edit and start new invoice"
-                  >
-                    Cancel
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={resetToNewInvoice}
+                  className="bg-amber-600 hover:bg-amber-700 text-white px-1.5 py-0 rounded font-bold cursor-pointer"
+                  title="Cancel edit and start new invoice"
+                >
+                  EDIT #{editingSaleId} ✕
+                </button>
               )}
-              <span className="text-[10px] text-slate-400 hidden xl:inline ml-1">
-                (F2: Item Search · F3: Search Bar · Ctrl+S: Save · F9: Hold · Ctrl+P: Print · Esc: Close)
-              </span>
             </div>
 
-            {/* Action & Navigation Buttons */}
             <div className="flex flex-wrap items-center gap-1">
               <button
                 type="button"
                 onClick={resetToNewInvoice}
-                className="px-2 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 font-bold flex items-center gap-0.5 cursor-pointer"
                 title="New Sales Invoice (Ctrl+N)"
               >
                 <Plus className="w-3 h-3 text-emerald-400" />
@@ -4426,112 +4060,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               <button
                 type="button"
                 onClick={() => setShowEditSearchModal(true)}
-                className="px-2 py-0.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white border border-amber-500 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                className="px-1.5 py-0 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                 title="Find & Edit Existing Invoice (Ctrl+E)"
               >
-                <Pencil className="w-3 h-3 text-amber-200" />
-                Find / Edit
-              </button>
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleSaveInvoice('completed')}
-                className={`px-2 py-0.5 rounded-lg ${
-                  editingSaleId ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'
-                } text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer`}
-                title={editingSaleId ? 'Update & Save Changes (F2)' : 'Complete & Save Invoice (F2)'}
-              >
-                <Save className="w-3 h-3" />
-                {editingSaleId ? 'Update (F2)' : 'Save (F2)'}
-              </button>
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleSaveInvoice('completed', 'a4')}
-                className="px-1.5 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Save & Print A4 Invoice (Ctrl+P)"
-              >
-                <Printer className="w-3 h-3 text-emerald-400" />
-                A4
-              </button>
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleSaveInvoice('completed', '80mm')}
-                className="px-1.5 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Print 80mm Thermal Receipt"
-              >
-                <Printer className="w-3 h-3 text-teal-400" />
-                80mm
-              </button>
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleSaveInvoice('completed', '58mm')}
-                className="px-1.5 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Print 58mm Thermal Receipt"
-              >
-                <Printer className="w-3 h-3 text-amber-400" />
-                58mm
-              </button>
-              <button
-                type="button"
-                onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                className="px-2 py-0.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white border border-sky-500 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Print Preview for Current Sales Invoice (A4 & Thermal)"
-              >
-                <Eye className="w-3 h-3 text-sky-200" />
-                Print Preview
-              </button>
-              <button
-                type="button"
-                onClick={handleOpenDsrReport}
-                className="px-2 py-0.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Open DSR – Daily Stock Requisition Report for Current Invoice"
-              >
-                <ClipboardList className="w-3 h-3 text-emerald-200" />
-                DSR
-              </button>
-              <button
-                type="button"
-                onClick={handleOpenSalesSms}
-                className="px-2 py-0.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white border border-indigo-500 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Send Customer SMS for Current Sales Invoice"
-              >
-                <MessageSquare className="w-3 h-3 text-indigo-200" />
-                Send SMS
-              </button>
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleSaveInvoice('held')}
-                className="px-1.5 py-0.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
-                title="Hold this invoice (F3)"
-              >
-                <PauseCircle className="w-3 h-3" />
-                Hold
+                <Pencil className="w-3 h-3" />
+                Edit
               </button>
               <button
                 type="button"
                 onClick={() => setShowHeldDrawer(true)}
-                className="px-1.5 py-0.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                className="px-1.5 py-0 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
               >
-                <PlayCircle className="w-3 h-3 text-indigo-200" />
-                Drafts ({heldInvoices.length})
+                <PlayCircle className="w-3 h-3" />
+                Held ({heldInvoices.length})
               </button>
               <button
                 type="button"
                 onClick={() => openCustomerShortcut('ledger')}
-                className="px-1.5 py-0.5 rounded-lg bg-teal-700 hover:bg-teal-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                className="px-1.5 py-0 rounded bg-teal-700 hover:bg-teal-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                 title="Open selected customer ledger"
               >
-                <BookOpen className="w-3 h-3 text-teal-200" />
+                <BookOpen className="w-3 h-3" />
                 Ledger
               </button>
               <button
                 type="button"
                 onClick={() => setShowAdvanceTaxModal(true)}
-                className={`px-1.5 py-0.5 rounded-lg border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
+                className={`px-1.5 py-0 rounded border font-bold flex items-center gap-0.5 cursor-pointer ${
                   advanceTaxApplicable
                     ? 'bg-amber-500 border-amber-300 text-slate-950'
                     : 'bg-slate-700 hover:bg-slate-600 border-slate-600 text-slate-200'
@@ -4543,104 +4098,82 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           </div>
 
-          {/* Dense MS Access Form Header Controls */}
-          <div className="px-2 py-0.5 bg-slate-100 border-b border-slate-300 shrink-0">
-            <div className="grid grid-cols-12 gap-1 items-center text-[11px]">
-              {/* Inv # (Auto-generated) */}
+          {/* Dense MS Access Form Header Controls (Customer, Date, Salesman & F3 Search) */}
+          <div className="px-2 py-1 bg-slate-100 border-b border-slate-300 shrink-0 space-y-1">
+            <div className="grid grid-cols-12 gap-1.5 items-center">
               <div className="col-span-2 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-9">
-                  Inv #:
-                </label>
+                <label className="font-bold text-slate-600 whitespace-nowrap">Inv #:</label>
                 <input
                   type="text"
                   readOnly
                   value={invoiceNumber}
-                  title="Auto-generated Sales Invoice Number"
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-mono font-bold text-slate-900 bg-slate-100 cursor-not-allowed text-[11px] h-5"
+                  className="w-full px-1 py-0 rounded border border-slate-300 font-mono font-bold text-slate-900 bg-slate-200 cursor-not-allowed"
                 />
               </div>
-
-              {/* Date */}
               <div className="col-span-2 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-8">
-                  Date:
-                </label>
+                <label className="font-bold text-slate-600 whitespace-nowrap">Date:</label>
                 <input
                   type="date"
                   value={invoiceDate}
                   onChange={(e) => setInvoiceDate(e.target.value)}
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-mono text-slate-900 bg-white text-[11px] h-5"
+                  className="w-full px-1 py-0 rounded border border-slate-300 font-mono text-slate-900 bg-white"
                 />
               </div>
-
-              {/* Customer Selection */}
               <div className="col-span-4 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-13">
-                  Customer:
-                </label>
-                <div className="flex-1 flex gap-1">
-                  <input
-                    type="text"
-                    placeholder="Find..."
-                    value={customerSearchText}
-                    onChange={(e) => setCustomerSearchText(e.target.value)}
-                    className="w-14 px-1 py-0 rounded-lg border border-slate-300 text-[10px] bg-white h-5"
-                  />
-                  <select
-                    value={customerAccountId}
-                    onChange={(e) => {
-                      const id = Number(e.target.value);
-                      setCustomerAccountId(id);
-                      if (id > 0) {
-                        refreshCustomerBalanceSummary(id, editingSaleId);
-                        const chosenCust = customers.find((c) => Number(c.id) === id);
-                        if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
-                          setSalesmanId(Number(chosenCust.assigned_salesman_id));
-                          setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
-                        }
-                      } else {
-                        setLiveBalanceSummary(null);
+                <label className="font-bold text-slate-600 whitespace-nowrap">Customer:</label>
+                <input
+                  type="text"
+                  placeholder="Find..."
+                  value={customerSearchText}
+                  onChange={(e) => setCustomerSearchText(e.target.value)}
+                  className="w-16 px-1 py-0 rounded border border-slate-300 bg-white"
+                />
+                <select
+                  value={customerAccountId}
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    setCustomerAccountId(id);
+                    if (id > 0) {
+                      refreshCustomerBalanceSummary(id, editingSaleId);
+                      const chosenCust = customers.find((c) => Number(c.id) === id);
+                      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
+                        setSalesmanId(Number(chosenCust.assigned_salesman_id));
+                        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
                       }
-                    }}
-                    className="flex-1 px-1 py-0 rounded-lg border border-slate-300 font-bold text-slate-900 bg-white text-[11px] h-5"
-                  >
-                    <option value={0}>— Select Customer (Walk-in Cash) —</option>
-                    {filteredCustomers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.account_name} ({c.account_code}){c.town_name ? ` • ${c.town_name}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                    } else {
+                      setLiveBalanceSummary(null);
+                    }
+                  }}
+                  className="flex-1 min-w-0 px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
+                >
+                  <option value={0}>Walk-in Cash Customer</option>
+                  {filteredCustomers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.account_name} ({c.account_code}){c.town_name ? ` • ${c.town_name}` : ''}
+                    </option>
+                  ))}
+                </select>
               </div>
-
-              {/* Invoice Type */}
               <div className="col-span-2 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-8">
-                  Type:
-                </label>
+                <label className="font-bold text-slate-600 whitespace-nowrap">Type:</label>
                 <select
                   value={invoiceType}
                   onChange={(e) => handleInvoiceTypeChange(e.target.value as SalesInvoiceType)}
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-bold text-slate-900 bg-white text-[11px] h-5"
+                  className="w-full px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
                 >
                   <option value="Retail">Retail</option>
                   <option value="Wholesale">Wholesale</option>
                 </select>
               </div>
-
-              {/* Payment Mode */}
               <div className="col-span-2 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-9">
-                  Mode:
-                </label>
+                <label className="font-bold text-slate-600 whitespace-nowrap">Mode:</label>
                 <select
                   value={paymentMode}
                   onChange={(e) => {
                     setPaidAmountManuallyEdited(false);
                     setPaymentMode(e.target.value as SalesPaymentMode);
                   }}
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-bold text-slate-900 bg-white text-[11px] h-5"
+                  className="w-full px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
                 >
                   <option value="Cash">Cash</option>
                   <option value="Credit">Credit</option>
@@ -4650,14 +4183,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            {/* Row 2: Salesman, Deliveryman, Charges & Customer Live Ledger Strip */}
-            <div className="grid grid-cols-12 gap-1 items-center text-[11px] pt-0.5 mt-0.5 border-t border-slate-200">
-              {/* Salesman */}
-              <div className="col-span-3 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-14 flex items-center gap-0.5">
-                  <UserCheck className="w-3 h-3 text-emerald-600" />
-                  Salesman:
-                </label>
+            {/* Row 2: Salesman, Deliveryman, Quick Search (F3) & Row Actions */}
+            <div className="grid grid-cols-12 gap-1.5 items-center pt-1 border-t border-slate-200">
+              <div className="col-span-2 flex items-center gap-1">
+                <label className="font-bold text-slate-600 whitespace-nowrap">Salesman:</label>
                 <select
                   value={salesmanId || ''}
                   onChange={(e) => {
@@ -4666,23 +4195,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const found = salesmenList.find((s) => s.id === idVal);
                     if (found) setSalesman(found.name);
                   }}
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-semibold text-slate-900 bg-white text-[11px] h-5"
+                  className="w-full px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white"
                 >
-                  <option value="">-- No Salesman --</option>
+                  <option value="">Counter</option>
                   {filteredSalesmen.map((sm) => (
                     <option key={sm.id} value={sm.id}>
-                      {sm.name || sm.full_name} ({sm.salesman_code})
+                      {sm.name || sm.full_name}
                     </option>
                   ))}
                 </select>
               </div>
-
-              {/* Deliveryman */}
-              <div className="col-span-3 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-16 flex items-center gap-0.5">
-                  <Truck className="w-3 h-3 text-sky-600" />
-                  Delivery:
-                </label>
+              <div className="col-span-2 flex items-center gap-1">
+                <label className="font-bold text-slate-600 whitespace-nowrap">Delivery:</label>
                 <select
                   value={deliverymanId || ''}
                   onChange={(e) => {
@@ -4696,69 +4220,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setDeliveryStatus('Pending');
                     }
                   }}
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-semibold text-slate-900 bg-white text-[11px] h-5"
+                  className="w-full px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white"
                 >
-                  <option value="">Counter Pickup</option>
+                  <option value="">Pickup</option>
                   {filteredDeliverymen.map((dm) => (
                     <option key={dm.id} value={dm.id}>
-                      {dm.name} ({dm.deliveryman_code})
+                      {dm.name}
                     </option>
                   ))}
                 </select>
               </div>
-
-              {/* Delivery Status */}
-              <div className="col-span-2 flex items-center gap-1">
-                <label className="text-[10px] font-bold uppercase text-slate-600 whitespace-nowrap w-9">
-                  Status:
-                </label>
-                <select
-                  value={deliveryStatus}
-                  onChange={(e) => setDeliveryStatus(e.target.value as any)}
-                  className="w-full px-1 py-0 rounded-lg border border-slate-300 font-semibold text-slate-900 bg-white text-[11px] h-5"
-                >
-                  <option value="Pending">Pending</option>
-                  <option value="Assigned">Assigned</option>
-                  <option value="Out for Delivery">Out</option>
-                  <option value="Delivered">Delivered</option>
-                  <option value="Failed">Failed</option>
-                  <option value="Returned">Returned</option>
-                </select>
-              </div>
-
-              {/* Customer Previous Balance & Live Ledger Strip */}
-              <div className="col-span-4 bg-slate-900 text-white rounded-lg px-2 py-0 flex items-center justify-between text-[10px] h-5">
-                <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Prev Bal:</span>
-                  <span className="font-mono font-bold text-amber-300">
-                    {formatPKR(prevCustomerBalance)}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1 border-l border-slate-700 pl-1.5">
-                  <span className="text-slate-400">Total Rec:</span>
-                  <span className="font-mono font-black text-emerald-300">
-                    {formatPKR(totalReceivable)}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => openCustomerShortcut('ledger')}
-                  className="px-1 py-0 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 text-[9px] font-mono border border-slate-700 cursor-pointer"
-                  title="Open full ledger in new view"
-                >
-                  Ledger ↗
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* ================= 2. COMPACT BARCODE SCANNER & ROW CONTROLS ================= */}
-          <div className="bg-slate-800 px-2 py-0.5 text-white border-b border-slate-700 relative shrink-0">
-            <div className="flex flex-wrap items-center justify-between gap-1.5">
-              {/* Quick Search & Barcode Scan Input */}
-              <div className="flex-1 min-w-[260px] relative">
-                <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-2 py-0 focus-within:border-emerald-400 h-5">
-                  <Search className="w-3 h-3 text-emerald-400 mr-1.5 shrink-0" />
+              <div className="col-span-4 relative">
+                <div className="flex items-center bg-white border border-slate-300 rounded px-1.5 focus-within:border-emerald-600">
+                  <Search className="w-3 h-3 text-emerald-600 mr-1 shrink-0" />
                   <input
                     ref={searchInputRef}
                     type="text"
@@ -4798,31 +4272,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           runFastSearch(quickSearchQuery);
                           return;
                         }
-                        setSearchHighlightIdx((prev) => {
-                          const next = Math.min(searchResults.length - 1, prev + 1);
-                          setTimeout(() => {
-                            document
-                              .querySelector(`[data-sales-search-idx="${next}"]`)
-                              ?.scrollIntoView({ block: 'nearest' });
-                          }, 0);
-                          return next;
-                        });
+                        setSearchHighlightIdx((prev) => Math.min(searchResults.length - 1, prev + 1));
                       } else if (e.key === 'ArrowUp') {
                         if (quickSearchQuery.trim().length === 0) return;
                         e.preventDefault();
-                        if (!showSearchDropdown) {
-                          setShowSearchDropdown(true);
-                          return;
-                        }
-                        setSearchHighlightIdx((prev) => {
-                          const next = Math.max(0, prev - 1);
-                          setTimeout(() => {
-                            document
-                              .querySelector(`[data-sales-search-idx="${next}"]`)
-                              ?.scrollIntoView({ block: 'nearest' });
-                          }, 0);
-                          return next;
-                        });
+                        setSearchHighlightIdx((prev) => Math.max(0, prev - 1));
                       } else if (e.key === 'Enter') {
                         e.preventDefault();
                         if (quickSearchQuery.trim().length > 0 && showSearchDropdown && searchResults.length > 0) {
@@ -4832,107 +4286,71 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             return;
                           }
                         }
-                        focusCell(selectedRowIndex, 'item_code', 'cell');
+                        focusCell(selectedRowIndex, 'item_name', 'cell');
                       } else if (e.key === 'Escape') {
                         e.preventDefault();
                         setShowSearchDropdown(false);
                       }
                     }}
-                    placeholder="Barcode Scanner / Manual Item Search (Type Code, Barcode, or Name)..."
-                    className="w-full bg-transparent text-[11px] text-white placeholder-slate-400 focus:outline-none"
+                    placeholder="Barcode / Item Search (F3)..."
+                    className="w-full bg-transparent text-slate-900 placeholder-slate-400 focus:outline-none"
                   />
-                  {quickSearchQuery && (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        setQuickSearchQuery('');
-                        setSearchHighlightIdx(0);
-                        setShowSearchDropdown(false);
-                        setSearchResults([]);
-                        searchInputRef.current?.focus();
-                      }}
-                      className="text-slate-400 hover:text-white mr-1 cursor-pointer"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  )}
-                  <Barcode className="w-3.5 h-3.5 text-slate-400 ml-1 shrink-0" />
                 </div>
-
-                {/* Instant Excel-Style Search Combobox (manual search bar only) */}
                 {renderSalesExcelItemCombobox('top')}
               </div>
-
-              {/* Row Actions Toolbar */}
-              <div className="flex items-center gap-1">
+              <div className="col-span-4 flex flex-wrap items-center justify-end gap-1">
                 <button
                   type="button"
                   onClick={() => openItemListForRow(selectedRowIndex)}
-                  className="px-2 py-0 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
-                  title="Open Item List to select or change item for the selected row"
+                  className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                  title="Open Item List (F2)"
                 >
                   <PackageSearch className="w-3 h-3 text-emerald-400" />
-                  Item List
+                  Items
                 </button>
                 <button
                   type="button"
                   onClick={handleInsertRow}
-                  className="px-2 py-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
-                  title="Add a new line item"
+                  className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                  title="Add New Blank Line"
                 >
                   <Plus className="w-3 h-3" />
-                  Add Row
+                  Row
                 </button>
                 <button
                   type="button"
                   onClick={() => handleDeleteRow(selectedRowIndex)}
-                  className="px-2 py-0 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
-                  title="Delete active row"
+                  className="px-1.5 py-0 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                  title="Delete selected row"
                 >
                   <Trash2 className="w-3 h-3" />
-                  Delete
+                  Del
                 </button>
                 <button
                   type="button"
                   onClick={() => handleCopyRow(selectedRowIndex)}
-                  className="px-1.5 py-0 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 text-[10px] font-semibold flex items-center gap-1 cursor-pointer h-5"
+                  className="px-1.5 py-0 rounded bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-semibold cursor-pointer"
                   title="Copy active row"
                 >
-                  <Copy className="w-3 h-3" />
                   Copy
                 </button>
                 <button
                   type="button"
                   onClick={() => handlePasteRow(selectedRowIndex)}
                   disabled={!copiedRowData}
-                  className="px-1.5 py-0 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 border border-slate-600 text-[10px] font-semibold flex items-center gap-1 cursor-pointer h-5"
-                  title="Paste into active row"
+                  className="px-1.5 py-0 rounded bg-white hover:bg-slate-50 disabled:opacity-40 text-slate-700 border border-slate-300 font-semibold cursor-pointer"
+                  title="Paste row"
                 >
-                  <ClipboardPaste className="w-3 h-3" />
                   Paste
                 </button>
-                <label
-                  className="ml-1 flex items-center gap-1 text-[10px] text-amber-300 bg-slate-900 px-1.5 py-0 rounded-lg border border-slate-700 cursor-pointer h-5"
-                  title="Allow Negative Stock for Sales"
-                >
-                  <input
-                    type="checkbox"
-                    checked={allowNegativeStock}
-                    onChange={(e) => handleToggleNegativeStock(e.target.checked)}
-                    className="rounded-lg text-amber-500"
-                  />
-                  <ShieldAlert className="w-3 h-3 text-amber-400" />
-                  <span>Allow Neg Stock</span>
-                </label>
               </div>
             </div>
           </div>
 
-          {/* ================= 3. MICROSOFT ACCESS-STYLE DATASHEET GRID (MIN 10 VISIBLE ROWS) ================= */}
-          <div className="flex flex-col flex-1 min-h-[375px] bg-white overflow-hidden select-none border-b border-slate-400">
+          {/* ================= SECTION B (CENTER): MICROSOFT ACCESS-STYLE DATASHEET GRID ONLY (MIN 10 VISIBLE ROWS) ================= */}
+          <div className="ams-pos-item-grid-card flex flex-col flex-1 min-h-[356px] bg-white overflow-hidden select-none border-b border-slate-400">
             {/* Vertical scrolling inside the item grid, sticky column headers */}
-            <div className="flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative">
+            <div className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative">
               <table className="ams-compact-10-grid w-full border-collapse text-[11px] font-sans leading-none min-w-[1180px]">
                 <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                   <tr className="h-6">
@@ -5645,17 +5063,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           )}
 
-          {/* ================= 4. FULL-WIDTH DESKTOP CALCULATION & ACTION FOOTER (NO SIDE-BY-SIDE SPLIT) ================= */}
-          <div className="p-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1.5 shrink-0">
-            {/* Row 1: Full-Width Totals, Discounts, Paid Amount & Balance */}
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-1.5">
-              <div className="flex flex-wrap items-center gap-3 text-xs">
+          {/* ================= SECTION C (BOTTOM): COMPACT MS ACCESS CALCULATION & ACTION FOOTER ================= */}
+          <div className="ams-pos-compact-chrome px-2.5 py-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1 shrink-0">
+            {/* Row 1: Essential Totals & Payment Settlement */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-1 tabular-nums">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <div className="flex items-center gap-1">
                   <span className="text-slate-400">A/C:</span>
                   <select
                     value={paymentAccountId || ''}
                     onChange={(e) => setPaymentAccountId(Number(e.target.value))}
-                    className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-white font-semibold text-xs"
+                    className="px-1.5 py-0 rounded bg-slate-800 border border-slate-700 text-white font-semibold"
                   >
                     {financialAccounts.map((fa) => (
                       <option key={fa.id} value={fa.id}>
@@ -5665,11 +5083,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   </select>
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Gross ({validRows.length}):</span>
+                  <span className="text-slate-400">Grand Total ({validRows.length}):</span>
                   <span className="font-mono font-bold text-white">{formatPKR(grossAmount)}</span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Inv Disc:</span>
+                  <span className="text-rose-400">Discount:</span>
+                  <span className="font-mono font-bold text-rose-300">-{formatPKR(totalDiscount)}</span>
                   <NumericInput
                     value={invoiceDiscountPercent}
                     onChange={(e) => {
@@ -5677,8 +5096,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setInvoiceDiscountPercent(pct);
                       setInvoiceDiscountAmount(round2((subtotalAfterItemDisc * pct) / 100));
                     }}
-                    className="w-14 px-1 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-xs text-right text-white"
+                    className="w-12 px-1 py-0 rounded bg-slate-800 border border-slate-700 font-mono text-right text-white"
                     placeholder="%"
+                    title="Invoice Discount %"
                   />
                   <NumericInput
                     value={invoiceDiscountAmount}
@@ -5686,160 +5106,162 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setInvoiceDiscountPercent(0);
                       setInvoiceDiscountAmount(Math.max(0, Number(e.target.value || 0)));
                     }}
-                    className="w-20 px-1 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-xs text-right text-white"
+                    className="w-16 px-1 py-0 rounded bg-slate-800 border border-slate-700 font-mono text-right text-white"
                     placeholder="PKR"
+                    title="Invoice Discount Amount"
                   />
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Prev Ledger:</span>
+                  <span className="text-slate-400">Cash Load:</span>
+                  <NumericInput
+                    value={deliveryCharges}
+                    onChange={(e) => setDeliveryCharges(Math.max(0, Number(e.target.value || 0)))}
+                    className="w-16 px-1 py-0 rounded bg-slate-800 border border-slate-700 font-mono text-amber-300 text-right"
+                    title="Delivery / Cash Load Charges"
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400">Prev Bal:</span>
                   <span className="font-mono font-semibold text-amber-300">{formatPKR(prevCustomerBalance)}</span>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="px-2.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1.5">
-                  <span className="text-xs uppercase font-bold text-emerald-300">Net Invoice:</span>
-                  <span className="font-mono text-base font-black text-emerald-300 ams-total-highlight">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1">
+                  <span className="uppercase font-bold text-emerald-300">Net Amount:</span>
+                  <span className="font-mono font-black text-emerald-300 ams-total-highlight">
                     {formatPKR(netInvoiceAmount)}
                   </span>
                 </div>
-                <div className="px-2.5 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1.5">
-                  <span className="text-xs uppercase font-bold text-sky-300">Total Rec:</span>
-                  <span className="font-mono text-base font-black text-sky-300 ams-total-highlight">
+                <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1">
+                  <span className="uppercase font-bold text-sky-300">Receivable:</span>
+                  <span className="font-mono font-black text-sky-300 ams-total-highlight">
                     {formatPKR(totalReceivable)}
                   </span>
                 </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-xs uppercase font-bold text-slate-300">Paid:</span>
+                <div className="flex items-center gap-1 bg-slate-800 px-1.5 py-0.5 rounded border border-emerald-500">
+                  <span className="uppercase font-bold text-emerald-300">Cash Rec:</span>
                   <NumericInput
                     value={paidAmountInput}
                     onChange={(e) => {
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
                     }}
-                    className="w-24 px-1.5 py-0.5 rounded bg-slate-800 border border-emerald-500 text-right font-mono font-bold text-emerald-300 text-xs"
+                    className="w-24 px-1 py-0 rounded bg-slate-900 border border-slate-700 text-right font-mono font-bold text-emerald-300 outline-none"
                   />
+                  <button
+                    type="button"
+                    onClick={handleExactCash}
+                    className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
+                  >
+                    Exact
+                  </button>
                 </div>
-                <div className="px-2.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1.5">
-                  <span className="text-xs uppercase font-bold text-amber-300">Balance:</span>
-                  <span className="font-mono text-base font-black text-amber-300 ams-total-highlight">
-                    {formatPKR(remainingBalance)}
+                <div className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1">
+                  <span className="uppercase font-bold text-amber-300">
+                    {paidAmount >= totalReceivable ? 'Change:' : 'Remaining:'}
+                  </span>
+                  <span className="font-mono font-black text-amber-300 ams-total-highlight">
+                    {formatPKR(paidAmount >= totalReceivable ? round2(paidAmount - totalReceivable) : remainingBalance)}
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Row 2: Full-Width Action Buttons Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-1.5">
-              <div className="flex flex-wrap items-center gap-1.5">
+            {/* Row 2: Compact Action Buttons Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-1">
+              <div className="flex flex-wrap items-center gap-1">
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed')}
-                  className={`px-3.5 py-1 rounded-lg ${
+                  className={`px-2.5 py-0.5 rounded ${
                     editingSaleId ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'
-                  } text-white text-xs font-black flex items-center gap-1 cursor-pointer shadow-sm`}
+                  } text-white font-black flex items-center gap-1 cursor-pointer`}
                 >
-                  <Save className="w-3.5 h-3.5" />
-                  {editingSaleId ? 'Update (Ctrl+S)' : 'Save Invoice (Ctrl+S)'}
+                  <Save className="w-3 h-3" />
+                  {editingSaleId ? 'Update (Ctrl+S)' : 'Save (Ctrl+S)'}
                 </button>
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', 'a4')}
-                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                  A4 Print
+                  <Printer className="w-3 h-3 text-emerald-400" />
+                  Save &amp; A4
                 </button>
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', '80mm')}
-                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-teal-400" />
+                  <Printer className="w-3 h-3 text-teal-400" />
                   80mm
                 </button>
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed', '58mm')}
-                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-amber-400" />
+                  <Printer className="w-3 h-3 text-amber-400" />
                   58mm
-                </button>
-                <button
-                  type="button"
-                  disabled={exportingExcel}
-                  onClick={handleExportCurrentSaleToExcel}
-                  className="px-3 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
-                  title="Export Sales Invoice to Excel (.xlsx)"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Export Excel
                 </button>
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('held')}
-                  className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <PauseCircle className="w-3.5 h-3.5" />
+                  <PauseCircle className="w-3 h-3" />
                   Hold (F9)
                 </button>
                 <button
                   type="button"
                   onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                  className="px-2.5 py-1 rounded-lg bg-sky-700 hover:bg-sky-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Eye className="w-3.5 h-3.5 text-sky-200" />
+                  <Eye className="w-3 h-3" />
                   Print Preview
                 </button>
                 <button
                   type="button"
-                  onClick={handleOpenDsrReport}
-                  className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  disabled={exportingExcel}
+                  onClick={handleExportCurrentSaleToExcel}
+                  className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  title="Export Sales Invoice to Excel (.xlsx)"
                 >
-                  <ClipboardList className="w-3.5 h-3.5 text-emerald-200" />
-                  DSR
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenSalesSms}
-                  className="px-2.5 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
-                  title="Send Customer SMS for Current Sales Invoice"
-                >
-                  <MessageSquare className="w-3.5 h-3.5 text-indigo-200" />
-                  Send SMS
+                  <Download className="w-3 h-3" />
+                  Excel
                 </button>
                 <button
                   type="button"
                   onClick={handleReprintLastInvoice}
-                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5" />
+                  <Printer className="w-3 h-3" />
                   Reprint
                 </button>
               </div>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => setShowDiscardConfirm(true)}
-                  className="px-2.5 py-1 rounded-lg bg-rose-900/80 hover:bg-rose-800 text-rose-200 border border-rose-700 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 rounded bg-rose-900/80 hover:bg-rose-800 text-rose-200 border border-rose-700 font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <RotateCcw className="w-3.5 h-3.5" />
+                  <RotateCcw className="w-3 h-3" />
                   Discard
                 </button>
                 {onBackToDashboard && (
                   <button
                     type="button"
                     onClick={onBackToDashboard}
-                    className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1 cursor-pointer"
+                    className="px-2 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                   >
-                    <ArrowLeft className="w-3.5 h-3.5" />
-                    Back / Close
+                    <ArrowLeft className="w-3 h-3" />
+                    Close
                   </button>
                 )}
               </div>

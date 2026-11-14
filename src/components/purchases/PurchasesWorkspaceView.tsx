@@ -178,6 +178,19 @@ export function ensureMinimumPurchaseRows(
   return result;
 }
 
+export function findNextBlankPurchaseRowIndex(
+  inputLines: PurchaseLineItem[],
+  fromRowIdx: number
+): number {
+  const start = Math.max(0, fromRowIdx) + 1;
+  for (let i = start; i < inputLines.length; i++) {
+    if (!isPurchaseLinePopulated(inputLines[i])) {
+      return i;
+    }
+  }
+  return inputLines.length;
+}
+
 export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   initialSubTab = 'new-invoice',
   onBackToDashboard,
@@ -234,9 +247,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const visibleRowCapacityRef = useRef<number>(INITIAL_PURCHASE_ROWS);
   const posGridViewportRef = useRef<HTMLDivElement | null>(null);
   const accessGridViewportRef = useRef<HTMLDivElement | null>(null);
-  // In POS mode, lower datasheet keyboard navigation is enabled only after
-  // the user deliberately clicks inside that datasheet with the mouse.
-  const posDatasheetMouseActivatedRef = useRef(false);
+  // Keyboard navigation is active immediately across both Purchase POS and MS Access grids
+  const posDatasheetMouseActivatedRef = useRef(true);
 
   // Responsive Datasheet Lines (Minimum 10 visible rows, automatically expands to fit taller screens)
   const [lines, setLines] = useState<PurchaseLineItem[]>(() =>
@@ -257,7 +269,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   });
 
   useEffect(() => {
-    posDatasheetMouseActivatedRef.current = false;
+    posDatasheetMouseActivatedRef.current = true;
   }, [purchaseViewMode]);
 
   const togglePurchaseViewMode = (mode: 'pos' | 'access') => {
@@ -310,6 +322,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   // Inline Row Cell Item Search State (for Datasheet cells in both POS & MS Access View)
   const [activeRowItemSearchIdx, setActiveRowItemSearchIdx] = useState<number | null>(null);
+  const [activeRowItemSearchField, setActiveRowItemSearchField] = useState<'item_code' | 'item_name' | null>(null);
   const [rowItemSearchQuery, setRowItemSearchQuery] = useState<string>('');
   const [rowItemHighlightIndex, setRowItemHighlightIndex] = useState<number>(0);
   const purchaseSearchReqIdRef = useRef<number>(0);
@@ -1257,7 +1270,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   };
 
   // Populate a specific row with an Item (used by Item Selection List modal & inline cells, preventing unnecessary duplicates)
-  const populatePurchaseRowWithItem = (idx: number, found: Item, fromPosRow: boolean = true) => {
+  const populatePurchaseRowWithItem = (idx: number, found: Item, _fromPosRow: boolean = true) => {
     const existingDuplicateIdx = lines.findIndex((l, i) => i !== idx && l.item_id === found.id);
     if (existingDuplicateIdx >= 0) {
       // Clear current row if it was empty and jump to the already-added item's Quantity field
@@ -1270,28 +1283,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       });
       setSelectedPurchaseLineIndex(existingDuplicateIdx);
       setActiveRowItemSearchIdx(null);
+      setActiveRowItemSearchField(null);
       setRowItemSearchQuery('');
       setPurchaseSearchQuery('');
       setShowPurchaseSearchDropdown(false);
-      if (purchaseViewMode === 'pos' && fromPosRow) {
-        posDatasheetMouseActivatedRef.current = true;
-      }
       setTimeout(() => {
-        if (purchaseViewMode === 'pos') {
-          if (fromPosRow) {
-            focusPurchaseCell(existingDuplicateIdx, 'quantity', 'pos_row');
-          } else {
-            const qtyEl =
-              (document.getElementById('pos_active_quantity') as HTMLInputElement | null) ||
-              (document.getElementById(
-                `pos_row_${existingDuplicateIdx}_quantity`
-              ) as HTMLInputElement | null);
-            qtyEl?.focus();
-            qtyEl?.select?.();
-          }
-        } else {
-          focusPurchaseCell(existingDuplicateIdx, 'quantity', 'pur_cell');
-        }
+        const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+        focusPurchaseCell(existingDuplicateIdx, 'quantity', prefix);
       }, 35);
       return;
     }
@@ -1307,26 +1305,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     });
     setSelectedPurchaseLineIndex(idx);
     setActiveRowItemSearchIdx(null);
+    setActiveRowItemSearchField(null);
     setRowItemSearchQuery('');
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
-    if (purchaseViewMode === 'pos' && fromPosRow) {
-      posDatasheetMouseActivatedRef.current = true;
-    }
     setTimeout(() => {
-      if (purchaseViewMode === 'pos') {
-        if (fromPosRow) {
-          focusPurchaseCell(idx, 'quantity', 'pos_row');
-        } else {
-          const qtyEl =
-            (document.getElementById('pos_active_quantity') as HTMLInputElement | null) ||
-            (document.getElementById(`pos_row_${idx}_quantity`) as HTMLInputElement | null);
-          qtyEl?.focus();
-          qtyEl?.select?.();
-        }
-      } else {
-        focusPurchaseCell(idx, 'quantity', 'pur_cell');
-      }
+      const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+      focusPurchaseCell(idx, 'quantity', prefix);
     }, 35);
   };
 
@@ -1459,12 +1444,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setLines((prev) => [...prev, createBlankPurchaseLine()]);
       setSelectedPurchaseLineIndex(targetIdx);
     }
-    if (purchaseViewMode === 'pos') {
-      posDatasheetMouseActivatedRef.current = true;
-    }
     const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
     setTimeout(() => {
-      focusPurchaseCell(targetIdx, 'item_code', prefix);
+      focusPurchaseCell(targetIdx, 'item_name', prefix);
     }, 25);
   };
 
@@ -1652,16 +1634,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }
       // If Item Search is empty and dropdown is closed, pressing Enter moves into Active Row's Quantity field!
       const activeLine = lines[selectedPurchaseLineIndex];
+      const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
       if (activeLine && activeLine.item_id > 0) {
-        const qtyInput =
-          (document.getElementById('pos_active_quantity') as HTMLInputElement | null) ||
-          (document.getElementById(
-            `pur_cell_${selectedPurchaseLineIndex}_quantity`
-          ) as HTMLInputElement | null);
-        if (qtyInput) {
-          qtyInput.focus();
-          qtyInput.select?.();
-        }
+        focusPurchaseCell(selectedPurchaseLineIndex, 'quantity', prefix);
+      } else {
+        focusPurchaseCell(selectedPurchaseLineIndex, 'item_name', prefix);
       }
       return;
     }
@@ -1706,100 +1683,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setPaidAmount(amt);
   };
 
-  // POS Active Strip Enter Key Sequence:
-  // 1.Qty -> 2.Discount -> 3.Bonus -> 4.Batch # -> 5.Expiry -> 6.Purchase Rate -> 7.MRP -> 8.GST -> Enter -> returns focus to Item Search!
-  const posActiveFieldOrder = [
-    'pos_active_quantity',
-    'pos_active_discount_percent',
-    'pos_active_bonus_quantity',
-    'pos_active_batch_number',
-    'pos_active_expiry_date',
-    'pos_active_purchase_rate',
-    'pos_active_mrp_rate',
-    'pos_active_tax_percent',
-  ];
 
-  const handlePosActiveFieldKeyDown = (
-    e: React.KeyboardEvent<HTMLInputElement>,
-    fieldId: string
-  ) => {
-    const idx = posActiveFieldOrder.indexOf(fieldId);
-    if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
-      e.preventDefault();
-      if (fieldId === 'pos_active_purchase_rate') {
-        const nextTarget = posActiveFieldOrder[idx + 1] || 'pos_active_mrp_rate';
-        if (checkAndTriggerPurchasePriceChange(selectedPurchaseLineIndex, nextTarget)) {
-          return;
-        }
-      }
-      if (idx >= 0 && idx < posActiveFieldOrder.length - 1) {
-        const nextEl = document.getElementById(
-          posActiveFieldOrder[idx + 1]
-        ) as HTMLInputElement | null;
-        if (nextEl) {
-          nextEl.focus();
-          if (typeof nextEl.select === 'function') nextEl.select();
-        }
-      } else {
-        // Completed the active row fields -> return focus to Item Search
-        setShowPurchaseSearchDropdown(false);
-        itemSearchInputRef.current?.focus();
-        itemSearchInputRef.current?.select?.();
-      }
-      return;
-    }
-
-    if (e.key === 'Tab' && e.shiftKey) {
-      e.preventDefault();
-      if (idx > 0) {
-        const prevEl = document.getElementById(
-          posActiveFieldOrder[idx - 1]
-        ) as HTMLInputElement | null;
-        if (prevEl) {
-          prevEl.focus();
-          if (typeof prevEl.select === 'function') prevEl.select();
-        }
-      } else {
-        itemSearchInputRef.current?.focus();
-        itemSearchInputRef.current?.select?.();
-      }
-      return;
-    }
-
-    if (e.key === 'ArrowRight') {
-      const inputEl = e.currentTarget;
-      const isAtEnd =
-        inputEl.type === 'number' ||
-        inputEl.selectionStart === null ||
-        inputEl.selectionStart === inputEl.value.length;
-      if (isAtEnd && idx >= 0 && idx < posActiveFieldOrder.length - 1) {
-        e.preventDefault();
-        const nextEl = document.getElementById(
-          posActiveFieldOrder[idx + 1]
-        ) as HTMLInputElement | null;
-        nextEl?.focus();
-        nextEl?.select?.();
-      }
-      return;
-    }
-
-    if (e.key === 'ArrowLeft') {
-      const inputEl = e.currentTarget;
-      const isAtStart =
-        inputEl.type === 'number' ||
-        inputEl.selectionStart === null ||
-        inputEl.selectionStart === 0;
-      if (isAtStart && idx > 0) {
-        e.preventDefault();
-        const prevEl = document.getElementById(
-          posActiveFieldOrder[idx - 1]
-        ) as HTMLInputElement | null;
-        prevEl?.focus();
-        prevEl?.select?.();
-      }
-      return;
-    }
-  };
 
   // Datasheet Cell Keyboard Navigation Sequence (Both POS Table & MS Access Datasheet)
   // Column Sequence: Item Code -> Item Name -> Qty -> Discount -> Bonus -> Gross Amount -> Net Amount -> Packing -> Batch/Expiry -> Purchase Rate -> MRP -> GST -> Taxable -> Line Total
@@ -1837,9 +1721,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     col: string,
     prefix: 'pur_cell' | 'pos_row' = 'pur_cell'
   ) => {
-    if (purchaseViewMode === 'pos' && prefix === 'pos_row' && !posDatasheetMouseActivatedRef.current) {
-      return;
-    }
     const cols = getPurchaseColsForPrefix(prefix);
     const resolvedCol = cols.includes(col) ? col : cols[0];
     const el = document.getElementById(`${prefix}_${rIdx}_${resolvedCol}`) as
@@ -1956,21 +1837,32 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
   };
 
+  // Microsoft Access-style continuous entry:
+  // Move to next blank row without mutating existing rows and focus Item Name in the new row
+  const advanceToNextBlankPurchaseRow = (
+    fromRowIdx: number,
+    prefix: 'pur_cell' | 'pos_row'
+  ) => {
+    const nextRow = findNextBlankPurchaseRowIndex(lines, fromRowIdx);
+    if (nextRow >= lines.length) {
+      setLines((prev) => [...prev, createBlankPurchaseLine()]);
+    }
+    setSelectedPurchaseLineIndex(nextRow);
+    setPurchaseRecordJumpInput(String(nextRow + 1));
+    setActiveRowItemSearchIdx(null);
+    setActiveRowItemSearchField(null);
+    setRowItemSearchQuery('');
+    setTimeout(() => {
+      focusPurchaseCell(nextRow, 'item_name', prefix);
+    }, 25);
+  };
+
   const handlePurchaseCellKeyDown = (
     e: React.KeyboardEvent<HTMLElement>,
     rowIdx: number,
     field: string,
     prefix: 'pur_cell' | 'pos_row' = 'pur_cell'
   ) => {
-    if (
-      purchaseViewMode === 'pos' &&
-      prefix === 'pos_row' &&
-      !posDatasheetMouseActivatedRef.current &&
-      ['Enter', 'Tab', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)
-    ) {
-      e.preventDefault();
-      return;
-    }
     const colOrder = getPurchaseColsForPrefix(prefix);
     const curColIdx = colOrder.indexOf(field);
 
@@ -1984,6 +1876,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       if (activeRowItemSearchIdx !== null) {
         e.preventDefault();
         setActiveRowItemSearchIdx(null);
+        setActiveRowItemSearchField(null);
         setRowItemSearchQuery('');
       }
       return;
@@ -2050,14 +1943,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         focusPurchaseCell(rowIdx, colOrder[curColIdx + 1], prefix);
       } else if (curColIdx === colOrder.length - 1) {
         e.preventDefault();
-        const nextRow = rowIdx + 1;
-        if (nextRow >= lines.length) {
-          setLines((prev) => [...prev, createBlankPurchaseLine()]);
-        }
-        setSelectedPurchaseLineIndex(nextRow);
-        setTimeout(() => {
-          focusPurchaseCell(nextRow, colOrder[0], prefix);
-        }, 25);
+        advanceToNextBlankPurchaseRow(rowIdx, prefix);
       }
       return;
     }
@@ -2345,7 +2231,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           setTimeout(() => {
             const qtyEl =
               purchaseViewMode === 'pos'
-                ? (document.getElementById('pos_active_quantity') as HTMLInputElement | null)
+                ? (document.getElementById(`pos_row_${focusIdx}_quantity`) as HTMLInputElement | null)
                 : (document.getElementById(`pur_cell_${focusIdx}_quantity`) as HTMLInputElement | null);
             qtyEl?.focus();
           }, 25);
@@ -2930,7 +2816,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const renderTopItemSearchDropdown = () => {
     if (!showPurchaseSearchDropdown) return null;
     return (
-      <div className="absolute left-0 right-0 top-full mt-1 z-[100] min-w-[580px] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl overflow-hidden">
+      <div className="absolute right-0 top-full mt-1 z-[100] w-[640px] max-w-[92vw] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl overflow-hidden">
         <div className="px-3 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center">
           <span>
             Matching Items ({purchaseSearchResults.length}) • Search by Item Name, Company, Code or Barcode
@@ -3086,26 +2972,28 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     <div
       className={`ams-readable-invoice-scope w-full h-full ${
         subTab === 'new-invoice'
-          ? 'flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden px-1.5 py-1 bg-slate-100'
+          ? 'flex-1 flex flex-col min-h-0 overflow-hidden px-1.5 py-1 bg-slate-100'
           : 'flex-1 min-h-0 overflow-y-auto p-2 space-y-3 bg-slate-100'
       }`}
     >
       {/* Top Full-Screen Header & Sub-Navigation Bar */}
       <div
-        className={`bg-slate-900 text-white border border-slate-700 shadow-md flex flex-wrap items-center justify-between gap-2 shrink-0 print:hidden ${
-          subTab === 'new-invoice' ? 'px-3 py-1.5 rounded-lg mb-1' : 'px-3 py-2 rounded-xl'
+        className={`bg-slate-900 text-white border border-slate-700 shadow-xs flex flex-wrap items-center justify-between gap-1.5 shrink-0 print:hidden ${
+          subTab === 'new-invoice'
+            ? 'ams-pos-compact-chrome px-2 py-0.5 rounded-md mb-1'
+            : 'px-3 py-2 rounded-xl'
         }`}
       >
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1">
           {onBackToDashboard && (
             <button
               type="button"
               onClick={onBackToDashboard}
-              className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm"
+              className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold flex items-center gap-1 cursor-pointer"
               title="Return to Previous Dashboard / Menu"
             >
-              <ArrowLeft className="w-4 h-4" />
-              <span>Back to Dashboard</span>
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back</span>
             </button>
           )}
           {navItems.map((tab) => {
@@ -3116,13 +3004,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 key={tab.id}
                 type="button"
                 onClick={() => setSubTab(tab.id)}
-                className={`rounded-lg font-bold flex items-center gap-1 transition-all cursor-pointer px-2.5 py-1 text-xs ${
+                className={`rounded font-bold flex items-center gap-1 transition-all cursor-pointer px-2 py-0.5 ${
                   active
-                    ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
+                    ? 'bg-emerald-600 text-white ring-1 ring-emerald-400'
                     : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700'
                 }`}
               >
-                <Icon className="w-3.5 h-3.5" />
+                <Icon className="w-3 h-3" />
                 <span>{tab.label}</span>
               </button>
             );
@@ -3130,39 +3018,36 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         </div>
 
         {/* Inline Two Independent Invoice Interfaces Selector & Excel Export Actions */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1">
           {subTab === 'new-invoice' && (
-            <div className="flex items-center gap-1.5 bg-slate-800 text-white px-2 py-0.5 rounded-lg border border-slate-700">
-              <span className="text-[10px] font-black uppercase tracking-wider text-slate-300 hidden md:inline">
-                Interface:
-              </span>
+            <div className="inline-flex items-center gap-1 bg-slate-800 text-white p-0.5 rounded border border-slate-700">
               <button
                 type="button"
                 onClick={() => togglePurchaseViewMode('pos')}
-                className={`px-2.5 py-0.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                className={`px-2 py-0 rounded font-bold transition-all flex items-center gap-1 cursor-pointer ${
                   purchaseViewMode === 'pos'
-                    ? 'bg-emerald-600 text-white ring-1 ring-emerald-400'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
                 }`}
-                title="Switch to Traditional Desktop POS Goods Receipt Interface"
+                title="Switch to POS Purchase Interface"
               >
-                <ShoppingBag className="w-3.5 h-3.5" />
+                <ShoppingBag className="w-3 h-3" />
                 <span>1. POS View</span>
               </button>
               <button
                 type="button"
                 onClick={() => togglePurchaseViewMode('access')}
-                className={`px-2.5 py-0.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                className={`px-2 py-0 rounded font-bold transition-all flex items-center gap-1 cursor-pointer ${
                   purchaseViewMode === 'access'
-                    ? 'bg-blue-600 text-white ring-1 ring-blue-400'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
                 }`}
-                title="Switch to Microsoft Access-Style Desktop Datasheet Form"
+                title="Switch to Microsoft Access Datasheet Form"
               >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <FileSpreadsheet className="w-3 h-3" />
                 <span>2. MS Access View</span>
               </button>
-              <span className="bg-slate-900 px-2 py-0.5 rounded-lg text-emerald-400 font-mono font-bold text-xs">
+              <span className="bg-slate-900 px-1.5 py-0 rounded text-emerald-400 font-mono font-bold">
                 {validLines.length} Items
               </span>
             </div>
@@ -3172,40 +3057,40 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             type="button"
             disabled={exportingExcel}
             onClick={handleExportCurrentPurchaseToExcel}
-            className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
-            title="Export Current Purchase Invoice (or Saved Purchase Invoices) to Excel (.xlsx)"
+            className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Export Current Purchase Invoice to Excel (.xlsx)"
           >
-            <Download className="w-3.5 h-3.5" />
-            <span>{exportingExcel ? 'Exporting...' : 'Export to Excel (.xlsx)'}</span>
+            <Download className="w-3 h-3" />
+            <span>{exportingExcel ? 'Exporting...' : 'Excel'}</span>
           </button>
 
           <button
             type="button"
             disabled={exportingExcel}
             onClick={handleExportAllPurchasesToExcel}
-            className="px-2.5 py-1 rounded-lg bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
-            title="Export All Saved Purchase Invoices with Line Items to Excel (.xlsx)"
+            className="px-2 py-0.5 rounded bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Export All Saved Purchase Invoices to Excel (.xlsx)"
           >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Export All (.xlsx)</span>
+            <FileSpreadsheet className="w-3 h-3" />
+            <span>All Excel</span>
           </button>
 
           {subTab === 'new-invoice' && (
             <button
               type="button"
               onClick={handleOpenPurchaseOrderSms}
-              className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shadow-sm whitespace-nowrap shrink-0"
+              className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
               title="Send Order SMS for Current Purchase Invoice"
             >
-              <MessageSquare className="w-3.5 h-3.5" />
-              <span>Send Order SMS</span>
+              <MessageSquare className="w-3 h-3" />
+              <span>Order SMS</span>
             </button>
           )}
 
           <button
             type="button"
             onClick={fetchWorkspaceData}
-            className="p-1.5 rounded-lg bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 cursor-pointer"
+            className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 cursor-pointer"
             title="Refresh Purchase & Inventory Data"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -3215,8 +3100,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             <button
               type="button"
               onClick={onBackToDashboard}
-              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-200 hover:text-white border border-slate-600 text-xs font-black flex items-center gap-1 cursor-pointer"
-              title="Close Full-Screen Purchase Invoice and Return to Dashboard"
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-600 text-slate-200 hover:text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
+              title="Close Purchase Invoice and Return to Dashboard"
             >
               <X className="w-3.5 h-3.5" />
               <span>Close</span>
@@ -3227,7 +3112,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       {/* Status Banners */}
       {formError && (
-        <div className="px-2.5 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between shrink-0 mb-0.5">
+        <div className="px-2.5 py-0.5 rounded bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between shrink-0 mb-0.5">
           <div className="flex items-center gap-1.5 font-medium">
             <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
             <span>{formError}</span>
@@ -3243,7 +3128,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       )}
 
       {formSuccess && (
-        <div className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between shrink-0 mb-0.5">
+        <div className="px-2.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between shrink-0 mb-0.5">
           <div className="flex items-center gap-1.5 font-semibold">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
             <span>{formSuccess}</span>
@@ -3258,231 +3143,54 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         </div>
       )}
 
-      {/* TAB 1: NEW / EDIT PURCHASE INVOICE SCREEN (BUILT JUST LIKE SALES INVOICE!) */}
+      {/* TAB 1: NEW / EDIT PURCHASE INVOICE SCREEN */}
       {subTab === 'new-invoice' && (
-        <div className="flex-1 min-h-0 flex flex-col">
-          {/* ================= OPTION 1: TRADITIONAL POS INTERFACE (LIKE SALES POS VIEW) ================= */}
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          {/* ================= OPTION 1: POS INTERFACE (THREE-SECTION MS ACCESS LAYOUT) ================= */}
           {purchaseViewMode === 'pos' && (
             <form
               onSubmit={(e) => handleSavePurchaseInvoice(e, false)}
-              className="flex-1 min-h-0 flex flex-col gap-1"
+              className="flex-1 min-h-0 flex flex-col gap-1 overflow-hidden"
             >
-              {/* POS Header: Supplier Search, Live Previous Balance, Bill #, Date & Payment Mode */}
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-3.5 py-2 space-y-1.5 shrink-0">
-                {/* Top row: Badges, Bill #, Date & Quick Header Actions */}
-                <div className="flex flex-wrap items-center justify-between gap-1.5 pb-1 border-b border-slate-100">
-                  <div className="flex items-center gap-1.5">
-                    <span className="px-2 py-0.5 rounded-lg bg-emerald-700 text-white text-[11px] font-black uppercase tracking-wider flex items-center gap-1">
-                      <Zap className="w-3 h-3 text-amber-300" />
-                      PURCHASE POS COUNTER
+              {/* SECTION A (TOP): COMPACT PURCHASE HEADER */}
+              <div className="ams-pos-compact-chrome bg-white rounded-md border border-slate-300 shadow-xs px-2.5 py-1 space-y-1 shrink-0">
+                {/* Header Row 1: Bill #, Date, Supplier Inv, Filer, Mode & Quick Actions */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-1.5 items-center">
+                  <div className="md:col-span-5 flex flex-wrap items-center gap-1">
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-black uppercase">
+                      PURCHASE POS
                     </span>
-                    <span className="font-mono text-[11px] font-black text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded-lg border border-slate-300">
+                    <span className="font-mono font-black text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-300">
                       {billNumber}
                     </span>
                     {editingPurchaseId && (
-                      <span className="px-1.5 py-0.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold">
                         EDIT #{editingPurchaseId}
                       </span>
                     )}
-                    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-1.5 py-0">
-                      <span className="text-[10px] font-bold text-slate-500 uppercase">Date:</span>
-                      <input
-                        type="date"
-                        required
-                        value={billDate}
-                        onChange={(e) => setBillDate(e.target.value)}
-                        className="text-[11px] font-mono font-semibold text-slate-800 bg-transparent outline-none cursor-pointer h-5"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Quick Header Actions */}
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={resetInvoiceForm}
-                      className="px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                      title="New Purchase Invoice (Ctrl+N)"
-                    >
-                      <Plus className="w-3 h-3 text-emerald-600" />
-                      New (Ctrl+N)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handlePreviewInvoice}
-                      className="px-2 py-0.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                      title="Preview A4 Invoice before saving (F4)"
-                    >
-                      <Printer className="w-3 h-3 text-blue-700" />
-                      <span>Preview (F4)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleOpenPurchaseOrderSms}
-                      className="px-2.5 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap shrink-0"
-                      title="Send Order SMS for Current Purchase Invoice"
-                    >
-                      <MessageSquare className="w-3 h-3" />
-                      <span>Send Order SMS</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={savingInvoice}
-                      onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
-                      className="px-2 py-0.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                      title="Hold this Purchase Invoice (F3)"
-                    >
-                      <PauseCircle className="w-3 h-3 text-amber-700" />
-                      Hold (F3)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowHeldModal(true)}
-                      className="px-2 py-0.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                      title="View Pending Held & Draft Purchase Invoices"
-                    >
-                      <Clock className="w-3 h-3 text-indigo-700" />
-                      Held Drafts ({heldPurchases.length})
-                    </button>
-                    {purchases.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenPrintInvoice(purchases[0].id)}
-                        className="px-2 py-0.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                        title="Reprint Last Purchase Invoice"
-                      >
-                        <Printer className="w-3 h-3 text-blue-700" />
-                        Reprint Last
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Middle row: Searchable Supplier Selection + Live Previous Ledger Balance + Mode */}
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
-                  {/* Searchable Supplier Input + Add New Supplier */}
-                  <div
-                    ref={purchaseViewMode === 'pos' ? supplierDropdownContainerRef : undefined}
-                    className="md:col-span-5 flex items-center gap-1 relative"
-                  >
-                    <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 shrink-0">
-                      Supplier:
-                    </label>
-                    <div className="relative flex-1">
-                      <Search className="w-3 h-3 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        ref={purchaseViewMode === 'pos' ? supplierSearchInputRef : undefined}
-                        type="text"
-                        value={supplierSearchQuery}
-                        onFocus={() => {
-                          // Do not open the supplier list just because the field receives focus.
-                          setIsSupplierDropdownOpen(false);
-                        }}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          setSupplierSearchQuery(value);
-                          setIsSupplierDropdownOpen(value.trim().length > 0);
-                          setSupplierHighlightIndex(0);
-                        }}
-                        onKeyDown={handleSupplierSearchKeyDown}
-                        placeholder="Search Supplier Name, Code or Mobile #..."
-                        className="w-full pl-6 pr-12 py-0.5 text-xs font-bold rounded-lg border border-emerald-500 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-600 h-6"
-                      />
-                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
-                        {supplierSearchQuery && (
-                          <button
-                            type="button"
-                            onMouseDown={(e) => {
-                              e.preventDefault();
-                              setSupplierSearchQuery('');
-                              setIsSupplierDropdownOpen(true);
-                              setSupplierHighlightIndex(0);
-                              supplierSearchInputRef.current?.focus();
-                            }}
-                            className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
-                            title="Clear search text to see all suppliers"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            setIsSupplierDropdownOpen((prev) => !prev);
-                            setSupplierHighlightIndex(0);
-                            supplierSearchInputRef.current?.focus();
-                          }}
-                          className="p-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
-                          title="Open Supplier List"
-                        >
-                          <ChevronDown className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenAddSupplierModal()}
-                      className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold flex items-center gap-0.5 cursor-pointer shrink-0 h-6"
-                      title="Add New Supplier"
-                    >
-                      <UserPlus className="w-3 h-3" />
-                      <span>+New</span>
-                    </button>
-
-                    {renderSupplierDropdownMenu()}
-                  </div>
-
-                  {/* Live Supplier Previous Balance Badge */}
-                  <div className="md:col-span-4 bg-slate-900 text-white rounded-lg px-2 py-0.5 flex items-center justify-between shadow-sm h-6">
-                    <div className="flex items-center gap-1.5 truncate">
-                      <span className="text-[9px] uppercase tracking-wider text-slate-400 shrink-0">
-                        Prev Bal:
-                      </span>
-                      <span
-                        className={`font-mono text-[11px] font-black ${
-                          previousSupplierBalance > 0
-                            ? 'text-amber-400'
-                            : previousSupplierBalance < 0
-                            ? 'text-emerald-400'
-                            : 'text-slate-300'
-                        }`}
-                      >
-                        {formatPKR(Math.abs(previousSupplierBalance))} ({previousBalanceType})
-                      </span>
-                      {supplierBalanceSummary?.lastPayment && (
-                        <span className="text-[9px] text-slate-400 hidden sm:inline truncate">
-                          • Last: {formatPKR(supplierBalanceSummary.lastPayment.amount)}
-                        </span>
-                      )}
-                    </div>
-                    {selectedSupplier && (
-                      <button
-                        type="button"
-                        onClick={handleOpenSupplierLedger}
-                        className="px-1.5 py-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold flex items-center gap-0.5 cursor-pointer shrink-0"
-                        title="Open Detailed Supplier Ledger"
-                      >
-                        <Scale className="w-2.5 h-2.5" />
-                        <span>Ledger</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Supplier Invoice #, Filer Status & Payment Mode */}
-                  <div className="md:col-span-3 flex items-center justify-end gap-1.5">
+                    <input
+                      type="date"
+                      required
+                      value={billDate}
+                      onChange={(e) => setBillDate(e.target.value)}
+                      className="px-1.5 py-0 font-mono font-semibold text-slate-800 bg-slate-50 border border-slate-300 rounded outline-none cursor-pointer"
+                      title="Purchase Bill Date"
+                    />
                     <input
                       type="text"
                       value={supplierInvoiceNumber}
                       onChange={(e) => setSupplierInvoiceNumber(e.target.value)}
                       placeholder="Sup. Inv #"
-                      className="w-24 px-1.5 py-0.5 text-[11px] font-mono font-semibold rounded-lg border border-slate-300 bg-white h-6"
+                      className="w-24 px-1.5 py-0 font-mono font-semibold rounded border border-slate-300 bg-white"
                       title="Supplier Invoice / Bill Number"
                     />
+                  </div>
+
+                  <div className="md:col-span-7 flex flex-wrap items-center justify-end gap-1">
                     <select
                       value={supplierFilerStatus}
                       onChange={(e) => setSupplierFilerStatus(e.target.value as FilerStatus)}
-                      className="px-1.5 py-0.5 text-[10px] font-bold rounded-lg border border-slate-300 bg-slate-50 text-slate-900 h-6"
+                      className="px-1.5 py-0 font-bold rounded border border-slate-300 bg-slate-50 text-slate-900"
                       title="Supplier FBR Filer Status"
                     >
                       <option value="Filer">Filer ({taxSettings?.filer_rate ?? 0.5}%)</option>
@@ -3501,360 +3209,254 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           setPaidAmountManuallyEdited(false);
                         }
                       }}
-                      className="px-2 py-0.5 text-[11px] font-bold rounded-lg border border-slate-300 bg-white text-slate-900 h-6"
+                      className="px-1.5 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900"
+                      title="Payment Mode"
                     >
                       <option value="Cash">Cash</option>
                       <option value="Credit">Credit</option>
                       <option value="Bank">Bank</option>
                       <option value="Partial">Partial</option>
                     </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* Fast Item Search & Barcode Scan Bar (Identical to Sales!) */}
-              <div
-                ref={purchaseViewMode === 'pos' ? itemDropdownContainerRef : undefined}
-                className="relative bg-slate-900 rounded-lg px-2 py-1 shadow-sm text-white shrink-0"
-              >
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <Barcode className="w-4 h-4 text-emerald-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      id="pos_purchase_item_search_input"
-                      ref={purchaseViewMode === 'pos' ? itemSearchInputRef : undefined}
-                      type="text"
-                      value={purchaseSearchQuery}
-                      onFocus={() => {
-                        setShowPurchaseSearchDropdown(true);
-                        setItemHighlightIndex(0);
-                      }}
-                      onChange={(e) => {
-                        const q = e.target.value;
-                        setPurchaseSearchQuery(q);
-                        setItemHighlightIndex(0);
-                        setShowPurchaseSearchDropdown(true);
-                      }}
-                      onKeyDown={handleItemSearchKeyDown}
-                      placeholder="Scan Barcode or Search Medicine Name / Generic / Brand / Company / Item Code (Press Enter)..."
-                      className="w-full pl-8 pr-7 py-1 rounded-lg bg-slate-800 border border-slate-700 text-white placeholder-slate-400 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6"
-                    />
-                    {purchaseSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={resetInvoiceForm}
+                      className="px-1.5 py-0 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="New Purchase Invoice (Ctrl+N)"
+                    >
+                      <Plus className="w-3 h-3 text-emerald-600" />
+                      <span>New</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handlePreviewInvoice}
+                      className="px-1.5 py-0 rounded bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Preview A4 Invoice (F4)"
+                    >
+                      <Printer className="w-3 h-3 text-blue-700" />
+                      <span>Preview</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingInvoice}
+                      onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
+                      className="px-1.5 py-0 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold flex items-center gap-0.5 cursor-pointer disabled:opacity-50"
+                      title="Hold Invoice (F3)"
+                    >
+                      <PauseCircle className="w-3 h-3 text-amber-700" />
+                      <span>Hold</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowHeldModal(true)}
+                      className="px-1.5 py-0 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Held Drafts"
+                    >
+                      <Clock className="w-3 h-3 text-indigo-700" />
+                      <span>Held ({heldPurchases.length})</span>
+                    </button>
+                    {purchases.length > 0 && (
                       <button
                         type="button"
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          setPurchaseSearchQuery('');
-                          setItemHighlightIndex(0);
-                          itemSearchInputRef.current?.focus();
-                        }}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                        onClick={() => handleOpenPrintInvoice(purchases[0].id)}
+                        className="px-1.5 py-0 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold flex items-center gap-0.5 cursor-pointer"
+                        title="Reprint Last Purchase Invoice"
                       >
-                        <X className="w-3.5 h-3.5" />
+                        <Printer className="w-3 h-3 text-blue-700" />
+                        <span>Reprint</span>
                       </button>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => openPurchaseItemListForRow(null, 'top')}
-                    className="px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 shadow-sm h-6"
-                    title="Open Full Item List to select or replace an item"
-                  >
-                    <PackageSearch className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Item List</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={addLineRow}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 shadow-sm h-6"
-                    title="Add New Empty Row to Purchase Bill"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>+ Blank Line</span>
-                  </button>
                 </div>
 
-                {renderTopItemSearchDropdown()}
-              </div>
-
-              {/* Active Item Goods Receipt Entry Strip (Identical to Sales Active Item Strip!) */}
-              {activePurchaseRow && activePurchaseRow.item_id > 0 ? (
-                <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border border-emerald-500/80 rounded-lg px-2.5 py-1 shadow-sm space-y-1 shrink-0">
-                  <div className="flex flex-wrap items-center justify-between gap-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className="px-1.5 py-0 rounded-lg bg-emerald-700 text-white font-mono text-[10px] font-bold">
-                        Active Line #{selectedPurchaseLineIndex + 1}
-                      </span>
-                      <span className="font-bold text-slate-900 text-xs">
-                        [{activePurchaseRow.item_code}] {activePurchaseRow.item_name}
-                      </span>
-                      <span className="text-[11px] text-slate-600 font-medium">
-                        ({activePurchaseRow.packing}) • {activePurchaseRow.company_name}
-                      </span>
+                {/* Header Row 2: Supplier Search, Live Previous Balance & Compact F3 Item Search */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-1.5 pt-1 border-t border-slate-200 items-center">
+                  {/* Searchable Supplier Input + Add New Supplier */}
+                  <div
+                    ref={purchaseViewMode === 'pos' ? supplierDropdownContainerRef : undefined}
+                    className="md:col-span-5 flex items-center gap-1 relative"
+                  >
+                    <label className="font-bold text-slate-600 shrink-0">Supplier:</label>
+                    <div className="relative flex-1">
+                      <Search className="w-3 h-3 text-slate-400 absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        ref={purchaseViewMode === 'pos' ? supplierSearchInputRef : undefined}
+                        type="text"
+                        value={supplierSearchQuery}
+                        onFocus={() => {
+                          setIsSupplierDropdownOpen(false);
+                        }}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setSupplierSearchQuery(value);
+                          setIsSupplierDropdownOpen(value.trim().length > 0);
+                          setSupplierHighlightIndex(0);
+                        }}
+                        onKeyDown={handleSupplierSearchKeyDown}
+                        placeholder="Search Supplier Name, Code or Mobile #..."
+                        className="w-full pl-6 pr-10 py-0 font-bold rounded border border-emerald-500 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                      />
+                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+                        {supplierSearchQuery && (
+                          <button
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setSupplierSearchQuery('');
+                              setIsSupplierDropdownOpen(true);
+                              setSupplierHighlightIndex(0);
+                              supplierSearchInputRef.current?.focus();
+                            }}
+                            className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                            title="Clear search text"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setIsSupplierDropdownOpen((prev) => !prev);
+                            setSupplierHighlightIndex(0);
+                            supplierSearchInputRef.current?.focus();
+                          }}
+                          className="p-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                          title="Open Supplier List"
+                        >
+                          <ChevronDown className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
-                    <span className="text-[10px] font-mono text-emerald-800 font-semibold">
-                      Line Net: <strong>{formatPKR(activePurchaseRow.line_total)}</strong>
-                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenAddSupplierModal()}
+                      className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-0.5 cursor-pointer shrink-0"
+                      title="Add New Supplier"
+                    >
+                      <UserPlus className="w-3 h-3" />
+                      <span>+New</span>
+                    </button>
+
+                    {renderSupplierDropdownMenu()}
                   </div>
 
-                  {/* Fast Stepper Controls for Active Row: Qty -> Discount -> Bonus -> Batch/Expiry -> Purchase Rate -> MRP -> GST -> Next Item */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-9 gap-1.5 items-end">
-                    {/* 1. Qty */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        1. Qty
-                      </label>
-                      <div className="flex items-center border border-slate-300 rounded-lg bg-white overflow-hidden h-5">
-                        <button
-                          type="button"
-                          onClick={() => handleDecrementPurchaseQty(selectedPurchaseLineIndex)}
-                          className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-r border-slate-300 h-full"
-                        >
-                          -
-                        </button>
-                        <NumericInput
-                          id="pos_active_quantity"
-                          value={activePurchaseRow.quantity}
-                          onChange={(e) =>
-                            handleLineChange(selectedPurchaseLineIndex, 'quantity', e.target.value)
-                          }
-                          onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_quantity')}
-                          className="w-full text-center font-mono font-bold text-[11px] text-slate-900 outline-none py-0 h-full"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleIncrementPurchaseQty(selectedPurchaseLineIndex)}
-                          className="px-1.5 py-0 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer border-l border-slate-300 h-full"
-                        >
-                          +
-                        </button>
-                      </div>
+                  {/* Live Supplier Previous Balance Pill */}
+                  <div className="md:col-span-3 bg-slate-900 text-white rounded px-2 py-0.5 flex items-center justify-between gap-1">
+                    <div className="flex items-center gap-1 truncate">
+                      <span className="text-slate-400 shrink-0">Prev:</span>
+                      <span
+                        className={`font-mono font-bold truncate ${
+                          previousSupplierBalance > 0
+                            ? 'text-amber-300'
+                            : previousSupplierBalance < 0
+                            ? 'text-emerald-300'
+                            : 'text-slate-300'
+                        }`}
+                      >
+                        {formatPKR(Math.abs(previousSupplierBalance))} ({previousBalanceType})
+                      </span>
                     </div>
-
-                    {/* 2. Discount */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        2. Discount %
-                      </label>
-                      <NumericInput
-                        id="pos_active_discount_percent"
-                        value={activePurchaseRow.discount_percent}
-                        onChange={(e) =>
-                          handleLineChange(
-                            selectedPurchaseLineIndex,
-                            'discount_percent',
-                            e.target.value
-                          )
-                        }
-                        onKeyDown={(e) =>
-                          handlePosActiveFieldKeyDown(e, 'pos_active_discount_percent')
-                        }
-                        className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 3. Bonus */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-teal-800 leading-none mb-0.5">
-                        3. Bonus
-                      </label>
-                      <div className="flex items-center border border-teal-300 rounded-lg bg-white overflow-hidden h-5">
-                        <button
-                          type="button"
-                          onClick={() => handleDecrementBonusQty(selectedPurchaseLineIndex)}
-                          className="px-1.5 py-0 bg-teal-50 hover:bg-teal-100 text-teal-800 font-bold text-xs cursor-pointer border-r border-teal-300 h-full"
-                        >
-                          -
-                        </button>
-                        <NumericInput
-                          id="pos_active_bonus_quantity"
-                          value={activePurchaseRow.bonus_quantity}
-                          onChange={(e) =>
-                            handleLineChange(
-                              selectedPurchaseLineIndex,
-                              'bonus_quantity',
-                              e.target.value
-                            )
-                          }
-                          onKeyDown={(e) =>
-                            handlePosActiveFieldKeyDown(e, 'pos_active_bonus_quantity')
-                          }
-                          className="w-full text-center font-mono font-bold text-[11px] text-teal-950 outline-none py-0 h-full"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleIncrementBonusQty(selectedPurchaseLineIndex)}
-                          className="px-1.5 py-0 bg-teal-50 hover:bg-teal-100 text-teal-800 font-bold text-xs cursor-pointer border-l border-teal-300 h-full"
-                        >
-                          +
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* 4. Batch # */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        4. Batch #
-                      </label>
-                      <input
-                        id="pos_active_batch_number"
-                        type="text"
-                        value={activePurchaseRow.batch_number}
-                        onChange={(e) =>
-                          handleLineChange(
-                            selectedPurchaseLineIndex,
-                            'batch_number',
-                            e.target.value
-                          )
-                        }
-                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_batch_number')}
-                        className="w-full px-1.5 py-0 font-mono font-bold text-[11px] rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 5. Expiry Date */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        5. Expiry
-                      </label>
-                      <input
-                        id="pos_active_expiry_date"
-                        type="date"
-                        value={activePurchaseRow.expiry_date}
-                        onChange={(e) =>
-                          handleLineChange(selectedPurchaseLineIndex, 'expiry_date', e.target.value)
-                        }
-                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_expiry_date')}
-                        className="w-full px-1 py-0 font-mono text-[10px] rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 6. Purchase Rate */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        6. Purchase Rate
-                      </label>
-                      <NumericInput
-                        id="pos_active_purchase_rate"
-                        value={activePurchaseRow.purchase_rate}
-                        onChange={(e) =>
-                          handleLineChange(
-                            selectedPurchaseLineIndex,
-                            'purchase_rate',
-                            e.target.value
-                          )
-                        }
-                        onBlur={() => {
-                          checkAndTriggerPurchasePriceChange(selectedPurchaseLineIndex);
-                        }}
-                        onKeyDown={(e) =>
-                          handlePosActiveFieldKeyDown(e, 'pos_active_purchase_rate')
-                        }
-                        className="w-full px-1.5 py-0 font-mono font-bold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 7. MRP */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        7. MRP
-                      </label>
-                      <NumericInput
-                        id="pos_active_mrp_rate"
-                        value={activePurchaseRow.mrp_rate}
-                        onChange={(e) =>
-                          handleLineChange(
-                            selectedPurchaseLineIndex,
-                            'mrp_rate',
-                            e.target.value
-                          )
-                        }
-                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_mrp_rate')}
-                        className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* 8. GST % */}
-                    <div>
-                      <label className="block text-[9px] font-bold uppercase text-slate-700 leading-none mb-0.5">
-                        8. GST %
-                      </label>
-                      <NumericInput
-                        id="pos_active_tax_percent"
-                        value={activePurchaseRow.tax_percent}
-                        onChange={(e) =>
-                          handleLineChange(selectedPurchaseLineIndex, 'tax_percent', e.target.value)
-                        }
-                        onKeyDown={(e) => handlePosActiveFieldKeyDown(e, 'pos_active_tax_percent')}
-                        className="w-full px-1.5 py-0 font-mono font-semibold text-[11px] text-right rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none h-5"
-                      />
-                    </div>
-
-                    {/* Next Item Button */}
-                    <div>
+                    {selectedSupplier && (
                       <button
                         type="button"
-                        onClick={() => {
-                          setPurchaseSearchQuery('');
-                          setShowPurchaseSearchDropdown(false);
-                          itemSearchInputRef.current?.focus();
-                        }}
-                        className="w-full rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer shadow-sm h-5"
-                        title="Return focus to Item Search to add next item"
+                        onClick={handleOpenSupplierLedger}
+                        className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-0.5 cursor-pointer shrink-0"
+                        title="Open Detailed Supplier Ledger"
                       >
-                        <Plus className="w-3 h-3" />
-                        <span>Next Item ↵</span>
+                        <Scale className="w-2.5 h-2.5" />
+                        <span>Ledger</span>
                       </button>
+                    )}
+                  </div>
+
+                  {/* Compact F3 Quick Barcode / Item Add inside Header */}
+                  <div
+                    ref={purchaseViewMode === 'pos' ? itemDropdownContainerRef : undefined}
+                    className="md:col-span-4 relative flex items-center gap-1"
+                  >
+                    <div className="relative flex-1">
+                      <Barcode className="w-3.5 h-3.5 text-emerald-600 absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        id="pos_purchase_item_search_input"
+                        ref={purchaseViewMode === 'pos' ? itemSearchInputRef : undefined}
+                        type="text"
+                        value={purchaseSearchQuery}
+                        onFocus={() => {
+                          if (purchaseSearchQuery.trim().length > 0) {
+                            setShowPurchaseSearchDropdown(true);
+                          }
+                          setItemHighlightIndex(0);
+                        }}
+                        onBlur={() => {
+                          setTimeout(() => {
+                            setShowPurchaseSearchDropdown(false);
+                          }, 160);
+                        }}
+                        onChange={(e) => {
+                          const q = e.target.value;
+                          setPurchaseSearchQuery(q);
+                          setItemHighlightIndex(0);
+                          setShowPurchaseSearchDropdown(q.trim().length > 0);
+                        }}
+                        onKeyDown={handleItemSearchKeyDown}
+                        placeholder="Barcode / Quick Search..."
+                        className="w-full pl-6 pr-6 py-0 rounded border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 outline-none"
+                      />
+                      {purchaseSearchQuery && (
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setPurchaseSearchQuery('');
+                            setItemHighlightIndex(0);
+                            setShowPurchaseSearchDropdown(false);
+                            itemSearchInputRef.current?.focus();
+                          }}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                      {renderTopItemSearchDropdown()}
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => openPurchaseItemListForRow(selectedPurchaseLineIndex, 'pos_row')}
+                      className="px-2 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                      title="Open Item List (F2)"
+                    >
+                      <PackageSearch className="w-3 h-3 text-emerald-400" />
+                      <span>Items</span>
+                    </button>
                   </div>
                 </div>
-              ) : (
-                <div className="bg-slate-50 border border-dashed border-slate-300 rounded-lg px-2.5 py-0.5 text-center text-[11px] text-slate-500 shrink-0">
-                  Click or type in the Item Search bar above (or directly in any row below) to add medicines to this Purchase Invoice.
-                </div>
-              )}
+              </div>
 
-              {/* Responsive Purchase Items Grid (Minimum 10 Visible Rows, Internal Scroll, Fixed Headers) */}
-              <div className="ams-pos-item-grid-card bg-white rounded-lg border border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-[375px]">
-                <div className="ams-pos-compact-chrome px-2.5 py-0.5 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-[11px] shrink-0">
-                  <span className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">
-                    Purchase Invoice Items ({validLines.length} Active / {lines.length} Rows • Fits {visibleRowCapacity})
-                  </span>
-                  <span className="font-mono text-slate-600 text-[10px]">
-                    Total Packs: {validLines.reduce((s, l) => s + (Number(l.quantity) || 0), 0)} •
-                    Bonus: {validLines.reduce((s, l) => s + (Number(l.bonus_quantity) || 0), 0)}
-                  </span>
-                </div>
-
+              {/* SECTION B (CENTER): PURCHASE INVOICE ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS) */}
+              <div className="ams-pos-item-grid-card bg-white rounded-md border border-slate-300 shadow-xs overflow-hidden flex flex-col flex-1 min-h-[356px] relative z-10">
                 <div
                   ref={posGridViewportRef}
-                  onMouseDown={(e) => {
-                    const target = e.target as HTMLElement;
-                    if (target.closest('input, select, button')) {
-                      posDatasheetMouseActivatedRef.current = true;
-                    }
-                  }}
-                  className="ams-pos-item-grid-scroll flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative"
+                  className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white"
                 >
                   <table className="ams-compact-10-grid w-full min-w-[1680px] text-left text-[11px] border-collapse leading-none">
-                    <thead className="sticky top-0 z-10 bg-slate-100 border-b border-slate-200 text-slate-600 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
-                      <tr className="h-6">
-                        <th className="py-0 px-2 w-8 text-center h-6">#</th>
-                        <th className="py-0 px-2 w-28 h-6">Item Code</th>
-                        <th className="py-0 px-2 min-w-[240px] h-6">Item Name</th>
-                        <th className="py-0 px-2 w-20 text-right h-6">Qty</th>
-                        <th className="py-0 px-2 w-20 text-right h-6">Discount</th>
-                        <th className="py-0 px-2 w-20 text-right h-6">Bonus</th>
-                        <th className="py-0 px-2 w-24 text-right h-6">Gross Amount</th>
-                        <th className="py-0 px-2 w-24 text-right h-6">Net Amount</th>
-                        <th className="py-0 px-2 w-20 text-center h-6">Packing</th>
-                        <th className="py-0 px-2 w-56 h-6">Batch/Expiry</th>
-                        <th className="py-0 px-2 w-28 text-right h-6">Purchase Rate</th>
-                        <th className="py-0 px-2 w-24 text-right h-6">MRP</th>
-                        <th className="py-0 px-2 w-20 text-right h-6">GST</th>
-                        <th className="py-0 px-2 w-24 text-right h-6">Taxable</th>
-                        <th className="py-0 px-2 w-28 text-right h-6">Line Total</th>
-                        <th className="py-0 px-2 w-10 text-center h-6"></th>
+                    <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
+                      <tr className="h-7">
+                        <th className="py-1 px-2 w-8 text-center border-r border-slate-300 h-7">#</th>
+                        <th className="py-1 px-2 w-28 border-r border-slate-300 h-7">Item Code</th>
+                        <th className="py-1 px-2 min-w-[240px] border-r border-slate-300 h-7">Item Name</th>
+                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">Qty</th>
+                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">Discount</th>
+                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">Bonus</th>
+                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Gross Amount</th>
+                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Net Amount</th>
+                        <th className="py-1 px-2 w-20 text-center border-r border-slate-300 h-7">Packing</th>
+                        <th className="py-1 px-2 w-56 border-r border-slate-300 h-7">Batch/Expiry</th>
+                        <th className="py-1 px-2 w-28 text-right border-r border-slate-300 h-7">Purchase Rate</th>
+                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">MRP</th>
+                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">GST</th>
+                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Taxable</th>
+                        <th className="py-1 px-2 w-28 text-right border-r border-slate-300 h-7">Line Total</th>
+                        <th className="py-1 px-2 w-10 text-center h-7"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
@@ -3888,36 +3490,28 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 id={`pos_row_${rIdx}_item_code`}
                                 type="text"
                                 value={
-                                  activeRowItemSearchIdx === rIdx
+                                  activeRowItemSearchIdx === rIdx &&
+                                  activeRowItemSearchField === 'item_code'
                                     ? rowItemSearchQuery
                                     : line.item_code
                                 }
-                                onMouseDown={() => {
-                                  suppressItemListReopenRef.current = false;
-                                  posDatasheetMouseActivatedRef.current = true;
-                                }}
-                                onClick={() => {
-                                  setSelectedPurchaseLineIndex(rIdx);
-                                  openPurchaseItemListForRow(
-                                    rIdx,
-                                    'pos_row',
-                                    `pos_row_${rIdx}_item_code`
-                                  );
-                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(rIdx);
-                                  posDatasheetMouseActivatedRef.current = true;
-                                  openPurchaseItemListForRow(
-                                    rIdx,
-                                    'pos_row',
-                                    `pos_row_${rIdx}_item_code`
-                                  );
+                                  if (
+                                    activeRowItemSearchIdx !== rIdx ||
+                                    activeRowItemSearchField !== 'item_code'
+                                  ) {
+                                    setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
+                                    setRowItemSearchQuery('');
+                                  }
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
                                     setActiveRowItemSearchIdx((prev) =>
                                       prev === rIdx ? null : prev
                                     );
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                   }, 180);
                                 }}
@@ -3926,17 +3520,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   setSelectedPurchaseLineIndex(rIdx);
                                   setRowItemSearchQuery(v);
                                   setRowItemHighlightIndex(0);
+                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_code' : null);
                                   setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
                                     e.preventDefault();
                                     setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                     return;
                                   }
                                   if (
                                     activeRowItemSearchIdx === rIdx &&
+                                    activeRowItemSearchField === 'item_code' &&
                                     rowItemSearchResults.length > 0
                                   ) {
                                     if (e.key === 'ArrowDown') {
@@ -3982,7 +3579,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   handlePurchaseCellKeyDown(e, rIdx, 'item_code', 'pos_row');
                                 }}
                                 placeholder="Code..."
-                                className="w-full px-1 py-0 font-mono font-bold text-[11px] text-emerald-800 bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none cursor-pointer"
+                                className="w-full px-1 py-0 font-mono font-bold text-[11px] text-emerald-800 bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
                               />
                             </td>
                             <td className="p-0 h-[16px] align-middle relative min-w-[200px]">
@@ -3990,38 +3587,30 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 id={`pos_row_${rIdx}_item_name`}
                                 type="text"
                                 value={
-                                  activeRowItemSearchIdx === rIdx
+                                  activeRowItemSearchIdx === rIdx &&
+                                  activeRowItemSearchField === 'item_name'
                                     ? rowItemSearchQuery
                                     : line.item_name
                                     ? `${line.item_name}${line.company_name ? ` (${line.company_name})` : ''}`
                                     : ''
                                 }
-                                onMouseDown={() => {
-                                  suppressItemListReopenRef.current = false;
-                                  posDatasheetMouseActivatedRef.current = true;
-                                }}
-                                onClick={() => {
-                                  setSelectedPurchaseLineIndex(rIdx);
-                                  openPurchaseItemListForRow(
-                                    rIdx,
-                                    'pos_row',
-                                    `pos_row_${rIdx}_item_name`
-                                  );
-                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(rIdx);
-                                  posDatasheetMouseActivatedRef.current = true;
-                                  openPurchaseItemListForRow(
-                                    rIdx,
-                                    'pos_row',
-                                    `pos_row_${rIdx}_item_name`
-                                  );
+                                  if (
+                                    activeRowItemSearchIdx !== rIdx ||
+                                    activeRowItemSearchField !== 'item_name'
+                                  ) {
+                                    setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
+                                    setRowItemSearchQuery('');
+                                  }
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
                                     setActiveRowItemSearchIdx((prev) =>
                                       prev === rIdx ? null : prev
                                     );
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                   }, 180);
                                 }}
@@ -4030,17 +3619,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   setSelectedPurchaseLineIndex(rIdx);
                                   setRowItemSearchQuery(v);
                                   setRowItemHighlightIndex(0);
+                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
                                   setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
                                     e.preventDefault();
                                     setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                     return;
                                   }
                                   if (
                                     activeRowItemSearchIdx === rIdx &&
+                                    activeRowItemSearchField === 'item_name' &&
                                     rowItemSearchResults.length > 0
                                   ) {
                                     if (e.key === 'ArrowDown') {
@@ -4085,8 +3677,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   }
                                   handlePurchaseCellKeyDown(e, rIdx, 'item_name', 'pos_row');
                                 }}
-                                placeholder="Click or Focus for Item List..."
-                                className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none cursor-pointer"
+                                placeholder="Type Item Name / Code (or F2)..."
+                                className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
                               />
                               {renderRowItemSearchCombobox(rIdx, true)}
                             </td>
@@ -4400,21 +3992,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               </div>
 
-              {/* Full-Width POS Bottom Totals & Payment Action Bar (No Side-by-Side Split) */}
-              <div className="w-full bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 text-white rounded-xl border border-slate-700 px-3.5 py-2 shadow-lg shrink-0 space-y-2">
-                {/* Row 1: Full-Width Financial Totals & Payment Settlement */}
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-2">
-                  <div className="flex flex-wrap items-center gap-4 text-xs">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-400 font-semibold">Gross:</span>
+              {/* SECTION C (BOTTOM): COMPACT PURCHASE POS FOOTER */}
+              <div className="ams-pos-compact-chrome w-full bg-slate-900 text-white rounded-md border border-slate-700 px-2.5 py-1.5 shrink-0 space-y-1">
+                {/* Row 1: Essential Totals & Payment Settlement */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-1 tabular-nums">
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    <div className="flex items-center gap-1">
+                      <span className="text-slate-400">Grand Total:</span>
                       <span className="font-mono font-bold text-white">{formatPKR(grossTotal)}</span>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-rose-400 font-semibold">Discounts:</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-rose-400">Discount:</span>
                       <span className="font-mono font-bold text-rose-300">-{formatPKR(totalDiscount)}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-400 font-semibold">Bill Disc %:</span>
                       <NumericInput
                         value={invoiceDiscountPercent}
                         onChange={(e) => {
@@ -4422,83 +4011,85 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           setInvoiceDiscountPercent(pct);
                           setInvoiceDiscountAmount(round2(subtotalAfterItemDisc * (pct / 100)));
                         }}
-                        className="w-16 px-1.5 py-0.5 rounded-lg bg-slate-800 border border-slate-600 font-mono text-xs text-white text-right"
+                        placeholder="%"
+                        title="Bill Discount %"
+                        className="w-12 px-1 py-0 rounded bg-slate-800 border border-slate-600 font-mono text-white text-right"
                       />
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-400 font-semibold">Prev Ledger ({previousBalanceType}):</span>
-                      <span className="font-mono font-bold text-amber-300">{formatPKR(previousSupplierBalance)}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-400 font-semibold">GST + Adv Tax ({appliedAdvanceTaxRate}%):</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-slate-400">Tax ({appliedAdvanceTaxRate}%):</span>
                       <span className="font-mono font-bold text-amber-300">
                         +{formatPKR(gstTotal + advanceTaxAmount)}
                       </span>
                     </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-slate-400">Prev Bal ({previousBalanceType}):</span>
+                      <span className="font-mono font-bold text-amber-300">{formatPKR(previousSupplierBalance)}</span>
+                    </div>
                   </div>
 
-                  {/* Highlighted Net Purchase, Paid & Balance */}
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="px-3 py-1 rounded-lg bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-2">
-                      <span className="text-xs font-black uppercase text-emerald-300">Net Total:</span>
-                      <span className="font-mono text-lg font-black text-emerald-300 ams-total-highlight">
+                  {/* Highlighted Net Amount, Payable, Cash Paid & Remaining Balance */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1.5">
+                      <span className="font-bold uppercase text-emerald-300">Net Amount:</span>
+                      <span className="font-mono font-black text-emerald-300 ams-total-highlight">
                         {formatPKR(netInvoiceAmount)}
                       </span>
                     </div>
-                    <div className="px-3 py-1 rounded-lg bg-sky-500/15 border border-sky-400/40 flex items-center gap-2">
-                      <span className="text-xs font-black uppercase text-sky-300">Payable:</span>
-                      <span className="font-mono text-lg font-black text-sky-300 ams-total-highlight">
+                    <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1.5">
+                      <span className="font-bold uppercase text-sky-300">Payable:</span>
+                      <span className="font-mono font-black text-sky-300 ams-total-highlight">
                         {formatPKR(totalPayable)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-lg border border-emerald-500">
-                      <span className="text-xs font-bold text-emerald-300 whitespace-nowrap">Paid:</span>
+                    <div className="flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded border border-emerald-500">
+                      <span className="font-bold text-emerald-300 whitespace-nowrap">Cash Paid:</span>
                       <NumericInput
                         value={paidAmount}
                         onChange={(e) => {
                           setPaidAmountManuallyEdited(true);
                           setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
                         }}
-                        className="w-28 px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono font-black text-white text-right outline-none"
+                        className="w-24 px-1.5 py-0 rounded bg-slate-900 border border-slate-700 font-mono font-black text-white text-right outline-none"
                       />
                       <button
                         type="button"
                         onClick={handleExactPurchasePayment}
-                        className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold cursor-pointer"
+                        className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
                       >
                         Exact
                       </button>
                     </div>
                     <div
-                      className={`px-3 py-1 rounded-lg border flex items-center gap-2 ${
+                      className={`px-2 py-0.5 rounded border flex items-center gap-1.5 ${
                         remainingBalance <= 0
                           ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300'
                           : 'bg-amber-950/80 border-amber-500/60 text-amber-300'
                       }`}
                     >
-                      <span className="text-xs font-bold uppercase">Balance:</span>
-                      <span className="font-mono text-lg font-black ams-total-highlight">
+                      <span className="font-bold uppercase">Remaining:</span>
+                      <span className="font-mono font-black ams-total-highlight">
                         {formatPKR(Math.abs(remainingBalance))}
                       </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Row 2: Full-Width Primary Action Buttons */}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-1.5">
+                {/* Row 2: Compact Professional Action Buttons */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1">
                     <button
                       type="submit"
                       disabled={savingInvoice}
-                      className="py-1.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-sm shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      className="px-3 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
                       title="Confirm & Save Purchase Invoice (F2)"
                     >
-                      <Save className="w-4 h-4" />
+                      <Save className="w-3.5 h-3.5" />
                       <span>
                         {savingInvoice
                           ? 'Posting...'
                           : editingPurchaseId
-                          ? 'Update Purchase (F2)'
+                          ? 'Update (F2)'
                           : 'Save Purchase (F2)'}
                       </span>
                     </button>
@@ -4507,184 +4098,136 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       type="button"
                       disabled={savingInvoice}
                       onClick={() => handleSavePurchaseInvoice(undefined, true)}
-                      className="py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-slate-600"
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white font-bold flex items-center gap-1 cursor-pointer border border-slate-600"
                       title="Save & Print A4 Purchase Invoice (Ctrl+P)"
                     >
-                      <Printer className="w-4 h-4 text-emerald-400" />
-                      <span>Save &amp; Print A4</span>
+                      <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>A4 Print</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={exportingExcel}
                       onClick={handleExportCurrentPurchaseToExcel}
-                      className="py-1.5 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-emerald-500/60"
+                      className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                       title="Export Purchase Invoice to Excel (.xlsx)"
                     >
-                      <Download className="w-4 h-4 text-emerald-200" />
-                      <span>Export to Excel</span>
+                      <Download className="w-3 h-3 text-emerald-200" />
+                      <span>Excel</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={handlePreviewInvoice}
-                      className="py-1.5 px-2.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-sky-500/50"
-                      title="Preview A4 Invoice before saving (F4)"
+                      className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Preview A4 Invoice (F4)"
                     >
-                      <Printer className="w-3.5 h-3.5 text-sky-200" />
+                      <Printer className="w-3 h-3 text-sky-200" />
                       <span>Preview (F4)</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={handleOpenPurchaseOrderSms}
-                      className="py-1.5 px-3 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer border border-indigo-500/60"
+                      className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                       title="Send Order SMS for Current Purchase Invoice"
                     >
-                      <MessageSquare className="w-3.5 h-3.5 text-indigo-200" />
-                      <span>Send Order SMS</span>
+                      <MessageSquare className="w-3 h-3 text-indigo-200" />
+                      <span>Order SMS</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={savingInvoice}
                       onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
-                      className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs flex items-center gap-1 cursor-pointer border border-slate-600 disabled:opacity-50"
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold flex items-center gap-1 cursor-pointer border border-slate-600 disabled:opacity-50"
                       title="Hold this Purchase Invoice (F3)"
                     >
-                      <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
+                      <PauseCircle className="w-3 h-3 text-amber-400" />
                       <span>Hold (F3)</span>
                     </button>
+                  </div>
 
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={resetInvoiceForm}
-                      className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs flex items-center gap-1 cursor-pointer border border-slate-600"
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold flex items-center gap-1 cursor-pointer border border-slate-600"
                       title="Reset Form (Ctrl+N)"
                     >
                       <span>Reset</span>
                     </button>
+                    {onBackToDashboard && (
+                      <button
+                        type="button"
+                        onClick={onBackToDashboard}
+                        className="px-2 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <ArrowLeft className="w-3 h-3" />
+                        <span>Close</span>
+                      </button>
+                    )}
                   </div>
-
-                  {onBackToDashboard && (
-                    <button
-                      type="button"
-                      onClick={onBackToDashboard}
-                      className="py-1.5 px-3 rounded-lg bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <ArrowLeft className="w-3.5 h-3.5" />
-                      <span>Back / Close</span>
-                    </button>
-                  )}
                 </div>
               </div>
             </form>
           )}
 
-          {/* ================= OPTION 2: MICROSOFT ACCESS-STYLE INTERFACE (LIKE SALES MS ACCESS VIEW) ================= */}
+          {/* ================= OPTION 2: MICROSOFT ACCESS-STYLE INTERFACE (THREE-SECTION COMPACT FORM) ================= */}
           {purchaseViewMode === 'access' && (
             <form
               onSubmit={(e) => handleSavePurchaseInvoice(e, false)}
-              className="flex-1 min-h-0 flex flex-col bg-slate-200 border-2 border-slate-400 rounded-sm shadow-xs select-none"
+              className="ams-pos-compact-chrome flex-1 min-h-0 flex flex-col overflow-hidden bg-slate-200 border border-slate-400 rounded-md shadow-xs select-none"
             >
-              {/* Combined Access Window Title Bar & Ribbon Toolbar */}
-              <div className="bg-gradient-to-r from-slate-800 via-slate-850 to-slate-900 text-white px-2.5 py-0.5 flex flex-wrap items-center justify-between gap-1 border-b border-slate-700 text-[11px] shrink-0 select-none">
-                <div className="flex items-center gap-2 font-mono">
+              {/* SECTION A (TOP): COMPACT MS ACCESS FORM HEADER */}
+              <div className="bg-slate-800 text-white px-2 py-0.5 flex flex-wrap items-center justify-between gap-1 border-b border-slate-700 shrink-0">
+                <div className="flex items-center gap-1.5 font-mono">
                   <FileSpreadsheet className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                  <span className="font-bold text-slate-200 tracking-tight">
-                    frm_PurchaseInvoice : Form
-                  </span>
-                  <span className="text-[10px] bg-emerald-700 px-1.5 py-0.2 rounded-lg text-white font-bold uppercase">
+                  <span className="font-bold text-slate-200">frm_PurchaseInvoice</span>
+                  <span className="bg-emerald-700 px-1.5 py-0 rounded text-white font-bold uppercase">
                     Goods Receipt
                   </span>
                   <span className="font-bold text-amber-300">{billNumber}</span>
                   {editingPurchaseId && (
-                    <span className="bg-amber-600 text-white text-[9px] px-1.5 py-0.2 rounded-lg font-bold">
+                    <span className="bg-amber-600 text-white px-1.5 py-0 rounded font-bold">
                       EDIT #{editingPurchaseId}
                     </span>
                   )}
-                  <span className="text-[10px] text-slate-400 hidden xl:inline ml-1">
-                    (F2: Save · F3: Hold · Ctrl+P: Save &amp; Print · Tab/Enter: Next Cell · Arrows: Navigate)
-                  </span>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
                     onClick={resetInvoiceForm}
-                    className="px-2 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer"
+                    className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                     title="New Purchase Bill (Ctrl+N)"
                   >
                     <Plus className="w-3 h-3 text-emerald-400" />
                     <span>New</span>
                   </button>
                   <button
-                    type="submit"
-                    disabled={savingInvoice}
-                    className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                    title="Save & Post Purchase Invoice (F2)"
-                  >
-                    <Save className="w-3 h-3" />
-                    <span>
-                      {savingInvoice
-                        ? 'Posting...'
-                        : editingPurchaseId
-                        ? 'Update (F2)'
-                        : 'Save (F2)'}
-                    </span>
-                  </button>
-                  <button
                     type="button"
                     onClick={handlePreviewInvoice}
-                    className="px-2 py-0.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer"
-                    title="Preview A4 Invoice before saving (F4)"
+                    className="px-1.5 py-0 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                    title="Preview A4 Invoice (F4)"
                   >
                     <Printer className="w-3 h-3 text-sky-200" />
-                    <span>Preview (F4)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleOpenPurchaseOrderSms}
-                    className="px-2 py-0.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer"
-                    title="Send Order SMS for Current Purchase Invoice"
-                  >
-                    <MessageSquare className="w-3 h-3 text-indigo-200" />
-                    <span>Send Order SMS</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={savingInvoice}
-                    onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
-                    className="px-2 py-0.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                    title="Hold Purchase Invoice (F3)"
-                  >
-                    <PauseCircle className="w-3 h-3 text-amber-200" />
-                    <span>Hold (F3)</span>
+                    <span>Preview</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowHeldModal(true)}
-                    className="px-2 py-0.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer"
-                    title="View Pending Held & Draft Purchase Invoices"
+                    className="px-1.5 py-0 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                    title="View Held Purchase Drafts"
                   >
                     <Clock className="w-3 h-3 text-indigo-300" />
                     <span>Held ({heldPurchases.length})</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={savingInvoice}
-                    onClick={() => handleSavePurchaseInvoice(undefined, true)}
-                    className="px-2 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer"
-                    title="Save & Print A4 Invoice (Ctrl+P)"
-                  >
-                    <Printer className="w-3 h-3 text-emerald-400" />
-                    <span>A4 Print</span>
                   </button>
                   {selectedSupplier && (
                     <button
                       type="button"
                       onClick={handleOpenSupplierLedger}
-                      className="px-2 py-0.5 rounded-lg bg-teal-700 hover:bg-teal-600 text-white font-bold text-[10px] flex items-center gap-1 cursor-pointer"
+                      className="px-1.5 py-0 rounded bg-teal-700 hover:bg-teal-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                       title="Open Detailed Supplier Ledger"
                     >
                       <Scale className="w-3 h-3 text-teal-200" />
@@ -4694,7 +4237,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setSubTab('advance-tax')}
-                    className="px-2 py-0.5 rounded-lg bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 text-[10px] flex items-center gap-1 cursor-pointer"
+                    className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 font-bold flex items-center gap-0.5 cursor-pointer"
                   >
                     <ShieldCheck className="w-3 h-3 text-amber-400" />
                     <span>Adv Tax ({appliedAdvanceTaxRate}%)</span>
@@ -4702,31 +4245,27 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               </div>
 
-              {/* Dense MS Access Form Header Controls (Identical in height & layout to Sales!) */}
-              <div className="bg-slate-100 border-b border-slate-300 px-2 py-0.5 shrink-0 select-none">
-                <div className="grid grid-cols-12 gap-1 items-center text-[11px]">
+              {/* Dense MS Access Form Header Controls (Supplier, Date, F3 Search & Row Actions) */}
+              <div className="bg-slate-100 border-b border-slate-300 px-2 py-1 shrink-0 space-y-1">
+                <div className="grid grid-cols-12 gap-1.5 items-center">
                   <div className="col-span-2 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-9 shrink-0">
-                      Bill #:
-                    </label>
+                    <label className="font-bold text-slate-600 whitespace-nowrap">Bill #:</label>
                     <input
                       type="text"
                       readOnly
                       value={billNumber}
                       title="Auto-generated Purchase Invoice Number"
-                      className="w-full px-1 py-0 text-[11px] font-mono font-bold rounded-lg border border-slate-300 bg-slate-100 cursor-not-allowed text-slate-900 h-5"
+                      className="w-full px-1 py-0 font-mono font-bold rounded border border-slate-300 bg-slate-200 cursor-not-allowed text-slate-900"
                     />
                   </div>
                   <div className="col-span-2 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-8 shrink-0">
-                      Date:
-                    </label>
+                    <label className="font-bold text-slate-600 whitespace-nowrap">Date:</label>
                     <input
                       type="date"
                       required
                       value={billDate}
                       onChange={(e) => setBillDate(e.target.value)}
-                      className="w-full px-1 py-0 text-[11px] font-mono rounded-lg border border-slate-300 bg-white text-slate-900 h-5"
+                      className="w-full px-1 py-0 font-mono rounded border border-slate-300 bg-white text-slate-900"
                     />
                   </div>
 
@@ -4735,9 +4274,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     ref={purchaseViewMode === 'access' ? supplierDropdownContainerRef : undefined}
                     className="col-span-4 flex items-center gap-1 relative"
                   >
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-12 shrink-0">
-                      Supplier:
-                    </label>
+                    <label className="font-bold text-slate-600 whitespace-nowrap">Supplier:</label>
                     <div className="relative flex-1 flex items-center gap-0.5">
                       <div className="relative flex-1">
                         <input
@@ -4745,7 +4282,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           type="text"
                           value={supplierSearchQuery}
                           onFocus={() => {
-                            // Keep the supplier picker closed until the user types or presses ArrowDown.
                             setIsSupplierDropdownOpen(false);
                           }}
                           onChange={(e) => {
@@ -4756,7 +4292,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           }}
                           onKeyDown={handleSupplierSearchKeyDown}
                           placeholder="Search Supplier Name / Code / Mobile..."
-                          className="w-full pl-1.5 pr-10 py-0 text-[11px] font-bold rounded-lg border border-emerald-500 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500 h-5"
+                          className="w-full pl-1.5 pr-9 py-0 font-bold rounded border border-emerald-500 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                         />
                         <div className="absolute right-0.5 top-1/2 -translate-y-1/2 flex items-center">
                           {supplierSearchQuery && (
@@ -4791,7 +4327,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       <button
                         type="button"
                         onClick={() => handleOpenAddSupplierModal()}
-                        className="px-1.5 h-5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-[9px] font-bold flex items-center gap-0.5 shrink-0 cursor-pointer"
+                        className="px-1.5 py-0 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-0.5 shrink-0 cursor-pointer"
                         title="Add New Supplier"
                       >
                         <UserPlus className="w-2.5 h-2.5" />
@@ -4803,21 +4339,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
 
                   <div className="col-span-2 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-12 shrink-0">
-                      Sup Inv:
-                    </label>
+                    <label className="font-bold text-slate-600 whitespace-nowrap">Sup Inv:</label>
                     <input
                       type="text"
                       value={supplierInvoiceNumber}
                       onChange={(e) => setSupplierInvoiceNumber(e.target.value)}
                       placeholder="Inv #"
-                      className="w-full px-1 py-0 text-[11px] font-mono rounded-lg border border-slate-300 bg-white text-slate-900 h-5"
+                      className="w-full px-1 py-0 font-mono rounded border border-slate-300 bg-white text-slate-900"
                     />
                   </div>
                   <div className="col-span-2 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-9 shrink-0">
-                      Mode:
-                    </label>
+                    <label className="font-bold text-slate-600 whitespace-nowrap">Mode:</label>
                     <select
                       value={paymentMode}
                       onChange={(e) => {
@@ -4830,7 +4362,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           setPaidAmountManuallyEdited(false);
                         }
                       }}
-                      className="w-full px-1 py-0 text-[11px] font-bold rounded-lg border border-slate-300 bg-white text-slate-900 h-5"
+                      className="w-full px-1 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900"
                     >
                       <option value="Cash">Cash</option>
                       <option value="Credit">Credit</option>
@@ -4840,33 +4372,29 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                 </div>
 
-                {/* Row 2: FBR Filer Status, Disbursing Account, Remarks & Live Supplier Ledger Strip */}
-                <div className="grid grid-cols-12 gap-1 items-center text-[11px] mt-0.5 pt-0.5 border-t border-slate-200">
+                {/* Row 2: FBR Filer, Remarks, Quick Item Search (F3) & Row Actions */}
+                <div className="grid grid-cols-12 gap-1.5 items-center pt-1 border-t border-slate-200">
                   <div className="col-span-2 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-9 shrink-0">
-                      FBR:
-                    </label>
+                    <label className="font-bold text-slate-600 whitespace-nowrap">FBR:</label>
                     <select
                       value={supplierFilerStatus}
                       onChange={(e) => setSupplierFilerStatus(e.target.value as FilerStatus)}
-                      className="w-full px-1 py-0 text-[10px] font-bold rounded-lg border border-slate-300 bg-white text-slate-900 h-5"
+                      className="w-full px-1 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900"
                     >
                       <option value="Filer">Filer ({taxSettings?.filer_rate ?? 0.5}%)</option>
                       <option value="Non-Filer">Non-Filer ({taxSettings?.non_filer_rate ?? 2.5}%)</option>
                       <option value="Exempt">Exempt (0%)</option>
                     </select>
                   </div>
-                  <div className="col-span-3 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-8 shrink-0">
-                      A/C:
-                    </label>
+                  <div className="col-span-2 flex items-center gap-1">
+                    <label className="font-bold text-slate-600 whitespace-nowrap">A/C:</label>
                     <select
                       value={paymentAccountId}
                       onChange={(e) => setPaymentAccountId(e.target.value)}
-                      className="w-full px-1 py-0 text-[10px] font-semibold rounded-lg border border-slate-300 bg-white text-slate-900 h-5"
+                      className="w-full px-1 py-0 font-semibold rounded border border-slate-300 bg-white text-slate-900"
                     >
                       <option value="">
-                        Auto ({paymentMode === 'Bank' ? 'Bank Account' : 'Cash in Hand'})
+                        Auto ({paymentMode === 'Bank' ? 'Bank' : 'Cash'})
                       </option>
                       {financialAccounts.map((fa) => (
                         <option key={fa.id} value={fa.id}>
@@ -4875,62 +4403,47 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       ))}
                     </select>
                   </div>
-                  <div className="col-span-3 flex items-center gap-1">
-                    <label className="text-[10px] font-bold uppercase text-slate-600 w-12 shrink-0">
-                      Remarks:
-                    </label>
+                  <div className="col-span-2 flex items-center gap-1">
+                    <label className="font-bold text-slate-600 whitespace-nowrap">Note:</label>
                     <input
                       type="text"
                       value={notes}
                       onChange={(e) => setNotes(e.target.value)}
-                      placeholder="Challan # / delivery note..."
-                      className="w-full px-1 py-0 text-[10px] rounded-lg border border-slate-300 bg-white text-slate-900 h-5"
+                      placeholder="Challan / remarks..."
+                      className="w-full px-1 py-0 rounded border border-slate-300 bg-white text-slate-900"
                     />
                   </div>
-                  <div className="col-span-4 bg-slate-900 text-white rounded-lg px-2 py-0 flex items-center justify-between text-[10px] h-5">
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Prev Bal:</span>
-                      <span className="font-mono font-bold text-amber-300">
-                        {formatPKR(previousSupplierBalance)} ({previousBalanceType})
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1 border-l border-slate-700 pl-1.5">
-                      <span className="text-slate-400">Total Pay:</span>
-                      <span className="font-mono font-black text-emerald-300">
-                        {formatPKR(totalPayable)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Compact Barcode Scanner & Fast Medicine Search Bar (Identical to Sales MS Access View!) */}
-              <div
-                ref={purchaseViewMode === 'access' ? itemDropdownContainerRef : undefined}
-                className="bg-slate-800 px-2 py-0.5 text-white border-b border-slate-700 relative shrink-0"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-1.5">
-                  <div className="flex-1 min-w-[260px] relative">
-                    <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-2 py-0 focus-within:border-emerald-400 h-5">
-                      <Search className="w-3 h-3 text-emerald-400 mr-1.5 shrink-0" />
+                  <div
+                    ref={purchaseViewMode === 'access' ? itemDropdownContainerRef : undefined}
+                    className="col-span-3 relative"
+                  >
+                    <div className="flex items-center bg-white border border-slate-300 rounded px-1.5 focus-within:border-emerald-600">
+                      <Search className="w-3 h-3 text-emerald-600 mr-1 shrink-0" />
                       <input
                         id="access_purchase_item_search_input"
                         ref={purchaseViewMode === 'access' ? itemSearchInputRef : undefined}
                         type="text"
                         value={purchaseSearchQuery}
                         onFocus={() => {
-                          setShowPurchaseSearchDropdown(true);
+                          if (purchaseSearchQuery.trim().length > 0) {
+                            setShowPurchaseSearchDropdown(true);
+                          }
                           setItemHighlightIndex(0);
+                        }}
+                        onBlur={() => {
+                          setTimeout(() => {
+                            setShowPurchaseSearchDropdown(false);
+                          }, 160);
                         }}
                         onChange={(e) => {
                           const q = e.target.value;
                           setPurchaseSearchQuery(q);
                           setItemHighlightIndex(0);
-                          setShowPurchaseSearchDropdown(true);
+                          setShowPurchaseSearchDropdown(q.trim().length > 0);
                         }}
                         onKeyDown={handleItemSearchKeyDown}
-                        placeholder="Barcode Scanner / Fast Medicine Search (Type Code, Barcode, Name, Generic, or Company)..."
-                        className="w-full bg-transparent text-[11px] text-white placeholder-slate-400 focus:outline-none"
+                        placeholder="Barcode / Item Search (F3)..."
+                        className="w-full bg-transparent text-slate-900 placeholder-slate-400 focus:outline-none"
                       />
                       {purchaseSearchQuery && (
                         <button
@@ -4939,60 +4452,59 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             e.preventDefault();
                             setPurchaseSearchQuery('');
                             setItemHighlightIndex(0);
+                            setShowPurchaseSearchDropdown(false);
                             itemSearchInputRef.current?.focus();
                           }}
-                          className="text-slate-400 hover:text-white mr-1 cursor-pointer"
+                          className="text-slate-400 hover:text-slate-700 cursor-pointer"
                         >
                           <X className="w-3 h-3" />
                         </button>
                       )}
-                      <Barcode className="w-3.5 h-3.5 text-slate-400 ml-1 shrink-0" />
                     </div>
-
                     {renderTopItemSearchDropdown()}
                   </div>
-
-                  {/* Row Actions Toolbar */}
-                  <div className="flex items-center gap-1">
+                  <div className="col-span-3 flex flex-wrap items-center justify-end gap-1">
                     <button
                       type="button"
                       onClick={() =>
                         openPurchaseItemListForRow(selectedPurchaseLineIndex, 'access_row')
                       }
-                      className="px-2 py-0 rounded-lg bg-slate-700 hover:bg-slate-600 text-white border border-slate-600 text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
-                      title="Open Item List to select or change item for the selected row"
+                      className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Open Item List (F2)"
                     >
                       <PackageSearch className="w-3 h-3 text-emerald-400" />
-                      Item List
+                      Items
                     </button>
                     <button
                       type="button"
                       onClick={addLineRow}
-                      className="px-2 py-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
+                      className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Add New Blank Line"
                     >
                       <Plus className="w-3 h-3" />
-                      Add Row
+                      Row
                     </button>
                     <button
                       type="button"
                       onClick={() => removeLineRow(selectedPurchaseLineIndex)}
-                      className="px-2 py-0 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer h-5"
+                      className="px-1.5 py-0 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Delete Selected Row"
                     >
                       <Trash2 className="w-3 h-3" />
-                      Delete
+                      Del
                     </button>
                   </div>
                 </div>
               </div>
 
-              {/* Responsive MS Access Datasheet Grid (Minimum 10 Visible Rows, Internal Scroll, Fixed Headers) */}
-              <div className="flex flex-col flex-1 min-h-[375px] bg-white overflow-hidden select-none border-b border-slate-400">
+              {/* SECTION B (CENTER): MS ACCESS DATASHEET ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS) */}
+              <div className="ams-pos-item-grid-card flex flex-col flex-1 min-h-[356px] bg-white overflow-hidden select-none border-b border-slate-400 relative z-10">
                 <div
                   ref={accessGridViewportRef}
-                  className="flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative"
+                  className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white"
                 >
                   <table className="ams-compact-10-grid w-full min-w-[1680px] border-collapse text-[11px] font-sans leading-none">
-                    <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
+                    <thead className="sticky top-0 z-20 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                       <tr className="h-6">
                         <th className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 w-7 text-center font-mono h-6">
                           #
@@ -5073,40 +4585,34 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               )}
                             </td>
 
-                            {/* 1. Item Code (Opens Shared Item Selection List on click or focus) */}
+                            {/* 1. Item Code (Direct typing + inline search; Enter on blank opens Item List) */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                               <input
                                 id={`pur_cell_${idx}_item_code`}
                                 type="text"
                                 value={
-                                  activeRowItemSearchIdx === idx
+                                  activeRowItemSearchIdx === idx &&
+                                  activeRowItemSearchField === 'item_code'
                                     ? rowItemSearchQuery
                                     : line.item_code
                                 }
-                                onMouseDown={() => {
-                                  suppressItemListReopenRef.current = false;
-                                }}
-                                onClick={() => {
-                                  setSelectedPurchaseLineIndex(idx);
-                                  openPurchaseItemListForRow(
-                                    idx,
-                                    'access_row',
-                                    `pur_cell_${idx}_item_code`
-                                  );
-                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(idx);
-                                  openPurchaseItemListForRow(
-                                    idx,
-                                    'access_row',
-                                    `pur_cell_${idx}_item_code`
-                                  );
+                                  if (
+                                    activeRowItemSearchIdx !== idx ||
+                                    activeRowItemSearchField !== 'item_code'
+                                  ) {
+                                    setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
+                                    setRowItemSearchQuery('');
+                                  }
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
                                     setActiveRowItemSearchIdx((prev) =>
                                       prev === idx ? null : prev
                                     );
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                   }, 180);
                                 }}
@@ -5115,17 +4621,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   setSelectedPurchaseLineIndex(idx);
                                   setRowItemSearchQuery(v);
                                   setRowItemHighlightIndex(0);
+                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_code' : null);
                                   setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
                                     e.preventDefault();
                                     setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                     return;
                                   }
                                   if (
                                     activeRowItemSearchIdx === idx &&
+                                    activeRowItemSearchField === 'item_code' &&
                                     rowItemSearchResults.length > 0
                                   ) {
                                     if (e.key === 'ArrowDown') {
@@ -5171,44 +4680,38 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   handlePurchaseCellKeyDown(e, idx, 'item_code', 'pur_cell');
                                 }}
                                 placeholder="Code..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none cursor-pointer"
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                               />
                             </td>
 
-                            {/* 2. Item Name (Opens Shared Item Selection List on click or focus) */}
+                            {/* 2. Item Name (Direct typing + inline search; Enter on blank opens Item List) */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                               <input
                                 id={`pur_cell_${idx}_item_name`}
                                 type="text"
                                 value={
-                                  activeRowItemSearchIdx === idx
+                                  activeRowItemSearchIdx === idx &&
+                                  activeRowItemSearchField === 'item_name'
                                     ? rowItemSearchQuery
                                     : line.item_name
                                 }
-                                onMouseDown={() => {
-                                  suppressItemListReopenRef.current = false;
-                                }}
-                                onClick={() => {
-                                  setSelectedPurchaseLineIndex(idx);
-                                  openPurchaseItemListForRow(
-                                    idx,
-                                    'access_row',
-                                    `pur_cell_${idx}_item_name`
-                                  );
-                                }}
                                 onFocus={() => {
                                   setSelectedPurchaseLineIndex(idx);
-                                  openPurchaseItemListForRow(
-                                    idx,
-                                    'access_row',
-                                    `pur_cell_${idx}_item_name`
-                                  );
+                                  if (
+                                    activeRowItemSearchIdx !== idx ||
+                                    activeRowItemSearchField !== 'item_name'
+                                  ) {
+                                    setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
+                                    setRowItemSearchQuery('');
+                                  }
                                 }}
                                 onBlur={() => {
                                   setTimeout(() => {
                                     setActiveRowItemSearchIdx((prev) =>
                                       prev === idx ? null : prev
                                     );
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                   }, 180);
                                 }}
@@ -5217,17 +4720,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   setSelectedPurchaseLineIndex(idx);
                                   setRowItemSearchQuery(v);
                                   setRowItemHighlightIndex(0);
+                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
                                   setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
                                     e.preventDefault();
                                     setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                     return;
                                   }
                                   if (
                                     activeRowItemSearchIdx === idx &&
+                                    activeRowItemSearchField === 'item_name' &&
                                     rowItemSearchResults.length > 0
                                   ) {
                                     if (e.key === 'ArrowDown') {
@@ -5272,8 +4778,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   }
                                   handlePurchaseCellKeyDown(e, idx, 'item_name', 'pur_cell');
                                 }}
-                                placeholder="Click or Focus for Item List..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none cursor-pointer"
+                                placeholder="Type Item Name / Code (or F2)..."
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                               />
                               {renderRowItemSearchCombobox(idx, false)}
                             </td>
@@ -5593,21 +5099,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               </div>
 
-              {/* Full-Width MS Access Calculation & Action Footer (No Side-by-Side Split) */}
-              <div className="p-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1.5 shrink-0">
-                {/* Row 1: Full-Width Totals, Discounts, Paid Amount & Balance */}
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-1.5">
-                  <div className="flex flex-wrap items-center gap-3 text-xs">
+              {/* SECTION C (BOTTOM): COMPACT MS ACCESS CALCULATION & ACTION FOOTER */}
+              <div className="ams-pos-compact-chrome px-2.5 py-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1 shrink-0">
+                {/* Row 1: Essential Totals & Payment Settlement */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-1 tabular-nums">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Gross ({validLines.length}):</span>
-                      <strong className="font-mono text-white">{formatPKR(grossTotal)}</strong>
+                      <span className="text-slate-400">Grand Total ({validLines.length}):</span>
+                      <span className="font-mono font-bold text-white">{formatPKR(grossTotal)}</span>
                     </div>
                     <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Item Disc:</span>
-                      <strong className="font-mono text-rose-300">-{formatPKR(itemDiscountTotal)}</strong>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Inv Disc %:</span>
+                      <span className="text-rose-400">Discount:</span>
+                      <span className="font-mono font-bold text-rose-300">-{formatPKR(totalDiscount)}</span>
                       <NumericInput
                         step="0.01"
                         min="0"
@@ -5618,31 +5121,40 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           setInvoiceDiscountPercent(pct);
                           setInvoiceDiscountAmount(round2(subtotalAfterItemDisc * (pct / 100)));
                         }}
-                        className="w-14 px-1 py-0.5 text-right text-xs rounded bg-slate-800 border border-slate-600 text-white font-mono"
+                        placeholder="%"
+                        title="Invoice Discount %"
+                        className="w-12 px-1 py-0 text-right rounded bg-slate-800 border border-slate-700 text-white font-mono"
                       />
-                      <strong className="font-mono text-rose-300">-{formatPKR(computedInvoiceDiscAmt)}</strong>
                     </div>
                     <div className="flex items-center gap-1">
-                      <span className="text-slate-400">GST + Adv Tax ({appliedAdvanceTaxRate}%):</span>
-                      <strong className="font-mono text-amber-300">+{formatPKR(gstTotal + advanceTaxAmount)}</strong>
+                      <span className="text-slate-400">Tax ({appliedAdvanceTaxRate}%):</span>
+                      <span className="font-mono font-bold text-amber-300">
+                        +{formatPKR(gstTotal + advanceTaxAmount)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-slate-400">Prev Bal ({previousBalanceType}):</span>
+                      <span className="font-mono font-semibold text-amber-300">
+                        {formatPKR(previousSupplierBalance)}
+                      </span>
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="px-2.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1.5">
-                      <span className="text-xs uppercase font-bold text-emerald-300">Net Total:</span>
-                      <strong className="font-mono text-base font-black text-emerald-300 ams-total-highlight">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1">
+                      <span className="uppercase font-bold text-emerald-300">Net Amount:</span>
+                      <span className="font-mono font-black text-emerald-300 ams-total-highlight">
                         {formatPKR(netInvoiceAmount)}
-                      </strong>
+                      </span>
                     </div>
-                    <div className="px-2.5 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1.5">
-                      <span className="text-xs uppercase font-bold text-sky-300">Total Payable:</span>
-                      <strong className="font-mono text-base font-black text-sky-300 ams-total-highlight">
+                    <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1">
+                      <span className="uppercase font-bold text-sky-300">Payable:</span>
+                      <span className="font-mono font-black text-sky-300 ams-total-highlight">
                         {formatPKR(totalPayable)}
-                      </strong>
+                      </span>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs uppercase font-bold text-slate-300">Paid:</span>
+                    <div className="flex items-center gap-1 bg-slate-800 px-1.5 py-0.5 rounded border border-emerald-500">
+                      <span className="uppercase font-bold text-emerald-300">Cash Paid:</span>
                       <NumericInput
                         step="0.01"
                         min="0"
@@ -5651,97 +5163,104 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           setPaidAmountManuallyEdited(true);
                           setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
                         }}
-                        className="w-24 px-1.5 py-0.5 rounded bg-slate-800 border border-emerald-500 text-right font-mono font-bold text-emerald-300 text-xs"
+                        className="w-24 px-1 py-0 rounded bg-slate-900 border border-slate-700 text-right font-mono font-bold text-emerald-300 outline-none"
                       />
+                      <button
+                        type="button"
+                        onClick={handleExactPurchasePayment}
+                        className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
+                      >
+                        Exact
+                      </button>
                     </div>
-                    <div className="px-2.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1.5">
-                      <span className="text-xs uppercase font-bold text-amber-300">Balance:</span>
-                      <strong className="font-mono text-base font-black text-amber-300 ams-total-highlight">
+                    <div className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1">
+                      <span className="uppercase font-bold text-amber-300">Remaining:</span>
+                      <span className="font-mono font-black text-amber-300 ams-total-highlight">
                         {formatPKR(remainingBalance)}
-                      </strong>
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Row 2: Full-Width Action Buttons Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-1.5">
-                  <div className="flex flex-wrap items-center gap-1.5">
+                {/* Row 2: Compact Action Buttons Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-1">
+                  <div className="flex flex-wrap items-center gap-1">
                     <button
                       type="submit"
                       disabled={savingInvoice}
-                      className="px-3.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center gap-1 shadow-sm cursor-pointer disabled:opacity-50"
+                      className="px-2.5 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-black flex items-center gap-1 cursor-pointer disabled:opacity-50"
                     >
-                      <Save className="w-3.5 h-3.5" />
+                      <Save className="w-3 h-3" />
                       <span>
                         {savingInvoice
                           ? 'Posting...'
                           : editingPurchaseId
-                          ? 'Update & Re-Post (F2)'
-                          : 'Confirm & Post Purchase (F2)'}
+                          ? 'Update (F2)'
+                          : 'Save (F2)'}
                       </span>
                     </button>
                     <button
                       type="button"
                       disabled={savingInvoice}
                       onClick={() => handleSavePurchaseInvoice(undefined, true)}
-                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold text-xs flex items-center gap-1 cursor-pointer"
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                     >
-                      <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Save &amp; Print A4</span>
+                      <Printer className="w-3 h-3 text-emerald-400" />
+                      <span>A4 Print</span>
                     </button>
                     <button
                       type="button"
                       disabled={exportingExcel}
                       onClick={handleExportCurrentPurchaseToExcel}
-                      className="px-3 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center gap-1 cursor-pointer"
+                      className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                       title="Export Purchase Invoice to Excel (.xlsx)"
                     >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Export Excel</span>
+                      <Download className="w-3 h-3" />
+                      <span>Excel</span>
                     </button>
                     <button
                       type="button"
                       onClick={handlePreviewInvoice}
-                      className="px-2.5 py-1 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-xs flex items-center gap-1 cursor-pointer"
+                      className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                     >
-                      <Printer className="w-3.5 h-3.5 text-sky-200" />
+                      <Printer className="w-3 h-3 text-sky-200" />
                       <span>Preview (F4)</span>
                     </button>
                     <button
                       type="button"
                       disabled={savingInvoice}
                       onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
-                      className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
                     >
-                      <PauseCircle className="w-3.5 h-3.5" />
+                      <PauseCircle className="w-3 h-3 text-amber-400" />
                       <span>Hold (F3)</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleOpenPurchaseOrderSms}
-                      className="px-2.5 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white font-bold text-xs flex items-center gap-1 cursor-pointer"
+                      className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                       title="Send Order SMS for Current Purchase Invoice"
                     >
-                      <MessageSquare className="w-3.5 h-3.5 text-indigo-200" />
-                      <span>Send Order SMS</span>
+                      <MessageSquare className="w-3 h-3 text-indigo-200" />
+                      <span>Order SMS</span>
                     </button>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={resetInvoiceForm}
-                      className="px-2.5 py-1 rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs cursor-pointer"
+                      className="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold cursor-pointer"
                     >
-                      Reset Form
+                      Reset
                     </button>
                     {onBackToDashboard && (
                       <button
                         type="button"
                         onClick={onBackToDashboard}
-                        className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black flex items-center gap-1 cursor-pointer"
+                        className="px-2 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                       >
-                        <ArrowLeft className="w-3.5 h-3.5" />
-                        <span>Back / Close</span>
+                        <ArrowLeft className="w-3 h-3" />
+                        <span>Close</span>
                       </button>
                     )}
                   </div>

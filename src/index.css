@@ -270,53 +270,59 @@
   .ams-readable-invoice-scope .text-lg:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-xl:not(.print-modal-container *),
   .ams-readable-invoice-scope .text-2xl:not(.print-modal-container *) {
-    font-size: 20px !important;
-    line-height: 1.25 !important;
+    font-size: 16px !important;
+    line-height: 1.2 !important;
   }
 
-  /* Compact chrome for Sales POS toolbars/headers so they never crush the POS Item Grid */
+  /* Compact MS Access-style chrome for Invoice Headers & Footers */
   .ams-readable-invoice-scope .ams-pos-compact-chrome button:not(.print-modal-container *),
   .ams-readable-invoice-scope .ams-pos-compact-chrome input:not([type="checkbox"]):not([type="radio"]):not(.print-modal-container *),
   .ams-readable-invoice-scope .ams-pos-compact-chrome select:not(.print-modal-container *) {
-    font-size: 13px !important;
-    min-height: 26px !important;
+    font-size: 12px !important;
+    min-height: 24px !important;
     height: auto !important;
     padding-top: 2px !important;
     padding-bottom: 2px !important;
   }
 
   .ams-readable-invoice-scope .ams-pos-compact-chrome label:not(.print-modal-container *),
-  .ams-readable-invoice-scope .ams-pos-compact-chrome span:not(.ams-total-highlight):not(.print-modal-container *) {
-    font-size: 13px !important;
+  .ams-readable-invoice-scope .ams-pos-compact-chrome span:not(.ams-total-highlight):not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome strong:not(.ams-total-highlight):not(.print-modal-container *) {
+    font-size: 12px !important;
     line-height: 1.2 !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-total-highlight:not(.print-modal-container *) {
+    font-size: 14.5px !important;
+    line-height: 1.15 !important;
   }
 
   /* 10+ visible row density & clean internal scrolling for Sales & Purchase Invoice Grids */
   .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) thead th {
-    font-size: 13.5px !important;
+    font-size: 12.5px !important;
     padding-top: 4px !important;
     padding-bottom: 4px !important;
-    min-height: 30px !important;
-    height: 30px !important;
+    min-height: 28px !important;
+    height: 28px !important;
   }
 
   .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody tr {
-    min-height: 30px !important;
-    height: 31px !important;
+    min-height: 29px !important;
+    height: 29px !important;
   }
 
   .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody td {
-    font-size: 14px !important;
+    font-size: 13px !important;
     padding-top: 1px !important;
     padding-bottom: 1px !important;
-    height: 31px !important;
+    height: 29px !important;
   }
 
   .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody td input:not([type="checkbox"]):not([type="radio"]),
   .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody td select {
-    font-size: 14px !important;
-    min-height: 27px !important;
-    height: 27px !important;
+    font-size: 13px !important;
+    min-height: 25px !important;
+    height: 25px !important;
     padding-top: 1px !important;
     padding-bottom: 1px !important;
   }
@@ -325,14 +331,14 @@
   .ams-readable-invoice-scope .ams-access-record-bar button:not(.print-modal-container *),
   .ams-readable-invoice-scope .ams-access-record-bar input:not([type="checkbox"]):not([type="radio"]):not(.print-modal-container *),
   .ams-readable-invoice-scope .ams-access-record-bar span:not(.print-modal-container *) {
-    font-size: 12.5px !important;
-    min-height: 24px !important;
+    font-size: 12px !important;
+    min-height: 22px !important;
     line-height: 1.2 !important;
   }
 
   .ams-readable-invoice-scope .ams-access-record-bar .ams-access-record-search input {
-    min-height: 22px !important;
-    height: 22px !important;
+    min-height: 20px !important;
+    height: 20px !important;
     padding-top: 1px !important;
     padding-bottom: 1px !important;
   }
@@ -343,7 +349,7 @@
     flex-direction: column !important;
     visibility: visible !important;
     opacity: 1 !important;
-    min-height: 375px !important;
+    min-height: 356px !important;
     flex: 1 1 0% !important;
   }
 
@@ -351,7 +357,7 @@
     display: block !important;
     visibility: visible !important;
     opacity: 1 !important;
-    min-height: 342px !important;
+    min-height: 322px !important;
     flex: 1 1 0% !important;
     overflow-y: auto !important;
     overflow-x: auto !important;
