@@ -18,6 +18,10 @@ import { NumericInput } from '../common/NumericInput';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar } from '../common/SimpleSyncStatusBar';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
+import {
+  InvoiceRecordSearchInput,
+  InvoiceSearchableItem,
+} from '../common/InvoiceRecordSearchInput';
 import { WhatsAppDocumentPayload } from '../../utils/whatsapp';
 import {
   Search,
@@ -76,7 +80,7 @@ function round2(val: unknown): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-function createEmptyRow(): DatasheetRow {
+export function createEmptyRow(): DatasheetRow {
   return {
     row_id: `row_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     item_id: null,
@@ -123,14 +127,14 @@ function createEmptyRow(): DatasheetRow {
   };
 }
 
-const MIN_DATASHEET_ROWS = 1;
+export const MIN_DATASHEET_ROWS = 10;
 
 function isSalesRowPopulated(row?: DatasheetRow): boolean {
   if (!row) return false;
   return row.item_id !== null && Number(row.item_id) > 0;
 }
 
-function ensureMinimumRows(list: DatasheetRow[], _minCount: number = MIN_DATASHEET_ROWS): DatasheetRow[] {
+export function ensureMinimumRows(list: DatasheetRow[], minCount: number = MIN_DATASHEET_ROWS): DatasheetRow[] {
   const result = [...list];
   let lastPopulatedIdx = -1;
   for (let i = result.length - 1; i >= 0; i--) {
@@ -140,8 +144,9 @@ function ensureMinimumRows(list: DatasheetRow[], _minCount: number = MIN_DATASHE
     }
   }
 
-  // One active blank row only. New rows appear only after an actual item is selected.
-  const desiredCount = Math.max(1, lastPopulatedIdx + 2);
+  // Always keep at least 10 visible rows by default, plus 1 blank entry row after the last item
+  const minFloor = Math.max(MIN_DATASHEET_ROWS, minCount || MIN_DATASHEET_ROWS);
+  const desiredCount = Math.max(minFloor, lastPopulatedIdx + 2);
   while (result.length < desiredCount) result.push(createEmptyRow());
   while (result.length > desiredCount && !isSalesRowPopulated(result[result.length - 1])) {
     result.pop();
@@ -298,11 +303,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   }, []);
 
-  // Datasheet Rows (14 initial compact rows so 12-15 rows are visible in MS Access View)
+  // Datasheet Rows (Minimum 10 visible rows by default, unbounded item capacity)
   const [rows, setRows] = useState<DatasheetRow[]>(() => ensureMinimumRows([]));
   const [selectedRowIndex, setSelectedRowIndex] = useState<number>(0);
   const [recordJumpInput, setRecordJumpInput] = useState<string>('1');
   const [copiedRowData, setCopiedRowData] = useState<Partial<DatasheetRow> | null>(null);
+  const [invoiceSearchMatchedRows, setInvoiceSearchMatchedRows] = useState<number[]>([]);
+  const [invoiceSearchActiveRow, setInvoiceSearchActiveRow] = useState<number | null>(null);
 
   useEffect(() => {
     setRecordJumpInput(String(selectedRowIndex + 1));
@@ -2280,6 +2287,48 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }, 15);
   };
 
+  // Searchable projection of existing invoice rows (read-only lookup including catalog barcode)
+  const salesSearchableItems = useMemo<InvoiceSearchableItem[]>(() => {
+    const barcodeByItemId = new Map<number, string>();
+    for (const c of catalogItems) {
+      if (c?.id && c?.barcode) {
+        barcodeByItemId.set(Number(c.id), String(c.barcode));
+      }
+    }
+    return rows.map((r, idx) => ({
+      rowIndex: idx,
+      itemId: r.item_id,
+      itemCode: r.item_code || '',
+      itemName: r.item_name || '',
+      barcode: r.item_id ? barcodeByItemId.get(Number(r.item_id)) || '' : '',
+    }));
+  }, [rows, catalogItems]);
+
+  const handlePreviewSearchedSalesRow = useCallback((rowIdx: number | null) => {
+    if (rowIdx === null || rowIdx < 0) return;
+    setSelectedRowIndex(rowIdx);
+    const rowEl = document.querySelector(`[data-sales-row-idx="${rowIdx}"]`) as HTMLElement | null;
+    if (rowEl) {
+      rowEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, []);
+
+  const handleNavigateToSearchedSalesRow = useCallback(
+    (rowIdx: number) => {
+      if (rowIdx < 0 || rowIdx >= rows.length) return;
+      setSelectedRowIndex(rowIdx);
+      setRecordJumpInput(String(rowIdx + 1));
+      setShowSearchDropdown(false);
+      const prefix = invoiceViewMode === 'pos' ? 'pos_row' : 'cell';
+      setTimeout(() => {
+        const rowEl = document.querySelector(`[data-sales-row-idx="${rowIdx}"]`) as HTMLElement | null;
+        rowEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        focusCell(rowIdx, 'quantity', prefix);
+      }, 15);
+    },
+    [rows.length, invoiceViewMode]
+  );
+
   const handleRecordJumpKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -2778,7 +2827,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   };
 
   return (
-    <div className="ams-readable-invoice-scope w-full h-full flex-1 min-h-0 flex flex-col gap-1 overflow-y-auto px-1.5 py-1 bg-slate-100" style={{ zoom: 1 }}>
+    <div className="ams-readable-invoice-scope w-full h-full flex-1 min-h-0 flex flex-col gap-1 overflow-y-auto overflow-x-hidden px-1.5 py-1 bg-slate-100" style={{ zoom: 1 }}>
       {/* Status Banners */}
       {errorMsg && (
         <div className="px-2.5 py-1 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 flex flex-wrap items-center justify-between gap-2 text-xs shadow-sm shrink-0 mb-1">
@@ -2984,7 +3033,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       {/* ================= OPTION 1: TRADITIONAL POS INTERFACE ================= */}
       {invoiceViewMode === 'pos' && (
-        <div className="flex-1 min-h-0 flex flex-col gap-1.5 overflow-y-auto">
+        <div className="flex-1 min-h-0 flex flex-col gap-1">
           {/* POS Header: Customer, Salesman, Deliveryman, Type & Mode */}
           <div className="ams-pos-compact-chrome bg-white rounded-xl border border-slate-200 shadow-sm px-3 py-1.5 space-y-1 shrink-0">
             {/* Top row: Badges, Bill #, Date & Action Shortcuts */}
@@ -3662,8 +3711,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           )}
 
-          {/* Sales POS Item Grid (Guaranteed Visible, Internal Scroll, Fixed Headers) */}
-          <div className="ams-pos-item-grid-card bg-white rounded-xl border-2 border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-[250px] sm:min-h-[290px] lg:min-h-[340px] shrink-0 relative z-10">
+          {/* Sales POS Item Grid (Minimum 10 Visible Rows, Internal Scroll, Fixed Headers) */}
+          <div className="ams-pos-item-grid-card bg-white rounded-xl border-2 border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-[375px] relative z-10">
             <div className="ams-pos-compact-chrome px-3 py-1 bg-slate-100 border-b border-slate-300 flex items-center justify-between text-[11px] shrink-0">
               <div className="flex items-center gap-2">
                 <span className="font-black text-slate-800 uppercase tracking-wider text-[11px]">
@@ -3678,8 +3727,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </span>
             </div>
 
-            <div className="ams-pos-item-grid-scroll flex-1 min-h-[210px] sm:min-h-[250px] overflow-y-auto overflow-x-auto relative bg-white">
-              <table className="w-full text-left text-xs border-collapse leading-normal min-w-[1150px]">
+            <div className="ams-pos-item-grid-scroll flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative bg-white">
+              <table className="ams-compact-10-grid w-full text-left text-xs border-collapse leading-normal min-w-[1150px]">
                 <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[11px] font-bold uppercase tracking-wider leading-normal shadow-sm">
                   <tr className="h-8">
                     <th className="py-1 px-1.5 w-9 text-center border-r border-slate-300 h-8">#</th>
@@ -3700,13 +3749,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 <tbody className="divide-y divide-slate-200">
                   {rows.map((row, rIdx) => {
                     const isSelected = rIdx === selectedRowIndex;
+                    const isActiveSearchMatch = invoiceSearchActiveRow === rIdx;
+                    const isSearchMatch = invoiceSearchMatchedRows.includes(rIdx);
 
                     return (
                       <tr
                         key={row.row_id}
+                        data-sales-row-idx={rIdx}
                         onClick={() => setSelectedRowIndex(rIdx)}
-                        className={`cursor-pointer transition-colors border-b border-slate-200 h-9 leading-none ${
-                          isSelected
+                        className={`cursor-pointer transition-colors border-b border-slate-200 h-8 leading-none ${
+                          isActiveSearchMatch
+                            ? 'bg-amber-200/80 ring-2 ring-inset ring-amber-500 font-semibold'
+                            : isSearchMatch
+                            ? 'bg-sky-100/80 font-medium'
+                            : isSelected
                             ? 'bg-emerald-50/90 font-medium'
                             : rIdx % 2 === 0
                             ? 'bg-white hover:bg-slate-50'
@@ -4044,73 +4100,84 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </table>
             </div>
 
-            {/* POS Record Navigator Bar */}
-            <div className="ams-pos-compact-chrome bg-slate-100 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-              <div className="flex items-center gap-1">
-                <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(0)}
-                  disabled={selectedRowIndex === 0}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
-                  title="First Record (Home)"
-                >
-                  |◀
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(selectedRowIndex - 1)}
-                  disabled={selectedRowIndex === 0}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
-                  title="Previous Record (Up)"
-                >
-                  ◀
-                </button>
-                <input
-                  type="text"
-                  value={recordJumpInput}
-                  onChange={(e) => setRecordJumpInput(e.target.value.replace(/[^\d]/g, ''))}
-                  onKeyDown={handleRecordJumpKeyDown}
-                  onBlur={() => {
-                    const parsed = parseInt(recordJumpInput, 10);
-                    if (!Number.isNaN(parsed) && parsed >= 1) {
-                      navigateToRecord(parsed - 1);
-                    } else {
-                      setRecordJumpInput(String(selectedRowIndex + 1));
-                    }
+            {/* POS Record Navigator Bar + MS Access-Style Invoice Item Search */}
+            <div className="ams-pos-compact-chrome ams-access-record-bar bg-slate-100 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex items-center gap-1">
+                  <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(0)}
+                    disabled={selectedRowIndex === 0}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
+                    title="First Record (Home)"
+                  >
+                    |◀
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(selectedRowIndex - 1)}
+                    disabled={selectedRowIndex === 0}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
+                    title="Previous Record (Up)"
+                  >
+                    ◀
+                  </button>
+                  <input
+                    type="text"
+                    value={recordJumpInput}
+                    onChange={(e) => setRecordJumpInput(e.target.value.replace(/[^\d]/g, ''))}
+                    onKeyDown={handleRecordJumpKeyDown}
+                    onBlur={() => {
+                      const parsed = parseInt(recordJumpInput, 10);
+                      if (!Number.isNaN(parsed) && parsed >= 1) {
+                        navigateToRecord(parsed - 1);
+                      } else {
+                        setRecordJumpInput(String(selectedRowIndex + 1));
+                      }
+                    }}
+                    className="w-9 px-1 py-0 bg-white border border-slate-400 font-mono font-bold text-[10px] text-center text-slate-900 focus:border-emerald-600 outline-none"
+                    title="Type Record # and press Enter (or use Up/Down arrows)"
+                  />
+                  <span className="text-[10px] font-mono">of {rows.length}</span>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(selectedRowIndex + 1)}
+                    disabled={selectedRowIndex >= rows.length - 1}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
+                    title="Next Record (Down)"
+                  >
+                    ▶
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(rows.length - 1)}
+                    disabled={selectedRowIndex >= rows.length - 1}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
+                    title="Last Record (End)"
+                  >
+                    ▶|
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleInsertRow}
+                    className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-50 border border-slate-300 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
+                    title="Jump to New (Blank) Record"
+                  >
+                    * New
+                  </button>
+                </div>
+                <InvoiceRecordSearchInput
+                  items={salesSearchableItems}
+                  onPreviewMatch={handlePreviewSearchedSalesRow}
+                  onNavigateToMatch={handleNavigateToSearchedSalesRow}
+                  onMatchesChange={(matches, activeRow) => {
+                    setInvoiceSearchMatchedRows(matches);
+                    setInvoiceSearchActiveRow(activeRow);
                   }}
-                  className="w-9 px-1 py-0 bg-white border border-slate-400 font-mono font-bold text-[10px] text-center text-slate-900 focus:border-emerald-600 outline-none"
-                  title="Type Record # and press Enter (or use Up/Down arrows)"
                 />
-                <span className="text-[10px] font-mono">of {rows.length}</span>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(selectedRowIndex + 1)}
-                  disabled={selectedRowIndex >= rows.length - 1}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
-                  title="Next Record (Down)"
-                >
-                  ▶
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(rows.length - 1)}
-                  disabled={selectedRowIndex >= rows.length - 1}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-40 border border-slate-300 text-[10px] font-mono font-bold cursor-pointer"
-                  title="Last Record (End)"
-                >
-                  ▶|
-                </button>
-                <button
-                  type="button"
-                  onClick={handleInsertRow}
-                  className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-50 border border-slate-300 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
-                  title="Jump to New (Blank) Record"
-                >
-                  * New
-                </button>
               </div>
-              <div className="text-[10px] text-slate-500 font-mono">
+              <div className="text-[10px] text-slate-500 font-mono hidden xl:block">
                 Arrow Keys / Tab / Enter to navigate cells &amp; records
               </div>
             </div>
@@ -4316,7 +4383,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       {/* ================= OPTION 2: MICROSOFT ACCESS-STYLE INTERFACE (FULL-SCREEN DESKTOP FORM) ================= */}
       {invoiceViewMode === 'access' && (
-        <div className="flex flex-col min-h-0 max-h-full bg-slate-200 border-2 border-slate-400 rounded-sm shadow-xs overflow-hidden select-none">
+        <div className="flex-1 flex flex-col min-h-0 bg-slate-200 border-2 border-slate-400 rounded-sm shadow-xs select-none">
           {/* Access Window Title Bar & Ribbon Toolbar Combined Compact Strip */}
           <div className="bg-gradient-to-r from-slate-800 via-slate-850 to-slate-900 text-white px-2.5 py-0.5 flex flex-wrap items-center justify-between gap-1 border-b border-slate-700 text-[11px] shrink-0 select-none">
             <div className="flex items-center gap-2 font-mono">
@@ -4862,11 +4929,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           </div>
 
-          {/* ================= 3. MICROSOFT ACCESS-STYLE DATASHEET GRID (COMPACT ~20 VISIBLE ROWS) ================= */}
-          <div className="flex flex-col flex-1 min-h-0 bg-white overflow-hidden select-none border-b border-slate-400">
-            {/* Vertical scrolling inside the item grid only after 20 visible rows, sticky column headers */}
-            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative">
-              <table className="w-full border-collapse text-[11px] font-sans leading-none min-w-[1180px]">
+          {/* ================= 3. MICROSOFT ACCESS-STYLE DATASHEET GRID (MIN 10 VISIBLE ROWS) ================= */}
+          <div className="flex flex-col flex-1 min-h-[375px] bg-white overflow-hidden select-none border-b border-slate-400">
+            {/* Vertical scrolling inside the item grid, sticky column headers */}
+            <div className="flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative">
+              <table className="ams-compact-10-grid w-full border-collapse text-[11px] font-sans leading-none min-w-[1180px]">
                 <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                   <tr className="h-6">
                     {/* Access Row Selector column */}
@@ -5029,6 +5096,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 <tbody>
                   {rows.map((row, rIdx) => {
                     const isSelected = rIdx === selectedRowIndex;
+                    const isActiveSearchMatch = invoiceSearchActiveRow === rIdx;
+                    const isSearchMatch = invoiceSearchMatchedRows.includes(rIdx);
                     const remainingUnits = round2(row.available_stock_units - row.total_units);
                     const isOverStock =
                       row.item_id !== null && !allowNegativeStock && remainingUnits < 0;
@@ -5036,9 +5105,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     return (
                       <tr
                         key={row.row_id}
+                        data-sales-row-idx={rIdx}
                         onClick={() => setSelectedRowIndex(rIdx)}
                         className={`border-b border-slate-300 font-sans transition-colors h-[16px] leading-none ${
-                          isOverStock
+                          isActiveSearchMatch
+                            ? 'bg-amber-200/90 ring-2 ring-inset ring-amber-500 font-semibold'
+                            : isSearchMatch
+                            ? 'bg-sky-100/90 font-medium'
+                            : isOverStock
                             ? 'bg-rose-100/90'
                             : isSelected
                             ? 'bg-amber-50/90 font-medium'
@@ -5329,71 +5403,82 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </table>
             </div>
 
-            {/* Combined Microsoft Access Record Navigator & Customer History Strip */}
-            <div className="bg-slate-200 border-t border-slate-400 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-              <div className="flex items-center gap-1">
-                <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(0)}
-                  disabled={selectedRowIndex === 0}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                  title="First Record (Home)"
-                >
-                  |◀
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(selectedRowIndex - 1)}
-                  disabled={selectedRowIndex === 0}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                  title="Previous Record (Up)"
-                >
-                  ◀
-                </button>
-                <input
-                  type="text"
-                  value={recordJumpInput}
-                  onChange={(e) => setRecordJumpInput(e.target.value.replace(/[^\d]/g, ''))}
-                  onKeyDown={handleRecordJumpKeyDown}
-                  onBlur={() => {
-                    const parsed = parseInt(recordJumpInput, 10);
-                    if (!Number.isNaN(parsed) && parsed >= 1) {
-                      navigateToRecord(parsed - 1);
-                    } else {
-                      setRecordJumpInput(String(selectedRowIndex + 1));
-                    }
+            {/* Combined Microsoft Access Record Navigator, Invoice Search & Customer History Strip */}
+            <div className="ams-access-record-bar bg-slate-200 border-t border-slate-400 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex items-center gap-1">
+                  <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(0)}
+                    disabled={selectedRowIndex === 0}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                    title="First Record (Home)"
+                  >
+                    |◀
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(selectedRowIndex - 1)}
+                    disabled={selectedRowIndex === 0}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                    title="Previous Record (Up)"
+                  >
+                    ◀
+                  </button>
+                  <input
+                    type="text"
+                    value={recordJumpInput}
+                    onChange={(e) => setRecordJumpInput(e.target.value.replace(/[^\d]/g, ''))}
+                    onKeyDown={handleRecordJumpKeyDown}
+                    onBlur={() => {
+                      const parsed = parseInt(recordJumpInput, 10);
+                      if (!Number.isNaN(parsed) && parsed >= 1) {
+                        navigateToRecord(parsed - 1);
+                      } else {
+                        setRecordJumpInput(String(selectedRowIndex + 1));
+                      }
+                    }}
+                    className="w-9 px-1 py-0 bg-white border border-slate-400 font-mono font-bold text-[10px] text-center text-slate-900 focus:border-blue-600 outline-none"
+                    title="Type Record # and press Enter (or use Up/Down arrows)"
+                  />
+                  <span className="text-[10px] font-mono">of {rows.length}</span>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(selectedRowIndex + 1)}
+                    disabled={selectedRowIndex >= rows.length - 1}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                    title="Next Record (Down)"
+                  >
+                    ▶
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateToRecord(rows.length - 1)}
+                    disabled={selectedRowIndex >= rows.length - 1}
+                    className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                    title="Last Record (End)"
+                  >
+                    ▶|
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleInsertRow}
+                    className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
+                    title="New (Blank) Record"
+                  >
+                    * New
+                  </button>
+                </div>
+                <InvoiceRecordSearchInput
+                  items={salesSearchableItems}
+                  onPreviewMatch={handlePreviewSearchedSalesRow}
+                  onNavigateToMatch={handleNavigateToSearchedSalesRow}
+                  onMatchesChange={(matches, activeRow) => {
+                    setInvoiceSearchMatchedRows(matches);
+                    setInvoiceSearchActiveRow(activeRow);
                   }}
-                  className="w-9 px-1 py-0 bg-white border border-slate-400 font-mono font-bold text-[10px] text-center text-slate-900 focus:border-blue-600 outline-none"
-                  title="Type Record # and press Enter (or use Up/Down arrows)"
                 />
-                <span className="text-[10px] font-mono">of {rows.length}</span>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(selectedRowIndex + 1)}
-                  disabled={selectedRowIndex >= rows.length - 1}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                  title="Next Record (Down)"
-                >
-                  ▶
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigateToRecord(rows.length - 1)}
-                  disabled={selectedRowIndex >= rows.length - 1}
-                  className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                  title="Last Record (End)"
-                >
-                  ▶|
-                </button>
-                <button
-                  type="button"
-                  onClick={handleInsertRow}
-                  className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
-                  title="New (Blank) Record"
-                >
-                  * New
-                </button>
               </div>
 
               {/* Inline Customer Last Sale History Info */}

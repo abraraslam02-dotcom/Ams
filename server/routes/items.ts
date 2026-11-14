@@ -161,14 +161,12 @@ itemsRouter.get('/', (req: Request, res: Response) => {
       total_stock_units: number;
     };
 
-    // Distinct categories and companies for filter dropdowns
+    // Distinct categories and deduplicated companies for filter dropdowns
     const categories = (
       db.prepare("SELECT DISTINCT category FROM items WHERE category IS NOT NULL AND category != '' ORDER BY category ASC").all() as Array<{ category: string }>
     ).map((r) => r.category);
 
-    const companies = (
-      db.prepare("SELECT DISTINCT company_name FROM items WHERE company_name IS NOT NULL AND company_name != '' ORDER BY company_name ASC").all() as Array<{ company_name: string }>
-    ).map((r) => r.company_name);
+    const companies = getDeduplicatedItemCompanies(db);
 
     return res.json({
       success: true,
@@ -238,6 +236,160 @@ itemsRouter.get('/check-code/:code', (req: Request, res: Response) => {
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * Normalizes a Company Name by trimming outer spaces and collapsing internal whitespace.
+ */
+function normalizeCompanyName(raw: unknown): string {
+  return String(raw || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Ensures the persistent item_companies table exists and is non-destructively synced
+ * with existing item records (items.company_name). Never modifies or deletes any existing items.
+ */
+export function ensureItemCompaniesTableAndSync(db: ReturnType<typeof getDatabase>): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS item_companies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      status TEXT NOT NULL DEFAULT 'Active',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  const existingItemCompanies = db
+    .prepare(
+      `SELECT DISTINCT TRIM(company_name) as c FROM items WHERE company_name IS NOT NULL AND TRIM(company_name) != ''`
+    )
+    .all() as Array<{ c: string }>;
+
+  const insertCompany = db.prepare(
+    "INSERT OR IGNORE INTO item_companies (company_name, status) VALUES (?, 'Active')"
+  );
+  for (const row of existingItemCompanies) {
+    const clean = normalizeCompanyName(row.c);
+    if (clean) {
+      insertCompany.run(clean);
+    }
+  }
+}
+
+/**
+ * Returns a sorted, case-insensitively deduplicated list of all existing item companies
+ * from item_companies and items.company_name.
+ */
+export function getDeduplicatedItemCompanies(db: ReturnType<typeof getDatabase>): string[] {
+  ensureItemCompaniesTableAndSync(db);
+
+  const rows = db
+    .prepare(
+      `SELECT company_name as name FROM item_companies WHERE status = 'Active' AND TRIM(company_name) != ''
+       UNION
+       SELECT company_name as name FROM items WHERE company_name IS NOT NULL AND TRIM(company_name) != ''`
+    )
+    .all() as Array<{ name: string }>;
+
+  const byKey = new Map<string, string>();
+  for (const row of rows) {
+    const clean = normalizeCompanyName(row.name);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (!byKey.has(key)) {
+      byKey.set(key, clean);
+    }
+  }
+
+  return Array.from(byKey.values()).sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' })
+  );
+}
+
+/**
+ * Registers a company name in item_companies if not already present (case-insensitive)
+ * and returns the canonical saved company name.
+ */
+function registerItemCompanyIfNew(db: ReturnType<typeof getDatabase>, rawCompany: unknown): string {
+  const clean = normalizeCompanyName(rawCompany);
+  if (!clean) return '';
+  ensureItemCompaniesTableAndSync(db);
+
+  const existing = db
+    .prepare('SELECT company_name FROM item_companies WHERE LOWER(TRIM(company_name)) = LOWER(?)')
+    .get(clean) as { company_name: string } | undefined;
+
+  if (existing) {
+    return existing.company_name;
+  }
+
+  db.prepare("INSERT OR IGNORE INTO item_companies (company_name, status) VALUES (?, 'Active')").run(clean);
+  return clean;
+}
+
+/**
+ * GET /api/items/companies
+ * Fetch all existing Company names from Company Master (items & item_companies)
+ */
+itemsRouter.get('/companies', (_req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const companies = getDeduplicatedItemCompanies(db);
+    return res.json({
+      success: true,
+      companies,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: `Failed to fetch companies: ${errorMsg}` });
+  }
+});
+
+/**
+ * POST /api/items/companies
+ * Permanently save a new company in the Company Master with case-insensitive duplicate prevention
+ */
+itemsRouter.post('/companies', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const cleanCompany = normalizeCompanyName(req.body?.company_name ?? req.body?.company);
+
+    if (!cleanCompany) {
+      return res.status(400).json({
+        success: false,
+        error: 'Company name is required.',
+      });
+    }
+
+    const existingCompanies = getDeduplicatedItemCompanies(db);
+    const duplicateMatch = existingCompanies.find(
+      (c) => c.toLowerCase() === cleanCompany.toLowerCase()
+    );
+
+    if (duplicateMatch) {
+      return res.status(400).json({
+        success: false,
+        duplicate: true,
+        existingCompany: duplicateMatch,
+        error: `Company "${duplicateMatch}" already exists. Duplicate company names are not allowed.`,
+      });
+    }
+
+    db.prepare("INSERT INTO item_companies (company_name, status) VALUES (?, 'Active')").run(cleanCompany);
+
+    const updatedCompanies = getDeduplicatedItemCompanies(db);
+    return res.status(201).json({
+      success: true,
+      company: cleanCompany,
+      companies: updatedCompanies,
+      message: `Company "${cleanCompany}" added successfully.`,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: `Failed to add company: ${errorMsg}` });
   }
 });
 
@@ -327,6 +479,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
       // (If requestedCode is empty or already taken due to simultaneous creation, allocateNextItemCode advances to the next unused sequential code)
       const allocated = allocateNextItemCode(db, requestedCode);
       const finalCode = allocated.next_code;
+      const canonicalCompany = registerItemCompanyIfNew(db, company_name) || normalizeCompanyName(company_name);
 
       const insertSql = `
         INSERT INTO items (
@@ -338,7 +491,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
 
       const result = db.prepare(insertSql).run(
         finalCode,
-        String(company_name).trim(),
+        canonicalCompany,
         String(item_name).trim(),
         generic_name ? String(generic_name).trim() : null,
         String(category).trim(),
@@ -489,9 +642,14 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       WHERE id = ?
     `;
 
+    const resolvedCompany =
+      company_name !== undefined
+        ? registerItemCompanyIfNew(db, company_name) || normalizeCompanyName(company_name)
+        : existingItem.company_name;
+
     db.prepare(updateSql).run(
       cleanCode,
-      company_name !== undefined ? String(company_name).trim() : existingItem.company_name,
+      resolvedCompany,
       item_name !== undefined ? String(item_name).trim() : existingItem.item_name,
       generic_name !== undefined ? (generic_name ? String(generic_name).trim() : null) : existingItem.generic_name,
       category !== undefined ? String(category).trim() : existingItem.category,

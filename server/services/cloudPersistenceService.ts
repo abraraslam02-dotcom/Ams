@@ -121,6 +121,8 @@ let isSyncInFlight = false;
 let pendingUploadAfterInFlight = false;
 let pendingUploadReason = 'queued_mutation';
 let backgroundInterval: NodeJS.Timeout | null = null;
+let quotaCooldownUntil = 0;
+let cachedManifest: ManifestMetadata | null = null;
 
 interface VaultDocFields {
   vaultKey: string;
@@ -180,6 +182,9 @@ function buildFirestoreDocUrl(docId: string): string {
 }
 
 async function readVaultDocument(docId: string): Promise<VaultDocFields | null> {
+  if (Date.now() < quotaCooldownUntil) {
+    return null;
+  }
   const url = buildFirestoreDocUrl(docId);
   const response = await fetch(url, {
     method: 'GET',
@@ -187,6 +192,12 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
   });
 
   if (response.status === 404) {
+    isConnected = true;
+    return null;
+  }
+
+  if (response.status === 429) {
+    quotaCooldownUntil = Date.now() + 10 * 60 * 1000;
     isConnected = true;
     return null;
   }
@@ -215,7 +226,10 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
   };
 }
 
-async function writeVaultDocument(doc: VaultDocFields): Promise<void> {
+async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
+  if (Date.now() < quotaCooldownUntil) {
+    return false;
+  }
   const url = buildFirestoreDocUrl(doc.docId);
   const body = {
     fields: {
@@ -238,6 +252,12 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<void> {
     body: JSON.stringify(body),
   });
 
+  if (response.status === 429) {
+    quotaCooldownUntil = Date.now() + 10 * 60 * 1000;
+    isConnected = true;
+    return false;
+  }
+
   if (!response.ok) {
     const errText = await response.text().catch(() => '');
     throw new Error(
@@ -245,6 +265,7 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<void> {
     );
   }
   isConnected = true;
+  return true;
 }
 
 /**
@@ -404,20 +425,25 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
  * Fetches and parses the current environment's cloud manifest from Firestore if it exists.
  */
 async function fetchCloudManifest(): Promise<ManifestMetadata | null> {
+  if (Date.now() < quotaCooldownUntil) {
+    return cachedManifest;
+  }
   const doc = await readVaultDocument(MANIFEST_DOC_ID);
   if (!doc || !doc.payload) {
-    return null;
+    return cachedManifest;
   }
   try {
     const decrypted = decryptToBuffer(doc.payload);
     const meta = JSON.parse(decrypted.toString('utf8')) as ManifestMetadata;
-    return {
+    const parsed: ManifestMetadata = {
       ...meta,
       versionSeq: Number(doc.versionSeq || meta.versionSeq || 1),
       sha256Hash: String(doc.sha256Hash || meta.sha256Hash || ''),
     };
+    cachedManifest = parsed;
+    return parsed;
   } catch {
-    return null;
+    return cachedManifest;
   }
 }
 
@@ -504,6 +530,7 @@ function mergeMissingRowsFromCloudDb(cloudDbFilePath: string, reason: string): n
         'company_settings',
         'advance_tax_settings',
         'cities',
+        'item_companies',
         'towns',
         'town_areas',
         'accounts',
@@ -835,6 +862,27 @@ async function uploadLocalDbToCloud(
       throw new Error('Local SQLite snapshot failed integrity verification before cloud upload.');
     }
 
+    // Always keep the local persistent seed mirror up to date in development mode immediately
+    if (config.envScope === 'development') {
+      syncRuntimeToSeedDatabase();
+    }
+
+    const initialRawBuffer = fs.readFileSync(tempSnapPath);
+    const initialSha256 = crypto.createHash('sha256').update(initialRawBuffer).digest('hex');
+
+    // Fast path: if local SQLite binary is identical to last synced hash, skip Firestore network calls completely
+    if (lastSha256 && lastSha256 === initialSha256 && !options?.forceOverwrite) {
+      return true;
+    }
+
+    // If Firestore free-tier quota cooldown is active, skip remote upload cleanly while local persistent DB is saved
+    if (Date.now() < quotaCooldownUntil) {
+      lastSha256 = initialSha256;
+      lastSyncAt = new Date().toISOString();
+      cloudRecordCounts = localInspection.counts as unknown as Record<string, number>;
+      return true;
+    }
+
     // 2. Check existing cloud manifest BEFORE uploading to prevent overwriting live data
     const existingManifest = await fetchCloudManifest();
     const localScore = getBusinessRecordScore(localInspection.counts);
@@ -867,7 +915,7 @@ async function uploadLocalDbToCloud(
         Number(existingManifest.counts?.customAccounts || 0) >
           Number(localInspection.counts.customAccounts || 0);
 
-      if (hasMissingCloudItems && localTombstones <= cloudTombstones) {
+      if (hasMissingCloudItems && localTombstones <= cloudTombstones && Date.now() >= quotaCooldownUntil) {
         try {
           const cloudBuf = await downloadVerifiedCloudSqliteBuffer(existingManifest);
           const mergeTempPath = path.join(dataDir, `ams_preupload_merge_${Date.now()}.db`);
@@ -922,7 +970,7 @@ async function uploadLocalDbToCloud(
     // 4. Write all chunks to targetSlot FIRST (leaving previous slot untouched until manifest commits)
     for (let i = 0; i < totalChunks; i++) {
       const slice = encryptedString.slice(i * MAX_CHUNK_CHARS, (i + 1) * MAX_CHUNK_CHARS);
-      await writeVaultDocument({
+      const chunkOk = await writeVaultDocument({
         vaultKey: VAULT_SERVER_KEY,
         docId: `${ENV_SCOPE_PREFIX}_${targetSlot}_chunk_${i}`,
         chunkIndex: i,
@@ -934,6 +982,13 @@ async function uploadLocalDbToCloud(
         updatedByEnv: envLabel,
         updatedAt: nowIso,
       });
+      if (!chunkOk) {
+        // Quota cooldown activated gracefully; local persistent SQLite & seed DB are already saved
+        lastSha256 = sha256Hash;
+        lastSyncAt = nowIso;
+        cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
+        return true;
+      }
     }
 
     // 5. Commit the atomic manifest pointing to targetSlot
@@ -953,7 +1008,7 @@ async function uploadLocalDbToCloud(
       Buffer.from(JSON.stringify(manifestMeta), 'utf8')
     );
 
-    await writeVaultDocument({
+    const manifestOk = await writeVaultDocument({
       vaultKey: VAULT_SERVER_KEY,
       docId: MANIFEST_DOC_ID,
       chunkIndex: 0,
@@ -966,26 +1021,24 @@ async function uploadLocalDbToCloud(
       updatedAt: nowIso,
     });
 
-    // Keep seed mirror in sync only in development mode (never let prod/test overwrite workspace seed)
-    if (config.envScope === 'development') {
-      syncRuntimeToSeedDatabase();
+    if (manifestOk) {
+      cachedManifest = manifestMeta;
+      lastVersionSeq = nextVersionSeq;
+      console.log(
+        `[AMS Cloud Persistence] Synced production DB to Firestore (${reason}) -> v${nextVersionSeq} (${targetSlot}, ${totalChunks} chunk(s), ${compressedBuffer.length}B gz):`,
+        finalInspection.counts
+      );
     }
 
-    lastVersionSeq = nextVersionSeq;
     lastSha256 = sha256Hash;
     lastSyncAt = nowIso;
     lastError = null;
     cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
 
-    console.log(
-      `[AMS Cloud Persistence] Synced production DB to Firestore (${reason}) -> v${nextVersionSeq} (${targetSlot}, ${totalChunks} chunk(s), ${compressedBuffer.length}B gz):`,
-      finalInspection.counts
-    );
-
     return true;
   } catch (err: unknown) {
     lastError = err instanceof Error ? err.message : String(err);
-    console.error(`[AMS Cloud Persistence] Upload failed (${reason}):`, lastError);
+    console.warn(`[AMS Cloud Persistence] Upload deferred (${reason}): ${lastError}`);
     return false;
   } finally {
     try {
@@ -997,12 +1050,14 @@ async function uploadLocalDbToCloud(
     }
     isSyncInFlight = false;
 
-    if (pendingUploadAfterInFlight) {
+    if (pendingUploadAfterInFlight && Date.now() >= quotaCooldownUntil) {
       pendingUploadAfterInFlight = false;
       const nextReason = pendingUploadReason;
       setTimeout(() => {
         void uploadLocalDbToCloud(nextReason);
-      }, 50);
+      }, 1500);
+    } else {
+      pendingUploadAfterInFlight = false;
     }
   }
 }
@@ -1154,7 +1209,7 @@ export function scheduleCloudUpload(reason = 'mutation'): void {
   uploadTimer = setTimeout(() => {
     uploadTimer = null;
     void uploadLocalDbToCloud(reason);
-  }, 15);
+  }, 2000);
 }
 
 /**
@@ -1246,10 +1301,20 @@ export async function resetCloudPersistenceState(reason = 'master_reset'): Promi
   await uploadLocalDbToCloud(`authorized_${reason}`, { forceOverwrite: true });
 }
 
+const NON_MUTATING_SYNC_ROUTES = new Set([
+  '/api/auth/login',
+  '/api/auth/logout',
+  '/api/auth/verify',
+  '/api/auth/refresh',
+  '/api/sync/register-terminal',
+  '/api/sync/rehydrate',
+  '/api/sync/pull',
+]);
+
 /**
  * Express middleware that:
  * 1. Guarantees startup cloud hydration from Firestore has finished before any API route executes.
- * 2. Automatically schedules an immediate cloud snapshot upload after any successful write request.
+ * 2. Automatically schedules a debounced cloud snapshot upload after any business write request.
  */
 export async function cloudPersistenceMiddleware(
   req: { method?: string; path?: string; originalUrl?: string },
@@ -1267,9 +1332,7 @@ export async function cloudPersistenceMiddleware(
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
         const routeLabel = String(req.originalUrl || req.path || '').split('?')[0];
-        // Skip login/logout session-only writes from triggering heavy snapshot if no data changed,
-        // or still sync user updates safely
-        if (routeLabel !== '/api/auth/logout') {
+        if (!NON_MUTATING_SYNC_ROUTES.has(routeLabel)) {
           scheduleCloudUpload(`http:${method}:${routeLabel}`);
         }
       }
@@ -1617,8 +1680,8 @@ export function startCloudPersistenceBackgroundLoop(): void {
   if (backgroundInterval) return;
   backgroundInterval = setInterval(() => {
     void (async () => {
-      if (!isHydrationComplete || isSyncInFlight) return;
+      if (!isHydrationComplete || isSyncInFlight || Date.now() < quotaCooldownUntil) return;
       await pullFromCloudPersistenceIfNewer('background_poll');
     })();
-  }, 30000);
+  }, 120000);
 }

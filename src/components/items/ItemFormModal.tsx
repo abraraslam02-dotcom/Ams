@@ -3,11 +3,13 @@ import { X, Save, AlertCircle, CheckCircle2, Calculator, Info } from 'lucide-rea
 import { Item, ItemFormData } from '../../types/item';
 import { api } from '../../services/api';
 import { NumericInput } from '../common/NumericInput';
+import { ItemCompanySelect } from './ItemCompanySelect';
 
 interface ItemFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSaved: (item: Item) => void;
+  onCompanyCreated?: (companies: string[]) => void;
   editingItem?: Item | null;
 }
 
@@ -29,6 +31,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   isOpen,
   onClose,
   onSaved,
+  onCompanyCreated,
   editingItem,
 }) => {
   const isEditing = Boolean(editingItem);
@@ -296,18 +299,17 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                 )}
               </div>
 
-              {/* Company Name */}
+              {/* Company Name (Searchable Dropdown with Add New Company Popup) */}
               <div className="space-y-1">
                 <label className="block text-xs font-semibold text-slate-700">
                   Company Name <span className="text-rose-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  required
+                <ItemCompanySelect
                   value={formData.company_name}
-                  onChange={(e) => setFormData({ ...formData, company_name: e.target.value })}
-                  placeholder="e.g. GSK, Abbott, Getz, Searle"
-                  className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  required
+                  onChange={(company) => setFormData((prev) => ({ ...prev, company_name: company }))}
+                  onCompanyCreated={onCompanyCreated}
+                  placeholder="Search or select company..."
                 />
               </div>
 

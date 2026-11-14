@@ -291,25 +291,69 @@
     line-height: 1.2 !important;
   }
 
-  /* Guaranteed visibility & sizing for the Sales POS Item Grid across all laptop & desktop screens */
+  /* 10+ visible row density & clean internal scrolling for Sales & Purchase Invoice Grids */
+  .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) thead th {
+    font-size: 13.5px !important;
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    min-height: 30px !important;
+    height: 30px !important;
+  }
+
+  .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody tr {
+    min-height: 30px !important;
+    height: 31px !important;
+  }
+
+  .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody td {
+    font-size: 14px !important;
+    padding-top: 1px !important;
+    padding-bottom: 1px !important;
+    height: 31px !important;
+  }
+
+  .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody td input:not([type="checkbox"]):not([type="radio"]),
+  .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) tbody td select {
+    font-size: 14px !important;
+    min-height: 27px !important;
+    height: 27px !important;
+    padding-top: 1px !important;
+    padding-bottom: 1px !important;
+  }
+
+  /* Compact MS Access record bar & inline invoice item search */
+  .ams-readable-invoice-scope .ams-access-record-bar button:not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-access-record-bar input:not([type="checkbox"]):not([type="radio"]):not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-access-record-bar span:not(.print-modal-container *) {
+    font-size: 12.5px !important;
+    min-height: 24px !important;
+    line-height: 1.2 !important;
+  }
+
+  .ams-readable-invoice-scope .ams-access-record-bar .ams-access-record-search input {
+    min-height: 22px !important;
+    height: 22px !important;
+    padding-top: 1px !important;
+    padding-bottom: 1px !important;
+  }
+
+  /* Guaranteed 10+ visible rows & internal vertical scroll across laptop & desktop screens */
   .ams-readable-invoice-scope .ams-pos-item-grid-card {
     display: flex !important;
     flex-direction: column !important;
     visibility: visible !important;
     opacity: 1 !important;
-    min-height: 250px !important;
-    flex: 1 1 250px !important;
+    min-height: 375px !important;
+    flex: 1 1 0% !important;
   }
 
   .ams-readable-invoice-scope .ams-pos-item-grid-scroll {
     display: block !important;
     visibility: visible !important;
     opacity: 1 !important;
-    min-height: 210px !important;
-    flex: 1 1 auto !important;
+    min-height: 342px !important;
+    flex: 1 1 0% !important;
     overflow-y: auto !important;
     overflow-x: auto !important;
   }
 }
-
-

@@ -787,6 +787,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
         isOpen={isFormModalOpen}
         onClose={() => setIsFormModalOpen(false)}
         editingItem={editingItem}
+        onCompanyCreated={(updatedCompanies) => setCompanies(updatedCompanies)}
         onSaved={(savedItem) => {
           setSuccessNotice(
             `Item "${savedItem.item_name}" (${savedItem.item_code}) saved permanently to database.`

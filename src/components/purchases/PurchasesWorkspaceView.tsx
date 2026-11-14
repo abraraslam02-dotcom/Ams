@@ -58,6 +58,10 @@ import { NumericInput } from '../common/NumericInput';
 import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
+import {
+  InvoiceRecordSearchInput,
+  InvoiceSearchableItem,
+} from '../common/InvoiceRecordSearchInput';
 import { generatePurchaseOrderSmsText } from '../../utils/invoiceSms';
 
 export type PurchaseSubTab =
@@ -73,9 +77,9 @@ interface PurchasesWorkspaceViewProps {
   onBackToDashboard?: () => void;
 }
 
-const INITIAL_PURCHASE_ROWS = 1;
-const PURCHASE_HEADER_HEIGHT_PX = 18;
-const PURCHASE_ROW_HEIGHT_PX = 24;
+export const INITIAL_PURCHASE_ROWS = 10;
+const PURCHASE_HEADER_HEIGHT_PX = 30;
+const PURCHASE_ROW_HEIGHT_PX = 31;
 const ACTIVE_PURCHASE_DRAFT_KEY = 'ams_active_purchase_draft_v2';
 
 const round2 = (n: number) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
@@ -148,9 +152,9 @@ function isPurchaseLinePopulated(line?: PurchaseLineItem): boolean {
   return Number(line.item_id || 0) > 0;
 }
 
-function ensureMinimumPurchaseRows(
+export function ensureMinimumPurchaseRows(
   inputLines: PurchaseLineItem[],
-  _minCount: number = INITIAL_PURCHASE_ROWS,
+  minCount: number = INITIAL_PURCHASE_ROWS,
   _activeRowIdx: number = 0
 ): PurchaseLineItem[] {
   const result = [...inputLines];
@@ -161,8 +165,9 @@ function ensureMinimumPurchaseRows(
       break;
     }
   }
-  // Keep only populated rows plus one ready-to-use blank row so searching never spawns empty rows
-  const desiredCount = Math.max(1, lastPopulatedIdx >= 0 ? lastPopulatedIdx + 2 : 1);
+  // Keep at least 10 visible rows (or screen-fitted capacity) plus 1 ready-to-use blank entry row
+  const minFloor = Math.max(INITIAL_PURCHASE_ROWS, minCount || INITIAL_PURCHASE_ROWS);
+  const desiredCount = Math.max(minFloor, lastPopulatedIdx >= 0 ? lastPopulatedIdx + 2 : minFloor);
 
   while (result.length < desiredCount) {
     result.push(createBlankPurchaseLine());
@@ -233,11 +238,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // the user deliberately clicks inside that datasheet with the mouse.
   const posDatasheetMouseActivatedRef = useRef(false);
 
-  // Responsive Datasheet Lines (Automatically sized to fit screen height)
+  // Responsive Datasheet Lines (Minimum 10 visible rows, automatically expands to fit taller screens)
   const [lines, setLines] = useState<PurchaseLineItem[]>(() =>
     ensureMinimumPurchaseRows([], INITIAL_PURCHASE_ROWS)
   );
   const [draftRestored, setDraftRestored] = useState(false);
+  const [purchaseSearchMatchedRows, setPurchaseSearchMatchedRows] = useState<number[]>([]);
+  const [purchaseSearchActiveRow, setPurchaseSearchActiveRow] = useState<number | null>(null);
 
   // TWO INDEPENDENT INVOICE INTERFACES: Option 1 (POS View) vs Option 2 (MS Access View)
   const [purchaseViewMode, setPurchaseViewMode] = useState<'pos' | 'access'>(() => {
@@ -347,7 +354,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     if (availableHeight <= 0) return;
 
     const bodyHeight = Math.max(0, availableHeight - PURCHASE_HEADER_HEIGHT_PX);
-    const fittingRows = Math.max(3, Math.floor(bodyHeight / PURCHASE_ROW_HEIGHT_PX));
+    const fittingRows = Math.max(
+      INITIAL_PURCHASE_ROWS,
+      Math.floor(bodyHeight / PURCHASE_ROW_HEIGHT_PX)
+    );
 
     visibleRowCapacityRef.current = fittingRows;
     setVisibleRowCapacity((prev) => (prev === fittingRows ? prev : fittingRows));
@@ -1863,6 +1873,52 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }, 15);
   };
 
+  // Read-only projection of existing purchase lines (includes catalog barcode lookup)
+  const purchaseSearchableItems = useMemo<InvoiceSearchableItem[]>(() => {
+    const barcodeByItemId = new Map<number, string>();
+    for (const it of items) {
+      if (it?.id && it?.barcode) {
+        barcodeByItemId.set(Number(it.id), String(it.barcode));
+      }
+    }
+    return lines.map((line, idx) => ({
+      rowIndex: idx,
+      itemId: line.item_id > 0 ? line.item_id : null,
+      itemCode: line.item_code || '',
+      itemName: line.item_name || '',
+      barcode: line.item_id > 0 ? barcodeByItemId.get(Number(line.item_id)) || '' : '',
+    }));
+  }, [lines, items]);
+
+  const handlePreviewSearchedPurchaseRow = useCallback((rowIdx: number | null) => {
+    if (rowIdx === null || rowIdx < 0) return;
+    setSelectedPurchaseLineIndex(rowIdx);
+    const rowEl = document.querySelector(`[data-purchase-row-idx="${rowIdx}"]`) as HTMLElement | null;
+    if (rowEl) {
+      rowEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, []);
+
+  const handleNavigateToSearchedPurchaseRow = useCallback(
+    (rowIdx: number) => {
+      if (rowIdx < 0 || rowIdx >= lines.length) return;
+      // Safely suppress opening Item List modal so existing invoice item is never modified
+      suppressItemListReopenRef.current = true;
+      posDatasheetMouseActivatedRef.current = true;
+      setSelectedPurchaseLineIndex(rowIdx);
+      setPurchaseRecordJumpInput(String(rowIdx + 1));
+      setActiveRowItemSearchIdx(null);
+      const prefix: 'pur_cell' | 'pos_row' =
+        purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+      setTimeout(() => {
+        const rowEl = document.querySelector(`[data-purchase-row-idx="${rowIdx}"]`) as HTMLElement | null;
+        rowEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        focusPurchaseCell(rowIdx, 'quantity', prefix);
+      }, 15);
+    },
+    [lines.length, purchaseViewMode]
+  );
+
   const handlePurchaseRecordJumpKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -3030,7 +3086,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     <div
       className={`ams-readable-invoice-scope w-full h-full ${
         subTab === 'new-invoice'
-          ? 'flex-1 max-h-full flex flex-col min-h-0 overflow-y-auto px-1.5 py-1 bg-slate-100'
+          ? 'flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden px-1.5 py-1 bg-slate-100'
           : 'flex-1 min-h-0 overflow-y-auto p-2 space-y-3 bg-slate-100'
       }`}
     >
@@ -3204,12 +3260,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       {/* TAB 1: NEW / EDIT PURCHASE INVOICE SCREEN (BUILT JUST LIKE SALES INVOICE!) */}
       {subTab === 'new-invoice' && (
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 flex flex-col">
           {/* ================= OPTION 1: TRADITIONAL POS INTERFACE (LIKE SALES POS VIEW) ================= */}
           {purchaseViewMode === 'pos' && (
             <form
               onSubmit={(e) => handleSavePurchaseInvoice(e, false)}
-              className="flex-1 min-h-0 flex flex-col gap-1 overflow-hidden"
+              className="flex-1 min-h-0 flex flex-col gap-1"
             >
               {/* POS Header: Supplier Search, Live Previous Balance, Bill #, Date & Payment Mode */}
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-3.5 py-2 space-y-1.5 shrink-0">
@@ -3758,9 +3814,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               )}
 
-              {/* Responsive Purchase Items Grid (Automatically adjusts height to screen, Internal Scroll, Fixed Headers) */}
-              <div className="bg-white rounded-lg border border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-0">
-                <div className="px-2.5 py-0.5 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-[11px] shrink-0">
+              {/* Responsive Purchase Items Grid (Minimum 10 Visible Rows, Internal Scroll, Fixed Headers) */}
+              <div className="ams-pos-item-grid-card bg-white rounded-lg border border-slate-300 shadow-sm overflow-hidden flex flex-col flex-1 min-h-[375px]">
+                <div className="ams-pos-compact-chrome px-2.5 py-0.5 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-[11px] shrink-0">
                   <span className="font-bold text-slate-800 uppercase tracking-wider text-[10px]">
                     Purchase Invoice Items ({validLines.length} Active / {lines.length} Rows • Fits {visibleRowCapacity})
                   </span>
@@ -3778,9 +3834,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       posDatasheetMouseActivatedRef.current = true;
                     }
                   }}
-                  className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative"
+                  className="ams-pos-item-grid-scroll flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative"
                 >
-                  <table className="w-full min-w-[1680px] text-left text-[11px] border-collapse leading-none">
+                  <table className="ams-compact-10-grid w-full min-w-[1680px] text-left text-[11px] border-collapse leading-none">
                     <thead className="sticky top-0 z-10 bg-slate-100 border-b border-slate-200 text-slate-600 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
                       <tr className="h-6">
                         <th className="py-0 px-2 w-8 text-center h-6">#</th>
@@ -3804,13 +3860,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     <tbody className="divide-y divide-slate-200">
                       {lines.map((line, rIdx) => {
                         const isSelected = rIdx === selectedPurchaseLineIndex;
+                        const isActiveSearchMatch = purchaseSearchActiveRow === rIdx;
+                        const isSearchMatch = purchaseSearchMatchedRows.includes(rIdx);
 
                         return (
                           <tr
                             key={rIdx}
+                            data-purchase-row-idx={rIdx}
                             onClick={() => setSelectedPurchaseLineIndex(rIdx)}
                             className={`cursor-pointer transition-colors h-[16px] leading-none ${
-                              isSelected
+                              isActiveSearchMatch
+                                ? 'bg-amber-200/80 ring-2 ring-inset ring-amber-500 font-semibold'
+                                : isSearchMatch
+                                ? 'bg-sky-100/80 font-medium'
+                                : isSelected
                                 ? 'bg-emerald-50/90 font-medium'
                                 : rIdx % 2 === 0
                                 ? 'bg-white hover:bg-slate-50'
@@ -4251,76 +4314,87 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </table>
                 </div>
 
-                {/* POS Datasheet Record Navigator Bar */}
-                <div className="bg-slate-200 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-                  <div className="flex items-center gap-1">
-                    <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(0)}
-                      disabled={selectedPurchaseLineIndex === 0}
-                      title="First Record (Home)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      |◀
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex - 1)}
-                      disabled={selectedPurchaseLineIndex === 0}
-                      title="Previous Record (Up)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      ◀
-                    </button>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={purchaseRecordJumpInput}
-                      onChange={(e) =>
-                        setPurchaseRecordJumpInput(e.target.value.replace(/[^0-9]/g, ''))
-                      }
-                      onKeyDown={handlePurchaseRecordJumpKeyDown}
-                      onBlur={() => {
-                        const parsed = parseInt(purchaseRecordJumpInput, 10);
-                        if (!isNaN(parsed) && parsed >= 1) {
-                          navigateToPurchaseRecord(parsed - 1);
-                        } else {
-                          setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
+                {/* POS Datasheet Record Navigator Bar + MS Access-Style Invoice Item Search */}
+                <div className="ams-pos-compact-chrome ams-access-record-bar bg-slate-200 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex items-center gap-1">
+                      <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(0)}
+                        disabled={selectedPurchaseLineIndex === 0}
+                        title="First Record (Home)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        |◀
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex - 1)}
+                        disabled={selectedPurchaseLineIndex === 0}
+                        title="Previous Record (Up)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        ◀
+                      </button>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={purchaseRecordJumpInput}
+                        onChange={(e) =>
+                          setPurchaseRecordJumpInput(e.target.value.replace(/[^0-9]/g, ''))
                         }
+                        onKeyDown={handlePurchaseRecordJumpKeyDown}
+                        onBlur={() => {
+                          const parsed = parseInt(purchaseRecordJumpInput, 10);
+                          if (!isNaN(parsed) && parsed >= 1) {
+                            navigateToPurchaseRecord(parsed - 1);
+                          } else {
+                            setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
+                          }
+                        }}
+                        title="Type record number and press Enter to jump"
+                        className="w-9 px-1 py-0 text-center bg-white border border-slate-400 focus:border-emerald-600 font-mono font-bold text-[10px] text-slate-900 outline-none"
+                      />
+                      <span className="text-[10px] font-mono">of {lines.length}</span>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex + 1)}
+                        disabled={selectedPurchaseLineIndex >= lines.length - 1}
+                        title="Next Record (Down)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        ▶
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(lines.length - 1)}
+                        disabled={selectedPurchaseLineIndex >= lines.length - 1}
+                        title="Last Record (End)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        ▶|
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addLineRow}
+                        title="Jump to first blank row or append new record"
+                        className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
+                      >
+                        * New
+                      </button>
+                    </div>
+                    <InvoiceRecordSearchInput
+                      items={purchaseSearchableItems}
+                      onPreviewMatch={handlePreviewSearchedPurchaseRow}
+                      onNavigateToMatch={handleNavigateToSearchedPurchaseRow}
+                      onMatchesChange={(matches, activeRow) => {
+                        setPurchaseSearchMatchedRows(matches);
+                        setPurchaseSearchActiveRow(activeRow);
                       }}
-                      title="Type record number and press Enter to jump"
-                      className="w-9 px-1 py-0 text-center bg-white border border-slate-400 focus:border-emerald-600 font-mono font-bold text-[10px] text-slate-900 outline-none"
                     />
-                    <span className="text-[10px] font-mono">of {lines.length}</span>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex + 1)}
-                      disabled={selectedPurchaseLineIndex >= lines.length - 1}
-                      title="Next Record (Down)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      ▶
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(lines.length - 1)}
-                      disabled={selectedPurchaseLineIndex >= lines.length - 1}
-                      title="Last Record (End)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      ▶|
-                    </button>
-                    <button
-                      type="button"
-                      onClick={addLineRow}
-                      title="Jump to first blank row or append new record"
-                      className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
-                    >
-                      * New
-                    </button>
                   </div>
-                  <div className="flex items-center gap-2 text-[10px] font-mono text-slate-600">
+                  <div className="flex items-center gap-2 text-[10px] font-mono text-slate-600 hidden xl:flex">
                     <span>Keys: Enter/Tab • Arrows • PgUp/PgDn • Ctrl+Home/End</span>
                   </div>
                 </div>
@@ -4511,7 +4585,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           {purchaseViewMode === 'access' && (
             <form
               onSubmit={(e) => handleSavePurchaseInvoice(e, false)}
-              className="flex-1 min-h-0 flex flex-col bg-slate-200 border-2 border-slate-400 rounded-sm shadow-xs overflow-hidden select-none"
+              className="flex-1 min-h-0 flex flex-col bg-slate-200 border-2 border-slate-400 rounded-sm shadow-xs select-none"
             >
               {/* Combined Access Window Title Bar & Ribbon Toolbar */}
               <div className="bg-gradient-to-r from-slate-800 via-slate-850 to-slate-900 text-white px-2.5 py-0.5 flex flex-wrap items-center justify-between gap-1 border-b border-slate-700 text-[11px] shrink-0 select-none">
@@ -4911,13 +4985,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               </div>
 
-              {/* Responsive MS Access Datasheet Grid (Automatically adjusts height to screen, Internal Scroll, Fixed Headers) */}
-              <div className="flex flex-col flex-1 min-h-0 bg-white overflow-hidden select-none border-b border-slate-400">
+              {/* Responsive MS Access Datasheet Grid (Minimum 10 Visible Rows, Internal Scroll, Fixed Headers) */}
+              <div className="flex flex-col flex-1 min-h-[375px] bg-white overflow-hidden select-none border-b border-slate-400">
                 <div
                   ref={accessGridViewportRef}
-                  className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative"
+                  className="flex-1 min-h-[342px] overflow-y-auto overflow-x-auto relative"
                 >
-                  <table className="w-full min-w-[1680px] border-collapse text-[11px] font-sans leading-none">
+                  <table className="ams-compact-10-grid w-full min-w-[1680px] border-collapse text-[11px] font-sans leading-none">
                     <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                       <tr className="h-6">
                         <th className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 w-7 text-center font-mono h-6">
@@ -4971,12 +5045,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     <tbody>
                       {lines.map((line, idx) => {
                         const isSelected = idx === selectedPurchaseLineIndex;
+                        const isActiveSearchMatch = purchaseSearchActiveRow === idx;
+                        const isSearchMatch = purchaseSearchMatchedRows.includes(idx);
                         return (
                           <tr
                             key={idx}
+                            data-purchase-row-idx={idx}
                             onClick={() => setSelectedPurchaseLineIndex(idx)}
                             className={`border-b border-slate-300 font-sans transition-colors h-[16px] leading-none ${
-                              isSelected
+                              isActiveSearchMatch
+                                ? 'bg-amber-200/90 ring-2 ring-inset ring-amber-500 font-semibold'
+                                : isSearchMatch
+                                ? 'bg-sky-100/90 font-medium'
+                                : isSelected
                                 ? 'bg-amber-50/90 font-medium'
                                 : idx % 2 === 0
                                 ? 'bg-white hover:bg-slate-50'
@@ -5414,74 +5495,85 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </table>
                 </div>
 
-                {/* Microsoft Access Record Navigator Bar */}
-                <div className="bg-slate-200 border-t border-slate-400 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-                  <div className="flex items-center gap-1">
-                    <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(0)}
-                      disabled={selectedPurchaseLineIndex === 0}
-                      title="First Record (Home)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      |◀
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex - 1)}
-                      disabled={selectedPurchaseLineIndex === 0}
-                      title="Previous Record (Up)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      ◀
-                    </button>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={purchaseRecordJumpInput}
-                      onChange={(e) =>
-                        setPurchaseRecordJumpInput(e.target.value.replace(/[^0-9]/g, ''))
-                      }
-                      onKeyDown={handlePurchaseRecordJumpKeyDown}
-                      onBlur={() => {
-                        const parsed = parseInt(purchaseRecordJumpInput, 10);
-                        if (!isNaN(parsed) && parsed >= 1) {
-                          navigateToPurchaseRecord(parsed - 1);
-                        } else {
-                          setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
+                {/* Microsoft Access Record Navigator Bar + Invoice Item Search */}
+                <div className="ams-access-record-bar bg-slate-200 border-t border-slate-400 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex items-center gap-1">
+                      <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(0)}
+                        disabled={selectedPurchaseLineIndex === 0}
+                        title="First Record (Home)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        |◀
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex - 1)}
+                        disabled={selectedPurchaseLineIndex === 0}
+                        title="Previous Record (Up)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        ◀
+                      </button>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={purchaseRecordJumpInput}
+                        onChange={(e) =>
+                          setPurchaseRecordJumpInput(e.target.value.replace(/[^0-9]/g, ''))
                         }
+                        onKeyDown={handlePurchaseRecordJumpKeyDown}
+                        onBlur={() => {
+                          const parsed = parseInt(purchaseRecordJumpInput, 10);
+                          if (!isNaN(parsed) && parsed >= 1) {
+                            navigateToPurchaseRecord(parsed - 1);
+                          } else {
+                            setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
+                          }
+                        }}
+                        title="Type record number and press Enter to jump"
+                        className="w-9 px-1 py-0 text-center bg-white border border-slate-400 focus:border-blue-600 font-mono font-bold text-[10px] text-slate-900 outline-none"
+                      />
+                      <span className="text-[10px] font-mono">of {lines.length}</span>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex + 1)}
+                        disabled={selectedPurchaseLineIndex >= lines.length - 1}
+                        title="Next Record (Down)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        ▶
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => navigateToPurchaseRecord(lines.length - 1)}
+                        disabled={selectedPurchaseLineIndex >= lines.length - 1}
+                        title="Last Record (End)"
+                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
+                      >
+                        ▶|
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addLineRow}
+                        title="Jump to first blank row or append new record"
+                        className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
+                      >
+                        * New
+                      </button>
+                    </div>
+                    <InvoiceRecordSearchInput
+                      items={purchaseSearchableItems}
+                      onPreviewMatch={handlePreviewSearchedPurchaseRow}
+                      onNavigateToMatch={handleNavigateToSearchedPurchaseRow}
+                      onMatchesChange={(matches, activeRow) => {
+                        setPurchaseSearchMatchedRows(matches);
+                        setPurchaseSearchActiveRow(activeRow);
                       }}
-                      title="Type record number and press Enter to jump"
-                      className="w-9 px-1 py-0 text-center bg-white border border-slate-400 focus:border-blue-600 font-mono font-bold text-[10px] text-slate-900 outline-none"
                     />
-                    <span className="text-[10px] font-mono">of {lines.length}</span>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex + 1)}
-                      disabled={selectedPurchaseLineIndex >= lines.length - 1}
-                      title="Next Record (Down)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      ▶
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => navigateToPurchaseRecord(lines.length - 1)}
-                      disabled={selectedPurchaseLineIndex >= lines.length - 1}
-                      title="Last Record (End)"
-                      className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                    >
-                      ▶|
-                    </button>
-                    <button
-                      type="button"
-                      onClick={addLineRow}
-                      title="Jump to first blank row or append new record"
-                      className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
-                    >
-                      * New
-                    </button>
                   </div>
 
                   <div className="flex items-center gap-2.5 text-[10px] font-mono">

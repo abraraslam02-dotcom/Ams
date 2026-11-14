@@ -4,6 +4,7 @@ import { config } from '../config.ts';
 import { ensureSalesmanSequenceTable } from '../utils/salesmanCodeGenerator.ts';
 import { ensureItemCodeSequenceTable } from '../utils/itemCodeGenerator.ts';
 import { ensureCitiesTableAndSync } from '../routes/accounts.ts';
+import { ensureItemCompaniesTableAndSync } from '../routes/items.ts';
 import { getDbResetEpoch } from './resetState.ts';
 
 export interface MigrationResult {
@@ -59,6 +60,7 @@ export function runMigrations(): MigrationResult {
   const migrationName26 = '026_complete_payroll_and_hr_management';
   const migrationName27 = '027_item_search_indexes_and_purchase_loose_rate';
   const migrationName28 = '028_automatic_item_code_sequence_and_cities_master';
+  const migrationName29 = '029_item_companies_master';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -4009,6 +4011,19 @@ export function runMigrations(): MigrationResult {
     if (!applied28) {
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName28, 28);
     }
+
+    // ------------------------------------------------------------------------
+    // MIGRATION 29: Item Companies Master (Non-Destructive Distinct Sync)
+    // ------------------------------------------------------------------------
+    const applied29 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName29);
+
+    ensureItemCompaniesTableAndSync(db);
+
+    if (!applied29) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName29, 29);
+    }
   });
 
   try {
@@ -4027,7 +4042,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

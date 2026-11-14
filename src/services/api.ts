@@ -1212,6 +1212,100 @@ export const api = {
   },
 
   /**
+   * Items Master - Fetch all existing Item Companies from database & saved items
+   */
+  async getItemCompanies(): Promise<{ success: boolean; companies: string[] }> {
+    try {
+      const res = await authFetch('/api/items/companies');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.companies)) {
+          offlineStorage.cacheApiData('item_companies_list', data.companies).catch(() => {});
+          return data;
+        }
+      }
+    } catch {
+      // Offline fallback
+    }
+    const cached = (await offlineStorage.getCachedApiData<string[]>('item_companies_list')) || [];
+    const allItems = await offlineStorage.getAll<any>('items').catch(() => []);
+    const byKey = new Map<string, string>();
+    for (const c of cached) {
+      const clean = String(c || '').trim().replace(/\s+/g, ' ');
+      if (clean && !byKey.has(clean.toLowerCase())) {
+        byKey.set(clean.toLowerCase(), clean);
+      }
+    }
+    for (const it of allItems) {
+      const clean = String(it?.company_name || '').trim().replace(/\s+/g, ' ');
+      if (clean && !byKey.has(clean.toLowerCase())) {
+        byKey.set(clean.toLowerCase(), clean);
+      }
+    }
+    const companies = Array.from(byKey.values()).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+    return { success: true, companies };
+  },
+
+  /**
+   * Items Master - Permanently add a new Company Name with case-insensitive duplicate prevention
+   */
+  async createItemCompany(companyName: string): Promise<{
+    success: boolean;
+    company: string;
+    companies: string[];
+    message?: string;
+  }> {
+    const cleanCompany = String(companyName || '').trim().replace(/\s+/g, ' ');
+    if (!cleanCompany) {
+      throw new Error('Company name is required.');
+    }
+    try {
+      const res = await authFetch('/api/items/companies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_name: cleanCompany }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (Array.isArray(data.companies)) {
+          offlineStorage.cacheApiData('item_companies_list', data.companies).catch(() => {});
+        }
+        return data;
+      }
+      if (res.status >= 400 && res.status < 500 && data.error) {
+        throw new Error(data.error);
+      }
+    } catch (err: any) {
+      if (
+        err?.message &&
+        !err.message.includes('Failed to fetch') &&
+        !err.message.includes('NetworkError') &&
+        (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ) {
+        throw err;
+      }
+    }
+
+    const current = await this.getItemCompanies();
+    const dup = current.companies.find((c) => c.toLowerCase() === cleanCompany.toLowerCase());
+    if (dup) {
+      throw new Error(`Company "${dup}" already exists. Duplicate company names are not allowed.`);
+    }
+    const updated = [...current.companies, cleanCompany].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+    await offlineStorage.cacheApiData('item_companies_list', updated).catch(() => {});
+    return {
+      success: true,
+      company: cleanCompany,
+      companies: updated,
+      message: `Company "${cleanCompany}" added successfully.`,
+    };
+  },
+
+  /**
    * Items Master - Create Item (with Offline Local Persistence & Sync Queue)
    */
   async createItem(item: any) {
