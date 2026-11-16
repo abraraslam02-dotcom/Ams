@@ -28,6 +28,7 @@ import {
   PageMarginOption,
   FontSizeScaleOption,
 } from '../../utils/printEngine';
+import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 interface SalesPrintModalProps {
   isOpen?: boolean;
@@ -59,7 +60,9 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   const [loadingDetails, setLoadingDetails] = useState<boolean>(false);
 
   const [settings, setSettings] = useState<CompanySettings | null>(null);
-  const [format, setFormat] = useState<PaperSizeOption>(initialFormat || 'a4');
+  const [format, setFormat] = useState<PaperSizeOption>(
+    initialFormat === '80mm' || initialFormat === '58mm' ? initialFormat : 'a4'
+  );
   const [orientation, setOrientation] = useState<PageOrientationOption>('portrait');
   const [margin, setMargin] = useState<PageMarginOption>('standard');
   const [fontSizeScale, setFontSizeScale] = useState<FontSizeScaleOption>('normal');
@@ -69,6 +72,21 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   );
   const [fields, setFields] = useState<InvoiceFieldVisibility>({
     ...DEFAULT_FIELD_VISIBILITY,
+  });
+
+  const isThermalFormat = format === '80mm' || format === '58mm';
+  const zoomState = usePreviewZoom({
+    initialZoom: 100,
+    naturalWidthPx:
+      format === '58mm'
+        ? 219
+        : format === '80mm'
+        ? 302
+        : orientation === 'landscape'
+        ? 1123
+        : 794,
+    naturalHeightPx: orientation === 'landscape' ? 794 : 1123,
+    isThermal: isThermalFormat,
   });
 
   const [showFieldControls, setShowFieldControls] = useState<boolean>(false);
@@ -137,7 +155,11 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
         const s = res.data;
         setSettings(s);
         if (!initialFormat && s.default_paper_size) {
-          setFormat(s.default_paper_size);
+          setFormat(
+            s.default_paper_size === '80mm' || s.default_paper_size === '58mm'
+              ? s.default_paper_size
+              : 'a4'
+          );
         }
         if (s.page_orientation) setOrientation(s.page_orientation);
         if (s.page_margin) setMargin(s.page_margin);
@@ -173,12 +195,19 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
     executePrintElement(printAreaRef.current, {
       title: `${storeName} - ${docNum}`,
-      paperSize: format,
+      paperSize: format === '80mm' || format === '58mm' ? format : 'a4',
+      profileId:
+        format === '80mm'
+          ? 'thermal-80mm'
+          : format === '58mm'
+          ? 'thermal-58mm'
+          : 'a4-sales-invoice',
       orientation,
       margin,
       fontSizeScale,
       copies,
       selectedPrinter,
+      showPageNumbers: format !== '80mm' && format !== '58mm',
     });
   };
 
@@ -203,12 +232,12 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   const isCancelled = String(docRecord.status || '').toLowerCase() === 'cancelled';
 
   const isThermal = format === '80mm' || format === '58mm';
-  const isA4 = format === 'a4';
+  const isFullPage = !isThermal;
 
   // Active visibility configuration based on current print / preview scope:
   const activeVisibility = isThermal
     ? moreOptions?.visibility?.thermal
-    : isA4
+    : isFullPage
     ? moreOptions?.visibility?.a4
     : moreOptions?.visibility?.preview;
 
@@ -328,10 +357,20 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
     : String(docRecord.payment_mode || 'Cash');
 
   return (
-    <div className="print-modal-container fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-2 lg:p-4 overflow-y-auto print:static print:bg-white print:p-0">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-6xl max-h-[95vh] flex flex-col overflow-hidden print:shadow-none print:border-0 print:max-w-none print:max-h-none">
+    <div
+      className={`print-modal-container fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center ${
+        zoomState.isFullScreen ? 'p-0' : 'p-1.5 lg:p-3'
+      } overflow-hidden print:static print:bg-white print:p-0`}
+    >
+      <div
+        className={`bg-white shadow-2xl border border-slate-300 w-full flex flex-col overflow-hidden print:shadow-none print:border-0 print:max-w-none print:max-h-none ${
+          zoomState.isFullScreen
+            ? 'h-screen max-w-none max-h-none rounded-none border-0'
+            : 'max-w-[96vw] xl:max-w-7xl h-[95vh] max-h-[95vh] rounded-xl'
+        }`}
+      >
         {/* Top Interactive Print Control Bar (Hidden when printing) */}
-        <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
+        <div className="bg-slate-900 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
               <Printer className="w-4 h-4" />
@@ -339,7 +378,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-bold">
-                  {isReturn ? 'Sales Return Print & Preview' : 'Sales Invoice Print & Preview'} —{' '}
+                  {isReturn ? 'Sales Return Print Preview' : 'Sales Invoice Print Preview'} —{' '}
                   {isReturn ? docRecord.return_number : docRecord.invoice_number}
                 </h3>
                 {isCancelled && (
@@ -349,7 +388,11 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                 )}
               </div>
               <p className="text-[11px] text-slate-400">
-                Exact Database Record · Zero Recalculation · Multi-Page & Thermal Ready
+                {isFullPage
+                  ? 'A4 Standard (210 × 297 mm) · Multi-Page Desktop Preview'
+                  : format === '80mm'
+                  ? '80mm Thermal Roll (80mm Width × Dynamic Auto Height)'
+                  : '58mm Thermal Roll (58mm Width × Dynamic Auto Height)'}
               </p>
             </div>
           </div>
@@ -361,13 +404,13 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                 type="button"
                 onClick={() => setFormat('a4')}
                 className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
-                  format === 'a4'
+                  isFullPage
                     ? 'bg-emerald-600 text-white shadow-xs'
                     : 'text-slate-300 hover:text-white'
                 }`}
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span>A4 Paper</span>
+                <span>A4 (210×297mm)</span>
               </button>
               <button
                 type="button"
@@ -454,22 +497,23 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print Now ({copies} {copies === 1 ? 'Copy' : 'Copies'})</span>
+              <span>Print ({copies} {copies === 1 ? 'Copy' : 'Copies'})</span>
             </button>
 
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1 cursor-pointer"
               title="Close Preview"
             >
-              <X className="w-4 h-4" />
+              <X className="w-3.5 h-3.5" />
+              <span>Close Preview</span>
             </button>
           </div>
         </div>
 
-        {/* Secondary Printing Controls Strip: Printer Target, Orientation, Margins, Font Size, Copies */}
-        <div className="bg-slate-800 text-slate-200 px-4 py-2 border-b border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs print:hidden">
+        {/* Secondary Printing Controls Strip: Printer Target, Orientation, Margins, Font Size, Copies, Zoom & Page Nav */}
+        <div className="bg-slate-800 text-slate-200 px-4 py-2 border-b border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 print:hidden">
           <div className="flex flex-wrap items-center gap-3">
             {/* Printer Selector */}
             <div className="flex items-center gap-1.5">
@@ -489,8 +533,8 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               </select>
             </div>
 
-            {/* Orientation (A4 only) */}
-            {format === 'a4' && (
+            {/* Orientation (Full Page A4 only) */}
+            {isFullPage && (
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                   Orientation:
@@ -500,8 +544,8 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   onChange={(e) => setOrientation(e.target.value as PageOrientationOption)}
                   className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white"
                 >
-                  <option value="portrait">Portrait</option>
-                  <option value="landscape">Landscape</option>
+                  <option value="portrait">Portrait (210 × 297 mm)</option>
+                  <option value="landscape">Landscape (297 × 210 mm)</option>
                 </select>
               </div>
             )}
@@ -555,7 +599,14 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <PreviewZoomToolbar
+              zoomState={zoomState}
+              dark
+              compact
+              showPageNav
+              showFullScreenButton
+            />
             {saveFeedback && (
               <span className="text-[11px] font-semibold text-emerald-400">{saveFeedback}</span>
             )}
@@ -574,7 +625,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
         {/* Expandable Show/Hide Invoice Fields Drawer */}
         {showFieldControls && (
-          <div className="bg-slate-50 border-b border-slate-200 px-4 py-2.5 text-xs print:hidden">
+          <div className="bg-slate-50 border-b border-slate-200 px-4 py-2.5 text-xs shrink-0 print:hidden">
             <div className="flex items-center justify-between mb-1.5">
               <span className="font-bold text-slate-700 flex items-center gap-1.5">
                 <Eye className="w-3.5 h-3.5 text-emerald-600" />
@@ -623,7 +674,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
         {/* Expandable Printer Capability & OS Spooler Setup Guide */}
         {showPrinterGuide && (
-          <div className="bg-sky-50 border-b border-sky-200 px-4 py-2.5 text-xs text-sky-950 print:hidden">
+          <div className="bg-sky-50 border-b border-sky-200 px-4 py-2.5 text-xs text-sky-950 shrink-0 print:hidden">
             <div className="font-bold text-sky-900 mb-1 flex items-center gap-2">
               <Printer className="w-3.5 h-3.5 text-sky-700" />
               <span>
@@ -646,7 +697,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
         {/* Missing Items / Loading Details Diagnostic Banner */}
         {(loadingDetails || (!isReturn && items.length === 0)) && (
-          <div className="bg-amber-50 border-b border-amber-300 px-4 py-2 text-xs text-amber-950 flex items-center gap-2 print:hidden">
+          <div className="bg-amber-50 border-b border-amber-300 px-4 py-2 text-xs text-amber-950 flex items-center gap-2 shrink-0 print:hidden">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
             <span>
               {loadingDetails
@@ -656,18 +707,44 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
           </div>
         )}
 
-        {/* Scrollable Print Preview Viewport */}
-        <div className="flex-1 overflow-y-auto p-4 lg:p-6 bg-slate-100 flex justify-center print:p-0 print:bg-white print:overflow-visible">
-          {format === 'a4' ? (
+        {/* MS Access / Windows Desktop-Style Grey Print Preview Workspace */}
+        <div
+          ref={zoomState.viewportRef}
+          onWheel={zoomState.handleWheelZoom}
+          className="flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:bg-white print:overflow-visible"
+        >
+          <div
+            ref={zoomState.contentRef}
+            style={{ zoom: `${zoomState.zoom}%` } as React.CSSProperties}
+            className="ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75"
+          >
+          {isFullPage ? (
             /* =========================================================
-               1. PROFESSIONAL A4 SALES INVOICE / SALES RETURN LAYOUT
+               1. PROFESSIONAL A4 PORTRAIT (210mm x 297mm) SALES INVOICE / SALES RETURN LAYOUT
                ========================================================= */
             <div
               ref={printAreaRef}
-              className={`ams-sales-print-a4 bg-white border border-slate-300 shadow-sm w-full ${
-                orientation === 'landscape' ? 'max-w-[285mm]' : 'max-w-[210mm]'
-              } p-6 lg:p-7 text-slate-900 ${fontScaleClass} leading-snug relative print:border-0 print:shadow-none print:p-2 print:max-w-none`}
+              className={`ams-sales-print-a4 bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] ${
+                orientation === 'landscape'
+                  ? 'w-[297mm] max-w-[297mm] min-h-[210mm]'
+                  : 'w-[210mm] max-w-[210mm] min-h-[297mm]'
+              } p-6 lg:p-7 text-slate-900 ${fontScaleClass} leading-snug relative print:border-0 print:shadow-none print:p-2 print:w-full print:max-w-none print:min-h-0`}
             >
+              {/* Multi-Page Visual Page Break Markers (Screen Preview Only) */}
+              {zoomState.totalPages > 1 &&
+                Array.from({ length: zoomState.totalPages - 1 }).map((_, pIdx) => (
+                  <div
+                    key={pIdx}
+                    style={{
+                      top: `${(pIdx + 1) * (orientation === 'landscape' ? 210 : 297)}mm`,
+                    }}
+                    className="pointer-events-none select-none absolute left-0 right-0 border-t-2 border-dashed border-sky-500/70 z-20 flex justify-end pr-2 print:hidden"
+                  >
+                    <span className="bg-sky-600 text-white text-[9px] font-mono font-bold px-2 py-0.5 rounded-b shadow-xs">
+                      Page {pIdx + 1} Break → Page {pIdx + 2}
+                    </span>
+                  </div>
+                ))}
               {/* CANCELLED WATERMARK OVERLAY */}
               {isCancelled && (
                 <div className="pointer-events-none select-none absolute inset-0 flex items-center justify-center z-10 overflow-hidden">
@@ -1126,14 +1203,20 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
           ) : (
             /* =========================================================
                2. 80mm / 58mm THERMAL RECEIPT PRINTER LAYOUT
-               (Designed to match the POS Thermal Reference PDF)
+               (Exact 80mm or 58mm paper width + Dynamic Height: auto)
                ========================================================= */
             <div
               ref={printAreaRef}
-              className={`thermal-receipt bg-white border border-slate-300 shadow-sm text-black font-sans tabular-nums leading-tight ${
+              style={{
+                width: format === '80mm' ? '80mm' : '58mm',
+                maxWidth: format === '80mm' ? '80mm' : '58mm',
+                height: 'auto',
+                minHeight: 0,
+              }}
+              className={`thermal-receipt bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-tight self-start h-auto min-h-0 ${
                 format === '80mm'
-                  ? 'thermal-80mm w-[312px] p-2.5 text-[12px]'
-                  : 'thermal-58mm w-[224px] p-1.5 text-[10.5px]'
+                  ? 'thermal-80mm w-[80mm] max-w-[80mm] px-[2.5mm] py-[2.5mm] text-[12px]'
+                  : 'thermal-58mm w-[58mm] max-w-[58mm] px-[1.5mm] py-[2mm] text-[10px]'
               } relative print:border-0 print:shadow-none print:p-1`}
             >
               {isCancelled && (
@@ -1582,6 +1665,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               </div>
             </div>
           )}
+          </div>
         </div>
       </div>
     </div>

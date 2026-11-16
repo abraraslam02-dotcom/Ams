@@ -19,6 +19,7 @@ import { FinancialPillar } from '../../types/accounting';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface ChartOfAccountsViewProps {
   onOpenGeneralLedger?: (accountId: number) => void;
@@ -137,6 +138,12 @@ export const ChartOfAccountsView: React.FC<ChartOfAccountsViewProps> = ({
   useEffect(() => {
     loadCOA();
   }, [loadCOA]);
+
+  useEffect(() => {
+    if (!feedback || feedback.type !== 'success') return;
+    const timer = setTimeout(() => setFeedback(null), 3500);
+    return () => clearTimeout(timer);
+  }, [feedback]);
 
   const handlePillarChangeInModal = (pillar: FinancialPillar) => {
     const subGroups = PILLAR_SUBGROUPS[pillar] || ['Assets'];
@@ -423,6 +430,7 @@ export const ChartOfAccountsView: React.FC<ChartOfAccountsViewProps> = ({
       )}
 
       {/* Printable COA Section */}
+      <ReportZoomWrapper label="Chart of Accounts Preview Zoom">
       <div ref={coaPrintRef} className="space-y-3">
         <PrintDocumentHeader
           title="CHART OF ACCOUNTS — HIERARCHICAL REGISTER"
@@ -627,6 +635,7 @@ export const ChartOfAccountsView: React.FC<ChartOfAccountsViewProps> = ({
         </div>
       </div>
       </div>
+      </ReportZoomWrapper>
 
       {/* Create New Account Modal */}
       {showCreateModal && (

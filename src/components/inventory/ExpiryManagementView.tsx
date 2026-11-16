@@ -21,6 +21,7 @@ import { formatPKR } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface ExpiryManagementViewProps {
   initialFilter?: 'ALL' | 'EXPIRED' | '30_DAYS' | '60_DAYS' | '90_DAYS';
@@ -279,6 +280,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
       )}
 
       {/* Printable Expiry Section */}
+      <ReportZoomWrapper label="Expiry & Quarantine Report Preview Zoom">
       <div ref={expiryPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title="PHARMACEUTICAL EXPIRY & QUARANTINE REGISTER"
@@ -415,6 +417,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
         </div>
       </div>
       </div>
+      </ReportZoomWrapper>
 
       {/* Configuration Modal */}
       {isSettingsOpen && (

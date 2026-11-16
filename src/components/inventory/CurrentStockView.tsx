@@ -18,6 +18,7 @@ import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 type ViewMode = 'item-stock-report' | 'consolidated-summary';
 
@@ -372,7 +373,7 @@ export const CurrentStockView: React.FC = () => {
                     `Abrar Medical Store - ${
                       viewMode === 'item-stock-report' ? 'Item Stock Report' : 'Current Stock Valuation'
                     }`,
-                    { orientation: 'landscape', paperSize: 'a4', margin: 'minimum', fontSizeScale: 'small' }
+                    { orientation: 'portrait', paperSize: 'legal', margin: 'minimum', fontSizeScale: 'small' }
                   );
                 } else {
                   window.print();
@@ -382,7 +383,7 @@ export const CurrentStockView: React.FC = () => {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white rounded text-xs font-semibold shadow-xs cursor-pointer transition-colors border border-slate-700"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print A4 Landscape</span>
+              <span>Print Legal</span>
             </button>
             <button
               type="button"
@@ -501,6 +502,7 @@ export const CurrentStockView: React.FC = () => {
       )}
 
       {/* Printable Report Area */}
+      <ReportZoomWrapper label="Stock Report Preview Zoom">
       <div ref={stockPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title={
@@ -840,6 +842,7 @@ export const CurrentStockView: React.FC = () => {
           </div>
         </div>
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

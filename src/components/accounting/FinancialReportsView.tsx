@@ -15,6 +15,7 @@ import { api } from '../../services/api';
 import { FinancialReportKey } from '../../types/accounting';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface FinancialReportsViewProps {
   initialReport?: FinancialReportKey;
@@ -285,6 +286,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
       </div>
 
       {/* Printable Report Section */}
+      <ReportZoomWrapper label="Financial Statement Preview Zoom">
       <div ref={reportPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title={REPORT_TABS.find((t) => t.key === activeReport)?.label?.replace(/^\d+\.\s*/, '') || 'FINANCIAL REPORT'}
@@ -947,6 +949,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           </div>
         )}
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

@@ -16,6 +16,7 @@ import { DetailedAccountLedger } from '../../types/accounting';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type LedgerWorkspaceTab =
   | 'customer'
@@ -385,6 +386,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
       </div>
 
       {/* Printable Ledger Area */}
+      <ReportZoomWrapper label="Ledger Statement Preview Zoom">
       <div ref={printableAreaRef} className="space-y-3">
         <PrintDocumentHeader
           title={
@@ -744,6 +746,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
         </div>
       )}
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

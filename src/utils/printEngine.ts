@@ -1,11 +1,129 @@
-export type PaperSizeOption = 'a4' | '80mm' | '58mm';
+export type PaperSizeOption = 'a4' | 'legal' | '80mm' | '58mm';
 export type PageOrientationOption = 'portrait' | 'landscape';
 export type PageMarginOption = 'none' | 'minimum' | 'compact' | 'standard';
 export type FontSizeScaleOption = 'small' | 'normal' | 'large';
 
+/**
+ * Five independent printing configurations supported by Abrar Medical Store ERP:
+ * 1. A4 Sales Invoices (210mm x 297mm)
+ * 2. A4 Purchase Invoices (210mm x 297mm)
+ * 3. A4 Reports (210mm x 297mm)
+ * 4. 80mm Thermal Invoices (80mm x auto dynamic height)
+ * 5. 58mm Thermal Invoices (58mm x auto dynamic height)
+ */
+export type PrintConfigurationProfileId =
+  | 'a4-sales-invoice'
+  | 'a4-purchase-invoice'
+  | 'a4-report'
+  | 'thermal-80mm'
+  | 'thermal-58mm';
+
+export interface PrintConfigurationSpec {
+  id: PrintConfigurationProfileId;
+  label: string;
+  paperSize: PaperSizeOption;
+  widthMm: number;
+  heightMm: number | 'auto';
+  defaultMargin: PageMarginOption;
+  defaultOrientation: PageOrientationOption;
+  pageSizeCss: (orientation: PageOrientationOption) => string;
+  printableWidthCss: (orientation: PageOrientationOption) => string;
+  previewWidthCss: (orientation: PageOrientationOption) => string;
+  previewMinHeightCss: (orientation: PageOrientationOption) => string;
+  isThermal: boolean;
+}
+
+export const PRINT_CONFIGURATION_PROFILES: Record<
+  PrintConfigurationProfileId,
+  PrintConfigurationSpec
+> = {
+  'a4-sales-invoice': {
+    id: 'a4-sales-invoice',
+    label: 'A4 Sales Invoice (210 × 297 mm)',
+    paperSize: 'a4',
+    widthMm: 210,
+    heightMm: 297,
+    defaultMargin: 'standard',
+    defaultOrientation: 'portrait',
+    pageSizeCss: (o) => (o === 'landscape' ? '297mm 210mm' : '210mm 297mm'),
+    printableWidthCss: (o) => (o === 'landscape' ? '281mm' : '194mm'),
+    previewWidthCss: (o) => (o === 'landscape' ? '297mm' : '210mm'),
+    previewMinHeightCss: (o) => (o === 'landscape' ? '210mm' : '297mm'),
+    isThermal: false,
+  },
+  'a4-purchase-invoice': {
+    id: 'a4-purchase-invoice',
+    label: 'A4 Purchase Invoice (210 × 297 mm)',
+    paperSize: 'a4',
+    widthMm: 210,
+    heightMm: 297,
+    defaultMargin: 'standard',
+    defaultOrientation: 'portrait',
+    pageSizeCss: (o) => (o === 'landscape' ? '297mm 210mm' : '210mm 297mm'),
+    printableWidthCss: (o) => (o === 'landscape' ? '281mm' : '194mm'),
+    previewWidthCss: (o) => (o === 'landscape' ? '297mm' : '210mm'),
+    previewMinHeightCss: (o) => (o === 'landscape' ? '210mm' : '297mm'),
+    isThermal: false,
+  },
+  'a4-report': {
+    id: 'a4-report',
+    label: 'A4 Report (210 × 297 mm)',
+    paperSize: 'a4',
+    widthMm: 210,
+    heightMm: 297,
+    defaultMargin: 'standard',
+    defaultOrientation: 'portrait',
+    pageSizeCss: (o) => (o === 'landscape' ? '297mm 210mm' : '210mm 297mm'),
+    printableWidthCss: (o) => (o === 'landscape' ? '281mm' : '194mm'),
+    previewWidthCss: (o) => (o === 'landscape' ? '297mm' : '210mm'),
+    previewMinHeightCss: (o) => (o === 'landscape' ? '210mm' : '297mm'),
+    isThermal: false,
+  },
+  'thermal-80mm': {
+    id: 'thermal-80mm',
+    label: '80mm Thermal Receipt (80mm × Auto)',
+    paperSize: '80mm',
+    widthMm: 80,
+    heightMm: 'auto',
+    defaultMargin: 'none',
+    defaultOrientation: 'portrait',
+    pageSizeCss: () => '80mm auto',
+    printableWidthCss: () => '76mm',
+    previewWidthCss: () => '80mm',
+    previewMinHeightCss: () => 'auto',
+    isThermal: true,
+  },
+  'thermal-58mm': {
+    id: 'thermal-58mm',
+    label: '58mm Thermal Receipt (58mm × Auto)',
+    paperSize: '58mm',
+    widthMm: 58,
+    heightMm: 'auto',
+    defaultMargin: 'none',
+    defaultOrientation: 'portrait',
+    pageSizeCss: () => '58mm auto',
+    printableWidthCss: () => '54mm',
+    previewWidthCss: () => '58mm',
+    previewMinHeightCss: () => 'auto',
+    isThermal: true,
+  },
+};
+
+export function resolvePrintConfigurationProfile(
+  paperSize: PaperSizeOption = 'a4',
+  category: 'sales' | 'purchase' | 'report' = 'report'
+): PrintConfigurationSpec {
+  if (paperSize === '80mm') return PRINT_CONFIGURATION_PROFILES['thermal-80mm'];
+  if (paperSize === '58mm') return PRINT_CONFIGURATION_PROFILES['thermal-58mm'];
+  if (category === 'sales') return PRINT_CONFIGURATION_PROFILES['a4-sales-invoice'];
+  if (category === 'purchase') return PRINT_CONFIGURATION_PROFILES['a4-purchase-invoice'];
+  return PRINT_CONFIGURATION_PROFILES['a4-report'];
+}
+
 export interface PrintJobConfig {
   title: string;
   paperSize: PaperSizeOption;
+  profileId?: PrintConfigurationProfileId;
   orientation?: PageOrientationOption;
   margin?: PageMarginOption;
   fontSizeScale?: FontSizeScaleOption;
@@ -25,7 +143,7 @@ export interface BrowserPrintCapabilities {
 
 export const STANDARD_PRINTER_PROFILES = [
   'System Default Printer (OS Print Spooler)',
-  'A4 Laser / InkJet Printer (HP / Canon / Brother)',
+  'A4 Laser / InkJet Printer (HP / Canon / Brother - 210×297mm)',
   '80mm Thermal POS Receipt Printer (ESC/POS Spooler)',
   '58mm Thermal POS Receipt Printer (ESC/POS Spooler)',
   'Save as PDF Document (Browser Native PDF)',
@@ -57,8 +175,8 @@ export function detectPrintCapabilities(configuredDefaultPrinter?: string): Brow
     availablePrinterProfiles: profiles,
     setupNotes: [
       'Browser security delegates final hardware selection to the Operating System Print Spooler dialog.',
-      'For A4 Laser/InkJet invoices & reports: Choose your installed A4 printer or "Save as PDF", Paper Size: A4, Scale: 100% / Default.',
-      'For 80mm / 58mm Thermal Receipt printers: Select your ESC/POS thermal driver in the OS print dialog, set Margins to "None" or "Minimum", and uncheck "Headers and footers".',
+      'For A4 Laser/InkJet invoices & reports: Choose your installed printer or "Save as PDF", Paper Size: A4 (210mm × 297mm), Portrait, Scale: 100% / Default.',
+      'For 80mm / 58mm Thermal Receipt printers: Select your ESC/POS thermal driver in the OS print dialog, Paper Size: 80mm or 58mm Roll (dynamic height), Margins: None.',
     ],
   };
 }
@@ -66,9 +184,9 @@ export function detectPrintCapabilities(configuredDefaultPrinter?: string): Brow
 function getMarginMm(paperSize: PaperSizeOption, margin: PageMarginOption = 'standard'): string {
   if (paperSize === '80mm' || paperSize === '58mm') {
     if (margin === 'none') return '0mm';
-    if (margin === 'minimum') return '1mm';
-    if (margin === 'compact') return '1.5mm';
-    return '2mm';
+    if (margin === 'minimum') return '0.5mm';
+    if (margin === 'compact') return '1mm';
+    return '1.5mm';
   }
   switch (margin) {
     case 'none':
@@ -99,8 +217,8 @@ function getFontZoomPercent(scale: FontSizeScaleOption = 'normal'): string {
  * Prints an HTML element cleanly using an isolated hidden iframe so:
  * - No popup windows (window.open) are required
  * - Complete CSS styles, Tailwind utility classes, custom fonts, borders, and colors are synchronously inlined
- * - Paper size (A4 / 80mm / 58mm), orientation, margins, font scaling, and multiple copies are applied accurately
- * - Long reports and invoices paginate cleanly with repeating table headers and zero trailing blank pages
+ * - Independent print configurations for A4 Sales, A4 Purchase, A4 Reports, 80mm Thermal, and 58mm Thermal are strictly enforced
+ * - Thermal documents print using exact 80mm or 58mm width and dynamic height (never Legal or A4)
  */
 export function executePrintElement(element: HTMLElement | null, config: PrintJobConfig): void {
   if (!element) {
@@ -109,9 +227,13 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
   }
 
   const copies = Math.max(1, Math.min(10, Number(config.copies) || 1));
-  const paperSize = config.paperSize || 'a4';
-  const orientation = paperSize === 'a4' ? config.orientation || 'portrait' : 'portrait';
-  const marginMm = getMarginMm(paperSize, config.margin || 'standard');
+  const rawPaperSize = config.paperSize || 'a4';
+  // Normalize 'legal' fallback to 'a4' unless explicitly required, since A4 (210x297mm) is standard for all A4 invoices & reports
+  const paperSize: PaperSizeOption = rawPaperSize === 'legal' ? 'a4' : rawPaperSize;
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
+  const isFullPage = !isThermal;
+  const orientation: PageOrientationOption = isFullPage ? config.orientation || 'portrait' : 'portrait';
+  const marginMm = getMarginMm(paperSize, isThermal ? (config.margin === 'none' ? 'none' : 'minimum') : config.margin || 'standard');
   const zoomPercent = getFontZoomPercent(config.fontSizeScale || 'normal');
 
   const pageSizeCss =
@@ -119,15 +241,17 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       ? '80mm auto'
       : paperSize === '58mm'
       ? '58mm auto'
-      : `A4 ${orientation}`;
-
-  const containerMaxWidth =
-    paperSize === '80mm'
-      ? '74mm'
-      : paperSize === '58mm'
-      ? '52mm'
       : orientation === 'landscape'
-      ? '280mm'
+      ? '297mm 210mm'
+      : '210mm 297mm';
+
+  const containerWidthCss =
+    paperSize === '80mm'
+      ? '76mm'
+      : paperSize === '58mm'
+      ? '54mm'
+      : orientation === 'landscape'
+      ? '281mm'
       : '194mm';
 
   // Extract all CSS rules from active document stylesheets to ensure synchronous, complete CSS rendering
@@ -173,13 +297,14 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
     `);
   }
 
-  const showPageNumbers = Boolean(config.showPageNumbers && paperSize === 'a4');
-  const effectiveMarginCss =
-    showPageNumbers && (marginMm === '0mm' || marginMm === '4mm')
-      ? `${marginMm} ${marginMm} 10mm ${marginMm}`
-      : showPageNumbers
-      ? `${marginMm} ${marginMm} 12mm ${marginMm}`
-      : marginMm;
+  const showPageNumbers = Boolean(config.showPageNumbers && isFullPage);
+  const effectiveMarginCss = isThermal
+    ? '0mm'
+    : showPageNumbers && (marginMm === '0mm' || marginMm === '4mm')
+    ? `${marginMm} ${marginMm} 10mm ${marginMm}`
+    : showPageNumbers
+    ? `${marginMm} ${marginMm} 12mm ${marginMm}`
+    : marginMm;
 
   const printDocumentHtml = `<!DOCTYPE html>
 <html>
@@ -223,8 +348,11 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       html, body {
         margin: 0 !important;
         padding: 0 !important;
+        width: ${isThermal ? (paperSize === '80mm' ? '80mm' : '58mm') : '100%'} !important;
+        max-width: ${isThermal ? (paperSize === '80mm' ? '80mm' : '58mm') : '100%'} !important;
         height: auto !important;
         min-height: 0 !important;
+        max-height: none !important;
         background: #ffffff !important;
         color: #000000 !important;
         -webkit-print-color-adjust: exact !important;
@@ -234,14 +362,23 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
         zoom: ${zoomPercent};
       }
       .ams-print-root {
-        width: 100%;
-        max-width: ${containerMaxWidth};
+        width: ${isThermal ? containerWidthCss : '100%'} !important;
+        max-width: ${containerWidthCss} !important;
+        height: auto !important;
+        min-height: 0 !important;
         margin: 0 auto !important;
+        padding: ${isThermal ? '1mm 1.5mm' : '0'} !important;
         background: #ffffff !important;
+      }
+      .ams-print-root > .ams-print-copy-wrapper {
+        height: auto !important;
+        min-height: 0 !important;
       }
       .ams-print-root > .ams-print-copy-wrapper > * {
         width: 100% !important;
         max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
         margin: 0 !important;
         box-shadow: none !important;
         border: none !important;
@@ -249,6 +386,12 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       .thermal-receipt,
       .thermal-receipt * {
         color: #000000 !important;
+      }
+      .thermal-receipt {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
       }
       .thermal-receipt table {
         width: 100% !important;
@@ -376,7 +519,7 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
 }
 
 /**
- * Standard utility to print any report or document element with A4/thermal settings.
+ * Standard utility to print any report or document element with A4 Portrait / thermal settings.
  */
 export function printReportDocument(
   element: HTMLElement | null,
@@ -386,10 +529,12 @@ export function printReportDocument(
   executePrintElement(element, {
     title,
     paperSize: options?.paperSize || 'a4',
+    profileId: options?.profileId || 'a4-report',
     orientation: options?.orientation || 'portrait',
     margin: options?.margin || 'standard',
     fontSizeScale: options?.fontSizeScale || 'normal',
     copies: options?.copies || 1,
     selectedPrinter: options?.selectedPrinter || 'System Default Printer (OS Print Spooler)',
+    showPageNumbers: options?.showPageNumbers ?? true,
   });
 }

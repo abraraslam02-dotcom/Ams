@@ -6,6 +6,7 @@ import { BookOpen, Download, Printer } from 'lucide-react';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface AccountLedgersViewProps {
   ledgerType: 'customer' | 'supplier' | 'cash' | 'bank' | 'general' | 'statement';
@@ -172,6 +173,7 @@ export const AccountLedgersView: React.FC<AccountLedgersViewProps> = ({ ledgerTy
       </div>
 
       {/* Printable Statement Area */}
+      <ReportZoomWrapper label="Account Statement Preview Zoom">
       <div ref={statementPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title={`${ledgerType.toUpperCase()} STATEMENT OF ACCOUNT`}
@@ -295,6 +297,7 @@ export const AccountLedgersView: React.FC<AccountLedgersViewProps> = ({ ledgerTy
         </div>
       </div>
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

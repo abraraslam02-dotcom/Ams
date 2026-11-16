@@ -57,6 +57,7 @@ import { PurchaseReturnPanel } from './PurchaseReturnPanel';
 import { PurchaseReportsPanel } from './PurchaseReportsPanel';
 import { NumericInput } from '../common/NumericInput';
 import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
+import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
 import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
@@ -210,18 +211,27 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [loadingHeld, setLoadingHeld] = useState<boolean>(false);
   const [returns, setReturns] = useState<PurchaseReturn[]>([]);
   const [batches, setBatches] = useState<BatchInventoryItem[]>([]);
-  const [nextPurchaseNo, setNextPurchaseNo] = useState('Inv-2026-11-01');
+  const [nextPurchaseNo, setNextPurchaseNo] = useState(() => {
+    const d = new Date();
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    return `PI-001-${String(d.getDate()).padStart(2, '0')}-${months[d.getMonth()]}-${d.getFullYear()}`;
+  });
   const [nextReturnNo, setNextReturnNo] = useState('PRN-2026-0001');
   const [loading, setLoading] = useState(false);
 
   // Purchase Invoice Form State
   const [editingPurchaseId, setEditingPurchaseId] = useState<number | null>(null);
+  const [editingPurchaseStatus, setEditingPurchaseStatus] = useState<string | null>(null);
   const editingPurchaseIdRef = useRef<number | null>(null);
   const isResumingPurchaseRef = useRef<boolean>(false);
   useEffect(() => {
     editingPurchaseIdRef.current = editingPurchaseId;
   }, [editingPurchaseId]);
-  const [billNumber, setBillNumber] = useState('Inv-2026-11-01');
+  const [billNumber, setBillNumber] = useState(() => {
+    const d = new Date();
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    return `PI-001-${String(d.getDate()).padStart(2, '0')}-${months[d.getMonth()]}-${d.getFullYear()}`;
+  });
   const [billDate, setBillDate] = useState(new Date().toISOString().slice(0, 10));
   const [supplierId, setSupplierId] = useState<string>('');
   const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState('');
@@ -391,6 +401,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [savingInvoice, setSavingInvoice] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!formSuccess) return;
+    const timer = window.setTimeout(() => {
+      setFormSuccess(null);
+      setShowPurchaseSmsModal(false);
+    }, 2200);
+    return () => window.clearTimeout(timer);
+  }, [formSuccess]);
 
   // Print Modal State
   const [printModalOpen, setPrintModalOpen] = useState(false);
@@ -589,7 +608,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       // Fetch next auto purchase invoice & return numbers
       const nextNumsRes = await api.getNextPurchaseNumbers(billDate).catch(() => ({
         success: true,
-        nextPurchaseNumber: 'Inv-2026-11-01',
+        nextPurchaseNumber: nextPurchaseNo,
         nextReturnNumber: 'PRN-2026-0001',
       }));
 
@@ -721,9 +740,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     return () => window.removeEventListener('ams-sync-completed', handleSyncDone);
   }, [fetchHeldPurchases]);
 
-  // Automatically update next read-only Purchase Invoice Number when billDate month/year changes on a new invoice
+  // Automatically update next read-only Purchase Invoice Number when billDate changes on a new or held/draft invoice
   useEffect(() => {
-    if (editingPurchaseId) return;
+    const isCompletedEdit =
+      Boolean(editingPurchaseId) &&
+      String(editingPurchaseStatus || '').trim().toLowerCase() === 'completed';
+    if (isCompletedEdit) return;
     let active = true;
     api
       .getNextPurchaseNumbers(billDate)
@@ -732,7 +754,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           setBillNumber(res.nextPurchaseNumber);
           setNextPurchaseNo(res.nextPurchaseNumber);
           setSupplierInvoiceNumber((prev) =>
-            !prev || prev.startsWith('Inv-') || prev.startsWith('PUR-') ? res.nextPurchaseNumber : prev
+            !prev ||
+            prev.startsWith('PI-') ||
+            prev.startsWith('Inv-') ||
+            prev.startsWith('PUR-') ||
+            prev.startsWith('HLD-') ||
+            prev.startsWith('DRF-')
+              ? res.nextPurchaseNumber
+              : prev
           );
         }
       })
@@ -740,7 +769,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     return () => {
       active = false;
     };
-  }, [billDate, editingPurchaseId]);
+  }, [billDate, editingPurchaseId, editingPurchaseStatus]);
 
   // Live Backend Item Search Fallback while typing (supports both top bar and inline row search)
   useEffect(() => {
@@ -2674,6 +2703,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
     editingPurchaseIdRef.current = null;
     setEditingPurchaseId(null);
+    setEditingPurchaseStatus(null);
     setSupplierId('');
     setSupplierSearchQuery('');
     setSupplierFilerStatus('Filer');
@@ -2729,11 +2759,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         // ignore
       }
 
+      const resumedDate = p.bill_date || new Date().toISOString().slice(0, 10);
+      const nextPreviewRes = await api
+        .getNextPurchaseNumbers(resumedDate)
+        .catch(() => ({ nextPurchaseNumber: p.bill_number || '' }));
+      const livePreviewNo = nextPreviewRes.nextPurchaseNumber || p.bill_number || '';
+
       editingPurchaseIdRef.current = p.id;
       setEditingPurchaseId(p.id);
-      setBillNumber(p.bill_number || '');
-      setSupplierInvoiceNumber(p.supplier_invoice_number || '');
-      setBillDate(p.bill_date || new Date().toISOString().slice(0, 10));
+      setEditingPurchaseStatus('held');
+      setBillNumber(livePreviewNo);
+      setSupplierInvoiceNumber(
+        !p.supplier_invoice_number ||
+          /^(PI-|Inv-|PUR-|HLD-|HOLD-|DRF-|DRAFT-)/i.test(String(p.supplier_invoice_number).trim())
+          ? livePreviewNo
+          : p.supplier_invoice_number
+      );
+      setBillDate(resumedDate);
       setSupplierId(p.supplier_account_id ? String(p.supplier_account_id) : '');
       setSupplierFilerStatus(p.supplier_filer_status || 'Filer');
       setNotes(p.remarks || '');
@@ -2945,7 +2987,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       paid_amount: round2(paidAmount),
       remarks: notes,
       status: targetStatus,
-      from_hold_conversion: Boolean(editingPurchaseId && targetStatus === 'completed'),
+      from_hold_conversion: Boolean(
+        editingPurchaseId &&
+          String(editingPurchaseStatus || '').trim().toLowerCase() !== 'completed' &&
+          targetStatus === 'completed'
+      ),
       client_request_id: clientRequestId,
       items: sanitizedItems,
     };
@@ -3146,62 +3192,94 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseSmsModal(true);
   };
 
+  const [customExportOpen, setCustomExportOpen] = useState<boolean>(false);
+  const [customExportRecords, setCustomExportRecords] = useState<Array<Record<string, any>>>([]);
+
+  const buildCurrentPurchaseExportRecord = () => {
+    if (validLines.length === 0) return null;
+    const paid = round2(paidAmount);
+    return {
+      id: editingPurchaseId || 0,
+      bill_number: billNumber,
+      bill_date: billDate,
+      supplier_account_id: supplierId ? parseInt(supplierId, 10) : 0,
+      supplier_name: selectedSupplier?.account_name || 'Supplier Account',
+      supplier_code: selectedSupplier?.account_code || '',
+      supplier_invoice_number: supplierInvoiceNumber.trim() || billNumber,
+      supplier_filer_status: supplierFilerStatus,
+      gross_amount: grossTotal,
+      gross_total: grossTotal,
+      discount_amount: totalDiscount,
+      total_discount: totalDiscount,
+      invoice_discount_percent: invoiceDiscountPercent,
+      invoice_discount_amount: computedInvoiceDiscAmt,
+      taxable_amount: taxableAmount,
+      gst_amount: gstTotal,
+      is_tax_overridden: isTaxOverridden ? 1 : 0,
+      advance_tax_rate: appliedAdvanceTaxRate,
+      advance_tax_amount: advanceTaxAmount,
+      net_total: netInvoiceAmount,
+      payment_mode: paymentMode,
+      payment_account_id: paymentAccountId ? parseInt(paymentAccountId, 10) : null,
+      paid_amount: paid,
+      balance_amount: round2(netInvoiceAmount - paid),
+      remarks: notes,
+      status: editingPurchaseId ? 'completed' : 'draft',
+      items: validLines.map((l, idx) => ({
+        id: idx + 1,
+        item_id: l.item_id,
+        item_code: l.item_code,
+        company_name: l.company_name,
+        item_name: l.item_name,
+        packing: l.packing,
+        batch_number: l.batch_number?.trim() || `B-${l.item_code || l.item_id}-01`,
+        expiry_date: l.expiry_date || '2028-12-31',
+        quantity: Number(l.quantity) || 0,
+        loose_quantity: Number(l.loose_quantity) || 0,
+        bonus_quantity: Number(l.bonus_quantity) || 0,
+        purchase_rate: Number(l.purchase_rate) || 0,
+        loose_rate: Number(l.loose_rate) || 0,
+        mrp_rate: Number(l.mrp_rate) || 0,
+        discount_percent: Number(l.discount_percent) || 0,
+        discount_amount: Number(l.discount_amount) || 0,
+        taxable_amount: Number(l.taxable_amount) || 0,
+        tax_percent: Number(l.tax_percent) || 0,
+        tax_amount: Number(l.tax_amount) || 0,
+        gross_amount: Number(l.gross_amount) || 0,
+        line_total: Number(l.line_total) || 0,
+      })),
+    };
+  };
+
+  const handleOpenCustomPurchaseExcelExport = async (forceAll?: boolean) => {
+    try {
+      setExportingExcel(true);
+      setFormError(null);
+      if (!forceAll) {
+        const currentRecord = buildCurrentPurchaseExportRecord();
+        if (currentRecord) {
+          setCustomExportRecords([currentRecord]);
+          setCustomExportOpen(true);
+          return;
+        }
+      }
+      const res = await api.getPurchases();
+      const savedPurchases = res.purchases || purchases || [];
+      setCustomExportRecords(savedPurchases);
+      setCustomExportOpen(true);
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
   const handleExportCurrentPurchaseToExcel = async () => {
     try {
       setExportingExcel(true);
       setFormError(null);
-      if (validLines.length > 0) {
-        const paid = round2(paidAmount);
-        const currentRecord = {
-          id: editingPurchaseId || 0,
-          bill_number: billNumber,
-          bill_date: billDate,
-          supplier_account_id: supplierId ? parseInt(supplierId, 10) : 0,
-          supplier_name: selectedSupplier?.account_name || 'Supplier Account',
-          supplier_code: selectedSupplier?.account_code || '',
-          supplier_invoice_number: supplierInvoiceNumber.trim() || billNumber,
-          supplier_filer_status: supplierFilerStatus,
-          gross_amount: grossTotal,
-          gross_total: grossTotal,
-          discount_amount: totalDiscount,
-          total_discount: totalDiscount,
-          invoice_discount_percent: invoiceDiscountPercent,
-          invoice_discount_amount: computedInvoiceDiscAmt,
-          taxable_amount: taxableAmount,
-          gst_amount: gstTotal,
-          is_tax_overridden: isTaxOverridden ? 1 : 0,
-          advance_tax_rate: appliedAdvanceTaxRate,
-          advance_tax_amount: advanceTaxAmount,
-          net_total: netInvoiceAmount,
-          payment_mode: paymentMode,
-          payment_account_id: paymentAccountId ? parseInt(paymentAccountId, 10) : null,
-          paid_amount: paid,
-          balance_amount: round2(netInvoiceAmount - paid),
-          remarks: notes,
-          status: editingPurchaseId ? 'completed' : 'draft',
-          items: validLines.map((l, idx) => ({
-            id: idx + 1,
-            item_id: l.item_id,
-            item_code: l.item_code,
-            company_name: l.company_name,
-            item_name: l.item_name,
-            packing: l.packing,
-            batch_number: l.batch_number?.trim() || `B-${l.item_code || l.item_id}-01`,
-            expiry_date: l.expiry_date || '2028-12-31',
-            quantity: Number(l.quantity) || 0,
-            loose_quantity: Number(l.loose_quantity) || 0,
-            bonus_quantity: Number(l.bonus_quantity) || 0,
-            purchase_rate: Number(l.purchase_rate) || 0,
-            loose_rate: Number(l.loose_rate) || 0,
-            mrp_rate: Number(l.mrp_rate) || 0,
-            discount_percent: Number(l.discount_percent) || 0,
-            discount_amount: Number(l.discount_amount) || 0,
-            tax_percent: Number(l.tax_percent) || 0,
-            tax_amount: Number(l.tax_amount) || 0,
-            gross_amount: Number(l.gross_amount) || 0,
-            line_total: Number(l.line_total) || 0,
-          })),
-        };
+      const currentRecord = buildCurrentPurchaseExportRecord();
+      if (currentRecord) {
         exportPurchaseInvoicesToExcel(
           [currentRecord],
           `Purchase_Invoice_${billNumber.replace(/[^a-zA-Z0-9_-]/g, '_')}.xlsx`
@@ -3365,6 +3443,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       editingPurchaseIdRef.current = p.id;
       setEditingPurchaseId(p.id);
+      setEditingPurchaseStatus(String(p.status || 'completed').trim().toLowerCase());
       setBillNumber(p.bill_number || '');
       setBillDate(p.bill_date || new Date().toISOString().slice(0, 10));
       setSupplierId(p.supplier_account_id ? String(p.supplier_account_id) : '');
@@ -3835,6 +3914,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           >
             <FileSpreadsheet className="w-3 h-3" />
             <span>All Excel</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={exportingExcel}
+            onClick={() => handleOpenCustomPurchaseExcelExport(false)}
+            className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Purchase Invoice → Custom Excel Export (Choose Fields & Saved Templates)"
+          >
+            <FileSpreadsheet className="w-3 h-3" />
+            <span>Custom Excel Export</span>
           </button>
 
           {subTab === 'new-invoice' && (
@@ -6138,6 +6228,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </button>
                     <button
                       type="button"
+                      disabled={exportingExcel}
+                      onClick={() => handleOpenCustomPurchaseExcelExport(false)}
+                      className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Purchase Invoice → Custom Excel Export (Field Selection & Templates)"
+                    >
+                      <FileSpreadsheet className="w-3 h-3" />
+                      <span>Custom Excel Export</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={handlePreviewInvoice}
                       className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                     >
@@ -6210,6 +6310,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               >
                 <Download className="w-4 h-4" />
                 <span>Export All to Excel ({purchases.length})</span>
+              </button>
+              <button
+                type="button"
+                disabled={exportingExcel || purchases.length === 0}
+                onClick={() => handleOpenCustomPurchaseExcelExport(true)}
+                className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-sm"
+                title="Purchase Invoice → Custom Excel Export (Choose Fields & Saved Templates)"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>Custom Excel Export</span>
               </button>
               <button
                 type="button"
@@ -6415,6 +6525,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         purchaseReturn={printReturn}
         returnItems={printReturnItems}
         journalLines={printJournalLines}
+      />
+
+      {/* Custom Excel Export Modal (Purchase Module) */}
+      <CustomExcelExportModal
+        isOpen={customExportOpen}
+        onClose={() => setCustomExportOpen(false)}
+        moduleType="PURCHASE"
+        records={customExportRecords}
+        defaultFilename={`Purchase_Custom_Export_${billDate}.xlsx`}
       />
 
       {/* Supplier Detailed Account Ledger Modal */}

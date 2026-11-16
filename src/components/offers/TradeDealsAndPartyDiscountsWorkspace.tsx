@@ -25,6 +25,7 @@ import {
   Check,
   X,
 } from 'lucide-react';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type OfferWorkspaceSubTab =
   | 'trade-offers'
@@ -145,6 +146,12 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
   useEffect(() => {
     setSubTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    if (!banner || banner.type !== 'success') return;
+    const timer = setTimeout(() => setBanner(null), 3500);
+    return () => clearTimeout(timer);
+  }, [banner]);
 
   const loadMasterDropdowns = useCallback(async () => {
     try {
@@ -1726,7 +1733,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                 onChange={(e) => setPrintMode(e.target.value as any)}
                 className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold"
               >
-                <option value="A4">Print Format: A4 Full Page</option>
+                <option value="A4">Print Format: US Legal Full Page</option>
                 <option value="THERMAL_80">Print Format: 80mm Thermal</option>
                 <option value="THERMAL_58">Print Format: 58mm Thermal</option>
               </select>
@@ -1752,6 +1759,11 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
           </div>
 
           {/* Printable Report Canvas */}
+          <ReportZoomWrapper
+            label="Offer & Discount Report Preview Zoom"
+            paperWidthMm={printMode === 'THERMAL_80' ? 80 : printMode === 'THERMAL_58' ? 58 : 215.9}
+            paperHeightMm={printMode === 'A4' ? 355.6 : 260}
+          >
           <div
             className={`bg-white rounded-2xl border border-slate-200 p-5 shadow-xs mx-auto ${
               printMode === 'THERMAL_80'
@@ -1804,6 +1816,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
               )}
             </div>
           </div>
+          </ReportZoomWrapper>
         </div>
       )}
     </div>

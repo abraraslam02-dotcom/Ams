@@ -22,6 +22,7 @@ import {
 } from '../../types/accounting';
 import { NumericInput } from '../common/NumericInput';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface VoucherManagementViewProps {
   initialVoucherType?: VoucherTypeCode;
@@ -115,6 +116,12 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
       setVoucherType(initialVoucherType);
     }
   }, [initialVoucherType]);
+
+  useEffect(() => {
+    if (!feedback || feedback.type !== 'success') return;
+    const timer = setTimeout(() => setFeedback(null), 3500);
+    return () => clearTimeout(timer);
+  }, [feedback]);
 
   const fetchNextNumber = useCallback(async (type: VoucherTypeCode) => {
     try {
@@ -986,7 +993,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
                           type="button"
                           onClick={() => setPrintVoucher(v)}
                           className="p-1 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded"
-                          title="Print A4 Voucher"
+                          title="Print Legal Voucher"
                         >
                           <Printer className="w-3.5 h-3.5" />
                         </button>
@@ -1056,7 +1063,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
                   className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded flex items-center gap-1 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  Print A4 Voucher
+                  Print Legal Voucher
                 </button>
                 <button
                   type="button"
@@ -1068,7 +1075,9 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
               </div>
             </div>
 
-            <div ref={voucherSheetRef} className="p-6 space-y-4 text-xs text-slate-900 bg-white">
+            <div className="p-3 bg-slate-100 max-h-[80vh] overflow-y-auto">
+              <ReportZoomWrapper label="Voucher Print Preview Zoom" paperWidthMm={215.9} paperHeightMm={355.6}>
+                <div ref={voucherSheetRef} className="p-6 space-y-4 text-xs text-slate-900 bg-white mx-auto" style={{ maxWidth: '215.9mm' }}>
               <div className="border-b-2 border-slate-900 pb-3 flex items-start justify-between">
                 <div>
                   <h2 className="text-lg font-extrabold tracking-tight">ABRAR MEDICAL STORE</h2>
@@ -1170,6 +1179,8 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
                 <div className="border-t border-slate-400 pt-1">Checked By (Accountant)</div>
                 <div className="border-t border-slate-400 pt-1">Authorized Signatory</div>
               </div>
+                </div>
+              </ReportZoomWrapper>
             </div>
           </div>
         </div>

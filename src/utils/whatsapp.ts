@@ -222,9 +222,9 @@ function generateTextDocumentPdf(payload: WhatsAppDocumentPayload): {
   push(RULE);
   push(`Thank you for choosing ${storeName}!`);
 
-  // Lay lines out on as many A4 pages as needed.
+  // Lay lines out on as many US Legal Portrait (8.5in x 14in = 612 x 1008 pt) pages as needed.
   type PlacedLine = { text: string; size: number; y: number };
-  const PAGE_TOP = 790;
+  const PAGE_TOP = 956;
   const PAGE_MIN_Y = 40;
   const pages: PlacedLine[][] = [[]];
   let y = PAGE_TOP;
@@ -269,7 +269,7 @@ function generateTextDocumentPdf(payload: WhatsAppDocumentPayload): {
     ops.push('ET');
     const streamContent = ops.join('\n');
     objects.push(
-      `${pageNo} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentNo} 0 R >>\nendobj\n`
+      `${pageNo} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 1008] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentNo} 0 R >>\nendobj\n`
     );
     objects.push(
       `${contentNo} 0 obj\n<< /Length ${streamContent.length} >>\nstream\n${streamContent}\nendstream\nendobj\n`

@@ -33,6 +33,7 @@ import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { printReportDocument } from '../../utils/printEngine';
 import { NavTabId } from '../layout/Sidebar';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type ClosingTabId =
   | 'closing-daily'
@@ -144,6 +145,12 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
       setActiveSubTab(initialTab);
     }
   }, [initialTab]);
+
+  useEffect(() => {
+    if (!message || message.type !== 'success') return;
+    const timer = setTimeout(() => setMessage(null), 3500);
+    return () => clearTimeout(timer);
+  }, [message]);
 
   const switchSubTab = (tab: ClosingTabId) => {
     setActiveSubTab(tab);
@@ -613,15 +620,17 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
     XLSX.writeFile(wb, safeFileName);
   };
 
-  const handlePrintActiveSection = (title: string, orientation: 'portrait' | 'landscape' = 'portrait') => {
+  const handlePrintActiveSection = (title: string, _orientation: 'portrait' | 'landscape' = 'portrait') => {
     printReportDocument(printContainerRef.current, title, {
-      orientation,
+      orientation: 'portrait',
+      paperSize: 'legal',
     });
   };
 
-  const handlePrintModalReport = (title: string, orientation: 'portrait' | 'landscape' = 'portrait') => {
+  const handlePrintModalReport = (title: string, _orientation: 'portrait' | 'landscape' = 'portrait') => {
     printReportDocument(modalPrintRef.current, title, {
-      orientation,
+      orientation: 'portrait',
+      paperSize: 'legal',
     });
   };
 
@@ -766,6 +775,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
           MODULE 1: DAILY CLOSING
          ===================================================================== */}
       {activeSubTab === 'closing-daily' && (
+        <ReportZoomWrapper label="Daily Closing Report Preview Zoom">
         <div className="space-y-6" ref={printContainerRef}>
           {/* Controls Bar */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end justify-between gap-4 no-print">
@@ -802,7 +812,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                     className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
                   >
                     <Printer className="w-3.5 h-3.5 text-slate-600" />
-                    <span>Print A4 / PDF</span>
+                    <span>Print Legal / PDF</span>
                   </button>
                   <button
                     onClick={() => exportClosingWorkbook(dailyData, 'Daily_Closing')}
@@ -1070,12 +1080,14 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
           </div>
         </div>
+        </ReportZoomWrapper>
       )}
 
       {/* =====================================================================
           MODULE 2: MONTHLY CLOSING & CARRY FORWARD
          ===================================================================== */}
       {activeSubTab === 'closing-monthly' && (
+        <ReportZoomWrapper label="Monthly Closing Report Preview Zoom">
         <div className="space-y-6" ref={printContainerRef}>
           {/* Controls Bar */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end justify-between gap-4 no-print">
@@ -1124,13 +1136,13 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                     onClick={() =>
                       handlePrintActiveSection(
                         `Monthly Financial Closing Report (${monthlyStart} to ${monthlyEnd})`,
-                        'landscape'
+                        'portrait'
                       )
                     }
                     className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
                   >
                     <Printer className="w-3.5 h-3.5" />
-                    <span>Print A4 / PDF</span>
+                    <span>Print Legal / PDF</span>
                   </button>
                   <button
                     onClick={() => exportClosingWorkbook(monthlyData, `Monthly_Closing_${selectedMonth}`)}
@@ -1622,12 +1634,14 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
           </div>
         </div>
+        </ReportZoomWrapper>
       )}
 
       {/* =====================================================================
           MODULE 3: YEARLY CLOSING & CONFIGURABLE FINANCIAL YEAR
          ===================================================================== */}
       {activeSubTab === 'closing-yearly' && (
+        <ReportZoomWrapper label="Yearly Closing Report Preview Zoom">
         <div className="space-y-6" ref={printContainerRef}>
           {/* Financial Year Configuration Bar */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end justify-between gap-4 no-print">
@@ -1692,13 +1706,13 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                     onClick={() =>
                       handlePrintActiveSection(
                         `Annual Financial Year Closing (${fyStartDate} to ${fyEndDate})`,
-                        'landscape'
+                        'portrait'
                       )
                     }
                     className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
                   >
                     <Printer className="w-3.5 h-3.5" />
-                    <span>Print A4 / PDF</span>
+                    <span>Print Legal / PDF</span>
                   </button>
                   <button
                     onClick={() => exportClosingWorkbook(yearlyData, `Yearly_Closing_${fyStartDate}_${fyEndDate}`)}
@@ -2007,12 +2021,14 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
           </div>
         </div>
+        </ReportZoomWrapper>
       )}
 
       {/* =====================================================================
           MODULE 4: STOCK CLOSING
          ===================================================================== */}
       {activeSubTab === 'closing-stock' && (
+        <ReportZoomWrapper label="Stock Closing Report Preview Zoom">
         <div className="space-y-6" ref={printContainerRef}>
           {/* Controls Bar */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end justify-between gap-4 no-print">
@@ -2074,13 +2090,13 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                     onClick={() =>
                       handlePrintActiveSection(
                         `Stock Closing & Valuation Report (${stockStart} to ${stockEnd})`,
-                        'landscape'
+                        'portrait'
                       )
                     }
                     className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
                   >
                     <Printer className="w-3.5 h-3.5" />
-                    <span>Print A4 / PDF</span>
+                    <span>Print Legal / PDF</span>
                   </button>
                   <button
                     onClick={() => exportClosingWorkbook(stockData, `Stock_Closing_${stockEnd}`)}
@@ -2254,12 +2270,14 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
           </div>
         </div>
+        </ReportZoomWrapper>
       )}
 
       {/* =====================================================================
           MODULE 5: CLOSING HISTORY & ARCHIVE REPORTS
          ===================================================================== */}
       {activeSubTab === 'closing-history' && (
+        <ReportZoomWrapper label="Closing History Preview Zoom">
         <div className="space-y-6" ref={printContainerRef}>
           {/* Search & Filters Bar */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end justify-between gap-3 no-print">
@@ -2424,6 +2442,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
           </div>
         </div>
+        </ReportZoomWrapper>
       )}
 
       {/* =====================================================================
@@ -2655,15 +2674,13 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   onClick={() =>
                     handlePrintModalReport(
                       `${selectedClosingDetail.closing_code} - ${selectedClosingDetail.closing_type} Closing Report`,
-                      detailReportTab === 'stock' || detailReportTab === 'customers' || detailReportTab === 'suppliers'
-                        ? 'landscape'
-                        : 'portrait'
+                      'portrait'
                     )
                   }
                   className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>Print A4 / Save PDF</span>
+                  <span>Print Legal / Save PDF</span>
                 </button>
                 <button
                   onClick={() =>
@@ -2724,7 +2741,9 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
 
             {/* Printable Modal Body */}
-            <div className="p-6 overflow-y-auto space-y-6 flex-1" ref={modalPrintRef}>
+            <div className="p-4 overflow-y-auto flex-1 bg-slate-100">
+              <ReportZoomWrapper label="Closing Detail Report Preview Zoom" paperWidthMm={215.9} paperHeightMm={355.6}>
+                <div className="p-6 space-y-6 bg-white rounded-xl border border-slate-200" ref={modalPrintRef}>
               {detailReportTab === 'summary' && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
                   <div className="p-3.5 rounded-xl border border-slate-200">
@@ -3002,6 +3021,8 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   </tbody>
                 </table>
               )}
+                </div>
+              </ReportZoomWrapper>
             </div>
           </div>
         </div>

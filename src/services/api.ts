@@ -2278,12 +2278,16 @@ export const api = {
       // Offline fallback
     }
     const now = date ? new Date(date) : new Date();
-    const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const dd = String(now.getUTCDate()).padStart(2, '0');
+    const mmm = months[now.getUTCMonth()] || 'JAN';
+    const yyyy = now.getUTCFullYear();
+    const ym = `${yyyy}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
     const localPurchases = await offlineStorage.getAll<any>('purchases');
     const nextSeq = localPurchases.length + 1;
     return {
       success: true,
-      nextPurchaseNumber: `Inv-${ym}-${String(nextSeq).padStart(2, '0')}`,
+      nextPurchaseNumber: `PI-${String(nextSeq).padStart(3, '0')}-${dd}-${mmm}-${yyyy}`,
       nextReturnNumber: `PR-${ym}-${String(nextSeq).padStart(2, '0')}`,
     };
   },
@@ -2993,12 +2997,16 @@ export const api = {
       // Offline fallback
     }
     const d = date ? new Date(date) : new Date();
-    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const mmm = months[d.getUTCMonth()] || 'JAN';
+    const yyyy = d.getUTCFullYear();
+    const ym = `${yyyy}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
     const localSales = await offlineStorage.getAll<any>('sales');
-    const nextSeq = String(localSales.length + 1).padStart(2, '0');
+    const nextSeq = String(localSales.length + 1).padStart(3, '0');
     return {
       success: true,
-      nextInvoiceNumber: `Inv-${ym}-${nextSeq}`,
+      nextInvoiceNumber: `SI-${nextSeq}-${dd}-${mmm}-${yyyy}`,
       nextReturnNumber: `SR-${ym}-01`,
       nextVoucherNumber: `PAY-${ym}-01`,
     };
@@ -8069,7 +8077,103 @@ export const api = {
       data: results.slice(0, limit),
     };
   },
+
+  /**
+   * Custom Excel Export Templates (Sales & Purchase) — Database + Local Storage Fallback
+   */
+  async getExcelExportTemplates(moduleType?: 'SALES' | 'PURCHASE'): Promise<{
+    success: boolean;
+    templates: Array<{
+      id: number;
+      module_type: 'SALES' | 'PURCHASE';
+      template_name: string;
+      fields: string[];
+      is_default: boolean;
+      created_by?: string;
+      updated_at?: string;
+    }>;
+  }> {
+    const query = moduleType ? `?module=${encodeURIComponent(moduleType)}` : '';
+    try {
+      const res = await authFetch(`/api/system/export-templates${query}`);
+      const data = await res.json();
+      if (res.ok && data.success && Array.isArray(data.templates)) {
+        offlineStorage
+          .cacheApiData(`excel_export_templates_${moduleType || 'ALL'}`, data.templates)
+          .catch(() => {});
+        return data;
+      }
+    } catch {
+      // Offline fallback below
+    }
+    const cached =
+      (await offlineStorage.getCachedApiData<any[]>(
+        `excel_export_templates_${moduleType || 'ALL'}`
+      )) || [];
+    return { success: true, templates: cached };
+  },
+
+  async saveExcelExportTemplate(payload: {
+    module_type: 'SALES' | 'PURCHASE';
+    template_name: string;
+    fields: string[];
+    is_default?: boolean;
+    overwrite?: boolean;
+  }): Promise<{
+    success: boolean;
+    id?: number;
+    exists?: boolean;
+    existingId?: number;
+    message?: string;
+    error?: string;
+  }> {
+    const res = await authFetch('/api/system/export-templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (res.status === 409 && data.exists) {
+      return data;
+    }
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to save Excel export template.');
+    }
+    return data;
+  },
+
+  async updateExcelExportTemplate(
+    id: number,
+    payload: {
+      template_name?: string;
+      fields?: string[];
+      is_default?: boolean;
+    }
+  ): Promise<{ success: boolean; id?: number; message?: string }> {
+    const res = await authFetch(`/api/system/export-templates/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update Excel export template.');
+    }
+    return data;
+  },
+
+  async deleteExcelExportTemplate(id: number): Promise<{ success: boolean; message?: string }> {
+    const res = await authFetch(`/api/system/export-templates/${id}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to delete Excel export template.');
+    }
+    return data;
+  },
 };
+
 
 
 

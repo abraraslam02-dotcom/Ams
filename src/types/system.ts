@@ -90,7 +90,7 @@ export interface CompanySettings {
   logo_data_url?: string;
   invoice_heading?: string;
   default_printer?: string;
-  default_paper_size?: 'a4' | '80mm' | '58mm';
+  default_paper_size?: 'legal' | 'a4' | '80mm' | '58mm';
   thermal_printer_width?: '80mm' | '58mm';
   print_copies?: number;
   page_orientation?: 'portrait' | 'landscape';

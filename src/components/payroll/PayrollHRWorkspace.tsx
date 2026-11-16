@@ -30,6 +30,7 @@ import {
   X,
   ArrowUpDown,
 } from 'lucide-react';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type PayrollTabId =
   | 'payroll-dashboard'
@@ -154,6 +155,12 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
 
   const [loading, setLoading] = useState<boolean>(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!notice || notice.type !== 'success') return;
+    const timer = setTimeout(() => setNotice(null), 3500);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   // Master State
   const [dashboardData, setDashboardData] = useState<any>(null);
@@ -3442,7 +3449,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
       )}
 
       {/* =================================================================== */}
-      {/* TAB 9: SALARY SLIP (PRINTABLE A4 & EXPORTABLE)                      */}
+      {/* TAB 9: SALARY SLIP (PRINTABLE LEGAL & EXPORTABLE)                   */}
       {/* =================================================================== */}
       {activeTab === 'payroll-slips' && (
         <div className="space-y-4">
@@ -3475,13 +3482,14 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                   className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>Print A4 Salary Slip / Save PDF</span>
+                  <span>Print Legal Salary Slip / Save PDF</span>
                 </button>
               </div>
             )}
           </div>
 
           {salarySlipData?.payroll ? (
+            <ReportZoomWrapper label="Salary Slip Print Preview Zoom" paperWidthMm={215.9} paperHeightMm={355.6}>
             <div className="bg-white rounded-2xl border border-slate-300 shadow-sm max-w-4xl mx-auto p-8 print:shadow-none print:border-0 print:p-2 space-y-6">
               {/* Store Header */}
               <div className="border-b-2 border-slate-900 pb-4 flex items-start justify-between">
@@ -3669,9 +3677,10 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                 <div className="border-t border-slate-400 pt-2 font-semibold">Employee Signature & Thumb</div>
               </div>
             </div>
+            </ReportZoomWrapper>
           ) : (
             <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-400 text-xs">
-              Select a processed or finalized payroll record above to view and print its official A4 Salary Slip.
+              Select a processed or finalized payroll record above to view and print its official US Legal Salary Slip.
             </div>
           )}
         </div>
@@ -3798,6 +3807,8 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
             </div>
 
             {/* Summary Strip */}
+            <ReportZoomWrapper label="Payroll & HR Report Preview Zoom">
+            <div className="space-y-3">
             {reportData?.summary && Object.keys(reportData.summary).length > 0 && (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 {Object.entries(reportData.summary).map(([k, v]) => (
@@ -3914,6 +3925,8 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                 </table>
               </div>
             </div>
+            </div>
+            </ReportZoomWrapper>
           </div>
         </div>
       )}

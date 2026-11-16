@@ -19,6 +19,7 @@ import { PhysicalVerification, StockDatasheetItem } from '../../types/inventory'
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface CountRow {
   inventory_id: number;
@@ -87,6 +88,12 @@ export const PhysicalVerificationView: React.FC = () => {
   useEffect(() => {
     fetchVerifications();
   }, []);
+
+  useEffect(() => {
+    if (!statusNotice || statusNotice.type !== 'success') return;
+    const timer = window.setTimeout(() => setStatusNotice(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [statusNotice]);
 
   const toCountRow = (b: StockDatasheetItem): CountRow => {
     const upp = Math.max(1, Number(b.units_per_pack || 1));
@@ -490,7 +497,7 @@ export const PhysicalVerificationView: React.FC = () => {
                       printReportDocument(
                         printDetailRef.current,
                         `Physical Stock Adjustment - ${activeVerification.verification_no}`,
-                        { orientation: 'landscape', paperSize: 'a4', margin: 'minimum', fontSizeScale: 'small' }
+                        { orientation: 'portrait', paperSize: 'legal', margin: 'minimum', fontSizeScale: 'small' }
                       );
                     }
                   }}
@@ -520,6 +527,7 @@ export const PhysicalVerificationView: React.FC = () => {
               </div>
             </div>
 
+            <ReportZoomWrapper label="Physical Stock Adjustment Report Preview Zoom">
             <div ref={printDetailRef} className="space-y-3">
               <PrintDocumentHeader
                 title="PHYSICAL STOCK ADJUSTMENT REPORT (FULL PACK EQUIVALENT)"
@@ -626,6 +634,7 @@ export const PhysicalVerificationView: React.FC = () => {
                 </div>
               )}
             </div>
+            </ReportZoomWrapper>
 
             {/* Confirmation Sub-Dialog (Replaces window.confirm) */}
             {confirmReconcileOpen && (

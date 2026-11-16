@@ -288,12 +288,22 @@ class OfflineSyncManager {
       const pendingQueueTxIds = new Set(queueItems.map((q) => q.client_tx_id));
       const failedQueueTxIds = new Set(queueFailed.map((q) => q.client_tx_id));
 
-      const extraPendingItems = allItems.filter(
-        (i) => i?.sync_status === 'pending' && !pendingQueueTxIds.has(`ITEM-${i.id}`)
-      ).length;
-      const extraPendingSales = allSales.filter(
-        (s) => s?.sync_status === 'pending' && !pendingQueueTxIds.has(String(s.client_tx_id || ''))
-      ).length;
+      // Reconcile any local items or sales whose sync_queue entry has already completed
+      for (const i of allItems) {
+        if (i?.sync_status === 'pending' && !pendingQueueTxIds.has(`ITEM-${i.id}`)) {
+          i.sync_status = 'synced';
+          i.local_modified = false;
+          await offlineStorage.put('items', i).catch(() => {});
+        }
+      }
+      for (const s of allSales) {
+        const txKey = String(s?.client_tx_id || '');
+        if (s?.sync_status === 'pending' && (!txKey || !pendingQueueTxIds.has(txKey))) {
+          s.sync_status = 'synced';
+          s.local_modified = false;
+          await offlineStorage.put('sales', s).catch(() => {});
+        }
+      }
 
       const extraFailedItems = allItems.filter(
         (i) => i?.sync_status === 'failed' && !failedQueueTxIds.has(`ITEM-${i.id}`)
@@ -302,7 +312,8 @@ class OfflineSyncManager {
         (s) => s?.sync_status === 'failed' && !failedQueueTxIds.has(String(s.client_tx_id || ''))
       ).length;
 
-      this.pendingCount = queueItems.length + extraPendingItems + extraPendingSales;
+      const onlyPendingCount = queueItems.filter((q) => q.status === 'pending').length;
+      this.pendingCount = onlyPendingCount;
       this.failedCount = queueFailed.length + extraFailedItems + extraFailedSales;
 
       if (!this.isSyncing) {
@@ -1043,14 +1054,19 @@ class OfflineSyncManager {
       payload.status === 'Draft';
 
     const now = new Date();
-    const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const targetDate = payload.invoice_date ? new Date(payload.invoice_date) : now;
+    const dd = String(targetDate.getUTCDate()).padStart(2, '0');
+    const mmm = months[targetDate.getUTCMonth()] || 'JAN';
+    const yyyy = targetDate.getUTCFullYear();
+    const dateToken = `${dd}-${mmm}-${yyyy}`;
     const allSales = await offlineStorage.getAll<any>('sales');
     const nextSeq = allSales.length + 1;
     const localInvNo = isHeldOrDraft
-      ? `HLD-${ym}-${String(nextSeq).padStart(2, '0')}`
+      ? `HLD-SI-${dateToken}-${String(nextSeq).padStart(3, '0')}`
       : payload.invoice_number && !String(payload.invoice_number).includes('OFF')
       ? payload.invoice_number
-      : `Inv-${ym}-${String(nextSeq).padStart(2, '0')}`;
+      : `SI-${String(nextSeq).padStart(3, '0')}-${dateToken}`;
 
     const rawLines = Array.isArray(payload.items)
       ? payload.items
@@ -1185,12 +1201,17 @@ class OfflineSyncManager {
       payload.status === 'draft';
 
     const now = new Date();
-    const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const targetDate = payload.bill_date ? new Date(payload.bill_date) : now;
+    const dd = String(targetDate.getUTCDate()).padStart(2, '0');
+    const mmm = months[targetDate.getUTCMonth()] || 'JAN';
+    const yyyy = targetDate.getUTCFullYear();
+    const dateToken = `${dd}-${mmm}-${yyyy}`;
     const allPurchases = await offlineStorage.getAll<any>('purchases');
     const nextSeq = allPurchases.length + 1;
     const localInvNo = isHeldOrDraft
-      ? `HLD-PUR-${ym}-${String(nextSeq).padStart(2, '0')}`
-      : payload.bill_number || `Inv-${ym}-${String(nextSeq).padStart(2, '0')}`;
+      ? `HLD-PI-${dateToken}-${String(nextSeq).padStart(3, '0')}`
+      : payload.bill_number || `PI-${String(nextSeq).padStart(3, '0')}-${dateToken}`;
 
     const rawLines = Array.isArray(payload.items) ? payload.items : [];
 

@@ -4,6 +4,7 @@ import { SalesInvoiceRecord } from '../../types/sales';
 import { formatPKR } from '../../utils/formatters';
 import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { SalesPrintModal } from './SalesPrintModal';
+import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 import {
@@ -47,6 +48,8 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
 
   const [loading, setLoading] = useState<boolean>(false);
   const [exporting, setExporting] = useState<boolean>(false);
+  const [customExportOpen, setCustomExportOpen] = useState<boolean>(false);
+  const [customExportRecords, setCustomExportRecords] = useState<SalesInvoiceRecord[]>([]);
   const [viewInvoice, setViewInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printInvoice, setPrintInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printFormat, setPrintFormat] = useState<'a4' | '80mm' | '58mm'>('a4');
@@ -168,6 +171,40 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
           `AMS_Sales_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`
         );
       }
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleOpenCustomExport = async (singleInvoice?: SalesInvoiceRecord) => {
+    try {
+      setExporting(true);
+      if (singleInvoice) {
+        if (Array.isArray(singleInvoice.items) && singleInvoice.items.length > 0) {
+          setCustomExportRecords([singleInvoice]);
+        } else {
+          const res = await api.getSaleDetails(singleInvoice.id);
+          setCustomExportRecords([res?.data || singleInvoice]);
+        }
+        setCustomExportOpen(true);
+        return;
+      }
+      const statusParam = mode === 'held_or_draft' ? 'held_or_draft' : 'completed';
+      const res = await api.getSales({
+        q,
+        customerId,
+        paymentMode,
+        status: statusParam,
+        startDate,
+        endDate,
+        exportAll: true,
+      });
+      const records: SalesInvoiceRecord[] = res?.data && res.data.length > 0 ? res.data : invoices;
+      setCustomExportRecords(records);
+      setCustomExportOpen(true);
+    } catch {
+      setCustomExportRecords(singleInvoice ? [singleInvoice] : invoices);
+      setCustomExportOpen(true);
     } finally {
       setExporting(false);
     }
@@ -312,6 +349,17 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
         >
           <Download className="w-3.5 h-3.5" />
           <span>{exporting ? 'Exporting...' : 'Export to Excel (.xlsx)'}</span>
+        </button>
+
+        <button
+          type="button"
+          disabled={exporting || invoices.length === 0}
+          onClick={() => handleOpenCustomExport()}
+          className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+          title="Sales Invoice → Custom Excel Export (Choose Fields & Templates)"
+        >
+          <FileSpreadsheet className="w-3.5 h-3.5" />
+          <span>Custom Excel Export</span>
         </button>
       </div>
 
@@ -572,6 +620,15 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                   <Download className="w-3.5 h-3.5" />
                   Export to Excel
                 </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenCustomExport(viewInvoice)}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                  title="Sales Invoice → Custom Excel Export"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  Custom Excel Export
+                </button>
                 {(onEditInvoice || onResumeInvoice) && (
                   <button
                     type="button"
@@ -685,6 +742,13 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
           onClose={() => setPrintInvoice(null)}
         />
       )}
+
+      <CustomExcelExportModal
+        isOpen={customExportOpen}
+        onClose={() => setCustomExportOpen(false)}
+        moduleType="SALES"
+        records={customExportRecords}
+      />
     </div>
   );
 };

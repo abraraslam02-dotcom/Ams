@@ -149,10 +149,17 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
   const [deleteModalVoucher, setDeleteModalVoucher] = useState<CashBookVoucher | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [printVoucher, setPrintVoucher] = useState<any | null>(null);
-  const [_printFormat, setPrintFormat] = useState<'a4' | '80mm' | '58mm'>('a4');
+  const [_printFormat, setPrintFormat] = useState<'legal' | 'a4' | '80mm' | '58mm'>('legal');
   const [whatsAppModalVoucher, setWhatsAppModalVoucher] = useState<any | null>(null);
   const [whatsAppPhone, setWhatsAppPhone] = useState<string>('');
   const [selectedAuditLogSnapshot, setSelectedAuditLogSnapshot] = useState<CashBookAuditLog | null>(null);
+
+  useEffect(() => {
+    if (!successMsg) return;
+    setWhatsAppModalVoucher(null);
+    const timer = window.setTimeout(() => setSuccessMsg(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [successMsg]);
 
   const printableElementRef = useRef<HTMLDivElement | null>(null);
 
@@ -582,13 +589,13 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
   };
 
   // Print Voucher
-  const handleOpenPrint = (v: any, format: 'a4' | '80mm' | '58mm') => {
+  const handleOpenPrint = (v: any, format: 'legal' | 'a4' | '80mm' | '58mm' = 'legal') => {
     setPrintVoucher(v);
     setPrintFormat(format);
     setTimeout(() => {
       executePrintElement(printableElementRef.current, {
         title: `Cash_Voucher_${v.voucher_number}`,
-        paperSize: format,
+        paperSize: format === 'a4' ? 'legal' : format,
         copies: 1,
       });
     }, 100);
@@ -1459,12 +1466,12 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                                     Edit
                                   </button>
 
-                                  {/* Print A4 */}
+                                  {/* Print Legal */}
                                   <button
                                     type="button"
-                                    onClick={() => handleOpenPrint(v, 'a4')}
+                                    onClick={() => handleOpenPrint(v, 'legal')}
                                     className="px-1.5 py-1 rounded bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 font-bold text-[10px] cursor-pointer"
-                                    title="Print A4 Voucher"
+                                    title="Print Legal Voucher"
                                   >
                                     <Printer className="w-3 h-3" />
                                   </button>
@@ -2094,11 +2101,11 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleOpenPrint(viewVoucher.voucher, 'a4')}
+                  onClick={() => handleOpenPrint(viewVoucher.voucher, 'legal')}
                   className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  Print A4
+                  Print Legal
                 </button>
                 <button
                   type="button"

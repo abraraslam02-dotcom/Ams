@@ -84,6 +84,12 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    if (!banner || banner.type !== 'success') return;
+    const timer = window.setTimeout(() => setBanner(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [banner]);
+
   // Core Shared Data
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [salesmen, setSalesmen] = useState<SupplySalesman[]>([]);

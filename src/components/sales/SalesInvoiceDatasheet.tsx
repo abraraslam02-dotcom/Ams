@@ -26,6 +26,7 @@ import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
 } from '../common/InvoiceRecordSearchInput';
+import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
 import { WhatsAppDocumentPayload } from '../../utils/whatsapp';
 import {
   Search,
@@ -275,8 +276,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 }) => {
   // Header State
   const [editingSaleId, setEditingSaleId] = useState<number | null>(null);
-  const [invoiceNumber, setInvoiceNumber] = useState<string>('Inv-2026-11-01');
+  const [editingSaleStatus, setEditingSaleStatus] = useState<string | null>(null);
   const [invoiceDate, setInvoiceDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [invoiceNumber, setInvoiceNumber] = useState<string>(() => {
+    const d = new Date();
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    return `SI-001-${String(d.getDate()).padStart(2, '0')}-${months[d.getMonth()]}-${d.getFullYear()}`;
+  });
   const [customerAccountId, setCustomerAccountId] = useState<number>(0);
   const [customerSearchText, setCustomerSearchText] = useState<string>('');
   const [buyerName, setBuyerName] = useState<string>('');
@@ -605,8 +611,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             parsed.rows.some((r: any) => r && r.item_id !== null && Number(r.item_id) > 0)
           ) {
             setEditingSaleId(parsed.editingSaleId || null);
+            setEditingSaleStatus(parsed.editingSaleStatus || null);
+            const isCompletedEdit =
+              Boolean(parsed.editingSaleId) &&
+              String(parsed.editingSaleStatus || '').trim().toLowerCase() === 'completed';
             setInvoiceNumber(
-              parsed.editingSaleId
+              isCompletedEdit
                 ? parsed.invoiceNumber || nextNumRes.nextInvoiceNumber
                 : nextNumRes.nextInvoiceNumber
             );
@@ -958,9 +968,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRowIndex, selectedRowItemId, selectedRowItemCode, customerAccountId]);
 
-  // Automatically update next read-only invoice number when invoiceDate month/year changes on a new invoice
+  // Automatically update next read-only invoice number when invoiceDate or invoiceType changes on a new or held/draft invoice
   useEffect(() => {
-    if (editingSaleId) return;
+    const isCompletedEdit =
+      Boolean(editingSaleId) &&
+      String(editingSaleStatus || '').trim().toLowerCase() === 'completed';
+    if (isCompletedEdit) return;
     let active = true;
     api
       .getNextSalesNumbers(invoiceDate)
@@ -973,7 +986,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     return () => {
       active = false;
     };
-  }, [invoiceDate, editingSaleId]);
+  }, [invoiceDate, invoiceType, editingSaleId, editingSaleStatus]);
 
   // Persist active invoice state to localStorage so changing menus never loses entered items
   useEffect(() => {
@@ -988,6 +1001,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
     const payload = {
       editingSaleId,
+      editingSaleStatus,
       invoiceNumber,
       invoiceDate,
       customerAccountId,
@@ -1016,6 +1030,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     localStorage.setItem(ACTIVE_DRAFT_STORAGE_KEY, JSON.stringify(payload));
   }, [
     editingSaleId,
+    editingSaleStatus,
     invoiceNumber,
     invoiceDate,
     customerAccountId,
@@ -1043,7 +1058,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     onDraftItemsStateChange,
   ]);
 
-  // Load specific Held/Draft invoice when resumeInvoiceId is passed
+  // Load specific Held/Draft or Completed invoice when resumeInvoiceId is passed
   const handleResumeInvoice = useCallback(
     async (idToResume: number) => {
       try {
@@ -1052,11 +1067,24 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         const res: any = await api.getSaleDetails(idToResume);
         const inv = res?.data || res?.invoice || res?.sale || res || {};
         const invId = Number(inv.id || idToResume);
+        const loadedStatus = String(inv.status || 'completed').trim().toLowerCase();
+        const loadedDate = String(inv.invoice_date || new Date().toISOString().slice(0, 10));
         editingSaleIdRef.current = invId;
         localStorage.removeItem(ACTIVE_DRAFT_STORAGE_KEY);
         setEditingSaleId(invId);
-        setInvoiceNumber(String(inv.invoice_number || ''));
-        setInvoiceDate(String(inv.invoice_date || new Date().toISOString().slice(0, 10)));
+        setEditingSaleStatus(loadedStatus);
+        setInvoiceDate(loadedDate);
+        if (
+          isHeldStatus(loadedStatus) ||
+          /^(HLD|HOLD|DRF|DRAFT)-/i.test(String(inv.invoice_number || '').trim())
+        ) {
+          const nextNum = await api
+            .getNextSalesNumbers(loadedDate)
+            .catch(() => ({ nextInvoiceNumber: String(inv.invoice_number || '') }));
+          setInvoiceNumber(nextNum.nextInvoiceNumber || String(inv.invoice_number || ''));
+        } else {
+          setInvoiceNumber(String(inv.invoice_number || ''));
+        }
         setCustomerAccountId(Number(inv.customer_account_id || 0));
         setCustomerSearchText('');
         setBuyerName(String(inv.buyer_name || ''));
@@ -1928,7 +1956,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   // Reset Invoice to Blank
   const resetToNewInvoice = async () => {
     localStorage.removeItem(ACTIVE_DRAFT_STORAGE_KEY);
+    editingSaleIdRef.current = null;
     setEditingSaleId(null);
+    setEditingSaleStatus(null);
     setCustomerAccountId(0);
     setCustomerSearchText('');
     setBuyerName('');
@@ -1955,6 +1985,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setDeliveryNotes('');
     setRemarks('');
     setShowDiscardConfirm(false);
+    setLastSavedWhatsappPayload(null);
+    setShowSalesSmsModal(false);
+    setSalesSmsText('');
     try {
       const nextNums = await api.getNextSalesNumbers(invoiceDate);
       setInvoiceNumber(nextNums.nextInvoiceNumber);
@@ -1963,6 +1996,27 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       // ignore
     }
   };
+
+  // Automatically dismiss completed activity / WhatsApp notifications without requiring manual user action
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = window.setTimeout(() => {
+      setSuccessMsg(null);
+      setLastSavedWhatsappPayload(null);
+    }, 2200);
+    return () => window.clearTimeout(timer);
+  }, [successMsg]);
+
+  useEffect(() => {
+    const handleWhatsAppCompleted = () => {
+      setLastSavedWhatsappPayload(null);
+      setSuccessMsg(null);
+    };
+    window.addEventListener('ams-whatsapp-activity-completed', handleWhatsAppCompleted);
+    return () => {
+      window.removeEventListener('ams-whatsapp-activity-completed', handleWhatsAppCompleted);
+    };
+  }, []);
 
   // Save / Complete / Hold Invoice
   const handleSaveInvoice = async (
@@ -2046,7 +2100,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         paid_amount: paidAmount,
         allow_negative_stock: allowNegativeStock ? 1 : 0,
         status: targetStatus,
-        ...(editingSaleId && targetStatus === 'completed' ? { from_hold_conversion: true } : {}),
+        ...(editingSaleId &&
+        String(editingSaleStatus || '').trim().toLowerCase() !== 'completed' &&
+        targetStatus === 'completed'
+          ? { from_hold_conversion: true }
+          : {}),
         remarks,
         items: activeLines.map((r) => ({
           item_id: r.item_id,
@@ -2078,28 +2136,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setHeldInvoices((prev) => prev.filter((h) => Number(h.id) !== Number(prevEditingId)));
       }
 
-      const waPayload: WhatsAppDocumentPayload = {
-        storeName: storeDisplayName,
-        documentType: 'invoice',
-        invoiceId: savedInvoice.id,
-        documentNumber: savedInvoice.invoice_number,
-        documentDate: savedInvoice.invoice_date || invoiceDate,
-        customerAccountId: customerAccountId || null,
-        customerName: selectedCustomer?.account_name || 'Walk-in Cash Customer',
-        customerPhone: selectedCustomer?.phone || '',
-        totalAmount: Number(savedInvoice.net_total ?? netInvoiceAmount),
-        paidAmount: Number(savedInvoice.paid_amount ?? paidAmount),
-        remainingBalance: Number(savedInvoice.balance_amount ?? remainingBalance),
-        items: activeLines.map((r) => ({
-          item_name: r.item_name,
-          packing: r.packing,
-          quantity: r.quantity,
-          loose_quantity: r.loose_quantity,
-          unit_price: r.unit_price,
-          line_total: r.line_total,
-        })),
-      };
-      setLastSavedWhatsappPayload(waPayload);
+      // Automatically dismiss any related WhatsApp/activity notification when invoice is saved or posted
+      setLastSavedWhatsappPayload(null);
+      setShowSalesSmsModal(false);
+      window.dispatchEvent(
+        new CustomEvent('ams-whatsapp-activity-completed', {
+          detail: { invoiceId: savedInvoice.id, documentNumber: savedInvoice.invoice_number },
+        })
+      );
 
       // Refresh store display name (never auto-trigger WhatsApp after save/update)
       api
@@ -2319,66 +2363,97 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   // Export Active Sales Invoice (or Saved Sales Invoices) to Formatted Multi-Sheet Excel (.xlsx)
   const [exportingExcel, setExportingExcel] = useState<boolean>(false);
+  const [customExportOpen, setCustomExportOpen] = useState<boolean>(false);
+  const [customExportRecords, setCustomExportRecords] = useState<Array<Record<string, any>>>([]);
+
+  const buildCurrentSaleExportRecord = () => {
+    const activeLines = rows.filter((r) => r.item_id !== null);
+    if (activeLines.length === 0) return null;
+    return {
+      id: editingSaleId || 0,
+      invoice_number: invoiceNumber,
+      invoice_date: invoiceDate,
+      customer_account_id: customerAccountId,
+      customer_code: selectedCustomer?.account_code || 'CUS-1001',
+      customer_name: selectedCustomer?.account_name || 'Walk-in Cash Customer',
+      buyer_name: buyerName.trim(),
+      customer_filer_status: customerFilerStatus,
+      salesman: salesman || 'Counter Pharmacist',
+      deliveryman_name: deliverymanName || '',
+      invoice_type: invoiceType,
+      payment_mode: paymentMode,
+      gross_amount: grossAmount,
+      item_discount_total: itemDiscountTotal,
+      invoice_discount_percent: invoiceDiscountPercent,
+      invoice_discount_amount: computedInvoiceDiscAmt,
+      discount_amount: round2(itemDiscountTotal + computedInvoiceDiscAmt),
+      taxable_amount: taxableAmount,
+      advance_tax_rate: effectiveAdvTaxRate,
+      advance_tax_amount: advanceTaxAmount,
+      tax_amount: totalTax,
+      net_total: netInvoiceAmount,
+      paid_amount: paidAmount,
+      balance_amount: remainingBalance,
+      status: editingSaleId ? 'completed' : 'draft',
+      remarks: remarks || '',
+      items: activeLines.map((r, idx) => ({
+        id: idx + 1,
+        item_id: Number(r.item_id || 0),
+        item_code: r.item_code,
+        company_name: r.company_name,
+        item_name: r.item_name,
+        packing: r.packing,
+        batch_number: r.batch_number,
+        expiry_date: r.expiry_date,
+        quantity: r.quantity,
+        loose_quantity: r.loose_quantity,
+        bonus_quantity: Number(r.bonus_quantity || 0),
+        total_units: r.total_units,
+        unit_price: r.unit_price,
+        loose_rate: r.loose_rate,
+        discount_percent: r.discount_percent,
+        discount_amount: r.discount_amount,
+        taxable_amount: r.taxable_amount,
+        tax_percent: r.tax_percent,
+        tax_amount: r.tax_amount,
+        gross_amount: r.gross_amount,
+        line_total: r.line_total,
+      })),
+    };
+  };
+
+  const handleOpenCustomExcelExport = async () => {
+    try {
+      setExportingExcel(true);
+      setErrorMsg(null);
+      const currentRecord = buildCurrentSaleExportRecord();
+      if (currentRecord) {
+        setCustomExportRecords([currentRecord]);
+        setCustomExportOpen(true);
+        return;
+      }
+      const res = await api.getSales({ status: 'completed', exportAll: true });
+      const savedSales = res.data || [];
+      setCustomExportRecords(savedSales);
+      setCustomExportOpen(true);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExportingExcel(false);
+    }
+  };
 
   const handleExportCurrentSaleToExcel = async () => {
     try {
       setExportingExcel(true);
       setErrorMsg(null);
-      const activeLines = rows.filter((r) => r.item_id !== null);
-      if (activeLines.length > 0) {
-        const currentRecord = {
-          id: editingSaleId || 0,
-          invoice_number: invoiceNumber,
-          invoice_date: invoiceDate,
-          customer_account_id: customerAccountId,
-          customer_code: selectedCustomer?.account_code || 'CUS-1001',
-          customer_name: selectedCustomer?.account_name || 'Walk-in Cash Customer',
-          buyer_name: buyerName.trim(),
-          customer_filer_status: customerFilerStatus,
-          salesman: salesman || 'Counter Pharmacist',
-          invoice_type: invoiceType,
-          payment_mode: paymentMode,
-          gross_amount: grossAmount,
-          item_discount_total: itemDiscountTotal,
-          invoice_discount_percent: invoiceDiscountPercent,
-          invoice_discount_amount: computedInvoiceDiscAmt,
-          discount_amount: round2(itemDiscountTotal + computedInvoiceDiscAmt),
-          taxable_amount: taxableAmount,
-          advance_tax_rate: effectiveAdvTaxRate,
-          advance_tax_amount: advanceTaxAmount,
-          tax_amount: totalTax,
-          net_total: netInvoiceAmount,
-          paid_amount: paidAmount,
-          balance_amount: remainingBalance,
-          status: editingSaleId ? 'completed' : 'draft',
-          remarks: remarks || '',
-          items: activeLines.map((r, idx) => ({
-            id: idx + 1,
-            item_id: Number(r.item_id || 0),
-            item_code: r.item_code,
-            company_name: r.company_name,
-            item_name: r.item_name,
-            packing: r.packing,
-            batch_number: r.batch_number,
-            expiry_date: r.expiry_date,
-            quantity: r.quantity,
-            loose_quantity: r.loose_quantity,
-            bonus_quantity: Number(r.bonus_quantity || 0),
-            unit_price: r.unit_price,
-            loose_rate: r.loose_rate,
-            discount_percent: r.discount_percent,
-            discount_amount: r.discount_amount,
-            tax_percent: r.tax_percent,
-            tax_amount: r.tax_amount,
-            gross_amount: r.gross_amount,
-            line_total: r.line_total,
-          })),
-        };
+      const currentRecord = buildCurrentSaleExportRecord();
+      if (currentRecord) {
         exportSalesInvoicesToExcel(
           [currentRecord],
           `Sales_Invoice_${invoiceNumber.replace(/[^a-zA-Z0-9_-]/g, '_')}.xlsx`
         );
-        setSuccessMsg(`Exported Sales Invoice ${invoiceNumber} (${activeLines.length} items) to Excel (.xlsx).`);
+        setSuccessMsg(`Exported Sales Invoice ${invoiceNumber} (${currentRecord.items.length} items) to Excel (.xlsx).`);
         return;
       }
 
@@ -3335,23 +3410,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             <span>{successMsg}</span>
           </div>
           <div className="flex items-center gap-2">
-            {lastSavedWhatsappPayload && (
-              <WhatsAppSendButton
-                compact
-                label={`Send ${lastSavedWhatsappPayload.documentNumber} via WhatsApp`}
-                payload={lastSavedWhatsappPayload}
-                autoTriggerKey={null}
-                onPhoneSaved={(newPhone) => {
-                  setLastSavedWhatsappPayload((prev) =>
-                    prev ? { ...prev, customerPhone: newPhone } : prev
-                  );
-                  loadReferenceData();
-                }}
-              />
-            )}
             <button
               type="button"
-              onClick={() => setSuccessMsg(null)}
+              onClick={() => {
+                setSuccessMsg(null);
+                setLastSavedWhatsappPayload(null);
+              }}
               className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
             >
               ✕
@@ -3437,6 +3501,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           >
             <FileSpreadsheet className="w-3 h-3" />
             <span>All Excel</span>
+          </button>
+          <button
+            type="button"
+            disabled={exportingExcel}
+            onClick={handleOpenCustomExcelExport}
+            className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Sales Invoice → Custom Excel Export (Choose Fields & Saved Templates)"
+          >
+            <FileSpreadsheet className="w-3 h-3" />
+            <span>Custom Excel Export</span>
           </button>
           <label
             className={`flex items-center gap-1 px-1.5 py-0.5 rounded border font-bold cursor-pointer transition-colors ${
@@ -3625,45 +3699,40 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 >
                   Held ({heldInvoices.length})
                 </button>
-                {(lastSavedWhatsappPayload || rows.some((r) => r.item_id)) && (
+                {rows.some((r) => r.item_id) && (
                   <WhatsAppSendButton
                     compact
                     label="WA"
-                    payload={
-                      rows.some((r) => r.item_id)
-                        ? {
-                            storeName: storeDisplayName,
-                            documentType: 'invoice',
-                            invoiceId: editingSaleId || null,
-                            documentNumber: invoiceNumber,
-                            documentDate: invoiceDate,
-                            customerAccountId: customerAccountId || null,
-                            customerName:
-                              selectedCustomer?.account_name || 'Walk-in Cash Customer',
-                            customerPhone: selectedCustomer?.phone || '',
-                            totalAmount: netInvoiceAmount,
-                            paidAmount: paidAmount,
-                            remainingBalance: remainingBalance,
-                            items: rows
-                              .filter((r) => r.item_id)
-                              .map((r) => ({
-                                item_name: r.item_name,
-                                packing: r.packing,
-                                quantity: r.quantity,
-                                loose_quantity: r.loose_quantity,
-                                unit_price: r.unit_price,
-                                line_total: r.line_total,
-                              })),
-                          }
-                        : lastSavedWhatsappPayload!
-                    }
-                    onPhoneSaved={(newPhone) => {
-                      if (lastSavedWhatsappPayload) {
-                        setLastSavedWhatsappPayload((prev) =>
-                          prev ? { ...prev, customerPhone: newPhone } : prev
-                        );
-                      }
+                    payload={{
+                      storeName: storeDisplayName,
+                      documentType: 'invoice',
+                      invoiceId: editingSaleId || null,
+                      documentNumber: invoiceNumber,
+                      documentDate: invoiceDate,
+                      customerAccountId: customerAccountId || null,
+                      customerName:
+                        selectedCustomer?.account_name || 'Walk-in Cash Customer',
+                      customerPhone: selectedCustomer?.phone || '',
+                      totalAmount: netInvoiceAmount,
+                      paidAmount: paidAmount,
+                      remainingBalance: remainingBalance,
+                      items: rows
+                        .filter((r) => r.item_id)
+                        .map((r) => ({
+                          item_name: r.item_name,
+                          packing: r.packing,
+                          quantity: r.quantity,
+                          loose_quantity: r.loose_quantity,
+                          unit_price: r.unit_price,
+                          line_total: r.line_total,
+                        })),
+                    }}
+                    onPhoneSaved={() => {
                       loadReferenceData();
+                    }}
+                    onSendSuccess={() => {
+                      setLastSavedWhatsappPayload(null);
+                      setSuccessMsg(null);
                     }}
                   />
                 )}
@@ -4519,45 +4588,40 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <Printer className="w-3 h-3" />
                   <span>Reprint</span>
                 </button>
-                {(lastSavedWhatsappPayload || rows.some((r) => r.item_id)) && (
+                {rows.some((r) => r.item_id) && (
                   <WhatsAppSendButton
                     compact
                     label="WhatsApp"
-                    payload={
-                      rows.some((r) => r.item_id)
-                        ? {
-                            storeName: storeDisplayName,
-                            documentType: 'invoice',
-                            invoiceId: editingSaleId || null,
-                            documentNumber: invoiceNumber,
-                            documentDate: invoiceDate,
-                            customerAccountId: customerAccountId || null,
-                            customerName:
-                              selectedCustomer?.account_name || 'Walk-in Cash Customer',
-                            customerPhone: selectedCustomer?.phone || '',
-                            totalAmount: netInvoiceAmount,
-                            paidAmount: paidAmount,
-                            remainingBalance: remainingBalance,
-                            items: rows
-                              .filter((r) => r.item_id)
-                              .map((r) => ({
-                                item_name: r.item_name,
-                                packing: r.packing,
-                                quantity: r.quantity,
-                                loose_quantity: r.loose_quantity,
-                                unit_price: r.unit_price,
-                                line_total: r.line_total,
-                              })),
-                          }
-                        : lastSavedWhatsappPayload!
-                    }
-                    onPhoneSaved={(newPhone) => {
-                      if (lastSavedWhatsappPayload) {
-                        setLastSavedWhatsappPayload((prev) =>
-                          prev ? { ...prev, customerPhone: newPhone } : prev
-                        );
-                      }
+                    payload={{
+                      storeName: storeDisplayName,
+                      documentType: 'invoice',
+                      invoiceId: editingSaleId || null,
+                      documentNumber: invoiceNumber,
+                      documentDate: invoiceDate,
+                      customerAccountId: customerAccountId || null,
+                      customerName:
+                        selectedCustomer?.account_name || 'Walk-in Cash Customer',
+                      customerPhone: selectedCustomer?.phone || '',
+                      totalAmount: netInvoiceAmount,
+                      paidAmount: paidAmount,
+                      remainingBalance: remainingBalance,
+                      items: rows
+                        .filter((r) => r.item_id)
+                        .map((r) => ({
+                          item_name: r.item_name,
+                          packing: r.packing,
+                          quantity: r.quantity,
+                          loose_quantity: r.loose_quantity,
+                          unit_price: r.unit_price,
+                          line_total: r.line_total,
+                        })),
+                    }}
+                    onPhoneSaved={() => {
                       loadReferenceData();
+                    }}
+                    onSendSuccess={() => {
+                      setLastSavedWhatsappPayload(null);
+                      setSuccessMsg(null);
                     }}
                   />
                 )}
@@ -5845,6 +5909,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </button>
                 <button
                   type="button"
+                  disabled={exportingExcel}
+                  onClick={handleOpenCustomExcelExport}
+                  className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  title="Sales Invoice → Custom Excel Export (Field Selection & Templates)"
+                >
+                  <FileSpreadsheet className="w-3 h-3" />
+                  Custom Excel Export
+                </button>
+                <button
+                  type="button"
                   onClick={handleReprintLastInvoice}
                   className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
@@ -6539,6 +6613,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           }}
         />
       )}
+
+      {/* ================= CUSTOM EXCEL EXPORT MODAL ================= */}
+      <CustomExcelExportModal
+        isOpen={customExportOpen}
+        onClose={() => setCustomExportOpen(false)}
+        moduleType="SALES"
+        records={customExportRecords}
+        defaultFilename={`Sales_Custom_Export_${invoiceDate}.xlsx`}
+      />
 
       {/* ================= MODAL 6: DSR (DAILY STOCK REQUISITION) REPORT ================= */}
       {showDsrModal && (

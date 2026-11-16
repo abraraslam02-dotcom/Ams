@@ -14,6 +14,7 @@ import { StockStatementResponse } from '../../types/inventory';
 import { formatPKR } from '../../utils/formatters';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const CompanyStockStatementView: React.FC = () => {
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -65,8 +66,8 @@ export const CompanyStockStatementView: React.FC = () => {
         printRef.current,
         `Abrar Medical Store - Stock Statement (${fromDate || 'Start'} to ${toDate})`,
         {
-          paperSize: 'a4',
-          orientation: 'landscape',
+          paperSize: 'legal',
+          orientation: 'portrait',
           margin: 'minimum',
           fontSizeScale: 'small',
         }
@@ -217,7 +218,7 @@ export const CompanyStockStatementView: React.FC = () => {
               className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-white rounded text-xs font-semibold border border-slate-700 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print / PDF (A4 Landscape)</span>
+              <span>Print / PDF (Legal)</span>
             </button>
 
             <button
@@ -253,7 +254,8 @@ export const CompanyStockStatementView: React.FC = () => {
         </div>
       )}
 
-      {/* Printable / Preview Sheet (A4 Landscape Layout with repeating column headers per printed page) */}
+      {/* Printable / Preview Sheet (US Legal Portrait Layout with repeating column headers per printed page) */}
+      <ReportZoomWrapper label="Company Stock Statement Preview Zoom">
       <div
         ref={printRef}
         className={`rounded-lg border overflow-hidden shadow-xs ${
@@ -288,7 +290,7 @@ export const CompanyStockStatementView: React.FC = () => {
               </div>
               <div>Print Date: {new Date().toLocaleDateString('en-PK')}</div>
               <div className="text-[10px] opacity-75">
-                Page: <span className="ams-page-number">1</span> (A4 Landscape • All Qty in Full Packs)
+                Page: <span className="ams-page-number">1</span> (US Legal Portrait • All Qty in Full Packs)
               </div>
             </div>
           </div>
@@ -461,6 +463,7 @@ export const CompanyStockStatementView: React.FC = () => {
           </table>
         </div>
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

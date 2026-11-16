@@ -347,9 +347,9 @@ systemRouter.put('/settings', authenticateToken, (req: Request, res: Response) =
       body.default_printer !== undefined
         ? String(body.default_printer).trim()
         : String(existing.default_printer || 'System Default Printer (OS Print Spooler)');
-    const defaultPaperSize = ['a4', '80mm', '58mm'].includes(String(body.default_paper_size))
+    const defaultPaperSize = ['legal', 'a4', '80mm', '58mm'].includes(String(body.default_paper_size))
       ? String(body.default_paper_size)
-      : String(existing.default_paper_size || 'a4');
+      : String(existing.default_paper_size || 'legal');
     const thermalPrinterWidth = ['80mm', '58mm'].includes(String(body.thermal_printer_width))
       ? String(body.thermal_printer_width)
       : String(existing.thermal_printer_width || '80mm');
@@ -359,7 +359,7 @@ systemRouter.put('/settings', authenticateToken, (req: Request, res: Response) =
         : Number(existing.print_copies || 1);
     const pageOrientation = ['portrait', 'landscape'].includes(String(body.page_orientation))
       ? String(body.page_orientation)
-      : String(existing.page_orientation || 'portrait');
+      : 'portrait';
     const pageMargin = ['none', 'minimum', 'compact', 'standard'].includes(String(body.page_margin))
       ? String(body.page_margin)
       : String(existing.page_margin || 'standard');
@@ -2310,6 +2310,444 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
       success: false,
       error: `Failed to load dashboard analytics: ${msg}`,
     });
+  }
+});
+
+// ============================================================================
+// CUSTOM EXCEL EXPORT TEMPLATES (PERMANENT SQLITE PERSISTENCE)
+// ============================================================================
+
+function ensureExcelExportTemplatesTable() {
+  const db = getDatabase();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS excel_export_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      module_type TEXT NOT NULL CHECK(module_type IN ('SALES', 'PURCHASE')),
+      template_name TEXT NOT NULL,
+      fields_json TEXT NOT NULL,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT DEFAULT 'System',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(module_type, template_name COLLATE NOCASE)
+    );
+  `);
+
+  const countRow = db
+    .prepare('SELECT COUNT(*) AS cnt FROM excel_export_templates')
+    .get() as { cnt: number };
+
+  if (Number(countRow?.cnt || 0) === 0) {
+    const starterTemplates: Array<{
+      module_type: 'SALES' | 'PURCHASE';
+      template_name: string;
+      fields: string[];
+      is_default: number;
+    }> = [
+      // Sales Starter Templates
+      {
+        module_type: 'SALES',
+        template_name: 'Daily Sales Report',
+        fields: [
+          'invoice_number',
+          'invoice_date',
+          'customer_name',
+          'item_code',
+          'item_name',
+          'company_name',
+          'packing',
+          'quantity',
+          'bonus_quantity',
+          'unit_price',
+          'discount_amount',
+          'line_total',
+          'net_total',
+          'paid_amount',
+          'balance_amount',
+        ],
+        is_default: 1,
+      },
+      {
+        module_type: 'SALES',
+        template_name: 'Customer Sales Report',
+        fields: [
+          'customer_code',
+          'customer_name',
+          'buyer_name',
+          'invoice_number',
+          'invoice_date',
+          'payment_mode',
+          'item_name',
+          'quantity',
+          'unit_price',
+          'discount_percent',
+          'discount_amount',
+          'line_total',
+          'net_total',
+          'paid_amount',
+          'balance_amount',
+        ],
+        is_default: 0,
+      },
+      {
+        module_type: 'SALES',
+        template_name: 'Company-Wise Sales',
+        fields: [
+          'company_name',
+          'item_code',
+          'item_name',
+          'packing',
+          'batch_number',
+          'expiry_date',
+          'invoice_number',
+          'invoice_date',
+          'customer_name',
+          'quantity',
+          'bonus_quantity',
+          'unit_price',
+          'line_total',
+        ],
+        is_default: 0,
+      },
+      {
+        module_type: 'SALES',
+        template_name: 'Salesman Performance',
+        fields: [
+          'salesman',
+          'invoice_date',
+          'invoice_number',
+          'customer_name',
+          'item_name',
+          'company_name',
+          'quantity',
+          'gross_amount',
+          'discount_amount',
+          'line_total',
+          'net_total',
+          'paid_amount',
+        ],
+        is_default: 0,
+      },
+      // Purchase Starter Templates
+      {
+        module_type: 'PURCHASE',
+        template_name: 'Daily Purchase Report',
+        fields: [
+          'bill_number',
+          'supplier_invoice_number',
+          'bill_date',
+          'supplier_name',
+          'item_code',
+          'item_name',
+          'company_name',
+          'packing',
+          'batch_number',
+          'expiry_date',
+          'quantity',
+          'bonus_quantity',
+          'purchase_rate',
+          'discount_amount',
+          'tax_amount',
+          'line_total',
+          'net_total',
+        ],
+        is_default: 1,
+      },
+      {
+        module_type: 'PURCHASE',
+        template_name: 'Supplier Purchase Report',
+        fields: [
+          'supplier_code',
+          'supplier_name',
+          'bill_number',
+          'supplier_invoice_number',
+          'bill_date',
+          'payment_mode',
+          'item_name',
+          'quantity',
+          'bonus_quantity',
+          'purchase_rate',
+          'line_total',
+          'net_total',
+          'paid_amount',
+          'remaining_balance',
+        ],
+        is_default: 0,
+      },
+      {
+        module_type: 'PURCHASE',
+        template_name: 'Company-Wise Purchase',
+        fields: [
+          'company_name',
+          'item_code',
+          'item_name',
+          'packing',
+          'bill_number',
+          'bill_date',
+          'supplier_name',
+          'quantity',
+          'bonus_quantity',
+          'mrp_rate',
+          'purchase_rate',
+          'discount_percent',
+          'line_total',
+        ],
+        is_default: 0,
+      },
+      {
+        module_type: 'PURCHASE',
+        template_name: 'Batch-Wise Purchase',
+        fields: [
+          'item_code',
+          'item_name',
+          'company_name',
+          'batch_number',
+          'manufacturing_date',
+          'expiry_date',
+          'quantity',
+          'bonus_quantity',
+          'purchase_rate',
+          'mrp_rate',
+          'bill_number',
+          'bill_date',
+          'supplier_name',
+        ],
+        is_default: 0,
+      },
+    ];
+
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO excel_export_templates (module_type, template_name, fields_json, is_default, created_by)
+      VALUES (?, ?, ?, ?, 'System')
+    `);
+    const seedTx = db.transaction(() => {
+      for (const tpl of starterTemplates) {
+        insertStmt.run(
+          tpl.module_type,
+          tpl.template_name,
+          JSON.stringify(tpl.fields),
+          tpl.is_default
+        );
+      }
+    });
+    seedTx();
+  }
+}
+
+systemRouter.get('/export-templates', authenticateToken, (req: Request, res: Response) => {
+  try {
+    ensureExcelExportTemplatesTable();
+    const db = getDatabase();
+    const moduleFilter = String(req.query.module || '')
+      .trim()
+      .toUpperCase();
+
+    const rows =
+      moduleFilter === 'SALES' || moduleFilter === 'PURCHASE'
+        ? (db
+            .prepare(
+              'SELECT * FROM excel_export_templates WHERE module_type = ? ORDER BY is_default DESC, template_name ASC'
+            )
+            .all(moduleFilter) as Array<Record<string, any>>)
+        : (db
+            .prepare(
+              'SELECT * FROM excel_export_templates ORDER BY module_type ASC, is_default DESC, template_name ASC'
+            )
+            .all() as Array<Record<string, any>>);
+
+    const templates = rows.map((r) => {
+      let fields: string[] = [];
+      try {
+        const parsed = JSON.parse(String(r.fields_json || '[]'));
+        if (Array.isArray(parsed)) {
+          fields = parsed.map((f) => String(f));
+        }
+      } catch {
+        fields = [];
+      }
+      return {
+        id: Number(r.id),
+        module_type: String(r.module_type) as 'SALES' | 'PURCHASE',
+        template_name: String(r.template_name),
+        fields,
+        is_default: Number(r.is_default) === 1,
+        created_by: String(r.created_by || 'User'),
+        created_at: String(r.created_at || ''),
+        updated_at: String(r.updated_at || ''),
+      };
+    });
+
+    return res.json({ success: true, templates });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+systemRouter.post('/export-templates', authenticateToken, (req: Request, res: Response) => {
+  try {
+    ensureExcelExportTemplatesTable();
+    const db = getDatabase();
+    const moduleType =
+      String(req.body.module_type || '')
+        .trim()
+        .toUpperCase() === 'PURCHASE'
+        ? 'PURCHASE'
+        : 'SALES';
+    const templateName = String(req.body.template_name || '').trim();
+    const fields = Array.isArray(req.body.fields)
+      ? req.body.fields.map((f: unknown) => String(f)).filter(Boolean)
+      : [];
+    const isDefault = req.body.is_default ? 1 : 0;
+    const overwrite = Boolean(req.body.overwrite);
+    const username = (req as AuthenticatedRequest).user?.username || 'User';
+
+    if (!templateName) {
+      return res.status(400).json({ success: false, error: 'Template name is required.' });
+    }
+    if (fields.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Please select at least one field for the template.' });
+    }
+
+    const existing = db
+      .prepare(
+        'SELECT id, template_name FROM excel_export_templates WHERE module_type = ? AND LOWER(template_name) = LOWER(?)'
+      )
+      .get(moduleType, templateName) as { id: number; template_name: string } | undefined;
+
+    if (existing && !overwrite) {
+      return res.status(409).json({
+        success: false,
+        exists: true,
+        existingId: existing.id,
+        error: `A template named "${existing.template_name}" already exists for ${moduleType}. Confirm overwrite or choose another name.`,
+      });
+    }
+
+    let savedId = existing?.id || 0;
+    const saveTx = db.transaction(() => {
+      if (isDefault === 1) {
+        db.prepare('UPDATE excel_export_templates SET is_default = 0 WHERE module_type = ?').run(
+          moduleType
+        );
+      }
+      if (existing) {
+        db.prepare(
+          `UPDATE excel_export_templates
+           SET template_name = ?, fields_json = ?, is_default = ?, updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(templateName, JSON.stringify(fields), isDefault, existing.id);
+        savedId = existing.id;
+      } else {
+        const info = db
+          .prepare(
+            `INSERT INTO excel_export_templates (module_type, template_name, fields_json, is_default, created_by)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(moduleType, templateName, JSON.stringify(fields), isDefault, username);
+        savedId = Number(info.lastInsertRowid);
+      }
+    });
+    saveTx();
+
+    return res.json({
+      success: true,
+      id: savedId,
+      message: `Template "${templateName}" saved permanently.`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+systemRouter.put('/export-templates/:id', authenticateToken, (req: Request, res: Response) => {
+  try {
+    ensureExcelExportTemplatesTable();
+    const db = getDatabase();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid template ID.' });
+    }
+
+    const current = db
+      .prepare('SELECT * FROM excel_export_templates WHERE id = ?')
+      .get(id) as Record<string, any> | undefined;
+    if (!current) {
+      return res.status(404).json({ success: false, error: 'Template not found.' });
+    }
+
+    const moduleType = String(current.module_type);
+    const templateName =
+      req.body.template_name !== undefined
+        ? String(req.body.template_name || '').trim()
+        : String(current.template_name);
+    if (!templateName) {
+      return res.status(400).json({ success: false, error: 'Template name cannot be empty.' });
+    }
+
+    // Check duplicate name on another template ID
+    const duplicate = db
+      .prepare(
+        'SELECT id FROM excel_export_templates WHERE module_type = ? AND LOWER(template_name) = LOWER(?) AND id != ?'
+      )
+      .get(moduleType, templateName, id) as { id: number } | undefined;
+    if (duplicate) {
+      return res.status(409).json({
+        success: false,
+        error: `Another template named "${templateName}" already exists.`,
+      });
+    }
+
+    const fieldsJson =
+      Array.isArray(req.body.fields) && req.body.fields.length > 0
+        ? JSON.stringify(req.body.fields.map((f: unknown) => String(f)).filter(Boolean))
+        : String(current.fields_json);
+
+    const isDefault =
+      req.body.is_default !== undefined ? (req.body.is_default ? 1 : 0) : Number(current.is_default);
+
+    const updateTx = db.transaction(() => {
+      if (isDefault === 1) {
+        db.prepare('UPDATE excel_export_templates SET is_default = 0 WHERE module_type = ?').run(
+          moduleType
+        );
+      }
+      db.prepare(
+        `UPDATE excel_export_templates
+         SET template_name = ?, fields_json = ?, is_default = ?, updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(templateName, fieldsJson, isDefault, id);
+    });
+    updateTx();
+
+    return res.json({
+      success: true,
+      id,
+      message: `Template "${templateName}" updated.`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+systemRouter.delete('/export-templates/:id', authenticateToken, (req: Request, res: Response) => {
+  try {
+    ensureExcelExportTemplatesTable();
+    const db = getDatabase();
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid template ID.' });
+    }
+
+    db.prepare('DELETE FROM excel_export_templates WHERE id = ?').run(id);
+    return res.json({ success: true, message: 'Template deleted.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
   }
 });
 

@@ -24,6 +24,7 @@ import { formatPKR, formatPKTDateTime } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type PerformanceAnalysisMode = 'overall' | 'sales' | 'purchase';
 export type PerformanceRankingOption = '1' | '2' | '3' | '5' | '10' | 'all';
@@ -362,8 +363,8 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
             : 'Sales & Purchase'
         } Report (${rankingTitleBadge})`,
         {
-          paperSize: 'a4',
-          orientation: 'landscape',
+          paperSize: 'legal',
+          orientation: 'portrait',
           margin: 'compact',
           fontSizeScale: 'small',
         }
@@ -764,7 +765,7 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
               className="px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:bg-slate-800 font-bold flex items-center gap-1 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              Print A4
+              Print Legal
             </button>
             <button
               type="button"
@@ -1042,6 +1043,7 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
       )}
 
       {/* Printable Report Body */}
+      <ReportZoomWrapper label="Top Performance Report Preview Zoom">
       <div ref={printContainerRef} className="space-y-4">
         <PrintDocumentHeader
           title={`TOP PERFORMANCE & OVERALL ${
@@ -1689,15 +1691,16 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
           </>
         )}
       </div>
+      </ReportZoomWrapper>
 
-      {/* A4 Print Preview Modal */}
+      {/* Legal Print Preview Modal */}
       {showPrintPreview && (
         <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 print:hidden">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden">
             <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
               <div>
                 <h4 className="text-sm font-bold">
-                  A4 Print Preview — Top Performance & Overall Report ({rankingTitleBadge})
+                  US Legal Print Preview — Top Performance & Overall Report ({rankingTitleBadge})
                 </h4>
                 <p className="text-[11px] text-slate-300">
                   {periodInfo.comparisonLabel} ({periodInfo.currentStart} to {periodInfo.currentEnd})
@@ -1710,7 +1713,7 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
                   className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  Print Now (A4)
+                  Print Now (Legal)
                 </button>
                 <button
                   type="button"
@@ -1722,12 +1725,14 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
               </div>
             </div>
             <div className="p-6 overflow-y-auto bg-slate-100 flex-1">
-              <div
-                className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 max-w-5xl mx-auto space-y-4"
-                dangerouslySetInnerHTML={{
-                  __html: printContainerRef.current?.innerHTML || '',
-                }}
-              />
+              <ReportZoomWrapper label="Print Preview Zoom">
+                <div
+                  className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 max-w-[215.9mm] min-h-[355.6mm] mx-auto space-y-4"
+                  dangerouslySetInnerHTML={{
+                    __html: printContainerRef.current?.innerHTML || '',
+                  }}
+                />
+              </ReportZoomWrapper>
             </div>
           </div>
         </div>

@@ -26,6 +26,7 @@ import {
   FontSizeScaleOption,
 } from '../../utils/printEngine';
 import { buildCompanyGroupedPurchaseData } from '../../utils/purchaseCompanyGrouping';
+import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 interface PurchasePrintModalProps {
   isOpen?: boolean;
@@ -73,6 +74,13 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
     ...DEFAULT_FIELD_VISIBILITY,
   });
 
+  const zoomState = usePreviewZoom({
+    initialZoom: 100,
+    naturalWidthPx: orientation === 'landscape' ? 1123 : 794,
+    naturalHeightPx: orientation === 'landscape' ? 794 : 1123,
+    isThermal: false,
+  });
+
   const [showFieldControls, setShowFieldControls] = useState<boolean>(false);
   const [showPrinterGuide, setShowPrinterGuide] = useState<boolean>(false);
   const [savingDefaults, setSavingDefaults] = useState<boolean>(false);
@@ -109,6 +117,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
     executePrintElement(printAreaRef.current, {
       title: `${storeName} - ${docNum}`,
       paperSize: 'a4',
+      profileId: 'a4-purchase-invoice',
       orientation,
       margin,
       fontSizeScale,
@@ -190,18 +199,28 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
   const supplierInvoiceNo = String(doc.supplier_invoice_number || '').trim();
 
   return (
-    <div className="print-modal-container fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-2 lg:p-4 overflow-y-auto print:bg-white print:p-0 print:block">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-6xl max-h-[95vh] overflow-hidden flex flex-col print:shadow-none print:border-none print:max-w-full print:max-h-none print:rounded-none">
+    <div
+      className={`print-modal-container fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center ${
+        zoomState.isFullScreen ? 'p-0' : 'p-1.5 lg:p-3'
+      } overflow-hidden print:bg-white print:p-0 print:block`}
+    >
+      <div
+        className={`bg-white shadow-2xl border border-slate-300 w-full overflow-hidden flex flex-col print:shadow-none print:border-none print:max-w-full print:max-h-none print:rounded-none ${
+          zoomState.isFullScreen
+            ? 'h-screen max-w-none max-h-none rounded-none border-0'
+            : 'max-w-[96vw] xl:max-w-7xl h-[95vh] max-h-[95vh] rounded-xl'
+        }`}
+      >
         {/* Top Modal Action Bar (Hidden when printing) */}
-        <div className="bg-slate-900 text-white px-5 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
+        <div className="bg-slate-900 text-white px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
           <div className="flex items-center gap-2.5">
             <FileText className="w-5 h-5 text-emerald-400" />
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-bold">
                   {mode === 'invoice'
-                    ? `A4 Purchase Invoice Print Preview — ${doc.bill_number}`
-                    : `A4 Purchase Return (Debit Note) Print Preview — ${doc.debit_note_number}`}
+                    ? `Purchase Invoice Print Preview (A4 210 × 297 mm) — ${doc.bill_number}`
+                    : `Purchase Return (Debit Note) Print Preview (A4 210 × 297 mm) — ${doc.debit_note_number}`}
                 </h3>
                 {isCancelled && (
                   <span className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-black uppercase tracking-wider">
@@ -210,7 +229,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 )}
               </div>
               <p className="text-[11px] text-slate-400">
-                Exact Saved Database Record · Batch & Expiry · Advance Tax & Double-Entry Verified
+                A4 Standard (210 × 297 mm) · Multi-Page Desktop Preview · Batch & Expiry · Advance Tax Verified
               </p>
             </div>
           </div>
@@ -253,15 +272,16 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
             >
-              <X className="w-4 h-4" />
+              <X className="w-3.5 h-3.5" />
+              <span>Close Preview</span>
             </button>
           </div>
         </div>
 
         {/* Secondary Print Controls Bar */}
-        <div className="bg-slate-800 text-slate-200 px-5 py-2 border-b border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs print:hidden">
+        <div className="bg-slate-800 text-slate-200 px-5 py-2 border-b border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 print:hidden">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
@@ -289,8 +309,8 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 onChange={(e) => setOrientation(e.target.value as PageOrientationOption)}
                 className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white"
               >
-                <option value="portrait">Portrait (A4)</option>
-                <option value="landscape">Landscape (A4 Wide)</option>
+                <option value="portrait">Portrait (A4 210 × 297 mm)</option>
+                <option value="landscape">Landscape (A4 297 × 210 mm)</option>
               </select>
             </div>
 
@@ -304,9 +324,9 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white"
               >
                 <option value="none">None (0mm)</option>
-                <option value="minimum">Minimum (5mm)</option>
-                <option value="compact">Compact (8mm)</option>
-                <option value="standard">Standard (12mm)</option>
+                <option value="minimum">Minimum (4mm)</option>
+                <option value="compact">Compact (6mm)</option>
+                <option value="standard">Standard (8mm)</option>
               </select>
             </div>
 
@@ -340,7 +360,14 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <PreviewZoomToolbar
+              zoomState={zoomState}
+              dark
+              compact
+              showPageNav
+              showFullScreenButton
+            />
             {saveFeedback && (
               <span className="text-[11px] font-semibold text-emerald-400">{saveFeedback}</span>
             )}
@@ -358,7 +385,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
 
         {/* Field Visibility Drawer */}
         {showFieldControls && (
-          <div className="bg-slate-50 border-b border-slate-200 px-5 py-2.5 text-xs print:hidden">
+          <div className="bg-slate-50 border-b border-slate-200 px-5 py-2.5 text-xs shrink-0 print:hidden">
             <div className="font-bold text-slate-700 mb-1.5 flex items-center gap-1.5">
               <Eye className="w-3.5 h-3.5 text-emerald-600" />
               {mode === 'invoice'
@@ -411,7 +438,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
         )}
 
         {showPrinterGuide && (
-          <div className="bg-sky-50 border-b border-sky-200 px-5 py-2.5 text-xs text-sky-950 print:hidden">
+          <div className="bg-sky-50 border-b border-sky-200 px-5 py-2.5 text-xs text-sky-950 shrink-0 print:hidden">
             <div className="font-bold text-sky-900 mb-1">
               Printer Status: {capabilities.browserPrintSupported ? 'Connected to OS Print Spooler' : 'Unavailable'} · Target: {selectedPrinter}
             </div>
@@ -423,14 +450,40 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
           </div>
         )}
 
-        {/* Printable A4 Sheet */}
-        <div className="flex-1 overflow-y-auto p-6 bg-slate-100 flex justify-center print:p-0 print:bg-white print:overflow-visible">
+        {/* MS Access / Windows Desktop-Style Grey Print Preview Workspace with A4 Sheet (210mm x 297mm) */}
+        <div
+          ref={zoomState.viewportRef}
+          onWheel={zoomState.handleWheelZoom}
+          className="flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:bg-white print:overflow-visible"
+        >
           <div
-            ref={printAreaRef}
-            className={`bg-white border border-slate-300 shadow-sm w-full ${
-              orientation === 'landscape' ? 'max-w-[285mm]' : 'max-w-[210mm]'
-            } p-6 lg:p-8 text-slate-900 ${fontScaleClass} space-y-5 relative print:border-0 print:shadow-none print:p-2`}
+            ref={zoomState.contentRef}
+            style={{ zoom: `${zoomState.zoom}%` } as React.CSSProperties}
+            className="ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75"
           >
+            <div
+              ref={printAreaRef}
+              className={`bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] ${
+                orientation === 'landscape'
+                  ? 'w-[297mm] max-w-[297mm] min-h-[210mm]'
+                  : 'w-[210mm] max-w-[210mm] min-h-[297mm]'
+              } p-6 lg:p-7 text-slate-900 ${fontScaleClass} space-y-5 relative print:border-0 print:shadow-none print:p-2 print:w-full print:max-w-none print:min-h-0`}
+            >
+              {/* Multi-Page Visual Page Break Markers (Screen Preview Only) */}
+              {zoomState.totalPages > 1 &&
+                Array.from({ length: zoomState.totalPages - 1 }).map((_, pIdx) => (
+                  <div
+                    key={pIdx}
+                    style={{
+                      top: `${(pIdx + 1) * (orientation === 'landscape' ? 210 : 297)}mm`,
+                    }}
+                    className="pointer-events-none select-none absolute left-0 right-0 border-t-2 border-dashed border-sky-500/70 z-20 flex justify-end pr-2 print:hidden"
+                  >
+                    <span className="bg-sky-600 text-white text-[9px] font-mono font-bold px-2 py-0.5 rounded-b shadow-xs">
+                      Page {pIdx + 1} Break → Page {pIdx + 2}
+                    </span>
+                  </div>
+                ))}
             {/* CANCELLED WATERMARK */}
             {isCancelled && (
               <div className="pointer-events-none select-none absolute inset-0 flex items-center justify-center z-10 overflow-hidden">
@@ -1092,10 +1145,11 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                   {storeName} · Purchase Invoice {doc.bill_number}
                 </span>
                 <span className="font-mono">
-                  A4 Portrait · Automatic Page Numbers (Page X of Y) in Print / PDF
+                  A4 Standard (210 × 297 mm) · Automatic Page Numbers (Page X of Y) in Print / PDF
                 </span>
               </div>
             )}
+            </div>
           </div>
         </div>
       </div>

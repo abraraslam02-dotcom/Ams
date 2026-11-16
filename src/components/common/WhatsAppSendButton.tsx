@@ -15,6 +15,7 @@ export interface WhatsAppSendButtonProps {
   className?: string;
   autoTriggerKey?: string | number | null;
   onPhoneSaved?: (newPhone: string) => void;
+  onSendSuccess?: () => void;
 }
 
 export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
@@ -24,6 +25,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
   className = '',
   autoTriggerKey = null,
   onPhoneSaved,
+  onSendSuccess,
 }) => {
   const { hasPermission } = useAuth();
   const canSend =
@@ -33,6 +35,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
 
   const [savedPhone, setSavedPhone] = useState<string>(payload.customerPhone || '');
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'Sent' | 'Failed'>('idle');
+  const [previouslySent, setPreviouslySent] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [cloudConfigured, setCloudConfigured] = useState<boolean>(false);
 
@@ -50,7 +53,8 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
     setSavedPhone(payload.customerPhone || '');
   }, [payload.customerPhone, payload.customerAccountId, payload.documentNumber]);
 
-  // Check existing whatsapp_log status for this invoice/document
+  // Check existing whatsapp_log status for this invoice/document:
+  // Only surface Failed notifications so completed activities never show stale notifications after refresh/reopen
   useEffect(() => {
     if (!canSend || (!payload.invoiceId && !payload.documentNumber)) return;
     let mounted = true;
@@ -65,12 +69,22 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
         const logs = Array.isArray(res.logs) ? res.logs : [];
         if (logs.length > 0) {
           const latest = logs[0];
-          if (latest.status === 'Sent' || latest.status === 'Failed') {
-            setSendStatus(latest.status);
+          if (latest.status === 'Failed') {
+            setSendStatus('Failed');
+            setPreviouslySent(false);
             setErrorMessage(latest.error || null);
+          } else if (latest.status === 'Sent') {
+            setSendStatus('idle');
+            setPreviouslySent(true);
+            setErrorMessage(null);
+          } else {
+            setSendStatus('idle');
+            setPreviouslySent(false);
+            setErrorMessage(null);
           }
         } else {
           setSendStatus('idle');
+          setPreviouslySent(false);
           setErrorMessage(null);
         }
       })
@@ -81,6 +95,15 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
       mounted = false;
     };
   }, [canSend, payload.invoiceId, payload.documentNumber]);
+
+  // Automatically dismiss transient 'Sent' badge after completion so no manual dismissal is needed
+  useEffect(() => {
+    if (sendStatus !== 'Sent') return;
+    const timer = window.setTimeout(() => {
+      setSendStatus('idle');
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [sendStatus]);
 
   // Manual send only: never auto-trigger WhatsApp on save/update/modify
   useEffect(() => {
@@ -116,8 +139,20 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
           reportType: payload.documentType,
           params: enrichedPayload,
         });
-        setSendStatus(res.status === 'Sent' ? 'Sent' : 'Failed');
-        setErrorMessage(null);
+        if (res.status === 'Sent') {
+          setSendStatus('Sent');
+          setPreviouslySent(true);
+          setErrorMessage(null);
+          onSendSuccess?.();
+          window.dispatchEvent(
+            new CustomEvent('ams-whatsapp-activity-completed', {
+              detail: { invoiceId: payload.invoiceId, documentNumber: payload.documentNumber },
+            })
+          );
+        } else {
+          setSendStatus('Failed');
+          setErrorMessage(null);
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         setSendStatus('Failed');
@@ -142,7 +177,14 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
         })
         .catch(() => null);
       setSendStatus('Sent');
+      setPreviouslySent(true);
       setErrorMessage(null);
+      onSendSuccess?.();
+      window.dispatchEvent(
+        new CustomEvent('ams-whatsapp-activity-completed', {
+          detail: { invoiceId: payload.invoiceId, documentNumber: payload.documentNumber },
+        })
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setSendStatus('Failed');
@@ -167,7 +209,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
     setPendingMode(mode);
 
     // Prevent duplicate sends without confirmation prompt
-    if (sendStatus === 'Sent' && !bypassDuplicate) {
+    if ((sendStatus === 'Sent' || previouslySent) && !bypassDuplicate) {
       setShowDuplicateConfirm(true);
       return;
     }

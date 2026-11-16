@@ -14,6 +14,7 @@ import {
 import { api } from '../../services/api';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface AdvanceTaxAccountingViewProps {
   onOpenTaxSettings?: () => void;
@@ -256,6 +257,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
       </div>
 
       {/* Printable Tax Area */}
+      <ReportZoomWrapper label="Advance Tax Statement Preview Zoom">
       <div ref={taxPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title={
@@ -627,6 +629,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
         </div>
       )}
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

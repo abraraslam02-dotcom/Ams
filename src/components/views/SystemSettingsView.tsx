@@ -94,9 +94,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     setForm({
       ...s,
       default_printer: s.default_printer || 'System Default Printer (OS Print Spooler)',
-      default_paper_size: s.default_paper_size || 'a4',
+      default_paper_size: s.default_paper_size === '80mm' || s.default_paper_size === '58mm' ? s.default_paper_size : 'legal',
       thermal_printer_width: s.thermal_printer_width || '80mm',
-      page_orientation: s.page_orientation || 'portrait',
+      page_orientation: 'portrait',
       page_margin: s.page_margin || 'compact',
       font_size_scale: s.font_size_scale || 'normal',
       print_copies: Number(s.print_copies || 1),
@@ -129,6 +129,12 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   useEffect(() => {
     loadSettingsIntoForm(propSettings);
   }, [propSettings, loadSettingsIntoForm]);
+
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = setTimeout(() => setSuccessMsg(null), 3500);
+    return () => clearTimeout(timer);
+  }, [successMsg]);
 
   const fetchAdminData = useCallback(async () => {
     try {
@@ -588,8 +594,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     Default Printer, Paper Size & Thermal Roll Settings
                   </h3>
                 </div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-800 font-bold">
-                  A4 • 80mm • 58mm
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-800 font-bold">
+                  US Legal • 80mm • 58mm
                 </span>
               </div>
 
@@ -611,16 +617,16 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     Default Paper Size
                   </label>
                   <select
-                    value={form.default_paper_size || 'a4'}
+                    value={form.default_paper_size || 'legal'}
                     onChange={(e) =>
                       setForm({
                         ...form,
-                        default_paper_size: e.target.value as 'a4' | '80mm' | '58mm',
+                        default_paper_size: e.target.value as 'legal' | 'a4' | '80mm' | '58mm',
                       })
                     }
                     className="w-full px-3 py-1.5 rounded-lg border border-slate-300 font-bold bg-white"
                   >
-                    <option value="a4">A4 Full Page (210mm × 297mm)</option>
+                    <option value="legal">US Legal Portrait (8.5in × 14in / 215.9mm × 355.6mm)</option>
                     <option value="80mm">80mm Thermal Receipt Roll</option>
                     <option value="58mm">58mm Compact Thermal Roll</option>
                   </select>
@@ -645,20 +651,19 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Page Orientation (A4)
+                    Page Orientation (US Legal)
                   </label>
                   <select
-                    value={form.page_orientation || 'portrait'}
-                    onChange={(e) =>
+                    value="portrait"
+                    onChange={() =>
                       setForm({
                         ...form,
-                        page_orientation: e.target.value as 'portrait' | 'landscape',
+                        page_orientation: 'portrait',
                       })
                     }
                     className="w-full px-3 py-1.5 rounded-lg border border-slate-300 font-bold bg-white"
                   >
-                    <option value="portrait">Portrait</option>
-                    <option value="landscape">Landscape</option>
+                    <option value="portrait">Portrait (8.5 in × 14 in)</option>
                   </select>
                 </div>
                 <div>

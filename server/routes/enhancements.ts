@@ -2565,7 +2565,9 @@ enhancementsRouter.get('/booking-imports/submitted-batches', authenticateToken, 
       return res.json({ success: true, batches: [] });
     }
     const rows = db
-      .prepare('SELECT * FROM mobile_submitted_batches ORDER BY id DESC LIMIT 100')
+      .prepare(
+        "SELECT * FROM mobile_submitted_batches WHERE COALESCE(import_status, 'Pending Import') != 'Imported' ORDER BY id DESC LIMIT 100"
+      )
       .all() as Array<Record<string, unknown>>;
 
     const batches = rows.map((r) => {

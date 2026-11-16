@@ -18,6 +18,7 @@ import { LowStockItem } from '../../types/inventory';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const LowStockView: React.FC = () => {
   const [data, setData] = useState<LowStockItem[]>([]);
@@ -130,7 +131,7 @@ export const LowStockView: React.FC = () => {
                   printReportDocument(
                     lowStockPrintRef.current,
                     'Abrar Medical Store - Low Stock & Purchase Requisition Sheet',
-                    { orientation: 'landscape', paperSize: 'a4' }
+                    { orientation: 'portrait', paperSize: 'legal' }
                   );
                 } else {
                   window.print();
@@ -195,6 +196,7 @@ export const LowStockView: React.FC = () => {
       )}
 
       {/* Printable Area */}
+      <ReportZoomWrapper label="Low Stock Requisition Preview Zoom">
       <div ref={lowStockPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title="LOW STOCK & REORDER REQUISITION SHEET"
@@ -309,6 +311,7 @@ export const LowStockView: React.FC = () => {
         </div>
       </div>
     </div>
+    </ReportZoomWrapper>
   </div>
 );
 };

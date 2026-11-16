@@ -628,3 +628,723 @@ export function exportPurchaseInvoicesToExcel(
 
   XLSX.writeFile(wb, customFileName || defaultName);
 }
+
+// ============================================================================
+// CUSTOM EXCEL EXPORT ENGINE (FIELD SELECTION, DRAG-AND-DROP ORDER & TEMPLATES)
+// ============================================================================
+
+export type CustomExportCategory =
+  | 'Invoice Information'
+  | 'Item Information'
+  | 'Financial Information';
+
+export interface CustomExportFieldDef {
+  key: string;
+  label: string;
+  category: CustomExportCategory;
+  format: 'text' | 'date' | 'number' | 'currency';
+  getValue: (invoice: Record<string, any>, item: Record<string, any>) => string | number;
+}
+
+/**
+ * Verified Sales Export Fields from `sales` and `sale_items` database tables
+ */
+export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
+  // 1. Invoice Information
+  {
+    key: 'invoice_number',
+    label: 'Invoice Number',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.invoice_number || ''),
+  },
+  {
+    key: 'invoice_date',
+    label: 'Invoice Date',
+    category: 'Invoice Information',
+    format: 'date',
+    getValue: (inv) => cleanDate(inv.invoice_date),
+  },
+  {
+    key: 'customer_name',
+    label: 'Customer Name',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.customer_name || 'Walk-in Cash Customer'),
+  },
+  {
+    key: 'customer_code',
+    label: 'Customer Code',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.customer_code || ''),
+  },
+  {
+    key: 'buyer_name',
+    label: 'Buyer Name',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.buyer_name || ''),
+  },
+  {
+    key: 'invoice_type',
+    label: 'Invoice Type',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.invoice_type || 'Retail'),
+  },
+  {
+    key: 'payment_mode',
+    label: 'Payment Mode',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.payment_mode || 'Cash'),
+  },
+  {
+    key: 'salesman',
+    label: 'Salesman',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.salesman || ''),
+  },
+  {
+    key: 'remarks',
+    label: 'Remarks / Notes',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (inv) => String(inv.remarks || ''),
+  },
+
+  // 2. Item Information
+  {
+    key: 'item_code',
+    label: 'Item Code',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_inv, item) => String(item.item_code || ''),
+  },
+  {
+    key: 'item_name',
+    label: 'Item Name',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_inv, item) => String(item.item_name || ''),
+  },
+  {
+    key: 'company_name',
+    label: 'Company',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_inv, item) => String(item.company_name || item.company || ''),
+  },
+  {
+    key: 'packing',
+    label: 'Packing',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_inv, item) => String(item.packing || ''),
+  },
+  {
+    key: 'batch_number',
+    label: 'Batch Number',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_inv, item) => String(item.batch_number || ''),
+  },
+  {
+    key: 'expiry_date',
+    label: 'Expiry',
+    category: 'Item Information',
+    format: 'date',
+    getValue: (_inv, item) => cleanDate(item.expiry_date),
+  },
+  {
+    key: 'quantity',
+    label: 'Quantity',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_inv, item) => toNum(item.quantity),
+  },
+  {
+    key: 'loose_quantity',
+    label: 'Loose Quantity',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_inv, item) => toNum(item.loose_quantity),
+  },
+  {
+    key: 'bonus_quantity',
+    label: 'Bonus Quantity',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_inv, item) => toNum(item.bonus_quantity),
+  },
+  {
+    key: 'total_units',
+    label: 'Total Units',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_inv, item) =>
+      toNum(
+        item.total_units ??
+          toNum(item.quantity) + toNum(item.loose_quantity) + toNum(item.bonus_quantity)
+      ),
+  },
+
+  // 3. Financial Information
+  {
+    key: 'unit_price',
+    label: 'Rate',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => toNum(item.unit_price ?? item.rate),
+  },
+  {
+    key: 'loose_rate',
+    label: 'Loose Rate',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => toNum(item.loose_rate),
+  },
+  {
+    key: 'gross_amount',
+    label: 'Gross Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => {
+      const qty = toNum(item.quantity);
+      const loose = toNum(item.loose_quantity);
+      const rate = toNum(item.unit_price ?? item.rate);
+      const lRate = toNum(item.loose_rate);
+      return toNum(item.gross_amount ?? qty * rate + loose * lRate);
+    },
+  },
+  {
+    key: 'discount_percent',
+    label: 'Discount %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_inv, item) => toNum(item.discount_percent),
+  },
+  {
+    key: 'discount_amount',
+    label: 'Discount Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => {
+      const qty = toNum(item.quantity);
+      const loose = toNum(item.loose_quantity);
+      const rate = toNum(item.unit_price ?? item.rate);
+      const lRate = toNum(item.loose_rate);
+      const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
+      const discPct = toNum(item.discount_percent);
+      return toNum(item.discount_amount ?? (gross * discPct) / 100);
+    },
+  },
+  {
+    key: 'taxable_amount',
+    label: 'Taxable Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => {
+      const qty = toNum(item.quantity);
+      const loose = toNum(item.loose_quantity);
+      const rate = toNum(item.unit_price ?? item.rate);
+      const lRate = toNum(item.loose_rate);
+      const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
+      const discPct = toNum(item.discount_percent);
+      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      return Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+    },
+  },
+  {
+    key: 'tax_percent',
+    label: 'Tax %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_inv, item) => toNum(item.tax_percent),
+  },
+  {
+    key: 'tax_amount',
+    label: 'Tax Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => {
+      const qty = toNum(item.quantity);
+      const loose = toNum(item.loose_quantity);
+      const rate = toNum(item.unit_price ?? item.rate);
+      const lRate = toNum(item.loose_rate);
+      const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
+      const discPct = toNum(item.discount_percent);
+      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+      const taxPct = toNum(item.tax_percent);
+      return toNum(item.tax_amount ?? (taxable * taxPct) / 100);
+    },
+  },
+  {
+    key: 'line_total',
+    label: 'Net Line Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) => {
+      const qty = toNum(item.quantity);
+      const loose = toNum(item.loose_quantity);
+      const rate = toNum(item.unit_price ?? item.rate);
+      const lRate = toNum(item.loose_rate);
+      const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
+      const discPct = toNum(item.discount_percent);
+      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+      const taxPct = toNum(item.tax_percent);
+      const taxAmt = toNum(item.tax_amount ?? (taxable * taxPct) / 100);
+      return toNum(item.line_total ?? taxable + taxAmt);
+    },
+  },
+  {
+    key: 'invoice_gross_total',
+    label: 'Invoice Gross Total',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (inv) => toNum(inv.gross_total ?? inv.gross_amount ?? 0),
+  },
+  {
+    key: 'invoice_discount_amount',
+    label: 'Invoice Discount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (inv) => toNum(inv.discount_amount ?? inv.invoice_discount_amount ?? 0),
+  },
+  {
+    key: 'invoice_tax_amount',
+    label: 'Invoice Tax',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (inv) => toNum(inv.tax_amount ?? 0),
+  },
+  {
+    key: 'net_total',
+    label: 'Total / Net Invoice Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (inv) => toNum(inv.net_total ?? 0),
+  },
+  {
+    key: 'paid_amount',
+    label: 'Paid Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (inv) => toNum(inv.paid_amount ?? 0),
+  },
+  {
+    key: 'balance_amount',
+    label: 'Balance',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (inv) =>
+      toNum(
+        inv.balance_amount ?? Math.max(0, toNum(inv.net_total ?? 0) - toNum(inv.paid_amount ?? 0))
+      ),
+  },
+];
+
+/**
+ * Verified Purchase Export Fields from `purchases` and `purchase_items` database tables
+ */
+export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
+  // 1. Invoice Information
+  {
+    key: 'bill_number',
+    label: 'Invoice Number',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (pur) => String(pur.bill_number || pur.invoice_number || ''),
+  },
+  {
+    key: 'supplier_invoice_number',
+    label: 'Supplier Invoice No',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (pur) => String(pur.supplier_invoice_number || pur.supplier_invoice_no || ''),
+  },
+  {
+    key: 'bill_date',
+    label: 'Invoice Date',
+    category: 'Invoice Information',
+    format: 'date',
+    getValue: (pur) => cleanDate(pur.bill_date || pur.invoice_date),
+  },
+  {
+    key: 'supplier_name',
+    label: 'Supplier Name',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (pur) => String(pur.supplier_name || ''),
+  },
+  {
+    key: 'supplier_code',
+    label: 'Supplier Code',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (pur) => String(pur.supplier_code || ''),
+  },
+  {
+    key: 'payment_mode',
+    label: 'Payment Mode',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (pur) => String(pur.payment_mode || 'Cash'),
+  },
+  {
+    key: 'remarks',
+    label: 'Remarks / Notes',
+    category: 'Invoice Information',
+    format: 'text',
+    getValue: (pur) => String(pur.remarks || pur.notes || ''),
+  },
+
+  // 2. Item Information
+  {
+    key: 'item_code',
+    label: 'Item Code',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_pur, item) => String(item.item_code || ''),
+  },
+  {
+    key: 'item_name',
+    label: 'Item Name',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_pur, item) => String(item.item_name || ''),
+  },
+  {
+    key: 'company_name',
+    label: 'Company',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_pur, item) => String(item.company_name || item.company || ''),
+  },
+  {
+    key: 'packing',
+    label: 'Packing',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_pur, item) => String(item.packing || ''),
+  },
+  {
+    key: 'batch_number',
+    label: 'Batch Number',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_pur, item) => String(item.batch_number || ''),
+  },
+  {
+    key: 'manufacturing_date',
+    label: 'Manufacturing Date',
+    category: 'Item Information',
+    format: 'date',
+    getValue: (_pur, item) => cleanDate(item.manufacturing_date),
+  },
+  {
+    key: 'expiry_date',
+    label: 'Expiry',
+    category: 'Item Information',
+    format: 'date',
+    getValue: (_pur, item) => cleanDate(item.expiry_date),
+  },
+  {
+    key: 'quantity',
+    label: 'Quantity',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_pur, item) => toNum(item.quantity),
+  },
+  {
+    key: 'loose_quantity',
+    label: 'Loose Quantity',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_pur, item) => toNum(item.loose_quantity),
+  },
+  {
+    key: 'bonus_quantity',
+    label: 'Bonus Quantity',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_pur, item) => toNum(item.bonus_quantity),
+  },
+  {
+    key: 'total_units',
+    label: 'Total Units',
+    category: 'Item Information',
+    format: 'number',
+    getValue: (_pur, item) =>
+      toNum(
+        item.total_units ??
+          toNum(item.quantity) + toNum(item.loose_quantity) + toNum(item.bonus_quantity)
+      ),
+  },
+
+  // 3. Financial Information
+  {
+    key: 'mrp_rate',
+    label: 'Trade / Retail Price (MRP)',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => toNum(item.mrp_rate ?? item.mrp),
+  },
+  {
+    key: 'purchase_rate',
+    label: 'Purchase Rate',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => toNum(item.purchase_rate ?? item.purchase_price ?? item.rate),
+  },
+  {
+    key: 'loose_rate',
+    label: 'Loose Rate',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => toNum(item.loose_rate),
+  },
+  {
+    key: 'gross_amount',
+    label: 'Gross Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => {
+      const qty = toNum(item.quantity);
+      const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
+      return toNum(item.gross_amount ?? qty * rate);
+    },
+  },
+  {
+    key: 'discount_percent',
+    label: 'Discount %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_pur, item) => toNum(item.discount_percent),
+  },
+  {
+    key: 'discount_amount',
+    label: 'Discount Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => {
+      const qty = toNum(item.quantity);
+      const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
+      const gross = toNum(item.gross_amount ?? qty * rate);
+      const discPct = toNum(item.discount_percent);
+      return toNum(item.discount_amount ?? (gross * discPct) / 100);
+    },
+  },
+  {
+    key: 'taxable_amount',
+    label: 'Taxable Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => {
+      const qty = toNum(item.quantity);
+      const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
+      const gross = toNum(item.gross_amount ?? qty * rate);
+      const discPct = toNum(item.discount_percent);
+      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      return Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+    },
+  },
+  {
+    key: 'tax_percent',
+    label: 'Tax %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_pur, item) => toNum(item.tax_percent),
+  },
+  {
+    key: 'tax_amount',
+    label: 'Tax Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => {
+      const qty = toNum(item.quantity);
+      const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
+      const gross = toNum(item.gross_amount ?? qty * rate);
+      const discPct = toNum(item.discount_percent);
+      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+      const taxPct = toNum(item.tax_percent);
+      return toNum(item.tax_amount ?? (taxable * taxPct) / 100);
+    },
+  },
+  {
+    key: 'line_total',
+    label: 'Net Line Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) => {
+      const qty = toNum(item.quantity);
+      const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
+      const gross = toNum(item.gross_amount ?? qty * rate);
+      const discPct = toNum(item.discount_percent);
+      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+      const taxPct = toNum(item.tax_percent);
+      const taxAmt = toNum(item.tax_amount ?? (taxable * taxPct) / 100);
+      return toNum(item.line_total ?? taxable + taxAmt);
+    },
+  },
+  {
+    key: 'invoice_gross_total',
+    label: 'Invoice Gross Total',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (pur) => toNum(pur.gross_total ?? pur.gross_amount ?? 0),
+  },
+  {
+    key: 'invoice_discount_amount',
+    label: 'Invoice Discount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (pur) => toNum(pur.discount_amount ?? pur.invoice_discount_amount ?? 0),
+  },
+  {
+    key: 'advance_tax_amount',
+    label: 'Advance Tax Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (pur) => toNum(pur.advance_tax_amount ?? 0),
+  },
+  {
+    key: 'net_total',
+    label: 'Total / Net Invoice Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (pur) => toNum(pur.net_total ?? 0),
+  },
+  {
+    key: 'paid_amount',
+    label: 'Paid Amount',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (pur) => toNum(pur.paid_amount ?? 0),
+  },
+  {
+    key: 'remaining_balance',
+    label: 'Balance',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (pur) =>
+      toNum(
+        pur.balance_amount ??
+          pur.remaining_balance ??
+          Math.max(0, toNum(pur.net_total ?? 0) - toNum(pur.paid_amount ?? 0))
+      ),
+  },
+];
+
+/**
+ * Builds custom rows (one row per invoice item, repeating selected invoice-level fields)
+ * in the exact column order specified by `selectedFieldKeys`.
+ */
+export function buildCustomExportRows(
+  moduleType: 'SALES' | 'PURCHASE',
+  invoices: Array<Record<string, any>>,
+  selectedFieldKeys: string[]
+): {
+  headers: string[];
+  fieldDefs: CustomExportFieldDef[];
+  rows: Array<Record<string, any>>;
+} {
+  const catalog =
+    moduleType === 'PURCHASE' ? PURCHASE_CUSTOM_EXPORT_FIELDS : SALES_CUSTOM_EXPORT_FIELDS;
+  const byKey = new Map<string, CustomExportFieldDef>();
+  for (const def of catalog) {
+    byKey.set(def.key, def);
+  }
+
+  const fieldDefs: CustomExportFieldDef[] = [];
+  for (const key of selectedFieldKeys) {
+    const def = byKey.get(key);
+    if (def) {
+      fieldDefs.push(def);
+    }
+  }
+
+  const headers = fieldDefs.map((f) => f.label);
+  const rows: Array<Record<string, any>> = [];
+
+  for (const inv of invoices) {
+    const rawItems: Array<Record<string, any>> = Array.isArray(inv.items)
+      ? inv.items
+      : Array.isArray(inv.lines)
+      ? inv.lines
+      : [];
+
+    const itemList = rawItems.length > 0 ? rawItems : [{}];
+
+    for (const item of itemList) {
+      const rowObj: Record<string, any> = {};
+      for (const def of fieldDefs) {
+        rowObj[def.label] = def.getValue(inv, item);
+      }
+      rows.push(rowObj);
+    }
+  }
+
+  return { headers, fieldDefs, rows };
+}
+
+/**
+ * Exports selected fields in the user's chosen column order into a genuine .xlsx workbook.
+ * One row per invoice item, repeating selected invoice-level fields on each item row.
+ */
+export function exportCustomInvoicesToExcel(
+  moduleType: 'SALES' | 'PURCHASE',
+  invoices: Array<Record<string, any>>,
+  selectedFieldKeys: string[],
+  customFileName?: string
+): { rowCount: number; columnCount: number; fileName: string } {
+  if (!invoices || invoices.length === 0) {
+    throw new Error('No invoices available to export.');
+  }
+  if (!selectedFieldKeys || selectedFieldKeys.length === 0) {
+    throw new Error('Please select at least one field to export.');
+  }
+
+  const { headers, rows } = buildCustomExportRows(moduleType, invoices, selectedFieldKeys);
+  if (headers.length === 0) {
+    throw new Error('No valid export fields selected.');
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows, { header: headers });
+  applyColumnWidths(ws, headers, rows);
+
+  const sheetName = moduleType === 'PURCHASE' ? 'Custom Purchase Export' : 'Custom Sales Export';
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+
+  const datePart = new Date().toISOString().slice(0, 10);
+  const defaultName =
+    moduleType === 'PURCHASE'
+      ? invoices.length === 1
+        ? `Custom_Purchase_${String(
+            invoices[0].bill_number || invoices[0].invoice_number || 'Export'
+          ).replace(/[^a-zA-Z0-9_-]/g, '_')}.xlsx`
+        : `Custom_Purchase_Export_${datePart}.xlsx`
+      : invoices.length === 1
+      ? `Custom_Sales_${String(invoices[0].invoice_number || 'Export').replace(
+          /[^a-zA-Z0-9_-]/g,
+          '_'
+        )}.xlsx`
+      : `Custom_Sales_Export_${datePart}.xlsx`;
+
+  const finalFileName = customFileName || defaultName;
+  XLSX.writeFile(wb, finalFileName);
+
+  return {
+    rowCount: rows.length,
+    columnCount: headers.length,
+    fileName: finalFileName,
+  };
+}
+

@@ -29,6 +29,7 @@ import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface ItemsMasterViewProps {
   initialOpenImport?: boolean;
@@ -225,7 +226,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                 printReportDocument(
                   itemsPrintRef.current,
                   'Abrar Medical Store - Medicine Catalog Directory',
-                  { orientation: 'landscape', paperSize: 'a4' }
+                  { orientation: 'portrait', paperSize: 'legal' }
                 );
               } else {
                 window.print();
@@ -440,6 +441,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
       </div>
 
       {/* Printable Catalog Area */}
+      <ReportZoomWrapper label="Items Catalog Directory Preview Zoom">
       <div ref={itemsPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title="MEDICINE CATALOG & ITEM MASTER DIRECTORY"
@@ -781,6 +783,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
         </div>
       </div>
     </div>
+    </ReportZoomWrapper>
 
       {/* Item Form Modal (Add / Edit) */}
       <ItemFormModal

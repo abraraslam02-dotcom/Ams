@@ -8,6 +8,8 @@ import {
   peekNextInvoiceNumber,
   allocateNextInvoiceNumber,
   bindInvoiceNumberRecordId,
+  isTemporaryOrHeldInvoiceNumber,
+  generateTemporaryHeldInvoiceNumber,
 } from '../services/invoiceSequenceService.ts';
 import {
   previewFIFOAllocation,
@@ -171,7 +173,7 @@ function computeBatchStatus(packQty: number, expiryDate: string, minStock: numbe
 }
 
 function getNextSalesInvoiceNumber(dateStr?: string): string {
-  return peekNextInvoiceNumber(dateStr);
+  return peekNextInvoiceNumber('SALE', dateStr);
 }
 
 function getNextSaleReturnNumber(): string {
@@ -1311,7 +1313,14 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
   const db = getDatabase();
 
   const tx = db.transaction(() => {
+    let existingSaleRow: { invoice_number: string; status: string } | undefined;
     if (saleId) {
+      existingSaleRow = db
+        .prepare('SELECT invoice_number, status FROM sales WHERE id = ?')
+        .get(saleId) as { invoice_number: string; status: string } | undefined;
+      if (!existingSaleRow) {
+        throw new Error(`Sales invoice #${saleId} not found.`);
+      }
       revertCompletedSaleEffects(saleId);
     }
 
@@ -1327,20 +1336,6 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     }
 
     const invoiceDate = String(body.invoice_date || new Date().toISOString().slice(0, 10)).trim();
-
-    // Enforce server-side automatic numbering on create and strict immutability on edit
-    let invoiceNumber: string;
-    if (saleId) {
-      const existingSaleRow = db
-        .prepare('SELECT invoice_number FROM sales WHERE id = ?')
-        .get(saleId) as { invoice_number: string } | undefined;
-      if (!existingSaleRow) {
-        throw new Error(`Sales invoice #${saleId} not found.`);
-      }
-      invoiceNumber = String(existingSaleRow.invoice_number);
-    } else {
-      invoiceNumber = allocateNextInvoiceNumber('SALE', invoiceDate);
-    }
 
     const invoiceType = String(body.invoice_type || 'Retail') === 'Wholesale' ? 'Wholesale' : 'Retail';
     const paymentMode = ['Cash', 'Credit', 'Partial', 'Bank'].includes(String(body.payment_mode))
@@ -1830,6 +1825,41 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         paymentMode === 'Bank' ? getSystemAccountId('FIN-1021') : getSystemAccountId('FIN-1010');
     }
 
+    // Allocate permanent invoice number ONLY when saving as a completed invoice,
+    // after all validations have passed inside the atomic transaction.
+    // Held and draft invoices never consume permanent SI numbers.
+    // Editing an already-completed invoice strictly retains its original invoice number.
+    let invoiceNumber: string;
+    let allocatedPermanentNow = false;
+    if (saleId && existingSaleRow) {
+      const wasTempOrHeld = isTemporaryOrHeldInvoiceNumber(
+        existingSaleRow.invoice_number,
+        existingSaleRow.status
+      );
+      if (wasTempOrHeld && status === 'completed') {
+        invoiceNumber = allocateNextInvoiceNumber('SALE', invoiceDate, saleId);
+        bindInvoiceNumberRecordId(invoiceNumber, 'SALE', saleId);
+        allocatedPermanentNow = true;
+      } else if (wasTempOrHeld && (status === 'held' || status === 'draft')) {
+        invoiceNumber = isTemporaryOrHeldInvoiceNumber(existingSaleRow.invoice_number, null)
+          ? String(existingSaleRow.invoice_number)
+          : generateTemporaryHeldInvoiceNumber('SALE', status === 'draft' ? 'draft' : 'held', invoiceDate);
+      } else {
+        invoiceNumber = String(existingSaleRow.invoice_number);
+      }
+    } else {
+      if (status === 'held' || status === 'draft') {
+        invoiceNumber = generateTemporaryHeldInvoiceNumber(
+          'SALE',
+          status === 'draft' ? 'draft' : 'held',
+          invoiceDate
+        );
+      } else {
+        invoiceNumber = allocateNextInvoiceNumber('SALE', invoiceDate);
+        allocatedPermanentNow = true;
+      }
+    }
+
     let finalSaleId = saleId;
 
     if (saleId) {
@@ -2013,7 +2043,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         body.remarks ? String(body.remarks) : ''
       );
       finalSaleId = Number(resInsert.lastInsertRowid);
-      bindInvoiceNumberRecordId(invoiceNumber, 'SALE', finalSaleId);
+      if (allocatedPermanentNow) {
+        bindInvoiceNumberRecordId(invoiceNumber, 'SALE', finalSaleId);
+      }
     }
 
     const insertLineStmt = db.prepare(`
@@ -2532,7 +2564,8 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
     const reqClientId = req.body?.client_request_id ? String(req.body.client_request_id).trim() : '';
     if (
       existingStatus === 'completed' &&
-      (req.body?.from_hold_conversion || (reqClientId && existing.client_request_id === reqClientId))
+      reqClientId &&
+      existing.client_request_id === reqClientId
     ) {
       return res.status(409).json({
         success: false,

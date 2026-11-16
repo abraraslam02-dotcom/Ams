@@ -101,9 +101,12 @@ export const InvoiceSmsModal: React.FC<InvoiceSmsModalProps> = ({
     document.body.removeChild(link);
 
     // Never show a false "SMS Sent" message when no SMS gateway is configured;
-    // clearly indicate that the device's default SMS application has been opened.
+    // clearly indicate that the device's default SMS application has been opened and auto-dismiss.
     setShowConfirmStep(false);
     setHandedOffToSmsApp(true);
+    window.setTimeout(() => {
+      onClose();
+    }, 800);
   };
 
   const handleCopyMessage = async () => {

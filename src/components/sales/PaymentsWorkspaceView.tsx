@@ -6,6 +6,7 @@ import { Banknote, CheckCircle2, AlertCircle, Printer } from 'lucide-react';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface PaymentsWorkspaceViewProps {
   initialVoucherType?: 'receive_payment' | 'customer_receipt' | 'cash_payment' | 'bank_payment';
@@ -35,6 +36,12 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const paymentsPrintRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = window.setTimeout(() => setSuccessMsg(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [successMsg]);
 
   useEffect(() => {
     setVoucherType(initialVoucherType);
@@ -333,6 +340,7 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
       </form>
 
       {/* Posted Vouchers History */}
+      <ReportZoomWrapper label="Payments & Receipts Register Zoom">
       <div ref={paymentsPrintRef} className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <PrintDocumentHeader
           title="PAYMENTS & RECEIPTS REGISTER"
@@ -412,6 +420,7 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
           </tbody>
         </table>
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

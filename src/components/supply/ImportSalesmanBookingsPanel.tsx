@@ -88,7 +88,9 @@ export const ImportSalesmanBookingsPanel: React.FC<ImportSalesmanBookingsPanelPr
       }
       const batchData = await batchRes.json();
       if (batchData.success && Array.isArray(batchData.batches)) {
-        setSubmittedBatches(batchData.batches);
+        setSubmittedBatches(
+          batchData.batches.filter((b: SubmittedMobileBatch) => b.import_status !== 'Imported')
+        );
       }
     } catch {
       // ignore
@@ -98,6 +100,12 @@ export const ImportSalesmanBookingsPanel: React.FC<ImportSalesmanBookingsPanelPr
   useEffect(() => {
     fetchHistoryAndPendingSupplies();
   }, [fetchHistoryAndPendingSupplies]);
+
+  useEffect(() => {
+    if (!banner || banner.type !== 'success') return;
+    const timer = window.setTimeout(() => setBanner(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [banner]);
 
   const runPreviewValidation = async (
     fileName: string,

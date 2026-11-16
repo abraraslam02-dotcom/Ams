@@ -48,7 +48,8 @@ function escapePdfTextServer(text: string): string {
 }
 
 function generateServerPdfBuffer(lines: string[]): Buffer {
-  let y = 790;
+  // US Legal Portrait: 8.5in x 14in = 612pt x 1008pt
+  let y = 956;
   const ops: string[] = ['BT', '/F1 10 Tf'];
   lines.forEach((line, idx) => {
     const sz = idx === 0 ? 14 : 9.5;
@@ -62,7 +63,7 @@ function generateServerPdfBuffer(lines: string[]): Buffer {
   const objs = [
     '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
     '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
-    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 1008] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n',
     '4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n',
     `5 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`,
   ];

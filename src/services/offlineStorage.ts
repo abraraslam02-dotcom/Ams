@@ -357,6 +357,12 @@ class OfflineStorage {
 
   async getPendingSyncItems(): Promise<OfflineSyncItem[]> {
     const all = await this.getAll<OfflineSyncItem>('sync_queue');
+    const syncedToPrune = all.filter((i) => i.status === 'synced');
+    for (const s of syncedToPrune) {
+      if (s.client_tx_id) {
+        await this.delete('sync_queue', s.client_tx_id).catch(() => {});
+      }
+    }
     return all
       .filter((i) => i.status === 'pending' || i.status === 'failed')
       .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
@@ -386,11 +392,11 @@ class OfflineStorage {
   ): Promise<void> {
     const existing = await this.get<OfflineSyncItem>('sync_queue', clientTxId);
     if (!existing) return;
-    existing.status = status;
     if (status === 'synced') {
-      existing.synced_at = new Date().toISOString();
-      existing.error = null;
+      await this.delete('sync_queue', clientTxId).catch(() => {});
+      return;
     }
+    existing.status = status;
     if (extra?.error !== undefined) existing.error = extra.error;
     if (extra?.server_id !== undefined) existing.server_id = extra.server_id;
     if (extra?.server_invoice_number !== undefined)

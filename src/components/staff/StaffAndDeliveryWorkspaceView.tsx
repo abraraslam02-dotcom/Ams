@@ -21,6 +21,7 @@ import { formatPKR } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type StaffWorkspaceTab = 'salesmen' | 'deliverymen' | 'deliveries';
 
@@ -58,6 +59,12 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   const [loading, setLoading] = useState(false);
   const salesmanReportPrintRef = useRef<HTMLDivElement>(null);
   const deliveryReportPrintRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = setTimeout(() => setSuccessMsg(null), 3500);
+    return () => clearTimeout(timer);
+  }, [successMsg]);
 
   // =========================================================================
   // 1. SALESMEN MANAGEMENT & COMMISSION REPORTS STATE
@@ -709,7 +716,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                       printReportDocument(
                         salesmanReportPrintRef.current,
                         `Abrar Medical Store - Salesman Report (${selectedSmReport})`,
-                        { orientation: 'landscape', paperSize: 'a4' }
+                        { orientation: 'portrait', paperSize: 'legal' }
                       );
                     } else {
                       window.print();
@@ -774,6 +781,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
               </div>
 
               {/* Printable Salesman Report */}
+              <ReportZoomWrapper label="Salesman Report Preview Zoom">
               <div ref={salesmanReportPrintRef} className="space-y-4">
                 <PrintDocumentHeader
                   title={`SALESMAN PERFORMANCE REPORT — ${selectedSmReport.toUpperCase()}`}
@@ -858,6 +866,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                 </table>
               </div>
             </div>
+            </ReportZoomWrapper>
           </div>
           )}
         </div>
@@ -1227,7 +1236,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                       printReportDocument(
                         deliveryReportPrintRef.current,
                         `Abrar Medical Store - Delivery Report (${selectedDelReport})`,
-                        { orientation: 'landscape', paperSize: 'a4' }
+                        { orientation: 'portrait', paperSize: 'legal' }
                       );
                     } else {
                       window.print();
@@ -1292,6 +1301,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
               </div>
 
               {/* Printable Delivery Report */}
+              <ReportZoomWrapper label="Delivery Report Preview Zoom">
               <div ref={deliveryReportPrintRef} className="space-y-4">
                 <PrintDocumentHeader
                   title={`DELIVERY DISPATCH & CHARGES REPORT — ${selectedDelReport.toUpperCase()}`}
@@ -1372,6 +1382,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                 </table>
               </div>
             </div>
+            </ReportZoomWrapper>
           </div>
           )}
         </div>

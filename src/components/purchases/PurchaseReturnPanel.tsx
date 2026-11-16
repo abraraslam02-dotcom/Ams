@@ -63,6 +63,12 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = window.setTimeout(() => setSuccessMsg(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [successMsg]);
+
   const [supplierSearchQuery, setSupplierSearchQuery] = useState<string>('');
   const [supplierDropdownOpen, setSupplierDropdownOpen] = useState<boolean>(false);
   const [supplierHighlightIdx, setSupplierHighlightIdx] = useState<number>(0);

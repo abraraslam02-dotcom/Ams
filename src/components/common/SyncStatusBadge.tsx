@@ -24,6 +24,10 @@ export const SyncStatusBadge: React.FC = () => {
   useEffect(() => {
     const unsubscribe = offlineSyncManager.subscribe((state) => {
       setSyncState(state);
+      offlineStorage
+        .getPendingSyncItems()
+        .then((items) => setPendingItems(items))
+        .catch(() => setPendingItems([]));
     });
     return () => unsubscribe();
   }, []);

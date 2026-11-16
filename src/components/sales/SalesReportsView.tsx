@@ -8,6 +8,7 @@ import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type SalesReportKey =
   | 'top-performance'
@@ -391,8 +392,8 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
   const handlePrint = () => {
     if (salesReportPrintRef.current) {
       printReportDocument(salesReportPrintRef.current, `Abrar Medical Store - ${activeTabLabel}`, {
-        paperSize: 'a4',
-        orientation: 'landscape',
+        paperSize: 'legal',
+        orientation: 'portrait',
         margin: 'compact',
         fontSizeScale: 'small',
       });
@@ -474,7 +475,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                 className="px-3 py-1.5 rounded-lg bg-slate-900 text-white font-bold flex items-center gap-1 cursor-pointer"
               >
                 <Printer className="w-3.5 h-3.5" />
-                Print A4
+                Print Legal
               </button>
               <button
                 type="button"
@@ -616,6 +617,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
           )}
 
           {/* Printable Report Content */}
+          <ReportZoomWrapper label="Sales Report Preview Zoom">
           <div ref={salesReportPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title={activeTabLabel.toUpperCase()}
@@ -1572,6 +1574,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
           )}
         </div>
       </div>
+          </ReportZoomWrapper>
         </>
       )}
     </div>

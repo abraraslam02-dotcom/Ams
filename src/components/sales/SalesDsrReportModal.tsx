@@ -3,6 +3,7 @@ import { Printer, Receipt, FileText, X, ClipboardList, AlertCircle } from 'lucid
 import { DatasheetRow, FastSearchItem } from '../../types/sales';
 import { api } from '../../services/api';
 import { executePrintElement } from '../../utils/printEngine';
+import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 export interface SalesDsrReportModalProps {
   isOpen: boolean;
@@ -80,6 +81,12 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
 
   const a4PrintRef = useRef<HTMLDivElement | null>(null);
   const thermalPrintRef = useRef<HTMLDivElement | null>(null);
+  const zoomState = usePreviewZoom({
+    initialZoom: 100,
+    naturalWidthPx: activeLayout === 'thermal' ? 302 : 794,
+    naturalHeightPx: 1123,
+    isThermal: activeLayout === 'thermal',
+  });
 
   useEffect(() => {
     if (propStoreName && propStoreName.trim()) {
@@ -232,12 +239,14 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
     setActiveLayout('a4');
     setTimeout(() => {
       executePrintElement(a4PrintRef.current, {
-        title: `${displayStoreName} - DSR Report - ${displayInvoiceNumber} (A4)`,
+        title: `${displayStoreName} - DSR Report - ${displayInvoiceNumber} (A4 Portrait)`,
         paperSize: 'a4',
+        profileId: 'a4-report',
         orientation: 'portrait',
         margin: 'standard',
         fontSizeScale: 'normal',
         copies: 1,
+        showPageNumbers: true,
       });
     }, 40);
   };
@@ -248,8 +257,9 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
       executePrintElement(thermalPrintRef.current, {
         title: `${displayStoreName} - DSR Report - ${displayInvoiceNumber} (80mm Thermal)`,
         paperSize: '80mm',
+        profileId: 'thermal-80mm',
         orientation: 'portrait',
-        margin: printOpts.margin,
+        margin: 'none',
         fontSizeScale: printOpts.fontSizeScale,
         copies: 1,
         selectedPrinter: printOpts.selectedPrinter,
@@ -258,10 +268,20 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
   };
 
   return (
-    <div className="print-modal-container fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-2 lg:p-4 overflow-y-auto print:static print:bg-white print:p-0">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-5xl max-h-[95vh] flex flex-col overflow-hidden print:shadow-none print:border-0 print:max-w-none print:max-h-none">
+    <div
+      className={`print-modal-container fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center ${
+        zoomState.isFullScreen ? 'p-0' : 'p-2 lg:p-3'
+      } overflow-hidden print:static print:bg-white print:p-0`}
+    >
+      <div
+        className={`bg-white shadow-2xl border border-slate-300 w-full flex flex-col overflow-hidden print:shadow-none print:border-0 print:max-w-none print:max-h-none ${
+          zoomState.isFullScreen
+            ? 'h-screen max-w-none max-h-none rounded-none border-0'
+            : 'max-w-[96vw] xl:max-w-6xl h-[95vh] max-h-[95vh] rounded-xl'
+        }`}
+      >
         {/* Top Action Bar (Hidden when printing) */}
-        <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
+        <div className="bg-slate-900 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
               <ClipboardList className="w-4 h-4" />
@@ -271,13 +291,14 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                 DSR – Daily Stock Requisition ({displayInvoiceNumber})
               </h3>
               <p className="text-[11px] text-slate-400">
-                Warehouse Stock Picking List · Company-wise A–Z · {dsrData.totalItems} Item
-                {dsrData.totalItems === 1 ? '' : 's'}
+                {activeLayout === 'a4'
+                  ? `A4 Standard (210 × 297 mm) · Company-wise A–Z · ${dsrData.totalItems} Item(s)`
+                  : `80mm Thermal Roll (80mm × Dynamic Height) · ${dsrData.totalItems} Item(s)`}
               </p>
             </div>
           </div>
 
-          {/* Preview Layout Switcher + Required 3 Print Controls (Print A4, Print Thermal, Close) */}
+          {/* Preview Layout Switcher + Print Controls */}
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center bg-slate-800 p-0.5 rounded-lg border border-slate-700 mr-1">
               <button
@@ -285,30 +306,38 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                 onClick={() => setActiveLayout('a4')}
                 className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   activeLayout === 'a4'
-                    ? 'bg-slate-700 text-white'
+                    ? 'bg-emerald-600 text-white'
                     : 'text-slate-400 hover:text-white'
                 }`}
-                title="Preview A4 Paper Layout"
+                title="Preview A4 Paper Layout (210 × 297 mm)"
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span>A4 View</span>
+                <span>A4 (210×297mm)</span>
               </button>
               <button
                 type="button"
                 onClick={() => setActiveLayout('thermal')}
                 className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   activeLayout === 'thermal'
-                    ? 'bg-slate-700 text-white'
+                    ? 'bg-emerald-600 text-white'
                     : 'text-slate-400 hover:text-white'
                 }`}
-                title="Preview 80mm Thermal Layout"
+                title="Preview 80mm Thermal Layout (Dynamic Height)"
               >
                 <Receipt className="w-3.5 h-3.5" />
-                <span>80mm Thermal View</span>
+                <span>80mm Thermal</span>
               </button>
             </div>
 
-            {/* 1. Print A4 */}
+            <PreviewZoomToolbar
+              zoomState={zoomState}
+              dark
+              compact
+              showPageNav
+              showFullScreenButton
+            />
+
+            {/* 1. Print A4 Portrait */}
             <button
               type="button"
               disabled={!dsrData.hasItems}
@@ -337,13 +366,17 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
               className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               <X className="w-3.5 h-3.5" />
-              <span>Close</span>
+              <span>Close Preview</span>
             </button>
           </div>
         </div>
 
-        {/* Report Viewport */}
-        <div className="flex-1 overflow-y-auto p-4 lg:p-6 bg-slate-100 flex justify-center print:p-0 print:bg-white print:overflow-visible">
+        {/* MS Access / Windows Desktop-Style Grey Print Preview Workspace */}
+        <div
+          ref={zoomState.viewportRef}
+          onWheel={zoomState.handleWheelZoom}
+          className="flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:bg-white print:overflow-visible"
+        >
           {!dsrData.hasItems ? (
             <div className="bg-white rounded-xl border border-slate-200 p-8 max-w-md w-full text-center my-auto space-y-3">
               <div className="w-12 h-12 rounded-full bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center mx-auto">
@@ -368,16 +401,20 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
               </div>
             </div>
           ) : (
-            <>
+            <div
+              ref={zoomState.contentRef}
+              style={{ zoom: `${zoomState.zoom}%` } as React.CSSProperties}
+              className="ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75"
+            >
               {/* =========================================================================
-                 1. STANDARD A4 DSR REPORT LAYOUT
+                 1. STANDARD A4 PORTRAIT (210mm x 297mm) DSR REPORT LAYOUT
                  ========================================================================= */}
               <div
-                className={activeLayout === 'a4' ? 'w-full flex justify-center' : 'hidden'}
+                className={activeLayout === 'a4' ? 'inline-flex justify-center' : 'hidden'}
               >
                 <div
                   ref={a4PrintRef}
-                  className="bg-white border border-slate-300 shadow-xs w-full max-w-[210mm] p-6 lg:p-8 text-slate-900 text-xs print:border-0 print:shadow-none print:p-0 print:max-w-none"
+                  className="bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] w-[210mm] max-w-[210mm] min-h-[297mm] p-6 lg:p-8 text-slate-900 text-xs relative print:border-0 print:shadow-none print:p-0 print:w-full print:max-w-none print:min-h-0"
                 >
                   <style>{`
                     @media print {
@@ -583,14 +620,15 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
               </div>
 
               {/* =========================================================================
-                 2. 80MM THERMAL RECEIPT DSR REPORT LAYOUT (COMPACT & PAGE-OPTIMIZED)
+                 2. 80MM THERMAL RECEIPT DSR REPORT LAYOUT (EXACT 80MM WIDTH & DYNAMIC HEIGHT)
                  ========================================================================= */}
               <div
-                className={activeLayout === 'thermal' ? 'w-full flex justify-center' : 'hidden'}
+                className={activeLayout === 'thermal' ? 'inline-flex justify-center items-start' : 'hidden'}
               >
                 <div
                   ref={thermalPrintRef}
-                  className="thermal-receipt thermal-80mm bg-white border border-slate-300 shadow-sm text-black font-sans tabular-nums leading-tight w-[312px] p-2.5 text-[12px] relative print:border-0 print:shadow-none print:p-1"
+                  style={{ width: '80mm', maxWidth: '80mm', height: 'auto', minHeight: 0 }}
+                  className="thermal-receipt thermal-80mm bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-tight w-[80mm] max-w-[80mm] h-auto min-h-0 self-start px-[2.5mm] py-[2.5mm] text-[12px] relative print:border-0 print:shadow-none print:p-1"
                 >
                   {/* Header: Store name + report title (same style as Sales thermal invoice) */}
                   <div className="text-center pb-2">
@@ -719,7 +757,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                   </table>
                 </div>
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>

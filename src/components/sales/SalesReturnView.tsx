@@ -35,6 +35,12 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   useEffect(() => {
+    if (!successMsg) return;
+    const timer = window.setTimeout(() => setSuccessMsg(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [successMsg]);
+
+  useEffect(() => {
     setMode(initialMode);
   }, [initialMode]);
 

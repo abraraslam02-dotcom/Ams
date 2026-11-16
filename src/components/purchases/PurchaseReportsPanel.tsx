@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FileSpreadsheet,
   Filter,
@@ -11,6 +11,7 @@ import {
   Scale,
   ShieldCheck,
   Clock,
+  Printer,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Account } from '../../types/account';
@@ -19,6 +20,9 @@ import { PurchaseReportType } from '../../types/purchase';
 import { api } from '../../services/api';
 import { formatPKR } from '../../utils/formatters';
 import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
+import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
+import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface PurchaseReportsPanelProps {
   suppliers: Account[];
@@ -90,6 +94,8 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
 
   const [rows, setRows] = useState<Array<Record<string, any>>>([]);
   const [loading, setLoading] = useState(false);
+  const purchaseReportPrintRef = useRef<HTMLDivElement>(null);
+  const activeTabInfo = REPORT_TABS.find((t) => t.id === activeReport) || REPORT_TABS[0];
 
   const loadReport = useCallback(async () => {
     try {
@@ -257,6 +263,29 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
           </button>
           <button
             type="button"
+            onClick={() => {
+              if (purchaseReportPrintRef.current) {
+                printReportDocument(
+                  purchaseReportPrintRef.current,
+                  `Abrar Medical Store - ${activeTabInfo.label}`,
+                  {
+                    paperSize: 'legal',
+                    orientation: 'portrait',
+                    margin: 'compact',
+                    fontSizeScale: 'small',
+                  }
+                );
+              } else {
+                window.print();
+              }
+            }}
+            className="px-3 py-1.5 text-xs font-bold rounded-lg bg-slate-900 hover:bg-slate-800 text-white flex items-center gap-1.5 cursor-pointer"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print Legal</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportExcel}
             className="px-4 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 shadow-2xs cursor-pointer"
           >
@@ -267,6 +296,17 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
       </div>
 
       {/* Report Data Table */}
+      <ReportZoomWrapper label="Purchase Report Preview Zoom">
+      <div ref={purchaseReportPrintRef} className="space-y-4">
+        <PrintDocumentHeader
+          title={activeTabInfo.label.toUpperCase()}
+          subtitle={activeTabInfo.subtitle}
+          metaItems={[
+            { label: 'Report', value: activeTabInfo.label },
+            { label: 'Date Range', value: `${startDate || 'Start'} to ${endDate || 'Current'}` },
+            { label: 'Total Rows', value: rows.length },
+          ]}
+        />
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="overflow-x-auto">
           {activeReport === 'purchase-register' && (
@@ -717,6 +757,8 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
           )}
         </div>
       </div>
+      </div>
+      </ReportZoomWrapper>
         </>
       )}
     </div>

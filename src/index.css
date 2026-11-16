@@ -7,10 +7,26 @@
    ======================================================== */
 
 @media print {
-  /* 1. Page Configuration: default clean standard margins */
+  /* 1. Default Page Configuration for A4 Invoices & Reports: A4 Portrait (210mm x 297mm) */
   @page {
-    size: auto;
+    size: 210mm 297mm;
     margin: 8mm 10mm 10mm 10mm;
+  }
+
+  /* Named page rules for independent print configurations */
+  @page a4-page {
+    size: 210mm 297mm;
+    margin: 8mm 10mm 10mm 10mm;
+  }
+
+  @page thermal-80-page {
+    size: 80mm auto;
+    margin: 0mm;
+  }
+
+  @page thermal-58-page {
+    size: 58mm auto;
+    margin: 0mm;
   }
 
   /* 2. Color fidelity: force exact backgrounds, table headers, borders, and status badges */
@@ -149,18 +165,36 @@
   /* 10. Thermal printer specific overrides when element has .thermal-receipt */
   .thermal-receipt,
   .thermal-80mm {
-    max-width: 74mm !important;
-    width: 74mm !important;
+    page: thermal-80-page !important;
+    max-width: 80mm !important;
+    width: 80mm !important;
+    height: auto !important;
+    min-height: 0 !important;
     margin: 0 auto !important;
-    font-size: 13px !important;
-    line-height: 1.3 !important;
+    padding: 1.5mm 2mm !important;
+    font-size: 12px !important;
+    line-height: 1.28 !important;
   }
   .thermal-58mm {
-    max-width: 52mm !important;
-    width: 52mm !important;
+    page: thermal-58-page !important;
+    max-width: 58mm !important;
+    width: 58mm !important;
+    height: auto !important;
+    min-height: 0 !important;
     margin: 0 auto !important;
-    font-size: 11.5px !important;
-    line-height: 1.28 !important;
+    padding: 1mm 1.5mm !important;
+    font-size: 10.5px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* 11. Reset any screen-only preview zoom so printed documents always render at 100% scale */
+  .ams-screen-zoom-wrapper {
+    zoom: 100% !important;
+    transform: none !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
   }
 }
 

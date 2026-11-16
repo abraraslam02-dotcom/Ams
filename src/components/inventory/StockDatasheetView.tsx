@@ -24,6 +24,7 @@ import { StockDatasheetItem } from '../../types/inventory';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface StockDatasheetViewProps {
   initialExpiryFilter?: string;
@@ -286,7 +287,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
                   printReportDocument(
                     datasheetPrintRef.current,
                     'Abrar Medical Store - Batch-Wise Stock Datasheet',
-                    { orientation: 'landscape', paperSize: 'a4' }
+                    { orientation: 'portrait', paperSize: 'legal' }
                   );
                 } else {
                   window.print();
@@ -294,7 +295,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
               }}
               disabled={loading || data.length === 0}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded text-xs font-semibold shadow-xs transition-colors cursor-pointer border border-slate-700"
-              title="Print formatted A4 landscape inventory datasheet"
+              title="Print formatted US Legal portrait inventory datasheet"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>Print Datasheet</span>
@@ -436,6 +437,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
       )}
 
       {/* Printable Datasheet Area */}
+      <ReportZoomWrapper label="Stock Datasheet Preview Zoom">
       <div ref={datasheetPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title="BATCH-WISE STOCK DATASHEET — 18-COLUMN INVENTORY MASTER"
@@ -800,6 +802,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
         </div>
       </div>
     </div>
+    </ReportZoomWrapper>
   </div>
 );
 };

@@ -13,6 +13,7 @@ import { StockLedgerEntry, ReportMetaItem } from '../../types/inventory';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const StockLedgerView: React.FC = () => {
   const [ledger, setLedger] = useState<StockLedgerEntry[]>([]);
@@ -255,7 +256,7 @@ export const StockLedgerView: React.FC = () => {
                   printReportDocument(
                     ledgerPrintRef.current,
                     `Abrar Medical Store - Item Log (${selectedItemObj ? selectedItemObj.item_name : 'All Items'})`,
-                    { orientation: 'landscape', paperSize: 'a4', margin: 'minimum', fontSizeScale: 'small' }
+                    { orientation: 'portrait', paperSize: 'legal', margin: 'minimum', fontSizeScale: 'small' }
                   );
                 } else {
                   window.print();
@@ -368,6 +369,7 @@ export const StockLedgerView: React.FC = () => {
       </div>
 
       {/* Printable Area */}
+      <ReportZoomWrapper label="Item Log / Stock Ledger Preview Zoom">
       <div ref={ledgerPrintRef} className="space-y-4">
         <PrintDocumentHeader
           title="ITEM LOG / ITEM TRANSACTION HISTORY (FULL PACK EQUIVALENT)"
@@ -605,6 +607,7 @@ export const StockLedgerView: React.FC = () => {
           </div>
         </div>
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };

@@ -15,6 +15,7 @@ import { formatPKR } from '../../utils/formatters';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const DetailedItemStockReportView: React.FC = () => {
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -113,7 +114,7 @@ export const DetailedItemStockReportView: React.FC = () => {
       printReportDocument(
         printRef.current,
         `Abrar Medical Store - Detailed Item Stock & Transaction Report (${fromDate || 'Start'} to ${toDate})`,
-        { paperSize: 'a4', orientation: 'landscape', margin: 'minimum', fontSizeScale: 'small' }
+        { paperSize: 'legal', orientation: 'portrait', margin: 'minimum', fontSizeScale: 'small' }
       );
     }
   };
@@ -193,7 +194,7 @@ export const DetailedItemStockReportView: React.FC = () => {
               className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-white rounded text-xs font-semibold border border-slate-700 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>Print (A4 Landscape)</span>
+              <span>Print (Legal)</span>
             </button>
 
             <button
@@ -269,6 +270,7 @@ export const DetailedItemStockReportView: React.FC = () => {
       )}
 
       {/* Report Body */}
+      <ReportZoomWrapper label="Detailed Item Stock Report Preview Zoom">
       <div ref={printRef} className="space-y-3">
         <PrintDocumentHeader
           title="DETAILED ITEM STOCK & TRANSACTION REPORT"
@@ -436,6 +438,7 @@ export const DetailedItemStockReportView: React.FC = () => {
           </div>
         </div>
       </div>
+      </ReportZoomWrapper>
     </div>
   );
 };
