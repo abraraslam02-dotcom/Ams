@@ -133,10 +133,10 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
   const isCancelled = String(doc.status || '').toLowerCase() === 'cancelled';
 
   const storeName = settings?.store_name || 'ABRAR MEDICAL STORE';
-  const storeAddress = settings?.address || 'Main Commercial Market, Lahore, Punjab, Pakistan';
-  const storePhone = settings?.phone || '+92 42 35789000';
-  const drugLicense = settings?.drug_license_number || 'DL-PK-LHR-2026-0891';
-  const ntnNumber = settings?.ntn_tax_number || 'NTN-PK-9812450-7';
+  const storeAddress = settings?.address || 'DAULATPUR';
+  const storePhone = settings?.phone || '03003234323';
+  const drugLicense = settings?.drug_license_number || 'DHO/SBA/230';
+  const ntnNumber = settings?.ntn_tax_number || 'NTN-PK-73943087';
   const logoDataUrl = settings?.logo_data_url || '';
 
   const formatPKR = (val: unknown) =>
