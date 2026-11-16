@@ -98,13 +98,14 @@ export function generateSalesInvoiceSmsText(rows: DatasheetRow[]): string {
 
 /**
  * Generates the Purchase Invoice Order SMS text from the active Purchase Invoice lines.
+ * Maps the actual item Qty from each Purchase Order detail record (never S.No / row index).
  * Shows Discount Percentage ONLY when discount_percent is valid and greater than 0.
  * Example:
  *   ABRAR MEDICAL STORE
  *
- *   1 = Panadol (5%)
- *   2 = Brufen (10%)
- *   3 = Syrup
+ *   10 = Panadol (5%)
+ *   25 = Brufen (10%)
+ *   5 = Syrup
  */
 export function generatePurchaseOrderSmsText(
   lines: PurchaseLineItem[],
@@ -119,9 +120,21 @@ export function generatePurchaseOrderSmsText(
       Boolean(line.item_name?.trim())
   );
 
-  const itemLines = populatedLines.map((line, idx) => {
-    const sNo = idx + 1;
+  const itemLines = populatedLines.map((line) => {
     const itemName = String(line.item_name || line.item_code || 'Item').trim();
+    const rawQty = Number(line.quantity ?? 0);
+    const rawLooseQty = Number(line.loose_quantity ?? 0);
+    const rawPackQty = Number(line.pack_quantity ?? 0);
+    const qty =
+      Number.isFinite(rawQty) && rawQty > 0
+        ? rawQty
+        : Number.isFinite(rawLooseQty) && rawLooseQty > 0
+        ? rawLooseQty
+        : Number.isFinite(rawPackQty) && rawPackQty > 0
+        ? rawPackQty
+        : 0;
+    const formattedQty = formatSmsNumber(qty);
+
     const rawVal = line.discount_percent as unknown;
     const isEmpty =
       rawVal === null ||
@@ -129,9 +142,9 @@ export function generatePurchaseOrderSmsText(
       (typeof rawVal === 'string' && rawVal.trim() === '');
     const numericDiscount = isEmpty ? 0 : Number(rawVal);
     if (Number.isFinite(numericDiscount) && numericDiscount > 0) {
-      return `${sNo} = ${itemName} (${formatSmsNumber(numericDiscount)}%)`;
+      return `${formattedQty} = ${itemName} (${formatSmsNumber(numericDiscount)}%)`;
     }
-    return `${sNo} = ${itemName}`;
+    return `${formattedQty} = ${itemName}`;
   });
 
   return `${header}\n\n${itemLines.join('\n')}`;

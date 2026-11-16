@@ -1896,6 +1896,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       copy[idx] = {
         ...row,
+        quantity: qty,
         units_per_pack: upp,
         loose_quantity: looseQty,
         loose_rate: looseRate,
@@ -3091,7 +3092,33 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   const handleOpenPurchaseOrderSms = async () => {
     setFormError(null);
-    const activePurchaseLines = lines.filter(
+    const syncedLines = lines.map((l, idx) => {
+      const qtyInput =
+        (document.getElementById(`pos_row_${idx}_quantity`) as HTMLInputElement | null) ||
+        (document.getElementById(`pur_cell_${idx}_quantity`) as HTMLInputElement | null);
+      const discInput =
+        (document.getElementById(`pos_row_${idx}_discount_percent`) as HTMLInputElement | null) ||
+        (document.getElementById(`pur_cell_${idx}_discount_percent`) as HTMLInputElement | null);
+
+      const domQtyRaw = qtyInput?.value?.trim();
+      const domDiscRaw = discInput?.value?.trim();
+      const resolvedQty =
+        domQtyRaw !== undefined && domQtyRaw !== '' && Number.isFinite(Number(domQtyRaw))
+          ? Number(domQtyRaw)
+          : Number(l.quantity || 0);
+      const resolvedDisc =
+        domDiscRaw !== undefined && domDiscRaw !== '' && Number.isFinite(Number(domDiscRaw))
+          ? Number(domDiscRaw)
+          : Number(l.discount_percent || 0);
+
+      return {
+        ...l,
+        quantity: resolvedQty,
+        discount_percent: resolvedDisc,
+      };
+    });
+
+    const activePurchaseLines = syncedLines.filter(
       (l) =>
         Number(l.item_id || 0) > 0 ||
         Boolean(l.item_code?.trim()) ||
@@ -3114,7 +3141,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       // Keep default ABRAR MEDICAL STORE
     }
 
-    const preparedSms = generatePurchaseOrderSmsText(lines, resolvedStore);
+    const preparedSms = generatePurchaseOrderSmsText(activePurchaseLines, resolvedStore);
     setPurchaseSmsText(preparedSms);
     setShowPurchaseSmsModal(true);
   };
@@ -4461,7 +4488,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             <td className="p-0 h-[16px] align-middle">
                               <NumericInput
                                 id={`pos_row_${rIdx}_quantity`}
-                                value={line.item_id ? line.quantity : 0}
+                                value={
+                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                    ? line.quantity
+                                    : 0
+                                }
                                 onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
                                 onChange={(e) =>
                                   handleLineChange(
@@ -4481,7 +4512,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             <td className="p-0 text-right h-[16px] align-middle">
                               <NumericInput
                                 id={`pos_row_${rIdx}_discount_percent`}
-                                value={line.item_id ? line.discount_percent : 0}
+                                value={
+                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                    ? line.discount_percent
+                                    : 0
+                                }
                                 onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
                                 onChange={(e) =>
                                   handleLineChange(
@@ -5632,7 +5667,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             <td className="border-r border-slate-300 p-0 bg-emerald-50/20 h-[16px] align-middle">
                               <NumericInput
                                 id={`pur_cell_${idx}_quantity`}
-                                value={line.item_id ? line.quantity : 0}
+                                value={
+                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                    ? line.quantity
+                                    : 0
+                                }
                                 onFocus={() => setSelectedPurchaseLineIndex(idx)}
                                 onChange={(e) =>
                                   handleLineChange(
@@ -5650,7 +5689,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
                               <NumericInput
                                 id={`pur_cell_${idx}_discount_percent`}
-                                value={line.item_id ? line.discount_percent : 0}
+                                value={
+                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                    ? line.discount_percent
+                                    : 0
+                                }
                                 onFocus={() => setSelectedPurchaseLineIndex(idx)}
                                 onChange={(e) =>
                                   handleLineChange(
