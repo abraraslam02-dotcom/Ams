@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from '../../services/api';
 import { findExactBarcodeOrCodeMatch, prepareItemIndex, searchItems } from '../../utils/itemSearch';
-import { ItemVariant } from '../../types/item';
+import { Item, ItemVariant } from '../../types/item';
 import {
   CustomerItemHistoryResponse,
   DatasheetRow,
@@ -24,6 +24,7 @@ import { VariantPickerModal } from '../common/VariantPickerModal';
 import { ProductThumb } from '../common/ProductThumb';
 import { SalesPriceHistoryModal } from './SalesPriceHistoryModal';
 import { ItemLogModal } from '../common/ItemLogModal';
+import { ItemFormModal } from '../items/ItemFormModal';
 import { CompactItemHistoryPopup } from '../common/CompactItemHistoryPopup';
 import {
   InvoiceRecordSearchInput,
@@ -122,6 +123,7 @@ export function createEmptyRow(): DatasheetRow {
     tax_percent: 0,
     tax_amount: 0,
     line_total: 0,
+    remarks: '',
     retail_price_ref: 0,
     wholesale_price_ref: 0,
     batches: [],
@@ -462,6 +464,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     itemId: null,
     itemCode: '',
     itemName: '',
+    returnFocusId: '',
+  });
+  const [f9ItemMasterState, setF9ItemMasterState] = useState<{
+    isOpen: boolean;
+    editingItem: Item | null;
+    rowIndex: number;
+    returnFocusId: string;
+  }>({
+    isOpen: false,
+    editingItem: null,
+    rowIndex: 0,
     returnFocusId: '',
   });
 
@@ -1260,6 +1273,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               tax_percent: Number(line.tax_percent || 0),
               tax_amount: Number(line.tax_amount || 0),
               line_total: Number(line.line_total || 0),
+              remarks: String(line.remarks || ''),
               retail_price_ref: Number(catVariant?.effective_retail_price ?? catMatch?.retail_price ?? line.unit_price ?? 0),
               wholesale_price_ref: Number(
                 catVariant?.effective_wholesale_price ?? catMatch?.wholesale_price ?? line.unit_price ?? 0
@@ -1629,6 +1643,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         loose_quantity: isSameItem ? targetRow.loose_quantity || 0 : 0,
         loose_rate: effectiveLoose,
         tax_percent: effTaxPct,
+        remarks: String(targetRow.remarks || ''),
         retail_price_ref: effRetail,
         wholesale_price_ref: wholesaleRate,
         item_loose_rate_ref: defaultLooseRate,
@@ -2261,6 +2276,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       discount_percent: r.discount_percent,
       loose_quantity: r.loose_quantity,
       loose_rate: r.loose_rate,
+      remarks: r.remarks || '',
     });
     setSuccessMsg(`Copied values (Qty, Bonus Qty, Price, Discount %, Loose Qty) from Row #${index + 1}.`);
   };
@@ -2503,6 +2519,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           loose_quantity: r.loose_quantity,
           loose_rate: r.loose_rate,
           tax_percent: r.tax_percent,
+          remarks: String(r.remarks || '').trim(),
         })),
       };
 
@@ -2738,6 +2755,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         tax_percent: r.tax_percent,
         tax_amount: r.tax_amount,
         line_total: r.line_total,
+        remarks: String(r.remarks || ''),
       })),
     };
     setPrintFormat(format);
@@ -2804,6 +2822,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         tax_amount: r.tax_amount,
         gross_amount: r.gross_amount,
         line_total: r.line_total,
+        remarks: String(r.remarks || ''),
       })),
     };
   };
@@ -2980,6 +2999,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     last_purchase_price: 154,
     company: 125,
     gross_amount: 106,
+    remarks: 120,
     actions: 112,
   });
 
@@ -3016,6 +3036,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     'loose_quantity',
     'loose_rate',
     'bonus_quantity',
+    'remarks',
   ];
 
   // MS Access-style: only ONE blank "new record" row is active at a time.
@@ -3029,8 +3050,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const getEditableColsForRow = (row?: DatasheetRow, mode: 'pos' | 'access' = 'access') => {
     if (mode === 'pos') {
       if (isSyrupItem(row)) {
-        return ['quantity', 'discount_percent', 'unit_price', 'bonus_quantity'] as Array<
-          'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate'
+        return ['quantity', 'discount_percent', 'unit_price', 'bonus_quantity', 'remarks'] as Array<
+          'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate' | 'remarks'
         >;
       }
       return [
@@ -3040,12 +3061,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         'unit_price',
         'bonus_quantity',
         'loose_rate',
+        'remarks',
       ] as Array<
-        'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate'
+        'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate' | 'remarks'
       >;
     }
     if (isSyrupItem(row)) {
-      return ['item_code', 'item_name', 'quantity', 'discount_percent', 'unit_price', 'bonus_quantity'];
+      return ['item_code', 'item_name', 'quantity', 'discount_percent', 'unit_price', 'bonus_quantity', 'remarks'];
     }
     return [
       'item_code',
@@ -3056,6 +3078,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       'loose_quantity',
       'loose_rate',
       'bonus_quantity',
+      'remarks',
     ];
   };
 
@@ -3238,13 +3261,26 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const handlePosFieldKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
     rowIdx: number,
-    fieldName: 'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate',
+    fieldName:
+      | 'quantity'
+      | 'bonus_quantity'
+      | 'discount_percent'
+      | 'unit_price'
+      | 'loose_quantity'
+      | 'loose_rate'
+      | 'remarks',
     isTableInput: boolean = false
   ) => {
     const row = rows[rowIdx];
     const prefix = isTableInput ? `pos_row_${rowIdx}` : 'pos_active';
     const posOrder = getEditableColsForRow(row, 'pos') as Array<
-      'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate'
+      | 'quantity'
+      | 'bonus_quantity'
+      | 'discount_percent'
+      | 'unit_price'
+      | 'loose_quantity'
+      | 'loose_rate'
+      | 'remarks'
     >;
     const curIdx = posOrder.indexOf(fieldName);
 
@@ -3703,7 +3739,82 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
-  // Global Keyboard Shortcuts (F2: Item Search, F3: Focus Search Bar, Ctrl+S: Save, Ctrl+P: Print, Ctrl+N: New, F9: Hold, Esc: Close Modals/Dropdown)
+  const handleOpenSalesItemMasterF9 = useCallback(async () => {
+    const rowIdx = selectedRowIndex;
+    const row = rows[rowIdx];
+    const returnFocusId =
+      document.activeElement?.id ||
+      (invoiceViewMode === 'pos' ? `pos_row_${rowIdx}_quantity` : `cell_${rowIdx}_quantity`);
+
+    if (!row || !row.item_id || Number(row.item_id) <= 0) {
+      setErrorMsg('Please select an item on the current row before pressing F9 to open Item Master.');
+      return;
+    }
+
+    setErrorMsg(null);
+    setShowSearchDropdown(false);
+    setShowCompactHistoryPopup(false);
+
+    try {
+      const res = await api.getItems({ q: row.item_code || row.item_name });
+      const itemsArr: Item[] = Array.isArray((res as any)?.items)
+        ? (res as any).items
+        : Array.isArray((res as any)?.data)
+        ? (res as any).data
+        : [];
+      const fullItem = itemsArr.find((it) => Number(it.id) === Number(row.item_id));
+      if (fullItem && fullItem.id) {
+        setF9ItemMasterState({
+          isOpen: true,
+          editingItem: fullItem,
+          rowIndex: rowIdx,
+          returnFocusId,
+        });
+        return;
+      }
+    } catch {
+      // Fallback to catalog item below
+    }
+
+    const catItem = catalogItems.find((c) => Number(c.id) === Number(row.item_id));
+    if (catItem) {
+      setF9ItemMasterState({
+        isOpen: true,
+        editingItem: {
+          id: Number(catItem.id),
+          item_code: catItem.item_code || row.item_code,
+          company_name: catItem.company_name || row.company_name,
+          item_name: catItem.item_name || row.item_name,
+          generic_name: catItem.generic_name || '',
+          category: catItem.category || 'Tablet',
+          packing: catItem.packing || row.packing || '1x1',
+          barcode: catItem.barcode || row.barcode || '',
+          purchase_price: Number(catItem.purchase_price || 0),
+          trade_price: Number(catItem.trade_price || 0),
+          wholesale_price: Number(catItem.wholesale_price || 0),
+          retail_price: Number(catItem.retail_price || row.unit_price || 0),
+          loose_rate: Number(catItem.loose_rate || row.loose_rate || 0),
+          discount_percent: Number(catItem.discount_percent || 0),
+          tax_percent: Number(catItem.tax_percent || row.tax_percent || 0),
+          opening_stock: Number(catItem.opening_stock || 0),
+          minimum_stock: Number(catItem.minimum_stock || 0),
+          rack_number: catItem.rack_number || '',
+          status: (catItem.status === 'Inactive' ? 'Inactive' : 'Active') as 'Active' | 'Inactive',
+          has_variants: Number(catItem.has_variants || 0),
+          image_url: catItem.image_url || null,
+          thumbnail_url: catItem.thumbnail_url || null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        rowIndex: rowIdx,
+        returnFocusId,
+      });
+    } else {
+      setErrorMsg('Unable to load the selected item into Item Master.');
+    }
+  }, [selectedRowIndex, rows, invoiceViewMode, catalogItems]);
+
+  // Global Keyboard Shortcuts (F2: Item Search, F3: Focus Search Bar, Ctrl+S: Save, Ctrl+P: Print, Ctrl+N: New, F9: Edit Selected Item in Item Master, Esc: Close Modals/Dropdown)
   useEffect(() => {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
       if (
@@ -3711,6 +3822,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         pendingVariantPicker ||
         priceHistoryModalState.isOpen ||
         itemLogModalState.isOpen ||
+        f9ItemMasterState.isOpen ||
         showEditSearchModal ||
         showDsrModal ||
         showSalesSmsModal ||
@@ -3748,7 +3860,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setShowEditSearchModal(true);
       } else if (e.key === 'F9') {
         e.preventDefault();
-        handleSaveInvoice('held');
+        e.stopPropagation();
+        if (e.repeat) return;
+        handleOpenSalesItemMasterF9();
       } else if (e.key === 'Escape') {
         if (showCompactHistoryPopup) {
           e.preventDefault();
@@ -3785,8 +3899,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     showItemListModal,
     showSearchDropdown,
     pendingDuplicatePrompt,
+    pendingVariantPicker,
     priceHistoryModalState.isOpen,
     itemLogModalState.isOpen,
+    f9ItemMasterState.isOpen,
+    handleOpenSalesItemMasterF9,
     showEditSearchModal,
     showDsrModal,
     showSalesSmsModal,
@@ -4436,6 +4553,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     <th className="py-1 px-1.5 w-24 text-right bg-blue-100/70 text-blue-950 border-r border-slate-300 h-8">Loose Rate</th>
                     <th className="py-1 px-1.5 w-26 text-right border-r border-slate-300 h-8">Gross Amount</th>
                     <th className="py-1 px-1.5 w-28 text-right bg-slate-300/70 font-black border-r border-slate-300 h-8">Amount</th>
+                    <th className="py-1 px-1.5 w-32 border-r border-slate-300 h-8">Remarks</th>
                     <th className="py-1 px-1 w-14 text-center h-8">Act</th>
                   </tr>
                 </thead>
@@ -4447,7 +4565,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           <td className="text-center font-mono text-[11px] text-slate-300 border-r border-slate-200 bg-slate-50/80">
                             {rIdx + 1}
                           </td>
-                          <td colSpan={12} />
+                          <td colSpan={13} />
                         </tr>
                       );
                     }
@@ -4845,6 +4963,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           }`}
                         >
                           {hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
+                        </td>
+
+                        {/* 12. Remarks */}
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle">
+                          <input
+                            id={`pos_row_${rIdx}_remarks`}
+                            type="text"
+                            value={row.remarks || ''}
+                            onFocus={() => setSelectedRowIndex(rIdx)}
+                            onChange={(e) => updateRowField(rIdx, 'remarks', e.target.value)}
+                            onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'remarks', true)}
+                            placeholder={hasItem ? 'Remarks...' : ''}
+                            className="w-full px-1.5 py-0 text-left text-[11px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-full leading-none outline-none"
+                          />
                         </td>
 
                         <td className="py-0 px-1 text-center h-9 align-middle whitespace-nowrap">
@@ -5651,6 +5783,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     colWidths.last_purchase_price +
                     colWidths.company +
                     colWidths.gross_amount +
+                    colWidths.remarks +
                     colWidths.actions
                   }px`,
                 }}
@@ -5821,7 +5954,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 13. Batch / Del */}
+                    {/* 13. Remarks */}
+                    <th
+                      style={{ width: `${colWidths.remarks}px`, minWidth: `${colWidths.remarks}px` }}
+                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
+                    >
+                      Remarks
+                      <div
+                        onMouseDown={(e) => handleColResizeMouseDown('remarks', e)}
+                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
+                      />
+                    </th>
+
+                    {/* 14. Batch / Del */}
                     <th
                       style={{ width: `${colWidths.actions}px`, minWidth: `${colWidths.actions}px` }}
                       className="px-1 py-0 text-center relative h-6 whitespace-nowrap"
@@ -5842,7 +5987,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                             {rIdx + 1}
                           </td>
-                          <td colSpan={13} />
+                          <td colSpan={14} />
                         </tr>
                       );
                     }
@@ -6186,7 +6331,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           {hasItem && row.gross_amount !== 0 ? row.gross_amount.toFixed(2) : ''}
                         </td>
 
-                        {/* 13. Batch / Del */}
+                        {/* 13. Remarks */}
+                        <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
+                          <input
+                            id={`cell_${rIdx}_remarks`}
+                            type="text"
+                            value={row.remarks || ''}
+                            onFocus={() => setSelectedRowIndex(rIdx)}
+                            onChange={(e) => updateRowField(rIdx, 'remarks', e.target.value)}
+                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'remarks')}
+                            placeholder={hasItem ? 'Remarks...' : ''}
+                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-left text-slate-800 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                          />
+                        </td>
+
+                        {/* 14. Batch / Del */}
                         <td className="px-1 py-0 text-center h-[16px] align-middle">
                           <div className="flex items-center justify-center gap-0.5 h-[15px]">
                             {row.batches && row.batches.length > 0 ? (
@@ -7539,6 +7698,113 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               el?.focus();
             }, 25);
           }
+        }}
+      />
+
+      {/* ================= MODAL 12: F9 EDIT SELECTED ITEM IN ITEM MASTER ================= */}
+      <ItemFormModal
+        isOpen={f9ItemMasterState.isOpen}
+        editingItem={f9ItemMasterState.editingItem}
+        onClose={() => {
+          const focusId = f9ItemMasterState.returnFocusId;
+          setF9ItemMasterState((prev) => ({ ...prev, isOpen: false, editingItem: null }));
+          if (focusId) {
+            window.setTimeout(() => {
+              const el = document.getElementById(focusId) as HTMLInputElement | null;
+              el?.focus();
+              el?.select?.();
+            }, 25);
+          }
+        }}
+        onSaved={(updatedItem) => {
+          if (!updatedItem || !updatedItem.id) return;
+          const uAny = updatedItem as any;
+          setCatalogItems((prev) =>
+            prev.map((c) =>
+              Number(c.id) === Number(updatedItem.id)
+                ? {
+                    ...c,
+                    item_code: String(updatedItem.item_code || c.item_code),
+                    company_name: String(updatedItem.company_name || c.company_name),
+                    item_name: String(updatedItem.item_name || c.item_name),
+                    generic_name: String(updatedItem.generic_name || c.generic_name || ''),
+                    category: String(updatedItem.category || c.category || 'Tablet'),
+                    packing: String(updatedItem.packing || c.packing || '1x1'),
+                    barcode: String(updatedItem.barcode || c.barcode || ''),
+                    purchase_price: Number(updatedItem.purchase_price || 0),
+                    trade_price: Number(updatedItem.trade_price || 0),
+                    wholesale_price: Number(updatedItem.wholesale_price || 0),
+                    retail_price: Number(updatedItem.retail_price || 0),
+                    loose_rate: Number(updatedItem.loose_rate || 0),
+                    discount_percent: Number(updatedItem.discount_percent || 0),
+                    tax_percent: Number(updatedItem.tax_percent || 0),
+                    minimum_stock: Number(updatedItem.minimum_stock || 0),
+                    rack_number: String(updatedItem.rack_number || ''),
+                    strips_per_box: Number(uAny.strips_per_box || c.strips_per_box || 1),
+                    units_per_strip: Number(uAny.units_per_strip || c.units_per_strip || 1),
+                    units_per_pack: Number(uAny.units_per_pack || c.units_per_pack || 1),
+                    has_variants: Number(updatedItem.has_variants || 0),
+                    image_url: updatedItem.image_url ?? c.image_url,
+                    thumbnail_url: updatedItem.thumbnail_url ?? c.thumbnail_url,
+                  }
+                : c
+            )
+          );
+
+          setRows((prev) =>
+            prev.map((r) => {
+              if (Number(r.item_id) !== Number(updatedItem.id)) return r;
+              const newUnitsPerPack = Math.max(
+                1,
+                Number(uAny.units_per_pack || r.units_per_pack || 1)
+              );
+              const newRetail = round2(Number(updatedItem.retail_price || r.retail_price_ref || 0));
+              const newWholesale = round2(
+                Number(
+                  updatedItem.wholesale_price ||
+                    updatedItem.trade_price ||
+                    updatedItem.retail_price ||
+                    r.wholesale_price_ref ||
+                    0
+                )
+              );
+              const updatedPrice = r.isRateManuallyEdited
+                ? r.unit_price
+                : invoiceType === 'Wholesale'
+                ? newWholesale
+                : newRetail;
+              const updatedLoose = r.isLooseRateManuallyEdited
+                ? r.loose_rate
+                : round2(updatedPrice / newUnitsPerPack);
+
+              return recalcRow({
+                ...r,
+                item_code: updatedItem.item_code || r.item_code,
+                company_name: updatedItem.company_name || r.company_name,
+                item_name: updatedItem.item_name || r.item_name,
+                packing: r.variant_id ? r.packing : updatedItem.packing || r.packing,
+                barcode: r.variant_id ? r.barcode : updatedItem.barcode || r.barcode,
+                strips_per_box: Number(uAny.strips_per_box || r.strips_per_box || 1),
+                units_per_strip: Number(uAny.units_per_strip || r.units_per_strip || 1),
+                units_per_pack: r.variant_id ? r.units_per_pack : newUnitsPerPack,
+                unit_price: updatedPrice,
+                loose_rate: updatedLoose,
+                tax_percent: r.variant_id
+                  ? r.tax_percent
+                  : Number(updatedItem.tax_percent ?? r.tax_percent ?? 0),
+                retail_price_ref: newRetail,
+                wholesale_price_ref: newWholesale,
+                lastPurchaseCostRate:
+                  Number(updatedItem.purchase_price || 0) > 0
+                    ? round2(updatedItem.purchase_price)
+                    : r.lastPurchaseCostRate,
+              });
+            })
+          );
+
+          setSuccessMsg(
+            `Item "${updatedItem.item_name}" [${updatedItem.item_code}] updated in Item Master.`
+          );
         }}
       />
     </div>

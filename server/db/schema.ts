@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS sale_items (
     returned_pack_qty REAL NOT NULL DEFAULT 0.0,
     returned_loose_qty REAL NOT NULL DEFAULT 0.0,
     returned_total_units REAL NOT NULL DEFAULT 0.0,
+    remarks TEXT DEFAULT '',
     FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
     FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE RESTRICT,
     FOREIGN KEY (inventory_id) REFERENCES inventory (id) ON DELETE SET NULL
@@ -459,6 +460,7 @@ CREATE TABLE IF NOT EXISTS purchase_items (
     tax_amount REAL NOT NULL DEFAULT 0.0,
     line_total REAL NOT NULL DEFAULT 0.0,
     returned_quantity REAL NOT NULL DEFAULT 0.0,
+    remarks TEXT DEFAULT '',
     FOREIGN KEY (purchase_id) REFERENCES purchases (id) ON DELETE CASCADE,
     FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE RESTRICT
 );

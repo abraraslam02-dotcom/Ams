@@ -97,6 +97,7 @@ export interface DatasheetRow {
   tax_percent: number;
   tax_amount: number;
   line_total: number;
+  remarks?: string;
   retail_price_ref: number;
   wholesale_price_ref: number;
   item_loose_rate_ref?: number;

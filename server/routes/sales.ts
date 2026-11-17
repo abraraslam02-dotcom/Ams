@@ -1781,6 +1781,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       partyDiscountAmount: number;
       manualOverrideReason: string;
       fifoBatchesJson: string;
+      remarks: string;
     }
 
     const processedLines: ProcessedSaleLine[] = [];
@@ -2069,6 +2070,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
             : evalOffer.party_discount_amount,
         manualOverrideReason: String(line.manual_override_reason || ''),
         fifoBatchesJson: JSON.stringify(evalOffer.fifo_allocation.allocations || []),
+        remarks: String(line.remarks || '').trim(),
       });
     }
 
@@ -2395,8 +2397,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         gross_amount, taxable_amount, tax_percent, tax_amount, line_total,
         offer_id, offer_name, offer_discount_percent, offer_discount_amount,
         party_discount_id, party_discount_percent, party_discount_amount,
-        manual_override_reason, fifo_batches_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        manual_override_reason, fifo_batches_json, remarks
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const todayIso = new Date().toISOString().slice(0, 10);
@@ -2847,7 +2849,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         pLine.partyDiscountPercent,
         pLine.partyDiscountAmount,
         pLine.manualOverrideReason,
-        fifoDedicatedSlices.length > 0 ? JSON.stringify(fifoDedicatedSlices) : pLine.fifoBatchesJson
+        fifoDedicatedSlices.length > 0 ? JSON.stringify(fifoDedicatedSlices) : pLine.fifoBatchesJson,
+        pLine.remarks || ''
       );
     }
 

@@ -4402,6 +4402,30 @@ export function runMigrations(): MigrationResult {
       }
     }
 
+    // Migration 33: Add row-wise remarks column to sale_items and purchase_items
+    const migrationName33 = '033_invoice_line_remarks';
+    const applied33 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName33);
+    const saleItemCols33 = (
+      db.prepare('PRAGMA table_info(sale_items)').all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!saleItemCols33.includes('remarks')) {
+      db.exec("ALTER TABLE sale_items ADD COLUMN remarks TEXT DEFAULT '';");
+    }
+    const purchaseItemCols33 = (
+      db.prepare('PRAGMA table_info(purchase_items)').all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!purchaseItemCols33.includes('remarks')) {
+      db.exec("ALTER TABLE purchase_items ADD COLUMN remarks TEXT DEFAULT '';");
+    }
+    if (!applied33) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+        migrationName33,
+        33
+      );
+    }
+
     const tables = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
@@ -4415,7 +4439,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

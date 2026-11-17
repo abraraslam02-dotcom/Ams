@@ -181,6 +181,7 @@ export function exportSalesInvoicesToExcel(
     'Tax %',
     'Tax',
     'Amount',
+    'Remarks',
     'Net Total',
     'Paid Amount',
     'Balance',
@@ -227,6 +228,7 @@ export function exportSalesInvoicesToExcel(
         'Tax %': 0,
         Tax: toNum(inv.tax_amount ?? 0),
         Amount: invNetTotal,
+        Remarks: '',
         'Net Total': invNetTotal,
         'Paid Amount': invPaid,
         Balance: invBalance,
@@ -283,6 +285,7 @@ export function exportSalesInvoicesToExcel(
         'Tax %': taxPct,
         Tax: taxAmt,
         Amount: lineAmount,
+        Remarks: String(item.remarks || ''),
         'Net Total': invNetTotal,
         'Paid Amount': invPaid,
         Balance: invBalance,
@@ -312,6 +315,7 @@ export function exportSalesInvoicesToExcel(
       'Tax %': '',
       Tax: detTax,
       Amount: detLineAmount,
+      Remarks: '',
       'Net Total': sumNetTotal,
       'Paid Amount': sumPaid,
       Balance: sumBalance,
@@ -487,6 +491,7 @@ export function exportPurchaseInvoicesToExcel(
     'GST',
     'Taxable',
     'Line Total',
+    'Remarks',
     'Paid Amount',
     'Balance',
   ];
@@ -531,6 +536,7 @@ export function exportPurchaseInvoicesToExcel(
         GST: toNum(pur.gst_amount ?? 0),
         Taxable: toNum(pur.taxable_amount ?? 0),
         'Line Total': invNetTotal,
+        Remarks: '',
         'Paid Amount': invPaid,
         Balance: invBalance,
       });
@@ -579,6 +585,7 @@ export function exportPurchaseInvoicesToExcel(
         GST: taxAmt,
         Taxable: taxableAmt,
         'Line Total': lineAmount,
+        Remarks: String(item.remarks || ''),
         'Paid Amount': invPaid,
         Balance: invBalance,
       });
@@ -604,6 +611,7 @@ export function exportPurchaseInvoicesToExcel(
       GST: detTax,
       Taxable: detTaxable,
       'Line Total': detLineAmount,
+      Remarks: '',
       'Paid Amount': sumPaid,
       Balance: sumBalance,
     });
@@ -789,6 +797,13 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
         item.total_units ??
           toNum(item.quantity) + toNum(item.loose_quantity) + toNum(item.bonus_quantity)
       ),
+  },
+  {
+    key: 'item_remarks',
+    label: 'Remarks',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_inv, item) => String(item.remarks || ''),
   },
 
   // 3. Financial Information
@@ -1084,6 +1099,13 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
         item.total_units ??
           toNum(item.quantity) + toNum(item.loose_quantity) + toNum(item.bonus_quantity)
       ),
+  },
+  {
+    key: 'item_remarks',
+    label: 'Remarks',
+    category: 'Item Information',
+    format: 'text',
+    getValue: (_pur, item) => String(item.remarks || ''),
   },
 
   // 3. Financial Information

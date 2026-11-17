@@ -953,14 +953,17 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                             {line.item_code}
                           </td>
                         )}
-                        <td className="py-2 px-1.5 border border-slate-200">
-                          <div className="font-bold text-[13.5px] text-slate-950">
+                        <td className="py-2 px-1.5 border border-slate-200 break-words">
+                          <div className="font-bold text-[13.5px] text-slate-950 break-words">
                             {line.item_name}
-                            {line.variant_name ? (
+                            {line.variant_name && !String(line.item_name || '').includes(line.variant_name) ? (
                               <span className="ml-1.5 text-[11.5px] font-semibold text-emerald-900">
-                                ({line.variant_name})
+                                — {line.variant_name}
                               </span>
                             ) : null}
+                            {String(line.remarks || '').trim()
+                              ? ` (${String(line.remarks || '').trim()})`
+                              : ''}
                           </div>
                           {fields.showCompany && line.company_name && (
                             <div className="text-[11.5px] text-slate-600 mt-0.5">{line.company_name}</div>
@@ -1471,13 +1474,18 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                             </td>
                             <td className="border border-black px-1.5 py-1 break-words">
                               <div
-                                className={`font-bold text-black leading-snug ${
+                                className={`font-bold text-black leading-snug break-words ${
                                   format === '80mm' ? 'text-[12px]' : 'text-[10.5px]'
                                 }`}
                               >
                                 {showItemCode && line.item_code ? `[${line.item_code}] ` : ''}
                                 {line.item_name}
-                                {line.variant_name ? ` - ${line.variant_name}` : ''}
+                                {line.variant_name && !String(line.item_name || '').includes(line.variant_name)
+                                  ? ` - ${line.variant_name}`
+                                  : ''}
+                                {String(line.remarks || '').trim()
+                                  ? ` (${String(line.remarks || '').trim()})`
+                                  : ''}
                               </div>
                               {((showItemCompany && line.company_name) ||
                                 (showPacking && rawPacking) ||

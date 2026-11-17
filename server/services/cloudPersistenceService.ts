@@ -1641,8 +1641,8 @@ export function hydrateSqliteFromCloudRecords(
                   packing, units_per_pack, batch_number, expiry_date,
                   quantity, loose_quantity, bonus_quantity, total_units,
                   unit_price, loose_rate, discount_percent, discount_amount,
-                  gross_amount, taxable_amount, tax_percent, tax_amount, line_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                  gross_amount, taxable_amount, tax_percent, tax_amount, line_total, remarks
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
               ).run(
                 targetSaleId,
                 itemId,
@@ -1669,7 +1669,8 @@ export function hydrateSqliteFromCloudRecords(
                 taxableAmt,
                 taxPct,
                 taxAmt,
-                lineTotal
+                lineTotal,
+                String(ln?.remarks || '')
               );
             }
           }
@@ -1782,8 +1783,8 @@ export function hydrateSqliteFromCloudRecords(
                   packing, units_per_pack, batch_number, manufacturing_date, expiry_date,
                   quantity, bonus_quantity, pack_quantity, loose_quantity, total_units,
                   purchase_rate, mrp_rate, gross_amount, discount_percent, discount_amount,
-                  taxable_amount, tax_percent, tax_amount, line_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                  taxable_amount, tax_percent, tax_amount, line_total, remarks
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
               ).run(
                 targetPurchaseId,
                 itemId,
@@ -1812,7 +1813,8 @@ export function hydrateSqliteFromCloudRecords(
                 taxableAmt,
                 taxPct,
                 taxAmt,
-                lineTotal
+                lineTotal,
+                String(ln?.remarks || '')
               );
             }
           }

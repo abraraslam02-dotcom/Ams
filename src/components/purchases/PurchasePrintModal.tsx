@@ -656,19 +656,18 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                   className={`w-full table-fixed border-collapse ${invoiceTableFontClass} leading-tight`}
                 >
                   <colgroup>
-                    <col style={{ width: '3.5%' }} />
-                    <col style={{ width: '20.5%' }} />
-                    <col style={{ width: '4.5%' }} />
-                    <col style={{ width: '4.5%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '7.5%' }} />
+                    <col style={{ width: '4%' }} />
+                    <col style={{ width: '25.5%' }} />
                     <col style={{ width: '5%' }} />
+                    <col style={{ width: '5%' }} />
+                    <col style={{ width: '8.5%' }} />
+                    <col style={{ width: '8.5%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '5.5%' }} />
                     <col style={{ width: '7.5%' }} />
                     <col style={{ width: '7.5%' }} />
                     <col style={{ width: '7%' }} />
-                    <col style={{ width: '9.5%' }} />
-                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '8%' }} />
                   </colgroup>
                   <thead>
                     <tr className="bg-slate-900 text-white border-b border-slate-900">
@@ -705,18 +704,15 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                       <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
                         Advance Tax
                       </th>
-                      <th className="py-1.5 px-1 font-bold text-right border-r border-slate-700">
+                      <th className="py-1.5 px-1 font-bold text-right">
                         Value With All Taxes
-                      </th>
-                      <th className="py-1.5 px-1 font-bold text-left">
-                        Remarks
                       </th>
                     </tr>
                   </thead>
                   {groupedPurchase.groups.length === 0 ? (
                     <tbody>
                       <tr>
-                        <td colSpan={13} className="py-6 text-center text-slate-500 font-medium">
+                        <td colSpan={12} className="py-6 text-center text-slate-500 font-medium">
                           No purchase line items found on this invoice.
                         </td>
                       </tr>
@@ -726,7 +722,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                       <tbody key={group.companyKey} className="ams-company-group">
                         {/* Company Group Heading */}
                         <tr className="ams-keep-with-next bg-slate-200/90 border-t-2 border-b border-slate-400">
-                          <td colSpan={13} className="py-1.5 px-2">
+                          <td colSpan={12} className="py-1.5 px-2">
                             <div className="flex items-center justify-between gap-2">
                               <div className="font-black text-slate-900 uppercase tracking-wide text-[10.5px]">
                                 COMPANY: {group.companyName}
@@ -752,9 +748,14 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                                 {line.sNo}
                               </td>
                               <td className="py-1.5 px-1.5 text-left border-r border-slate-200 align-top break-words">
-                                <div className="font-bold text-slate-900">
+                                <div className="font-bold text-slate-900 break-words">
                                   {line.itemName}
-                                  {line.variantName ? ` — ${line.variantName}` : ''}
+                                  {line.variantName && !String(line.itemName || '').includes(line.variantName)
+                                    ? ` — ${line.variantName}`
+                                    : ''}
+                                  {String(line.remarks || '').trim()
+                                    ? ` (${String(line.remarks || '').trim()})`
+                                    : ''}
                                 </div>
                                 {line.packing ? (
                                   <div className="text-[8.5px] text-slate-500">{line.packing}</div>
@@ -794,11 +795,8 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                               <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-800 border-r border-slate-200 align-top whitespace-nowrap">
                                 {formatPKR(line.advanceTaxAmount)}
                               </td>
-                              <td className="py-1.5 px-1 text-right font-mono tabular-nums font-bold text-slate-950 border-r border-slate-200 align-top whitespace-nowrap">
+                              <td className="py-1.5 px-1 text-right font-mono tabular-nums font-bold text-slate-950 align-top whitespace-nowrap">
                                 {formatPKR(line.valueWithAllTaxes)}
-                              </td>
-                              <td className="py-1.5 px-1 text-left text-slate-600 align-top break-words">
-                                {line.remarks || '—'}
                               </td>
                             </tr>
                           );
@@ -840,11 +838,8 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                           <td className="py-1.5 px-1 text-right font-mono tabular-nums border-r border-slate-300 whitespace-nowrap">
                             {formatPKR(group.totalAdvanceTax)}
                           </td>
-                          <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-950 border-r border-slate-300 whitespace-nowrap">
+                          <td className="py-1.5 px-1 text-right font-mono tabular-nums text-slate-950 whitespace-nowrap">
                             {formatPKR(group.totalValueWithAllTaxes)}
-                          </td>
-                          <td className="py-1.5 px-1 text-left font-normal text-[8.5px] text-slate-600">
-                            {group.items.length} {group.items.length === 1 ? 'item' : 'items'}
                           </td>
                         </tr>
                       </tbody>
@@ -890,10 +885,15 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                             {item.item_code}
                           </td>
                         )}
-                        <td className="py-1.5 px-2">
-                          <div className="font-bold text-slate-900">
+                        <td className="py-1.5 px-2 break-words">
+                          <div className="font-bold text-slate-900 break-words">
                             {item.item_name}
-                            {item.variant_name ? ` — ${item.variant_name}` : ''}
+                            {item.variant_name && !String(item.item_name || '').includes(item.variant_name)
+                              ? ` — ${item.variant_name}`
+                              : ''}
+                            {String(item.remarks || '').trim()
+                              ? ` (${String(item.remarks || '').trim()})`
+                              : ''}
                           </div>
                           {fields.showCompany && (
                             <div className="text-[10px] text-slate-500">{item.company_name}</div>

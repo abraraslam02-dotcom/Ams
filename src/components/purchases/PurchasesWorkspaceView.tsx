@@ -64,6 +64,7 @@ import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
 import { VariantPickerModal } from '../common/VariantPickerModal';
 import { ProductThumb } from '../common/ProductThumb';
 import { ItemLogModal } from '../common/ItemLogModal';
+import { ItemFormModal } from '../items/ItemFormModal';
 import { CompactItemHistoryPopup } from '../common/CompactItemHistoryPopup';
 import { CustomerItemHistoryResponse } from '../../types/sales';
 import {
@@ -137,6 +138,7 @@ export const createBlankPurchaseLine = (): PurchaseLineItem => ({
   tax_percent: 0,
   tax_amount: 0,
   line_total: 0,
+  remarks: '',
   master_purchase_price: 0,
   master_retail_price: 0,
   last_prompted_purchase_rate: undefined,
@@ -432,6 +434,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [printReturn, setPrintReturn] = useState<PurchaseReturn | null>(null);
   const [printReturnItems, setPrintReturnItems] = useState<PurchaseReturnLineItem[]>([]);
   const [printJournalLines, setPrintJournalLines] = useState<JournalEntryLineView[]>([]);
+
+  // F9 Shortcut: Open selected row's item in Item Master (Edit Mode)
+  const [f9ItemMasterState, setF9ItemMasterState] = useState<{
+    isOpen: boolean;
+    editingItem: Item | null;
+    rowIndex: number;
+    returnFocusId: string;
+  }>({
+    isOpen: false,
+    editingItem: null,
+    rowIndex: 0,
+    returnFocusId: '',
+  });
 
   const selectedPurchaseLineIndexRef = useRef<number>(0);
   useEffect(() => {
@@ -1439,6 +1454,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       tax_percent: taxPct,
       tax_amount: taxAmt,
       line_total: net,
+      remarks: !preserveQtyAndDiscountOnly ? String(existingRow?.remarks || '') : String(existingRow?.remarks || ''),
       master_purchase_price: rate,
       master_retail_price: retailPrice,
       last_prompted_purchase_rate: rate,
@@ -2499,6 +2515,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'expiry_date',
     'mrp_rate',
     'tax_percent',
+    'remarks',
   ];
 
   const purchasePosColOrder = [
@@ -2512,6 +2529,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'purchase_rate',
     'mrp_rate',
     'tax_percent',
+    'remarks',
   ];
 
   const getPurchaseColsForPrefix = (prefix: 'pur_cell' | 'pos_row') =>
@@ -3042,6 +3060,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           tax_percent: Number(it.tax_percent || 0),
           tax_amount: Number(it.tax_amount || 0),
           line_total: Number(it.line_total || 0),
+          remarks: String(it.remarks || ''),
         };
       });
 
@@ -3210,6 +3229,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       loose_quantity: Number(l.loose_quantity) || 0,
       bonus_quantity: Number(l.bonus_quantity) || 0,
       loose_rate: Number(l.loose_rate) || 0,
+      remarks: String(l.remarks || '').trim(),
       ...(targetStatus === 'held'
         ? { update_master_purchase_price: false, update_master_retail_price: false }
         : {}),
@@ -3331,6 +3351,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       loose_quantity: Number(l.loose_quantity) || 0,
       bonus_quantity: Number(l.bonus_quantity) || 0,
       loose_rate: Number(l.loose_rate) || 0,
+      remarks: String(l.remarks || ''),
     }));
     const paid = round2(paidAmount);
     const previewInvoice = {
@@ -3501,6 +3522,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         tax_amount: Number(l.tax_amount) || 0,
         gross_amount: Number(l.gross_amount) || 0,
         line_total: Number(l.line_total) || 0,
+        remarks: String(l.remarks || ''),
       })),
     };
   };
@@ -3606,7 +3628,57 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
   };
 
-  // Global Keyboard Shortcuts (F2 / Ctrl+S: Save, F3: Hold, Ctrl+P: Save & Print, Ctrl+N: New)
+  // Open currently selected Purchase row item in Item Master (Edit Mode) via F9
+  const handleOpenPurchaseItemMasterF9 = async () => {
+    const rIdx = selectedPurchaseLineIndex;
+    const row = lines[rIdx];
+    if (!row || !row.item_id || Number(row.item_id) <= 0) {
+      setFormError('Please select an item on the current row before pressing F9 to open Item Master.');
+      return;
+    }
+    const activeEl = document.activeElement as HTMLElement | null;
+    const fallbackFocusId =
+      purchaseViewMode === 'pos'
+        ? `pos_row_${rIdx}_quantity`
+        : `pur_cell_${rIdx}_quantity`;
+    const returnFocusId = activeEl?.id || fallbackFocusId;
+
+    try {
+      setFormError(null);
+      let targetItem: Item | null = null;
+      try {
+        const res = await api.getItems({ q: row.item_code || row.item_name });
+        const itemsArr: Item[] = Array.isArray((res as any)?.items)
+          ? (res as any).items
+          : Array.isArray((res as any)?.data)
+          ? (res as any).data
+          : [];
+        const matched = itemsArr.find((it) => Number(it.id) === Number(row.item_id));
+        if (matched && matched.id) {
+          targetItem = matched;
+        }
+      } catch {
+        // Fallback to local cached items list
+      }
+      if (!targetItem) {
+        targetItem = items.find((it) => Number(it.id) === Number(row.item_id)) || null;
+      }
+      if (!targetItem) {
+        setFormError('Selected item could not be found in Item Master.');
+        return;
+      }
+      setF9ItemMasterState({
+        isOpen: true,
+        editingItem: targetItem,
+        rowIndex: rIdx,
+        returnFocusId,
+      });
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'Failed to load item into Item Master.');
+    }
+  };
+
+  // Global Keyboard Shortcuts (F2 / Ctrl+S: Save, F3: Hold, F9: Item Master Edit, Ctrl+P: Save & Print, Ctrl+N: New)
   useEffect(() => {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
       if (subTab !== 'new-invoice') return;
@@ -3614,7 +3686,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         priceChangePrompt ||
         showPurchaseItemListModal ||
         pendingDuplicatePrompt ||
+        pendingVariantPicker ||
         itemLogModalState.isOpen ||
+        f9ItemMasterState.isOpen ||
         netAmountModalState.isOpen ||
         showAddSupplierModal ||
         showPurchaseSmsModal ||
@@ -3622,7 +3696,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       ) {
         return;
       }
-      if (e.key === 'F2' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's')) {
+      if (e.key === 'F9') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.repeat) return;
+        setShowPurchaseCompactHistoryPopup(false);
+        setActiveRowItemSearchIdx(null);
+        handleOpenPurchaseItemMasterF9();
+      } else if (e.key === 'F2' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's')) {
         e.preventDefault();
         setShowPurchaseCompactHistoryPopup(false);
         handleSavePurchaseInvoice();
@@ -3662,6 +3743,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     billNumber,
     supplierId,
     validLines,
+    lines,
+    selectedPurchaseLineIndex,
+    purchaseViewMode,
+    items,
     isTaxOverridden,
     taxOverrideReason,
     supplierInvoiceNumber,
@@ -3670,7 +3755,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     showPurchaseItemListModal,
     showPurchaseCompactHistoryPopup,
     pendingDuplicatePrompt,
+    pendingVariantPicker,
     itemLogModalState.isOpen,
+    f9ItemMasterState.isOpen,
     netAmountModalState.isOpen,
     showAddSupplierModal,
     showPurchaseSmsModal,
@@ -3759,6 +3846,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           tax_percent: Number(it.tax_percent || 0),
           tax_amount: Number(it.tax_amount || 0),
           line_total: Number(it.line_total || 0),
+          remarks: String(it.remarks || ''),
         };
       });
       setLines(ensureMinimumPurchaseRows(normalizedItems, visibleRowCapacityRef.current, 0));
@@ -4714,6 +4802,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">GST</th>
                         <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Taxable</th>
                         <th className="py-1 px-2 w-28 text-right border-r border-slate-300 h-7">Line Total</th>
+                        <th className="py-1 px-2 w-32 text-left border-r border-slate-300 h-7">Remarks</th>
                         <th className="py-1 px-2 w-10 text-center h-7"></th>
                       </tr>
                     </thead>
@@ -4725,7 +4814,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               <td className="py-0 px-1 text-center font-mono text-slate-300 text-[10px] h-[16px] align-middle">
                                 {rIdx + 1}
                               </td>
-                              <td colSpan={15} />
+                              <td colSpan={16} />
                             </tr>
                           );
                         }
@@ -5214,6 +5303,22 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               }`}
                             >
                               {hasItem ? formatPKR(Number(line.line_total || 0)) : ''}
+                            </td>
+
+                            {/* 15. Remarks */}
+                            <td className="p-0 h-[16px] align-middle">
+                              <input
+                                id={`pos_row_${rIdx}_remarks`}
+                                type="text"
+                                value={line.remarks || ''}
+                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                onChange={(e) => handleLineChange(rIdx, 'remarks', e.target.value)}
+                                onKeyDown={(e) =>
+                                  handlePurchaseCellKeyDown(e, rIdx, 'remarks', 'pos_row')
+                                }
+                                placeholder="Remarks..."
+                                className="w-full px-1 py-0 text-[11px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                              />
                             </td>
                             <td className="py-0 px-1 text-center h-[16px] align-middle whitespace-nowrap">
                               <div className="inline-flex items-center gap-1">
@@ -5937,6 +6042,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         <th className="border-r border-slate-300 px-1 py-0 w-28 text-right bg-slate-300/60 font-black h-6">
                           Line Total
                         </th>
+                        <th className="border-r border-slate-300 px-1 py-0 w-32 text-left h-6">
+                          Remarks
+                        </th>
                         <th className="px-1 py-0 w-8 text-center h-6">Del</th>
                       </tr>
                     </thead>
@@ -5948,7 +6056,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                                 {idx + 1}
                               </td>
-                              <td colSpan={15} />
+                              <td colSpan={16} />
                             </tr>
                           );
                         }
@@ -6438,6 +6546,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               }`}
                             >
                               {hasItem ? Number(line.line_total || 0).toFixed(2) : ''}
+                            </td>
+
+                            {/* 15. Remarks */}
+                            <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
+                              <input
+                                id={`pur_cell_${idx}_remarks`}
+                                type="text"
+                                value={line.remarks || ''}
+                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                onChange={(e) => handleLineChange(idx, 'remarks', e.target.value)}
+                                onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'remarks')}
+                                placeholder="Remarks..."
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                              />
                             </td>
 
                             {/* Select Item List / Delete Row */}
@@ -7762,6 +7884,115 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           }
         }}
       />
+
+      {f9ItemMasterState.isOpen && f9ItemMasterState.editingItem && (
+        <ItemFormModal
+          isOpen={f9ItemMasterState.isOpen}
+          editingItem={f9ItemMasterState.editingItem}
+          onClose={() => {
+            const focusId = f9ItemMasterState.returnFocusId;
+            setF9ItemMasterState((prev) => ({ ...prev, isOpen: false, editingItem: null }));
+            if (focusId) {
+              window.setTimeout(() => {
+                const el = document.getElementById(focusId) as HTMLInputElement | null;
+                el?.focus();
+                if (el && typeof el.select === 'function') el.select();
+              }, 25);
+            }
+          }}
+          onSaved={(updatedItem: Item) => {
+            const focusId = f9ItemMasterState.returnFocusId;
+            setItems((prev) =>
+              prev.map((it) => (Number(it.id) === Number(updatedItem.id) ? updatedItem : it))
+            );
+            setLines((prevLines) =>
+              prevLines.map((l) => {
+                if (Number(l.item_id) !== Number(updatedItem.id)) return l;
+                const isVariantRow = Boolean(l.variant_id && Number(l.variant_id) > 0);
+                const updatedVariants = Array.isArray(updatedItem.variants)
+                  ? updatedItem.variants
+                  : [];
+                const matchedVar = isVariantRow
+                  ? updatedVariants.find((v) => Number(v.id) === Number(l.variant_id))
+                  : null;
+                const useParentPricing =
+                  !matchedVar || Number(matchedVar.use_parent_pricing ?? 1) === 1;
+                const resolvedPacking =
+                  (!useParentPricing && matchedVar?.effective_packing) ||
+                  matchedVar?.packing ||
+                  updatedItem.packing ||
+                  l.packing ||
+                  '1x1';
+                const upp = Math.max(
+                  1,
+                  Number((updatedItem as any).units_per_pack || parseUnitsPerPack(resolvedPacking))
+                );
+                const masterPurchasePrice = round2(
+                  !useParentPricing && matchedVar
+                    ? Number(matchedVar.effective_purchase_price ?? matchedVar.purchase_price ?? l.purchase_rate)
+                    : Number(updatedItem.purchase_price ?? l.purchase_rate)
+                );
+                const masterRetailPrice = round2(
+                  !useParentPricing && matchedVar
+                    ? Number(matchedVar.effective_retail_price ?? matchedVar.retail_price ?? l.mrp_rate)
+                    : Number(updatedItem.retail_price ?? l.mrp_rate)
+                );
+                const shouldSyncRate =
+                  Math.abs(Number(l.purchase_rate || 0) - Number(l.master_purchase_price || 0)) < 0.01;
+                const nextRate = shouldSyncRate ? masterPurchasePrice : Number(l.purchase_rate || 0);
+                const nextLooseRate = l.is_loose_rate_manual
+                  ? Number(l.loose_rate || 0)
+                  : round2(nextRate / upp);
+                const qty = Math.max(0, round2(Number(l.quantity) || 0));
+                const looseQty = Math.max(0, round2(Number(l.loose_quantity) || 0));
+                const gross = round2(qty * nextRate + looseQty * nextLooseRate);
+                const discPct = Math.max(0, round2(Number(l.discount_percent) || 0));
+                const discAmt = round2(gross * (discPct / 100));
+                const taxable = round2(gross - discAmt);
+                const taxPct = Math.max(
+                  0,
+                  round2(
+                    Number(updatedItem.tax_percent ?? l.tax_percent ?? 0)
+                  )
+                );
+                const taxAmt = round2(taxable * (taxPct / 100));
+                const net = round2(taxable + taxAmt);
+
+                return {
+                  ...l,
+                  item_code: matchedVar?.variant_code || updatedItem.item_code || l.item_code,
+                  company_name: updatedItem.company_name || l.company_name,
+                  item_name: updatedItem.item_name || l.item_name,
+                  barcode: matchedVar?.barcode || updatedItem.barcode || l.barcode,
+                  packing: resolvedPacking,
+                  units_per_pack: upp,
+                  purchase_rate: nextRate,
+                  loose_rate: nextLooseRate,
+                  mrp_rate: masterRetailPrice,
+                  master_purchase_price: masterPurchasePrice,
+                  master_retail_price: masterRetailPrice,
+                  last_prompted_purchase_rate: nextRate,
+                  gross_amount: gross,
+                  discount_amount: discAmt,
+                  taxable_amount: taxable,
+                  tax_percent: taxPct,
+                  tax_amount: taxAmt,
+                  line_total: net,
+                };
+              })
+            );
+            setF9ItemMasterState((prev) => ({ ...prev, isOpen: false, editingItem: null }));
+            setFormSuccess(`Item "${updatedItem.item_name}" updated in Item Master.`);
+            if (focusId) {
+              window.setTimeout(() => {
+                const el = document.getElementById(focusId) as HTMLInputElement | null;
+                el?.focus();
+                if (el && typeof el.select === 'function') el.select();
+              }, 35);
+            }
+          }}
+        />
+      )}
 
       {/* Manual Net Amount Entry Dialog (Triggered by pressing Ctrl in Purchase Item Name field) */}
       {netAmountModalState.isOpen && (

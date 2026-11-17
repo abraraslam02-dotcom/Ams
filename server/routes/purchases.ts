@@ -1987,6 +1987,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       taxPct,
       updateMasterPurchasePrice: raw.update_master_purchase_price === true,
       updateMasterRetailPrice: raw.update_master_retail_price === true,
+      remarks: String(raw.remarks || '').trim(),
     });
   }
 
@@ -2260,8 +2261,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       quantity, bonus_quantity, pack_quantity, loose_quantity, loose_rate, total_units,
       purchase_rate, mrp_rate, gross_amount,
       discount_percent, discount_amount, taxable_amount,
-      tax_percent, tax_amount, line_total, returned_quantity
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      tax_percent, tax_amount, line_total, returned_quantity, remarks
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
   `);
 
   for (const line of processedLines) {
@@ -2562,7 +2563,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       line.lineTaxable,
       line.taxPct,
       line.lineTaxAmount,
-      line.lineNet
+      line.lineNet,
+      line.remarks || ''
     );
   }
 

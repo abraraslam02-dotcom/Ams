@@ -69,6 +69,7 @@ export interface PurchaseLineItem {
   tax_amount: number;
   line_total: number;
   returned_quantity?: number;
+  remarks?: string;
   master_purchase_price?: number;
   master_retail_price?: number;
   master_loose_rate?: number;
