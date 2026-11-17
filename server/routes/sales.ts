@@ -250,9 +250,101 @@ function revertCompletedSaleEffects(saleId: number) {
     const batchNumber = String(line.batch_number);
     const totalUnitsSold = Number(line.total_units || 0);
     const parsed = parsePacking(String(line.packing || '1x1'));
+    const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
+
+    const itemRow = db
+      .prepare('SELECT minimum_stock FROM items WHERE id = ?')
+      .get(itemId) as { minimum_stock: number } | undefined;
+    const minStock = Number(itemRow?.minimum_stock || 0);
+
+    // Check if dedicated FIFO / Return batch slices were recorded during completion
+    let parsedSlices: Array<Record<string, unknown>> = [];
+    if (line.fifo_batches_json) {
+      try {
+        const rawJson = JSON.parse(String(line.fifo_batches_json));
+        if (
+          Array.isArray(rawJson) &&
+          rawJson.length > 0 &&
+          rawJson.every((s) => s && typeof s === 'object' && 'remaining_after_packs' in s)
+        ) {
+          parsedSlices = rawJson as Array<Record<string, unknown>>;
+        }
+      } catch {
+        parsedSlices = [];
+      }
+    }
+
+    if (parsedSlices.length > 0) {
+      for (const slice of parsedSlices) {
+        const sliceInvId = Number(slice.inventory_id || 0);
+        const sliceBatchNo = String(slice.batch_number || batchNumber);
+        const sliceUnits = Number(slice.allocated_units || 0);
+        if (sliceUnits === 0) continue;
+
+        let inv = sliceInvId
+          ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(sliceInvId) as
+              | Record<string, unknown>
+              | undefined)
+          : undefined;
+        if (!inv) {
+          inv = db
+            .prepare(
+              'SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?'
+            )
+            .get(itemId, lineVariantKey, sliceBatchNo) as Record<string, unknown> | undefined;
+        }
+        if (inv) {
+          const packSoldEquivalent = round2(sliceUnits / parsed.unitsPerPack);
+          const soldDelta =
+            slice.sold_qty_delta !== undefined ? Number(slice.sold_qty_delta) : packSoldEquivalent;
+          const dispDelta =
+            slice.dispatched_qty_delta !== undefined
+              ? Number(slice.dispatched_qty_delta)
+              : packSoldEquivalent;
+          const newSoldQty = round2(Math.max(0, Number(inv.sold_qty || 0) - soldDelta));
+          const newDispatchedQty = round2(
+            Math.max(0, Number(inv.dispatched_pack_qty || 0) - dispDelta)
+          );
+          const newTotalUnits = round2(Number(inv.total_stock_units || 0) + sliceUnits);
+          const newPackQty = round2(newTotalUnits / parsed.unitsPerPack);
+          const newStripQty = round2(newPackQty * parsed.stripsPerBox);
+          const newLooseQty = round2(newTotalUnits % parsed.unitsPerPack);
+          const status = computeBatchStatus(
+            newPackQty,
+            String(inv.expiry_date || ''),
+            minStock
+          );
+
+          db.prepare(`
+            UPDATE inventory
+            SET sold_qty = ?,
+                dispatched_pack_qty = ?,
+                current_pack_qty = ?,
+                current_strip_qty = ?,
+                current_loose_qty = ?,
+                total_stock_units = ?,
+                status = ?,
+                batch_status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(
+            newSoldQty,
+            newDispatchedQty,
+            newPackQty,
+            newStripQty,
+            newLooseQty,
+            newTotalUnits,
+            status,
+            newPackQty <= 0 ? 'Out of Stock' : 'Active',
+            Number(inv.id)
+          );
+        }
+      }
+      continue;
+    }
+
     const packSoldEquivalent = round2(totalUnitsSold / parsed.unitsPerPack);
 
-    const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
     let inv = line.inventory_id
       ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(Number(line.inventory_id)) as
           | Record<string, unknown>
@@ -266,33 +358,50 @@ function revertCompletedSaleEffects(saleId: number) {
 
     if (inv) {
       const newSoldQty = round2(Math.max(0, Number(inv.sold_qty || 0) - packSoldEquivalent));
+      const newDispatchedQty = round2(
+        Math.max(0, Number(inv.dispatched_pack_qty || 0) - packSoldEquivalent)
+      );
       const newTotalUnits = round2(Number(inv.total_stock_units || 0) + totalUnitsSold);
       const newPackQty = round2(newTotalUnits / parsed.unitsPerPack);
       const newStripQty = round2(newPackQty * parsed.stripsPerBox);
       const newLooseQty = round2(newTotalUnits % parsed.unitsPerPack);
 
-      const itemRow = db
-        .prepare('SELECT minimum_stock FROM items WHERE id = ?')
-        .get(itemId) as { minimum_stock: number } | undefined;
       const status = computeBatchStatus(
         newPackQty,
         String(inv.expiry_date || ''),
-        Number(itemRow?.minimum_stock || 0)
+        minStock
       );
 
       db.prepare(`
         UPDATE inventory
         SET sold_qty = ?,
+            dispatched_pack_qty = ?,
             current_pack_qty = ?,
             current_strip_qty = ?,
             current_loose_qty = ?,
             total_stock_units = ?,
             status = ?,
+            batch_status = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(newSoldQty, newPackQty, newStripQty, newLooseQty, newTotalUnits, status, Number(inv.id));
+      `).run(
+        newSoldQty,
+        newDispatchedQty,
+        newPackQty,
+        newStripQty,
+        newLooseQty,
+        newTotalUnits,
+        status,
+        newPackQty <= 0 ? 'Out of Stock' : 'Active',
+        Number(inv.id)
+      );
     }
   }
+
+  // Remove previous batch stock movement logs recorded for this sale invoice before re-applying or cancelling
+  db.prepare(
+    "DELETE FROM batch_stock_movements WHERE reference_type = 'SALE_INVOICE' AND reference_id = ?"
+  ).run(saleId);
 
   // Delete all linked journal entries for this sale (by stored IDs AND by reference_type='SALE' & reference_id=saleId)
   // so editing or cancelling an invoice reverses 100% of its accounting effect and never creates duplicate ledger entries.
@@ -1251,9 +1360,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
     const salesHistory = rawSales.map((row) => {
       const costPerUnit = Number(row.cost_price_per_unit || 0);
       const totalUnits = Number(row.total_units || 0);
-      const hasReliableCost = costPerUnit > 0 && totalUnits > 0;
+      const hasReliableCost = costPerUnit > 0 && totalUnits !== 0;
       const netRevenue =
-        Number(row.taxable_amount || 0) > 0
+        Number(row.taxable_amount || 0) !== 0
           ? Number(row.taxable_amount)
           : Number(row.line_total || 0) - Number(row.tax_amount || 0);
       const profit = hasReliableCost ? round2(netRevenue - totalUnits * costPerUnit) : null;
@@ -1705,8 +1814,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const useVarCustom = Boolean(variantRow && Number(variantRow.use_parent_pricing ?? 1) === 0);
 
       const parsed = parsePacking(String(line.packing || variantRow?.packing || itemRow.packing || '1x1'));
-      const quantity = round2(Math.max(0, Number(line.quantity ?? line.packs_quantity ?? 0)));
-      const looseQuantity = round2(Math.max(0, Number(line.loose_quantity || 0)));
+      const quantity = round2(Number(line.quantity ?? line.packs_quantity ?? 0));
+      const looseQuantity = round2(Number(line.loose_quantity || 0));
 
       const baseWholesale = useVarCustom
         ? Number(variantRow?.wholesale_price || variantRow?.trade_price || variantRow?.retail_price || itemRow.wholesale_price || itemRow.trade_price || itemRow.retail_price)
@@ -1727,11 +1836,11 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
           ? round2(Math.max(0, Number(rawPriceVal)))
           : defaultBoxPrice;
 
-      // Evaluate Trade Deals & Party Discounts automatically (variant-aware)
+      // Evaluate Trade Deals & Party Discounts automatically (variant-aware; bonus only applies to positive sales)
       const evalOffer = evaluateLineOfferAndPartyDiscount({
         itemId,
         variantId,
-        quantity,
+        quantity: Math.max(0, quantity),
         tradePrice: unitPrice,
         partyAccountId: customerAccountId,
         townId: customer.town_id ? Number(customer.town_id) : null,
@@ -1751,14 +1860,16 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       });
 
       const bonusQuantity =
-        line.bonus_quantity !== undefined && line.bonus_quantity !== ''
+        quantity < 0 || looseQuantity < 0
+          ? 0
+          : line.bonus_quantity !== undefined && line.bonus_quantity !== ''
           ? round2(Math.max(0, Number(line.bonus_quantity)))
           : evalOffer.bonus_quantity;
 
       const totalUnits = round2((quantity + bonusQuantity) * parsed.unitsPerPack + looseQuantity);
 
-      if (status === 'completed' && totalUnits <= 0) {
-        throw new Error(`Row #${idx + 1} (${itemRow.item_name}): Quantity, Bonus Quantity, or Loose Quantity must be greater than 0.`);
+      if (status === 'completed' && totalUnits === 0) {
+        throw new Error(`Row #${idx + 1} (${itemRow.item_name}): Quantity or Loose Quantity cannot be zero.`);
       }
 
       const defaultItemLooseRate = round2(unitPrice / parsed.unitsPerPack);
@@ -1770,21 +1881,23 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const grossAmount = round2(quantity * unitPrice + looseQuantity * looseRate);
 
       let discountPercent =
-        line.discount_percent !== undefined && line.discount_percent !== '' && Number(line.discount_percent) > 0
+        line.discount_percent !== undefined && line.discount_percent !== '' && Number(line.discount_percent) >= 0
           ? round2(Math.max(0, Math.min(100, Number(line.discount_percent))))
           : evalOffer.effective_discount_percent;
       let discountAmount = round2((grossAmount * discountPercent) / 100);
       if (
         line.discount_amount !== undefined &&
-        Number(line.discount_amount) >= 0 &&
-        discountPercent === 0 &&
-        Number(line.discount_amount) > 0
+        Number(line.discount_amount) !== 0 &&
+        discountPercent === 0
       ) {
-        discountAmount = round2(Math.min(grossAmount, Number(line.discount_amount)));
-        discountPercent = grossAmount > 0 ? round2((discountAmount / grossAmount) * 100) : 0;
+        const rawDiscAmt = Math.abs(Number(line.discount_amount));
+        const clampedAbsDisc = Math.min(Math.abs(grossAmount), rawDiscAmt);
+        discountAmount = round2(grossAmount >= 0 ? clampedAbsDisc : -clampedAbsDisc);
+        discountPercent =
+          grossAmount !== 0 ? round2((Math.abs(discountAmount) / Math.abs(grossAmount)) * 100) : 0;
       }
 
-      const taxableAmount = round2(Math.max(0, grossAmount - discountAmount));
+      const taxableAmount = round2(grossAmount - discountAmount);
       const baseTaxPct = useVarCustom
         ? Number(variantRow?.tax_percent ?? itemRow.tax_percent ?? 0)
         : Number(itemRow.tax_percent ?? 0);
@@ -1806,8 +1919,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
             .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
             .get(itemId, variantKey, String(line.batch_number).trim()) as Record<string, unknown> | undefined;
         }
-        // If explicitly selected batch is blocked or expired, reject or fallback if auto
-        if (batchRow && (line.inventory_id || line.batch_number)) {
+        // Only block expired/blocked batch selection on positive sale lines (not on return lines)
+        if (totalUnits > 0 && batchRow && (line.inventory_id || line.batch_number)) {
           if (Number(batchRow.is_blocked || 0) === 1) {
             throw new Error(
               `Row #${idx + 1} (${itemRow.item_name}): Batch "${batchRow.batch_number}" is Blocked (${batchRow.blocked_reason || 'Hold'}) and cannot be sold.`
@@ -1822,22 +1935,39 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         }
       }
       if (!batchRow) {
-        // Strict FIFO order within the item/variant scope
-        batchRow = db
-          .prepare(`
-            SELECT * FROM inventory
-            WHERE item_id = ?
-              AND COALESCE(variant_key, 0) = ?
-              AND COALESCE(is_blocked, 0) = 0
-              AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
-            ORDER BY
-              CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
-              COALESCE(NULLIF(purchase_date, ''), DATE(created_at)) ASC,
-              CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
-              id ASC
-            LIMIT 1
-          `)
-          .get(itemId, variantKey, todayIso) as Record<string, unknown> | undefined;
+        if (totalUnits < 0) {
+          // For returned items without a specific batch, pick any active batch for this item/variant (preferring non-expired)
+          batchRow = db
+            .prepare(`
+              SELECT * FROM inventory
+              WHERE item_id = ?
+                AND COALESCE(variant_key, 0) = ?
+                AND COALESCE(is_blocked, 0) = 0
+              ORDER BY
+                CASE WHEN expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?) THEN 0 ELSE 1 END,
+                CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+                id DESC
+              LIMIT 1
+            `)
+            .get(itemId, variantKey, todayIso) as Record<string, unknown> | undefined;
+        } else {
+          // Strict FIFO order within the item/variant scope
+          batchRow = db
+            .prepare(`
+              SELECT * FROM inventory
+              WHERE item_id = ?
+                AND COALESCE(variant_key, 0) = ?
+                AND COALESCE(is_blocked, 0) = 0
+                AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
+              ORDER BY
+                CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+                COALESCE(NULLIF(purchase_date, ''), DATE(created_at)) ASC,
+                CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
+                id ASC
+              LIMIT 1
+            `)
+            .get(itemId, variantKey, todayIso) as Record<string, unknown> | undefined;
+        }
       }
 
       // Compute total eligible FIFO stock across all non-blocked, non-expired batches of this item/variant
@@ -1864,7 +1994,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         batchRow?.expiry_date || (batchWiseSales && line.expiry_date) || '2028-12-31'
       ).trim();
 
-      if (status === 'completed' && !allowNegativeStock && totalUnits > availableUnits) {
+      if (status === 'completed' && !allowNegativeStock && totalUnits > 0 && totalUnits > availableUnits) {
         throw new Error(
           `Insufficient eligible FIFO stock for "${itemRow.item_name}${variantName ? ` (${variantName})` : ''}". Available Eligible: ${availablePacks} Packs (${availableUnits} Units), Requested: ${quantity} Sale + ${bonusQuantity} Bonus (${totalUnits} Units).`
         );
@@ -1942,20 +2072,21 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       });
     }
 
-    // Invoice-level discount
-    const subtotalAfterItemDisc = round2(Math.max(0, grossTotal - itemDiscountTotal));
+    // Invoice-level discount (supports positive, negative return, and mixed invoices)
+    const subtotalAfterItemDisc = round2(grossTotal - itemDiscountTotal);
     let invoiceDiscountPercent = round2(Math.max(0, Math.min(100, Number(body.invoice_discount_percent || 0))));
-    let invoiceDiscountAmount = round2(Math.max(0, Number(body.invoice_discount_amount || 0)));
+    let invoiceDiscountAmount = round2(Number(body.invoice_discount_amount || 0));
 
     if (invoiceDiscountPercent > 0 && invoiceDiscountAmount === 0) {
       invoiceDiscountAmount = round2((subtotalAfterItemDisc * invoiceDiscountPercent) / 100);
-    } else if (invoiceDiscountAmount > 0 && invoiceDiscountPercent === 0 && subtotalAfterItemDisc > 0) {
-      invoiceDiscountAmount = round2(Math.min(subtotalAfterItemDisc, invoiceDiscountAmount));
-      invoiceDiscountPercent = round2((invoiceDiscountAmount / subtotalAfterItemDisc) * 100);
+    } else if (invoiceDiscountAmount !== 0 && invoiceDiscountPercent === 0 && subtotalAfterItemDisc !== 0) {
+      const clampedAbs = Math.min(Math.abs(subtotalAfterItemDisc), Math.abs(invoiceDiscountAmount));
+      invoiceDiscountAmount = round2(subtotalAfterItemDisc >= 0 ? clampedAbs : -clampedAbs);
+      invoiceDiscountPercent = round2((Math.abs(invoiceDiscountAmount) / Math.abs(subtotalAfterItemDisc)) * 100);
     }
 
     const totalDiscountAmount = round2(itemDiscountTotal + invoiceDiscountAmount);
-    const taxableAmount = round2(Math.max(0, grossTotal - totalDiscountAmount));
+    const taxableAmount = round2(grossTotal - totalDiscountAmount);
 
     // Advance Tax calculation (only when advance_tax_applicable is enabled or overridden)
     const taxSettings = db
@@ -2013,7 +2144,11 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     const totalReceivable = round2(signedPrevReceivable + netTotal);
 
     let paidAmount = round2(Math.max(0, Number(body.paid_amount || 0)));
-    if ((paymentMode === 'Cash' || paymentMode === 'Bank') && (body.paid_amount === undefined || body.paid_amount === null || body.paid_amount === '')) {
+    if (
+      (paymentMode === 'Cash' || paymentMode === 'Bank') &&
+      (body.paid_amount === undefined || body.paid_amount === null || body.paid_amount === '') &&
+      netTotal > 0
+    ) {
       paidAmount = netTotal;
     }
 
@@ -2273,181 +2408,404 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const fifoDedicatedSlices: Array<Record<string, unknown>> = [];
 
       if (status === 'completed') {
-        // Fetch all FIFO-eligible batches for this item/variant (putting preferred invId first if eligible)
-        const allEligibleBatches = db
-          .prepare(`
-            SELECT * FROM inventory
-            WHERE item_id = ?
-              AND COALESCE(variant_key, 0) = ?
-              AND COALESCE(is_blocked, 0) = 0
-              AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
-            ORDER BY
-              CASE WHEN id = ? THEN 0 ELSE 1 END,
-              CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
-              COALESCE(NULLIF(purchase_date, ''), DATE(created_at)) ASC,
-              CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
-              id ASC
-          `)
-          .all(pLine.itemId, pLine.variantKey, todayIso, invId || -1) as Array<Record<string, unknown>>;
+        const itemMinRow = db
+          .prepare('SELECT minimum_stock FROM items WHERE id = ?')
+          .get(pLine.itemId) as { minimum_stock: number } | undefined;
+        const minStock = Number(itemMinRow?.minimum_stock || 0);
 
-        if (allEligibleBatches.length > 0) {
-          const itemMinRow = db
-            .prepare('SELECT minimum_stock FROM items WHERE id = ?')
-            .get(pLine.itemId) as { minimum_stock: number } | undefined;
-          const minStock = Number(itemMinRow?.minimum_stock || 0);
+        if (pLine.totalUnits < 0) {
+          // Item Return Row (negative quantity / loose_quantity -> increase stock)
+          const returnUnitsAbs = round2(Math.abs(pLine.totalUnits));
+          const returnPackEq = round2(returnUnitsAbs / pLine.unitsPerPack);
 
-          let remainingUnitsToDeduct = pLine.totalUnits;
-          invId = Number(allEligibleBatches[0].id);
-          const usedBatchNames: string[] = [];
-          const usedExpiries: string[] = [];
+          let targetBatchRow: Record<string, unknown> | undefined;
+          if (invId) {
+            targetBatchRow = db
+              .prepare('SELECT * FROM inventory WHERE id = ? AND item_id = ? AND COALESCE(variant_key, 0) = ?')
+              .get(invId, pLine.itemId, pLine.variantKey) as Record<string, unknown> | undefined;
+          }
+          if (!targetBatchRow && pLine.batchNumber) {
+            targetBatchRow = db
+              .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
+              .get(pLine.itemId, pLine.variantKey, pLine.batchNumber) as Record<string, unknown> | undefined;
+          }
+          if (!targetBatchRow) {
+            targetBatchRow = db
+              .prepare(`
+                SELECT * FROM inventory
+                WHERE item_id = ?
+                  AND COALESCE(variant_key, 0) = ?
+                  AND COALESCE(is_blocked, 0) = 0
+                ORDER BY
+                  CASE WHEN expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?) THEN 0 ELSE 1 END,
+                  CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+                  id DESC
+                LIMIT 1
+              `)
+              .get(pLine.itemId, pLine.variantKey, todayIso) as Record<string, unknown> | undefined;
+          }
 
-          for (let bIdx = 0; bIdx < allEligibleBatches.length; bIdx++) {
-            if (remainingUnitsToDeduct <= 0) break;
-            const bRow = allEligibleBatches[bIdx];
-            const bId = Number(bRow.id);
-            const bCurrentUnits = round2(Number(bRow.total_stock_units || 0));
-            const isLastBatch = bIdx === allEligibleBatches.length - 1;
+          if (targetBatchRow) {
+            const bId = Number(targetBatchRow.id);
+            invId = bId;
+            const prevSoldQty = round2(Number(targetBatchRow.sold_qty || 0));
+            const prevDispatchedQty = round2(Number(targetBatchRow.dispatched_pack_qty || 0));
+            const newSoldQty = round2(Math.max(0, prevSoldQty - returnPackEq));
+            const newDispatchedQty = round2(Math.max(0, prevDispatchedQty - returnPackEq));
+            const soldQtyDelta = round2(newSoldQty - prevSoldQty);
+            const dispatchedQtyDelta = round2(newDispatchedQty - prevDispatchedQty);
 
-            let unitsFromThisBatch = 0;
-            if (bCurrentUnits >= remainingUnitsToDeduct) {
-              unitsFromThisBatch = remainingUnitsToDeduct;
-            } else if (bCurrentUnits > 0 && !isLastBatch) {
-              unitsFromThisBatch = bCurrentUnits;
-            } else if (isLastBatch && allowNegativeStock) {
-              unitsFromThisBatch = remainingUnitsToDeduct;
+            const bCurrentUnits = round2(Number(targetBatchRow.total_stock_units || 0));
+            const newTotalUnits = round2(bCurrentUnits + returnUnitsAbs);
+            const newPackQty = round2(newTotalUnits / pLine.unitsPerPack);
+            const newStripQty = round2(newPackQty * pLine.stripsPerBox);
+            const newLooseQty = round2(newTotalUnits % pLine.unitsPerPack);
+            const batchStatus = computeBatchStatus(
+              newPackQty,
+              String(targetBatchRow.expiry_date || pLine.expiryDate),
+              minStock
+            );
+
+            db.prepare(`
+              UPDATE inventory
+              SET sold_qty = ?,
+                  dispatched_pack_qty = ?,
+                  current_pack_qty = ?,
+                  current_strip_qty = ?,
+                  current_loose_qty = ?,
+                  total_stock_units = ?,
+                  status = ?,
+                  batch_status = ?,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `).run(
+              newSoldQty,
+              newDispatchedQty,
+              newPackQty,
+              newStripQty,
+              newLooseQty,
+              newTotalUnits,
+              batchStatus,
+              newPackQty <= 0 ? 'Out of Stock' : 'Active',
+              bId
+            );
+
+            const bNo = String(targetBatchRow.batch_number || pLine.batchNumber);
+            const bExp = String(targetBatchRow.expiry_date || pLine.expiryDate);
+            recordedBatchString = bNo;
+            if (bExp) recordedExpiryString = bExp;
+
+            fifoDedicatedSlices.push({
+              inventory_id: bId,
+              batch_number: bNo,
+              expiry_date: bExp,
+              allocated_packs: round2(-returnPackEq),
+              allocated_units: pLine.totalUnits,
+              sold_qty_delta: soldQtyDelta,
+              dispatched_qty_delta: dispatchedQtyDelta,
+              remaining_after_packs: newPackQty,
+            });
+
+            recordBatchStockMovement({
+              movementDate: invoiceDate,
+              itemId: pLine.itemId,
+              variantId: pLine.variantId,
+              variantCode: pLine.variantCode,
+              variantName: pLine.variantName,
+              itemCode: pLine.itemCode,
+              itemName: pLine.itemName,
+              companyName: pLine.companyName,
+              inventoryId: bId,
+              batchNumber: bNo,
+              expiryDate: bExp,
+              purchaseDate: String(targetBatchRow.purchase_date || ''),
+              movementType: 'RETURN_IN_SALEABLE',
+              referenceType: 'SALE_INVOICE',
+              referenceId: finalSaleId,
+              referenceNumber: invoiceNumber,
+              partyAccountId: customerAccountId,
+              partyName: customerName,
+              salesmanId,
+              salesmanName: salesman,
+              townName: String(customer.town_name || customer.city || ''),
+              quantityPacks: returnPackEq,
+              bonusPacks: 0,
+              totalUnits: returnUnitsAbs,
+              purchaseRate: Number(targetBatchRow.pack_cost || targetBatchRow.cost_price || 0),
+              tradePrice: pLine.unitPrice,
+              balanceAfterPacks: newPackQty,
+              remarks: `Item Return on Sales Invoice ${invoiceNumber}${pLine.variantName ? ` (${pLine.variantName})` : ''}`,
+              performedBy: String(body.created_by || 'Super Admin'),
+            });
+          } else {
+            // No batch existed yet for this item/variant -> create a positive batch from the returned units
+            const newTotalUnits = returnUnitsAbs;
+            const newPackQty = round2(newTotalUnits / pLine.unitsPerPack);
+            const newStripQty = round2(newPackQty * pLine.stripsPerBox);
+            const newLooseQty = round2(newTotalUnits % pLine.unitsPerPack);
+            const batchStatus = computeBatchStatus(newPackQty, pLine.expiryDate, minStock);
+
+            const newInv = db.prepare(`
+              INSERT INTO inventory (
+                item_id, variant_id, variant_key, batch_number, manufacturing_date, expiry_date,
+                packing, strips_per_box, units_per_strip, units_per_pack,
+                cost_price, trade_price, wholesale_price, retail_price,
+                pack_cost, pack_retail, purchased_qty, bonus_qty, returned_qty, sold_qty,
+                current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
+                status, batch_status
+              ) VALUES (?, ?, ?, ?, '2025-06-01', ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?)
+            `).run(
+              pLine.itemId,
+              pLine.variantId,
+              pLine.variantKey,
+              pLine.batchNumber,
+              pLine.expiryDate,
+              pLine.packing,
+              pLine.stripsPerBox,
+              Math.max(1, Math.round(pLine.unitsPerPack / pLine.stripsPerBox)),
+              pLine.unitsPerPack,
+              pLine.costPricePerUnit,
+              pLine.unitPrice,
+              round2(pLine.costPricePerUnit * pLine.unitsPerPack),
+              pLine.unitPrice,
+              newPackQty,
+              newStripQty,
+              newLooseQty,
+              newTotalUnits,
+              batchStatus,
+              newPackQty <= 0 ? 'Out of Stock' : 'Active'
+            );
+            const newBatchId = Number(newInv.lastInsertRowid);
+            invId = newBatchId;
+
+            fifoDedicatedSlices.push({
+              inventory_id: newBatchId,
+              batch_number: pLine.batchNumber,
+              expiry_date: pLine.expiryDate,
+              allocated_packs: round2(-returnPackEq),
+              allocated_units: pLine.totalUnits,
+              sold_qty_delta: 0,
+              dispatched_qty_delta: 0,
+              remaining_after_packs: newPackQty,
+            });
+
+            recordBatchStockMovement({
+              movementDate: invoiceDate,
+              itemId: pLine.itemId,
+              variantId: pLine.variantId,
+              variantCode: pLine.variantCode,
+              variantName: pLine.variantName,
+              itemCode: pLine.itemCode,
+              itemName: pLine.itemName,
+              companyName: pLine.companyName,
+              inventoryId: newBatchId,
+              batchNumber: pLine.batchNumber,
+              expiryDate: pLine.expiryDate,
+              purchaseDate: invoiceDate,
+              movementType: 'RETURN_IN_SALEABLE',
+              referenceType: 'SALE_INVOICE',
+              referenceId: finalSaleId,
+              referenceNumber: invoiceNumber,
+              partyAccountId: customerAccountId,
+              partyName: customerName,
+              salesmanId,
+              salesmanName: salesman,
+              townName: String(customer.town_name || customer.city || ''),
+              quantityPacks: returnPackEq,
+              bonusPacks: 0,
+              totalUnits: returnUnitsAbs,
+              purchaseRate: round2(pLine.costPricePerUnit * pLine.unitsPerPack),
+              tradePrice: pLine.unitPrice,
+              balanceAfterPacks: newPackQty,
+              remarks: `Item Return on Sales Invoice ${invoiceNumber}${pLine.variantName ? ` (${pLine.variantName})` : ''}`,
+              performedBy: String(body.created_by || 'Super Admin'),
+            });
+          }
+        } else {
+          // Normal Positive Sale Row (pLine.totalUnits > 0 -> deduct stock across FIFO batches)
+          const allEligibleBatches = db
+            .prepare(`
+              SELECT * FROM inventory
+              WHERE item_id = ?
+                AND COALESCE(variant_key, 0) = ?
+                AND COALESCE(is_blocked, 0) = 0
+                AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
+              ORDER BY
+                CASE WHEN id = ? THEN 0 ELSE 1 END,
+                CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+                COALESCE(NULLIF(purchase_date, ''), DATE(created_at)) ASC,
+                CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
+                id ASC
+            `)
+            .all(pLine.itemId, pLine.variantKey, todayIso, invId || -1) as Array<Record<string, unknown>>;
+
+          if (allEligibleBatches.length > 0) {
+            let remainingUnitsToDeduct = pLine.totalUnits;
+            invId = Number(allEligibleBatches[0].id);
+            const usedBatchNames: string[] = [];
+            const usedExpiries: string[] = [];
+
+            for (let bIdx = 0; bIdx < allEligibleBatches.length; bIdx++) {
+              if (remainingUnitsToDeduct <= 0) break;
+              const bRow = allEligibleBatches[bIdx];
+              const bId = Number(bRow.id);
+              const bCurrentUnits = round2(Number(bRow.total_stock_units || 0));
+              const isLastBatch = bIdx === allEligibleBatches.length - 1;
+
+              let unitsFromThisBatch = 0;
+              if (bCurrentUnits >= remainingUnitsToDeduct) {
+                unitsFromThisBatch = remainingUnitsToDeduct;
+              } else if (bCurrentUnits > 0 && !isLastBatch) {
+                unitsFromThisBatch = bCurrentUnits;
+              } else if (isLastBatch && allowNegativeStock) {
+                unitsFromThisBatch = remainingUnitsToDeduct;
+              }
+
+              if (unitsFromThisBatch > 0) {
+                remainingUnitsToDeduct = round2(remainingUnitsToDeduct - unitsFromThisBatch);
+                const packSoldEq = round2(unitsFromThisBatch / pLine.unitsPerPack);
+                const newSoldQty = round2(Number(bRow.sold_qty || 0) + packSoldEq);
+                const newDispatchedQty = round2(Number(bRow.dispatched_pack_qty || 0) + packSoldEq);
+                const newTotalUnits = round2(bCurrentUnits - unitsFromThisBatch);
+                const newPackQty = round2(newTotalUnits / pLine.unitsPerPack);
+                const newStripQty = round2(newPackQty * pLine.stripsPerBox);
+                const newLooseQty = round2(newTotalUnits % pLine.unitsPerPack);
+                const batchStatus = computeBatchStatus(
+                  newPackQty,
+                  String(bRow.expiry_date || pLine.expiryDate),
+                  minStock
+                );
+
+                db.prepare(`
+                  UPDATE inventory
+                  SET sold_qty = ?,
+                      dispatched_pack_qty = ?,
+                      current_pack_qty = ?,
+                      current_strip_qty = ?,
+                      current_loose_qty = ?,
+                      total_stock_units = ?,
+                      status = ?,
+                      batch_status = ?,
+                      updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?
+                `).run(
+                  newSoldQty,
+                  newDispatchedQty,
+                  newPackQty,
+                  newStripQty,
+                  newLooseQty,
+                  newTotalUnits,
+                  batchStatus,
+                  newPackQty <= 0 ? 'Out of Stock' : 'Active',
+                  bId
+                );
+
+                const bNo = String(bRow.batch_number || pLine.batchNumber);
+                const bExp = String(bRow.expiry_date || pLine.expiryDate);
+                usedBatchNames.push(bNo);
+                if (bExp) usedExpiries.push(bExp);
+
+                fifoDedicatedSlices.push({
+                  inventory_id: bId,
+                  batch_number: bNo,
+                  expiry_date: bExp,
+                  allocated_packs: packSoldEq,
+                  allocated_units: unitsFromThisBatch,
+                  sold_qty_delta: packSoldEq,
+                  dispatched_qty_delta: packSoldEq,
+                  remaining_after_packs: newPackQty,
+                });
+
+                recordBatchStockMovement({
+                  movementDate: invoiceDate,
+                  itemId: pLine.itemId,
+                  variantId: pLine.variantId,
+                  variantCode: pLine.variantCode,
+                  variantName: pLine.variantName,
+                  itemCode: pLine.itemCode,
+                  itemName: pLine.itemName,
+                  companyName: pLine.companyName,
+                  inventoryId: bId,
+                  batchNumber: bNo,
+                  expiryDate: bExp,
+                  purchaseDate: String(bRow.purchase_date || ''),
+                  movementType: 'COUNTER_SALE_OUT',
+                  referenceType: 'SALE_INVOICE',
+                  referenceId: finalSaleId,
+                  referenceNumber: invoiceNumber,
+                  partyAccountId: customerAccountId,
+                  partyName: customerName,
+                  salesmanId,
+                  salesmanName: salesman,
+                  townName: String(customer.town_name || customer.city || ''),
+                  quantityPacks: packSoldEq,
+                  bonusPacks: usedBatchNames.length === 1 ? pLine.bonusQuantity : 0,
+                  totalUnits: unitsFromThisBatch,
+                  purchaseRate: Number(bRow.pack_cost || bRow.cost_price || 0),
+                  tradePrice: pLine.unitPrice,
+                  balanceAfterPacks: newPackQty,
+                  remarks: `Sales Invoice ${invoiceNumber}${pLine.variantName ? ` (${pLine.variantName})` : ''}`,
+                  performedBy: String(body.created_by || 'Super Admin'),
+                });
+              }
             }
 
-            if (unitsFromThisBatch > 0) {
-              remainingUnitsToDeduct = round2(remainingUnitsToDeduct - unitsFromThisBatch);
-              const packSoldEq = round2(unitsFromThisBatch / pLine.unitsPerPack);
-              const newSoldQty = round2(Number(bRow.sold_qty || 0) + packSoldEq);
-              const newDispatchedQty = round2(Number(bRow.dispatched_pack_qty || 0) + packSoldEq);
-              const newTotalUnits = round2(bCurrentUnits - unitsFromThisBatch);
-              const newPackQty = round2(newTotalUnits / pLine.unitsPerPack);
-              const newStripQty = round2(newPackQty * pLine.stripsPerBox);
-              const newLooseQty = round2(newTotalUnits % pLine.unitsPerPack);
-              const batchStatus = computeBatchStatus(
-                newPackQty,
-                String(bRow.expiry_date || pLine.expiryDate),
-                minStock
-              );
-
-              db.prepare(`
-                UPDATE inventory
-                SET sold_qty = ?,
-                    dispatched_pack_qty = ?,
-                    current_pack_qty = ?,
-                    current_strip_qty = ?,
-                    current_loose_qty = ?,
-                    total_stock_units = ?,
-                    status = ?,
-                    batch_status = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-              `).run(
-                newSoldQty,
-                newDispatchedQty,
-                newPackQty,
-                newStripQty,
-                newLooseQty,
-                newTotalUnits,
-                batchStatus,
-                newPackQty <= 0 ? 'Out of Stock' : 'Active',
-                bId
-              );
-
-              const bNo = String(bRow.batch_number || pLine.batchNumber);
-              const bExp = String(bRow.expiry_date || pLine.expiryDate);
-              usedBatchNames.push(bNo);
-              if (bExp) usedExpiries.push(bExp);
-
-              fifoDedicatedSlices.push({
-                inventory_id: bId,
-                batch_number: bNo,
-                expiry_date: bExp,
-                allocated_packs: packSoldEq,
-                allocated_units: unitsFromThisBatch,
-                remaining_after_packs: newPackQty,
-              });
-
-              recordBatchStockMovement({
-                movementDate: invoiceDate,
-                itemId: pLine.itemId,
-                variantId: pLine.variantId,
-                variantCode: pLine.variantCode,
-                variantName: pLine.variantName,
-                itemCode: pLine.itemCode,
-                itemName: pLine.itemName,
-                companyName: pLine.companyName,
-                inventoryId: bId,
-                batchNumber: bNo,
-                expiryDate: bExp,
-                purchaseDate: String(bRow.purchase_date || ''),
-                movementType: 'COUNTER_SALE_OUT',
-                referenceType: 'SALE_INVOICE',
-                referenceId: finalSaleId,
-                referenceNumber: invoiceNumber,
-                partyAccountId: customerAccountId,
-                partyName: customerName,
-                salesmanId,
-                salesmanName: salesman,
-                townName: String(customer.town_name || customer.city || ''),
-                quantityPacks: packSoldEq,
-                bonusPacks: usedBatchNames.length === 1 ? pLine.bonusQuantity : 0,
-                totalUnits: unitsFromThisBatch,
-                purchaseRate: Number(bRow.pack_cost || bRow.cost_price || 0),
-                tradePrice: pLine.unitPrice,
-                balanceAfterPacks: newPackQty,
-                remarks: `Sales Invoice ${invoiceNumber}${pLine.variantName ? ` (${pLine.variantName})` : ''}`,
-                performedBy: String(body.created_by || 'Super Admin'),
-              });
+            if (usedBatchNames.length > 0) {
+              recordedBatchString = usedBatchNames.join(', ');
             }
-          }
+            if (usedExpiries.length > 0) {
+              recordedExpiryString = usedExpiries[0];
+            }
+          } else if (allowNegativeStock) {
+            // Create negative batch record if administrator authorized negative stock and no batch existed
+            const packSoldEquivalent = round2(pLine.totalUnits / pLine.unitsPerPack);
+            const negTotalUnits = round2(-pLine.totalUnits);
+            const negPackQty = round2(negTotalUnits / pLine.unitsPerPack);
+            const negStripQty = round2(negPackQty * pLine.stripsPerBox);
+            const negLooseQty = round2(negTotalUnits % pLine.unitsPerPack);
 
-          if (usedBatchNames.length > 0) {
-            recordedBatchString = usedBatchNames.join(', ');
+            const newInv = db.prepare(`
+              INSERT INTO inventory (
+                item_id, variant_id, variant_key, batch_number, manufacturing_date, expiry_date,
+                packing, strips_per_box, units_per_strip, units_per_pack,
+                cost_price, trade_price, wholesale_price, retail_price,
+                pack_cost, pack_retail, purchased_qty, bonus_qty, returned_qty, sold_qty,
+                current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
+                status
+              ) VALUES (?, ?, ?, ?, '2025-06-01', ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'out_of_stock')
+            `).run(
+              pLine.itemId,
+              pLine.variantId,
+              pLine.variantKey,
+              pLine.batchNumber,
+              pLine.expiryDate,
+              pLine.packing,
+              pLine.stripsPerBox,
+              Math.max(1, Math.round(pLine.unitsPerPack / pLine.stripsPerBox)),
+              pLine.unitsPerPack,
+              pLine.costPricePerUnit,
+              pLine.unitPrice,
+              round2(pLine.costPricePerUnit * pLine.unitsPerPack),
+              pLine.unitPrice,
+              packSoldEquivalent,
+              negPackQty,
+              negStripQty,
+              negLooseQty,
+              negTotalUnits
+            );
+            const newBatchId = Number(newInv.lastInsertRowid);
+            invId = newBatchId;
+            fifoDedicatedSlices.push({
+              inventory_id: newBatchId,
+              batch_number: pLine.batchNumber,
+              expiry_date: pLine.expiryDate,
+              allocated_packs: packSoldEquivalent,
+              allocated_units: pLine.totalUnits,
+              sold_qty_delta: packSoldEquivalent,
+              dispatched_qty_delta: 0,
+              remaining_after_packs: negPackQty,
+            });
           }
-          if (usedExpiries.length > 0) {
-            recordedExpiryString = usedExpiries[0];
-          }
-        } else if (allowNegativeStock) {
-          // Create negative batch record if administrator authorized negative stock and no batch existed
-          const packSoldEquivalent = round2(pLine.totalUnits / pLine.unitsPerPack);
-          const negTotalUnits = round2(-pLine.totalUnits);
-          const negPackQty = round2(negTotalUnits / pLine.unitsPerPack);
-          const negStripQty = round2(negPackQty * pLine.stripsPerBox);
-          const negLooseQty = round2(negTotalUnits % pLine.unitsPerPack);
-
-          const newInv = db.prepare(`
-            INSERT INTO inventory (
-              item_id, variant_id, variant_key, batch_number, manufacturing_date, expiry_date,
-              packing, strips_per_box, units_per_strip, units_per_pack,
-              cost_price, trade_price, wholesale_price, retail_price,
-              pack_cost, pack_retail, purchased_qty, bonus_qty, returned_qty, sold_qty,
-              current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
-              status
-            ) VALUES (?, ?, ?, ?, '2025-06-01', ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'out_of_stock')
-          `).run(
-            pLine.itemId,
-            pLine.variantId,
-            pLine.variantKey,
-            pLine.batchNumber,
-            pLine.expiryDate,
-            pLine.packing,
-            pLine.stripsPerBox,
-            Math.max(1, Math.round(pLine.unitsPerPack / pLine.stripsPerBox)),
-            pLine.unitsPerPack,
-            pLine.costPricePerUnit,
-            pLine.unitPrice,
-            round2(pLine.costPricePerUnit * pLine.unitsPerPack),
-            pLine.unitPrice,
-            packSoldEquivalent,
-            negPackQty,
-            negStripQty,
-            negLooseQty,
-            negTotalUnits
-          );
-          invId = Number(newInv.lastInsertRowid);
         }
       }
 
@@ -2493,41 +2851,162 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       );
     }
 
-    // Post Double-Entry Accounting if completed
-    if (status === 'completed' && netTotal > 0) {
+    // Post Double-Entry Accounting if completed (supports positive sales, negative returns, and mixed invoices)
+    const totalCostOfGoodsSold = round2(
+      processedLines.reduce((sum, l) => sum + l.totalUnits * l.costPricePerUnit, 0)
+    );
+
+    if (
+      status === 'completed' &&
+      (netTotal !== 0 || grossTotal !== 0 || totalCostOfGoodsSold !== 0 || paidAmount > 0)
+    ) {
       const salesIncomeAccountId = getSystemAccountId('INC-4010');
+      const salesReturnAccountId = getSystemAccountId('SAL-4015');
       const salesDiscountAccountId = getSystemAccountId('DIS-5015');
       const gstPayableAccountId = getSystemAccountId('TAX-2045');
       const advTaxPayableAccountId = getSystemAccountId('TAX-2040');
       const cogsAccountId = getSystemAccountId('EXP-5005');
       const inventoryAssetAccountId = getSystemAccountId('INV-1030');
 
-      const totalCostOfGoodsSold = round2(
-        processedLines.reduce((sum, l) => sum + l.totalUnits * l.costPricePerUnit, 0)
-      );
+      const salesRevenueBase = round2(totalDiscountAmount !== 0 ? grossTotal : taxableAmount);
 
-      const jeTotalSide = round2(
-        (totalDiscountAmount > 0 ? grossTotal : taxableAmount) +
-          totalGst +
-          advanceTaxAmount +
-          totalCostOfGoodsSold
-      );
+      interface PendingJeLine {
+        accountId: number;
+        ledgerType: string;
+        debit: number;
+        credit: number;
+        narration: string;
+      }
+      const pendingLines: PendingJeLine[] = [];
 
-      const jeNumber = getNextJournalNumber('JE-SAL');
-      const jeRes = db.prepare(`
-        INSERT INTO journal_entries (
-          entry_number, entry_date, reference_type, reference_id, description,
-          total_debit, total_credit, is_balanced, status
-        ) VALUES (?, ?, 'SALE', ?, ?, ?, ?, 1, 'posted')
-      `).run(
-        jeNumber,
-        invoiceDate,
-        finalSaleId,
-        `Sales Invoice ${invoiceNumber} (${invoiceType} - ${customerName})`,
-        jeTotalSide,
-        jeTotalSide
-      );
-      const journalEntryId = Number(jeRes.lastInsertRowid);
+      // 1. Customer Account for Net Invoice Amount (Debit if > 0, Credit if < 0)
+      if (netTotal > 0) {
+        pendingLines.push({
+          accountId: customerAccountId,
+          ledgerType: 'customer',
+          debit: netTotal,
+          credit: 0,
+          narration: `Sales Invoice ${invoiceNumber} receivable from ${customerName}`,
+        });
+      } else if (netTotal < 0) {
+        pendingLines.push({
+          accountId: customerAccountId,
+          ledgerType: 'customer',
+          debit: 0,
+          credit: Math.abs(netTotal),
+          narration: `Sales Return / Credit adjustment on Invoice ${invoiceNumber} for ${customerName}`,
+        });
+      }
+
+      // 2. Sales Discount Allowed (Debit if > 0, Credit reversal if < 0)
+      if (totalDiscountAmount > 0) {
+        pendingLines.push({
+          accountId: salesDiscountAccountId,
+          ledgerType: 'general',
+          debit: totalDiscountAmount,
+          credit: 0,
+          narration: `Discount allowed on Sales Invoice ${invoiceNumber}`,
+        });
+      } else if (totalDiscountAmount < 0) {
+        pendingLines.push({
+          accountId: salesDiscountAccountId,
+          ledgerType: 'general',
+          debit: 0,
+          credit: Math.abs(totalDiscountAmount),
+          narration: `Discount reversed on Sales Return Invoice ${invoiceNumber}`,
+        });
+      }
+
+      // 3. Medicine Sales Income / Sales Return Account
+      if (salesRevenueBase > 0) {
+        pendingLines.push({
+          accountId: salesIncomeAccountId,
+          ledgerType: 'general',
+          debit: 0,
+          credit: salesRevenueBase,
+          narration: `Medicine Sales Income on ${invoiceNumber}`,
+        });
+      } else if (salesRevenueBase < 0) {
+        pendingLines.push({
+          accountId: salesReturnAccountId,
+          ledgerType: 'general',
+          debit: Math.abs(salesRevenueBase),
+          credit: 0,
+          narration: `Medicine Sales Return on ${invoiceNumber}`,
+        });
+      }
+
+      // 4. GST Payable (Credit if > 0, Debit if < 0)
+      if (totalGst > 0) {
+        pendingLines.push({
+          accountId: gstPayableAccountId,
+          ledgerType: 'general',
+          debit: 0,
+          credit: totalGst,
+          narration: `Output GST collected on ${invoiceNumber}`,
+        });
+      } else if (totalGst < 0) {
+        pendingLines.push({
+          accountId: gstPayableAccountId,
+          ledgerType: 'general',
+          debit: Math.abs(totalGst),
+          credit: 0,
+          narration: `Output GST reversed on Return Invoice ${invoiceNumber}`,
+        });
+      }
+
+      // 5. Advance Tax Collected (Credit if > 0, Debit if < 0)
+      if (advanceTaxAmount > 0) {
+        pendingLines.push({
+          accountId: advTaxPayableAccountId,
+          ledgerType: 'general',
+          debit: 0,
+          credit: advanceTaxAmount,
+          narration: `Advance Tax (${advanceTaxRate}%) collected on ${invoiceNumber}`,
+        });
+      } else if (advanceTaxAmount < 0) {
+        pendingLines.push({
+          accountId: advTaxPayableAccountId,
+          ledgerType: 'general',
+          debit: Math.abs(advanceTaxAmount),
+          credit: 0,
+          narration: `Advance Tax (${advanceTaxRate}%) reversed on ${invoiceNumber}`,
+        });
+      }
+
+      // 6. Cost of Goods Sold (EXP-5005) & Inventory Asset (INV-1030)
+      if (totalCostOfGoodsSold > 0) {
+        pendingLines.push({
+          accountId: cogsAccountId,
+          ledgerType: 'general',
+          debit: totalCostOfGoodsSold,
+          credit: 0,
+          narration: `Cost of Goods Sold (Weighted-Avg Batch Cost) on ${invoiceNumber}`,
+        });
+        pendingLines.push({
+          accountId: inventoryAssetAccountId,
+          ledgerType: 'general',
+          debit: 0,
+          credit: totalCostOfGoodsSold,
+          narration: `Inventory Stock Reduction on ${invoiceNumber}`,
+        });
+      } else if (totalCostOfGoodsSold < 0) {
+        const absCogs = Math.abs(totalCostOfGoodsSold);
+        pendingLines.push({
+          accountId: inventoryAssetAccountId,
+          ledgerType: 'general',
+          debit: absCogs,
+          credit: 0,
+          narration: `Inventory Stock Restored on Return Invoice ${invoiceNumber}`,
+        });
+        pendingLines.push({
+          accountId: cogsAccountId,
+          ledgerType: 'general',
+          debit: 0,
+          credit: absCogs,
+          narration: `COGS Reversal on Return Invoice ${invoiceNumber}`,
+        });
+      }
 
       const insertJeLine = db.prepare(`
         INSERT INTO journal_entry_lines (
@@ -2535,83 +3014,39 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         ) VALUES (?, ?, ?, ?, ?, ?)
       `);
 
-      // 1. Debit Customer Account for Net Invoice Amount
-      insertJeLine.run(
-        journalEntryId,
-        customerAccountId,
-        'customer',
-        netTotal,
-        0,
-        `Sales Invoice ${invoiceNumber} receivable from ${customerName}`
-      );
+      const affectedAccounts = new Set<number>([customerAccountId]);
+      let journalEntryId: number | null = null;
 
-      // 2. Debit Sales Discount Allowed if > 0
-      if (totalDiscountAmount > 0) {
-        insertJeLine.run(
-          journalEntryId,
-          salesDiscountAccountId,
-          'general',
-          totalDiscountAmount,
-          0,
-          `Discount allowed on Sales Invoice ${invoiceNumber}`
+      if (pendingLines.length > 0) {
+        const jeTotalDebit = round2(pendingLines.reduce((s, l) => s + l.debit, 0));
+        const jeTotalCredit = round2(pendingLines.reduce((s, l) => s + l.credit, 0));
+        const jeNumber = getNextJournalNumber('JE-SAL');
+        const jeRes = db.prepare(`
+          INSERT INTO journal_entries (
+            entry_number, entry_date, reference_type, reference_id, description,
+            total_debit, total_credit, is_balanced, status
+          ) VALUES (?, ?, 'SALE', ?, ?, ?, ?, 1, 'posted')
+        `).run(
+          jeNumber,
+          invoiceDate,
+          finalSaleId,
+          `Sales Invoice ${invoiceNumber} (${invoiceType} - ${customerName})`,
+          jeTotalDebit,
+          jeTotalCredit
         );
-      }
+        journalEntryId = Number(jeRes.lastInsertRowid);
 
-      // 3. Credit Medicine Sales Income (Gross Sales if discount recorded separately, else Taxable)
-      const salesCreditAmount = totalDiscountAmount > 0 ? grossTotal : taxableAmount;
-      if (salesCreditAmount > 0) {
-        insertJeLine.run(
-          journalEntryId,
-          salesIncomeAccountId,
-          'general',
-          0,
-          salesCreditAmount,
-          `Medicine Sales Income on ${invoiceNumber}`
-        );
-      }
-
-      // 4. Credit GST Payable if > 0
-      if (totalGst > 0) {
-        insertJeLine.run(
-          journalEntryId,
-          gstPayableAccountId,
-          'general',
-          0,
-          totalGst,
-          `Output GST collected on ${invoiceNumber}`
-        );
-      }
-
-      // 5. Credit Advance Tax Collected if > 0
-      if (advanceTaxAmount > 0) {
-        insertJeLine.run(
-          journalEntryId,
-          advTaxPayableAccountId,
-          'general',
-          0,
-          advanceTaxAmount,
-          `Advance Tax (${advanceTaxRate}%) collected on ${invoiceNumber}`
-        );
-      }
-
-      // 6. Record Cost of Goods Sold (Debit EXP-5005) and Reduce Inventory Asset (Credit INV-1030)
-      if (totalCostOfGoodsSold > 0) {
-        insertJeLine.run(
-          journalEntryId,
-          cogsAccountId,
-          'general',
-          totalCostOfGoodsSold,
-          0,
-          `Cost of Goods Sold (Weighted-Avg Batch Cost) on ${invoiceNumber}`
-        );
-        insertJeLine.run(
-          journalEntryId,
-          inventoryAssetAccountId,
-          'general',
-          0,
-          totalCostOfGoodsSold,
-          `Inventory Stock Reduction on ${invoiceNumber}`
-        );
+        for (const pl of pendingLines) {
+          insertJeLine.run(
+            journalEntryId,
+            pl.accountId,
+            pl.ledgerType,
+            pl.debit,
+            pl.credit,
+            pl.narration
+          );
+          affectedAccounts.add(pl.accountId);
+        }
       }
 
       let paymentJournalEntryId: number | null = null;
@@ -2651,6 +3086,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
           paidAmount,
           `Payment received from ${customerName} against ${invoiceNumber}`
         );
+        affectedAccounts.add(paymentAccountId);
       }
 
       db.prepare(`
@@ -2660,16 +3096,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       `).run(journalEntryId, paymentJournalEntryId, finalSaleId);
 
       // Recalculate balances of all affected accounts
-      recalculateAccountBalance(customerAccountId);
-      recalculateAccountBalance(salesIncomeAccountId);
-      if (totalDiscountAmount > 0) recalculateAccountBalance(salesDiscountAccountId);
-      if (totalGst > 0) recalculateAccountBalance(gstPayableAccountId);
-      if (advanceTaxAmount > 0) recalculateAccountBalance(advTaxPayableAccountId);
-      if (totalCostOfGoodsSold > 0) {
-        recalculateAccountBalance(cogsAccountId);
-        recalculateAccountBalance(inventoryAssetAccountId);
+      for (const accId of affectedAccounts) {
+        recalculateAccountBalance(accId);
       }
-      if (paymentAccountId) recalculateAccountBalance(paymentAccountId);
     }
 
     return finalSaleId!;

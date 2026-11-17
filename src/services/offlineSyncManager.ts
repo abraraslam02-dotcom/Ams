@@ -1123,7 +1123,7 @@ class OfflineSyncManager {
           ) || allBatches.find((b) => Number(b.item_id) === itemId);
 
         if (targetBatch) {
-          targetBatch.sold_qty = round2((Number(targetBatch.sold_qty) || 0) + packsEquiv);
+          targetBatch.sold_qty = round2(Math.max(0, (Number(targetBatch.sold_qty) || 0) + packsEquiv));
           targetBatch.total_stock_units = round2(
             (Number(targetBatch.total_stock_units) || 0) - totalUnitsSold
           );
@@ -1134,16 +1134,22 @@ class OfflineSyncManager {
         }
       }
 
-      // Update customer account balance if balance_amount > 0
+      // Update customer account balance if balance_amount !== 0
       const custId = Number(payload.customer_account_id || 0);
       const netTotal = round2(payload.net_total || 0);
       const paidAmt = round2(payload.paid_amount || 0);
       const balDiff = round2(netTotal - paidAmt);
-      if (custId > 0 && balDiff !== 0) {
+      if (custId > 0 && (balDiff !== 0 || netTotal !== 0)) {
         const custAcc = await offlineStorage.get<any>('accounts', custId);
         if (custAcc) {
-          custAcc.total_debit = round2((Number(custAcc.total_debit) || 0) + netTotal);
-          custAcc.total_credit = round2((Number(custAcc.total_credit) || 0) + paidAmt);
+          if (netTotal >= 0) {
+            custAcc.total_debit = round2((Number(custAcc.total_debit) || 0) + netTotal);
+          } else {
+            custAcc.total_credit = round2((Number(custAcc.total_credit) || 0) + Math.abs(netTotal));
+          }
+          if (paidAmt > 0) {
+            custAcc.total_credit = round2((Number(custAcc.total_credit) || 0) + paidAmt);
+          }
           const signed =
             (custAcc.current_balance_type === 'Credit'
               ? -Number(custAcc.current_balance || 0)

@@ -53,7 +53,12 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
     }, [value, displayZero]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = e.target.value;
+      let raw = e.target.value;
+      if (allowNegative && (raw === '0-' || raw === '-0')) {
+        raw = '-';
+      } else if (/^(-?)0+(\d.*)$/.test(raw)) {
+        raw = raw.replace(/^(-?)0+(\d.*)$/, '$1$2');
+      }
       const pattern = allowNegative ? /^-?\d*\.?\d*$/ : /^\d*\.?\d*$/;
       if (raw !== '' && !pattern.test(raw)) {
         return;
@@ -62,6 +67,9 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
       const parsed = raw === '' || raw === '-' || raw === '.' || raw === '-.' ? 0 : Number(raw);
       lastEmittedNumRef.current = Number.isFinite(parsed) ? parsed : 0;
       if (onChange) {
+        if (raw !== e.target.value) {
+          e.target.value = raw;
+        }
         onChange(e);
       }
     };
@@ -75,7 +83,11 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
 
     const handleBlur = (e: React.FocusEvent<HTMLInputElement>) => {
       isFocusedRef.current = false;
-      const num = textValue.trim() === '' ? 0 : Number(textValue);
+      const trimmed = textValue.trim();
+      const num =
+        trimmed === '' || trimmed === '-' || trimmed === '.' || trimmed === '-.'
+          ? 0
+          : Number(trimmed);
       if (!Number.isFinite(num) || num === 0) {
         setTextValue(displayZero ? '0' : '');
         lastEmittedNumRef.current = 0;

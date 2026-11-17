@@ -218,13 +218,21 @@ export function isSyrupItem(
   );
 }
 
+function parseSignedNumeric(val: unknown): number {
+  if (val === '' || val === '-' || val === '.' || val === '-.' || val === null || val === undefined) {
+    return 0;
+  }
+  const n = Number(val);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function recalcRow(row: DatasheetRow): DatasheetRow {
   const isSyrup = isSyrupItem(row);
   const unitsPerPack = Math.max(1, Number(row.units_per_pack || 1));
-  const quantity = Math.max(0, Number(row.quantity || 0));
+  const quantity = parseSignedNumeric(row.quantity);
   const bonusQuantity = Math.max(0, Number(row.bonus_quantity || 0));
-  // Syrups are strictly sold as complete bottles; loose units are forced to 0
-  const looseQty = isSyrup ? 0 : Math.max(0, Number(row.loose_quantity || 0));
+  // Syrups are strictly sold/returned as complete bottles; loose units are forced to 0
+  const looseQty = isSyrup ? 0 : parseSignedNumeric(row.loose_quantity);
   const unitPrice = Math.max(0, Number(row.unit_price || 0));
   const looseRate = isSyrup
     ? 0
@@ -234,15 +242,15 @@ function recalcRow(row: DatasheetRow): DatasheetRow {
     ? Math.max(0, round2(Number(row.loose_rate || 0)))
     : round2(unitPrice / unitsPerPack);
 
-  // Stock units include Normal Qty + Bonus Qty
+  // Stock units include Normal Qty + Bonus Qty (negative quantity/looseQty yields negative totalUnits for returns)
   const totalUnits = isSyrup
     ? round2((quantity + bonusQuantity) * unitsPerPack)
     : round2((quantity + bonusQuantity) * unitsPerPack + looseQty);
-  // Financial calculation: Item gross amount, discount, tax, net total use Normal Qty only (bonus items are free)
+  // Financial calculation: Item gross amount, discount, tax, net total use signed Normal Qty & Loose Qty
   const gross = round2(quantity * unitPrice + (isSyrup ? 0 : looseQty * looseRate));
   const discPct = Math.max(0, Math.min(100, Number(row.discount_percent || 0)));
   const discAmt = round2((gross * discPct) / 100);
-  const taxable = round2(Math.max(0, gross - discAmt));
+  const taxable = round2(gross - discAmt);
   const taxPct = Math.max(0, Number(row.tax_percent || 0));
   const taxAmt = round2((taxable * taxPct) / 100);
   const lineTotal = round2(taxable + taxAmt);
@@ -1583,9 +1591,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         : round2(effectivePrice / effUnitsPerPack);
 
       const preservedQty = hasExistingItem
-        ? Math.max(0, Number(targetRow.quantity || 0))
-        : Number(targetRow.quantity || 0) > 0
-        ? Math.max(0, Number(targetRow.quantity || 0))
+        ? parseSignedNumeric(targetRow.quantity)
+        : parseSignedNumeric(targetRow.quantity) !== 0
+        ? parseSignedNumeric(targetRow.quantity)
         : 0;
 
       const preservedDiscount = hasExistingItem
@@ -2155,17 +2163,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         current.isRateManuallyEdited = true;
         current.rateSuggestionSource = 'manual';
       } else if (field === 'loose_quantity') {
-        current.loose_quantity = isSyrupItem(current) ? 0 : Math.max(0, Number(value || 0));
+        current.loose_quantity = isSyrupItem(current) ? 0 : parseSignedNumeric(value);
       } else if (field === 'discount_amount') {
-        const discAmt = Math.max(0, Number(value || 0));
+        const discAmt = parseSignedNumeric(value);
         const gross = round2(
           current.quantity * current.unit_price + current.loose_quantity * current.loose_rate
         );
         current.discount_amount = discAmt;
-        current.discount_percent = gross > 0 ? round2((discAmt / gross) * 100) : 0;
+        current.discount_percent =
+          gross !== 0 ? Math.max(0, Math.min(100, round2(Math.abs(discAmt / gross) * 100))) : 0;
       } else if (field === 'quantity') {
-        const nextQty = Math.max(0, Number(value || 0));
+        const nextQty = parseSignedNumeric(value);
         current.quantity = nextQty;
+        if (nextQty < 0) {
+          current.bonus_quantity = 0;
+        }
         if (current.item_id && nextQty > 0) {
           const curItemId = Number(current.item_id);
           const curVariantId = current.variant_id || null;
@@ -2266,19 +2278,23 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setSuccessMsg(`Pasted values into Row #${index + 1}.`);
   };
 
-  // Automatic Bill Calculations
+  // Automatic Bill Calculations (supports positive sales, negative returns, and mixed invoices)
   const validRows = rows.filter((r) => r.item_id !== null);
   const grossAmount = round2(validRows.reduce((s, r) => s + r.gross_amount, 0));
   const itemDiscountTotal = round2(validRows.reduce((s, r) => s + r.discount_amount, 0));
-  const subtotalAfterItemDisc = round2(Math.max(0, grossAmount - itemDiscountTotal));
+  const subtotalAfterItemDisc = round2(grossAmount - itemDiscountTotal);
 
   const computedInvoiceDiscAmt =
     invoiceDiscountPercent > 0
       ? round2((subtotalAfterItemDisc * invoiceDiscountPercent) / 100)
-      : round2(Math.min(subtotalAfterItemDisc, invoiceDiscountAmount));
+      : subtotalAfterItemDisc >= 0
+      ? round2(Math.min(subtotalAfterItemDisc, Math.max(0, invoiceDiscountAmount)))
+      : round2(
+          -Math.min(Math.abs(subtotalAfterItemDisc), Math.abs(invoiceDiscountAmount))
+        );
 
   const totalDiscount = round2(itemDiscountTotal + computedInvoiceDiscAmt);
-  const taxableAmount = round2(Math.max(0, grossAmount - totalDiscount));
+  const taxableAmount = round2(grossAmount - totalDiscount);
   const gstAmount = round2(validRows.reduce((s, r) => s + r.tax_amount, 0));
 
   const effectiveAdvTaxRate = advanceTaxApplicable ? round2(advanceTaxRate) : 0;
@@ -2398,7 +2414,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       if (targetStatus === 'completed') {
         for (let i = 0; i < activeLines.length; i++) {
           const r = activeLines[i];
-          if (r.total_units <= 0) {
+          if (r.total_units === 0) {
             const rowIndexInGrid = rows.findIndex((row) => row.row_id === r.row_id);
             const focusIdx = rowIndexInGrid >= 0 ? rowIndexInGrid : i;
             setSelectedRowIndex(focusIdx);
@@ -2416,10 +2432,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }
       }
 
-      if (targetStatus === 'completed' && !allowNegativeStock) {
+      if (targetStatus === 'completed' && !allowNegativeStock && !editingSaleId) {
         for (let i = 0; i < activeLines.length; i++) {
           const r = activeLines[i];
-          if (r.total_units > r.available_stock_units) {
+          if (r.total_units > 0 && r.total_units > r.available_stock_units) {
             setErrorMsg(
               `Stock Shortage on Row #${i + 1} (${r.item_name} - Batch ${r.batch_number}): Available ${r.available_stock_packs} Packs (${r.available_stock_units} Units), Requested ${r.total_units} Units.`
             );
@@ -3837,9 +3853,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   const handleDecrementQty = (idx: number) => {
     const current = Number(rows[idx]?.quantity || 0);
-    if (current > 0) {
-      updateRowField(idx, 'quantity', Math.max(0, current - 1));
-    }
+    updateRowField(idx, 'quantity', current - 1);
   };
 
   const handleAddStripToRow = (idx: number, stripsCount: number = 1) => {
@@ -4441,7 +4455,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const isActiveSearchMatch = invoiceSearchActiveRow === rIdx;
                     const isSearchMatch = invoiceSearchMatchedRows.includes(rIdx);
                     const hasItem = row.item_id !== null && Number(row.item_id) > 0;
-                    const isZeroQty = hasItem && Number(row.quantity || 0) === 0;
+                    const isZeroQty =
+                      hasItem &&
+                      Number(row.quantity || 0) === 0 &&
+                      Number(row.loose_quantity || 0) === 0;
                     const isZeroNet = hasItem && round2(Number(row.line_total || 0)) === 0;
                     const isZeroRow = isZeroQty || isZeroNet;
 
@@ -4731,6 +4748,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           <NumericInput
                             id={`pos_row_${rIdx}_quantity`}
                             value={row.quantity}
+                            allowNegative={true}
                             displayZero={hasItem}
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'quantity', e.target.value)}
@@ -4761,6 +4779,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             <NumericInput
                               id={`pos_row_${rIdx}_loose_quantity`}
                               value={row.loose_quantity}
+                              allowNegative={true}
                               onFocus={() => setSelectedRowIndex(rIdx)}
                               onChange={(e) => updateRowField(rIdx, 'loose_quantity', e.target.value)}
                               onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'loose_quantity', true)}
@@ -5839,7 +5858,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         : Number(row.lastPurchaseCostRate || 0);
 
                     const hasItem = row.item_id !== null && Number(row.item_id) > 0;
-                    const isZeroQty = hasItem && Number(row.quantity || 0) === 0;
+                    const isZeroQty =
+                      hasItem &&
+                      Number(row.quantity || 0) === 0 &&
+                      Number(row.loose_quantity || 0) === 0;
                     const isZeroNet = hasItem && round2(Number(row.line_total || 0)) === 0;
                     const isZeroRow = isZeroQty || isZeroNet;
 
@@ -6029,6 +6051,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           <NumericInput
                             id={`cell_${rIdx}_quantity`}
                             value={row.quantity}
+                            allowNegative={true}
                             displayZero={hasItem}
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'quantity', e.target.value)}
@@ -6081,6 +6104,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               <NumericInput
                                 id={`cell_${rIdx}_loose_quantity`}
                                 value={row.loose_quantity}
+                                allowNegative={true}
                                 onFocus={() => setSelectedRowIndex(rIdx)}
                                 onChange={(e) => updateRowField(rIdx, 'loose_quantity', e.target.value)}
                                 onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_quantity')}
@@ -6159,7 +6183,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
                         {/* 12. Gross Amount */}
                         <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-700 bg-slate-50/30 text-[11px] h-[16px] align-middle">
-                          {row.gross_amount > 0 ? row.gross_amount.toFixed(2) : ''}
+                          {hasItem && row.gross_amount !== 0 ? row.gross_amount.toFixed(2) : ''}
                         </td>
 
                         {/* 13. Batch / Del */}
