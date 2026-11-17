@@ -2285,6 +2285,9 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
       interface ValidatedAdjLine {
         itemId: number;
         inventoryId: number;
+        variantId: number | null;
+        variantCode: string | null;
+        variantName: string | null;
         itemCode: string;
         itemName: string;
         companyName: string;
@@ -2320,14 +2323,16 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
 
         // Support item_id lookup if inventory_id wasn't supplied directly
         if (!inventoryId && line.item_id) {
+          const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
           const fallbackBatch = db
             .prepare(`
               SELECT id FROM inventory
               WHERE item_id = ?
+                AND (? = 0 OR COALESCE(variant_key, 0) = ?)
               ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, expiry_date ASC, id DESC
               LIMIT 1
             `)
-            .get(Number(line.item_id)) as { id: number } | undefined;
+            .get(Number(line.item_id), lineVariantKey, lineVariantKey) as { id: number } | undefined;
           if (fallbackBatch) {
             inventoryId = Number(fallbackBatch.id);
           }
@@ -2343,9 +2348,11 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
 
         const invRow = db
           .prepare(`
-            SELECT inv.*, itm.item_name, itm.item_code, itm.company_name, itm.minimum_stock
+            SELECT inv.*, itm.item_name, itm.item_code, itm.company_name, itm.minimum_stock,
+                   iv.variant_code as iv_variant_code, iv.variant_name as iv_variant_name
             FROM inventory inv
             JOIN items itm ON inv.item_id = itm.id
+            LEFT JOIN item_variants iv ON iv.id = inv.variant_id
             WHERE inv.id = ?
           `)
           .get(inventoryId) as Record<string, unknown> | undefined;
@@ -2391,9 +2398,16 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
           totalCostImpact = round2(totalCostImpact - lineCost);
         }
 
+        const adjVariantId = invRow.variant_id ? Number(invRow.variant_id) : (line.variant_id ? Number(line.variant_id) : null);
+        const adjVariantCode = adjVariantId ? (String(invRow.iv_variant_code || line.variant_code || '').trim() || null) : null;
+        const adjVariantName = adjVariantId ? (String(invRow.iv_variant_name || line.variant_name || '').trim() || null) : null;
+
         validatedLines.push({
           itemId: Number(invRow.item_id),
           inventoryId,
+          variantId: adjVariantId,
+          variantCode: adjVariantCode,
+          variantName: adjVariantName,
           itemCode: String(invRow.item_code),
           itemName: String(invRow.item_name),
           companyName: String(invRow.company_name || ''),
@@ -2439,11 +2453,12 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
 
       const insertLineStmt = db.prepare(`
         INSERT INTO stock_adjustment_items (
-          adjustment_id, item_id, inventory_id, item_code, item_name, company_name,
+          adjustment_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+          item_code, item_name, company_name,
           batch_number, expiry_date, packing, units_per_pack, adjustment_mode,
           pack_qty, loose_qty, total_units, system_stock_units, new_stock_units,
           cost_price_per_unit, total_cost, reason_category, remarks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const line of validatedLines) {
@@ -2451,6 +2466,9 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
           createdAdjId,
           line.itemId,
           line.inventoryId,
+          line.variantId,
+          line.variantCode,
+          line.variantName,
           line.itemCode,
           line.itemName,
           line.companyName,
@@ -2640,16 +2658,23 @@ inventoryRouter.post('/transfers', (req: AuthenticatedRequest, res: Response) =>
 
       const insertLine = db.prepare(`
         INSERT INTO stock_transfer_items (
-          transfer_id, item_id, inventory_id, item_code, item_name,
+          transfer_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+          item_code, item_name,
           batch_number, pack_qty, loose_qty, total_units,
           from_shelf, to_shelf, remarks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const line of items) {
         const invId = Number(line.inventory_id);
         const inv = db
-          .prepare('SELECT inv.*, i.item_name, i.item_code FROM inventory inv JOIN items i ON inv.item_id = i.id WHERE inv.id = ?')
+          .prepare(`
+            SELECT inv.*, i.item_name, i.item_code, iv.variant_code as iv_variant_code, iv.variant_name as iv_variant_name
+            FROM inventory inv
+            JOIN items i ON inv.item_id = i.id
+            LEFT JOIN item_variants iv ON iv.id = inv.variant_id
+            WHERE inv.id = ?
+          `)
           .get(invId) as Record<string, unknown> | undefined;
 
         if (!inv) throw new Error(`Batch ID ${invId} does not exist.`);
@@ -2663,11 +2688,17 @@ inventoryRouter.post('/transfers', (req: AuthenticatedRequest, res: Response) =>
 
         const fromShelf = String(line.from_shelf ?? line.from_rack ?? inv.rack_shelf ?? from_location);
         const toShelf = String(line.to_shelf ?? line.to_rack ?? to_location);
+        const trfVariantId = inv.variant_id ? Number(inv.variant_id) : (line.variant_id ? Number(line.variant_id) : null);
+        const trfVariantCode = trfVariantId ? (String(inv.iv_variant_code || line.variant_code || '').trim() || null) : null;
+        const trfVariantName = trfVariantId ? (String(inv.iv_variant_name || line.variant_name || '').trim() || null) : null;
 
         insertLine.run(
           createdTrfId,
           inv.item_id,
           invId,
+          trfVariantId,
+          trfVariantCode,
+          trfVariantName,
           inv.item_code,
           inv.item_name,
           inv.batch_number,
@@ -3617,11 +3648,12 @@ inventoryRouter.post('/physical-verifications', (req: AuthenticatedRequest, res:
 
       const insertItem = db.prepare(`
         INSERT INTO physical_verification_items (
-          verification_id, item_id, inventory_id, item_code, item_name, company_name,
+          verification_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+          item_code, item_name, company_name,
           batch_number, expiry_date, system_units, system_packs,
           physical_units, physical_packs, difference_units, difference_packs,
           cost_price_per_unit, discrepancy_cost, adjustment_reason, is_reconciled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
       `);
 
       const seenBatchIds = new Set<number>();
@@ -3629,14 +3661,16 @@ inventoryRouter.post('/physical-verifications', (req: AuthenticatedRequest, res:
       for (const line of items) {
         let invId = line.inventory_id ? Number(line.inventory_id) : 0;
         if (!invId && line.item_id) {
+          const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
           const fallbackBatch = db
             .prepare(`
               SELECT id FROM inventory
               WHERE item_id = ?
+                AND (? = 0 OR COALESCE(variant_key, 0) = ?)
               ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, expiry_date ASC, id DESC
               LIMIT 1
             `)
-            .get(Number(line.item_id)) as { id: number } | undefined;
+            .get(Number(line.item_id), lineVariantKey, lineVariantKey) as { id: number } | undefined;
           if (fallbackBatch) invId = Number(fallbackBatch.id);
         }
 
@@ -3647,7 +3681,14 @@ inventoryRouter.post('/physical-verifications', (req: AuthenticatedRequest, res:
         seenBatchIds.add(invId);
 
         const inv = db
-          .prepare('SELECT inv.*, i.item_name, i.item_code, i.company_name FROM inventory inv JOIN items i ON inv.item_id = i.id WHERE inv.id = ?')
+          .prepare(`
+            SELECT inv.*, i.item_name, i.item_code, i.company_name,
+                   iv.variant_code as iv_variant_code, iv.variant_name as iv_variant_name
+            FROM inventory inv
+            JOIN items i ON inv.item_id = i.id
+            LEFT JOIN item_variants iv ON iv.id = inv.variant_id
+            WHERE inv.id = ?
+          `)
           .get(invId) as Record<string, unknown> | undefined;
 
         if (!inv) throw new Error(`Batch ID ${invId} does not exist.`);
@@ -3674,10 +3715,17 @@ inventoryRouter.post('/physical-verifications', (req: AuthenticatedRequest, res:
           netCostDiscrepancy = round2(netCostDiscrepancy + discCost);
         }
 
+        const verVariantId = inv.variant_id ? Number(inv.variant_id) : (line.variant_id ? Number(line.variant_id) : null);
+        const verVariantCode = verVariantId ? (String(inv.iv_variant_code || line.variant_code || '').trim() || null) : null;
+        const verVariantName = verVariantId ? (String(inv.iv_variant_name || line.variant_name || '').trim() || null) : null;
+
         insertItem.run(
           createdId,
           inv.item_id,
           invId,
+          verVariantId,
+          verVariantCode,
+          verVariantName,
           inv.item_code,
           inv.item_name,
           inv.company_name,
@@ -3805,16 +3853,24 @@ inventoryRouter.post('/physical-verifications/:id/reconcile', (req: Authenticate
 
         const insertAdjLine = db.prepare(`
           INSERT INTO stock_adjustment_items (
-            adjustment_id, item_id, inventory_id, item_code, item_name, company_name,
+            adjustment_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+            item_code, item_name, company_name,
             batch_number, expiry_date, packing, units_per_pack, adjustment_mode,
             pack_qty, loose_qty, total_units, system_stock_units, new_stock_units,
             cost_price_per_unit, total_cost, reason_category, remarks
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         for (const item of discrepancyItems) {
           const invId = Number(item.inventory_id);
-          const invRow = db.prepare('SELECT * FROM inventory WHERE id = ?').get(invId) as Record<string, unknown>;
+          const invRow = db
+            .prepare(`
+              SELECT inv.*, iv.variant_code as iv_variant_code, iv.variant_name as iv_variant_name
+              FROM inventory inv
+              LEFT JOIN item_variants iv ON iv.id = inv.variant_id
+              WHERE inv.id = ?
+            `)
+            .get(invId) as Record<string, unknown>;
           if (!invRow) continue;
 
           const diffUnits = Number(item.difference_units || 0);
@@ -3837,10 +3893,17 @@ inventoryRouter.post('/physical-verifications/:id/reconcile', (req: Authenticate
           const parsed = parsePacking(String(invRow.packing || '1x1'));
           const newStrips = round2(newPacks * parsed.stripsPerBox);
 
+          const recVariantId = item.variant_id ? Number(item.variant_id) : (invRow.variant_id ? Number(invRow.variant_id) : null);
+          const recVariantCode = recVariantId ? (String(item.variant_code || invRow.iv_variant_code || '').trim() || null) : null;
+          const recVariantName = recVariantId ? (String(item.variant_name || invRow.iv_variant_name || '').trim() || null) : null;
+
           insertAdjLine.run(
             adjustmentId,
             item.item_id,
             invId,
+            recVariantId,
+            recVariantCode,
+            recVariantName,
             item.item_code,
             item.item_name,
             item.company_name,

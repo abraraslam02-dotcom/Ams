@@ -478,10 +478,10 @@ export function recordBatchStockMovement(params: {
   item_id?: number;
   variantId?: number | null;
   variant_id?: number | null;
-  variantCode?: string;
-  variant_code?: string;
-  variantName?: string;
-  variant_name?: string;
+  variantCode?: string | null;
+  variant_code?: string | null;
+  variantName?: string | null;
+  variant_name?: string | null;
   itemCode?: string;
   item_code?: string;
   itemName?: string;
@@ -554,6 +554,9 @@ export function recordBatchStockMovement(params: {
 }): void {
   const db = getDatabase();
   const qtyPacks = Number(params.quantityPacks ?? params.quantity_packs ?? 0);
+  const resolvedVariantId = params.variantId ?? params.variant_id ?? null;
+  const resolvedVariantCode = resolvedVariantId ? (String(params.variantCode || params.variant_code || '').trim() || null) : null;
+  const resolvedVariantName = resolvedVariantId ? (String(params.variantName || params.variant_name || '').trim() || null) : null;
   db.prepare(`
     INSERT INTO batch_stock_movements (
       movement_date, item_id, variant_id, variant_code, variant_name, item_code, item_name, company_name,
@@ -566,9 +569,9 @@ export function recordBatchStockMovement(params: {
   `).run(
     params.movementDate || params.movement_date || new Date().toISOString().slice(0, 10),
     Number(params.itemId ?? params.item_id ?? 0),
-    params.variantId ?? params.variant_id ?? null,
-    params.variantCode || params.variant_code || '',
-    params.variantName || params.variant_name || '',
+    resolvedVariantId,
+    resolvedVariantCode,
+    resolvedVariantName,
     params.itemCode || params.item_code || '',
     params.itemName || params.item_name || '',
     params.companyName || params.company_name || '',

@@ -7,7 +7,6 @@ import {
   searchItems,
 } from '../../utils/itemSearch';
 import { formatPKR } from '../../utils/formatters';
-import { ProductThumb } from './ProductThumb';
 
 export interface ItemListSelectionModalProps<T extends BaseSearchableItem> {
   isOpen: boolean;
@@ -194,7 +193,6 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
           <table className="w-full text-left border-collapse text-[11px]">
             <thead className="bg-slate-900 text-white sticky top-0 z-10">
               <tr>
-                <th className="px-2.5 py-2 w-9 text-center">Pic</th>
                 <th className="px-3 py-2">Code</th>
                 <th className="px-3 py-2">Item Name</th>
                 <th className="px-3 py-2">Company</th>
@@ -207,7 +205,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
             <tbody className="divide-y divide-slate-100">
               {results.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-semibold">
+                  <td colSpan={7} className="px-4 py-8 text-center text-slate-500 font-semibold">
                     No matching items found.
                   </td>
                 </tr>
@@ -232,15 +230,6 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                         isHighlighted ? 'bg-emerald-100 font-semibold' : 'hover:bg-emerald-50/60'
                       }`}
                     >
-                      <td className="px-2.5 py-1.5 text-center">
-                        <ProductThumb
-                          src={it.thumbnail_url || it.image_url}
-                          fullSrc={it.image_url}
-                          alt={it.item_name}
-                          size="xs"
-                          className="mx-auto"
-                        />
-                      </td>
                       <td className="px-3 py-2 font-mono font-bold text-emerald-700">
                         {it.item_code}
                       </td>

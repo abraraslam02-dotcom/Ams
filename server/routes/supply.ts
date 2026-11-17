@@ -161,7 +161,7 @@ function recordAudit(req: Request, action: string, details: string) {
 /**
  * Helper to get available stock packs & units for an item
  */
-function getItemStockSummary(itemId: number): {
+function getItemStockSummary(itemId: number, variantId?: number | null): {
   availablePacks: number;
   availableUnits: number;
   reservedPacks: number;
@@ -176,14 +176,16 @@ function getItemStockSummary(itemId: number): {
     .prepare('SELECT id, item_code, packing FROM items WHERE id = ?')
     .get(itemId) as { id: number; item_code: string; packing: string } | undefined;
   const parsed = parsePacking(String(itemRow?.packing || '1x1'));
+  const vKey = variantId ? Number(variantId) : 0;
   const batches = db
     .prepare(`
       SELECT *
       FROM inventory
       WHERE item_id = ?
+        AND (? = 0 OR COALESCE(variant_key, 0) = ?)
       ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, expiry_date ASC, id ASC
     `)
-    .all(itemId) as Array<Record<string, unknown>>;
+    .all(itemId, vKey, vKey) as Array<Record<string, unknown>>;
 
   const totalUnits = batches.reduce((sum, b) => sum + Number(b.total_stock_units || 0), 0);
   const availablePacks = round2(totalUnits / parsed.unitsPerPack);
@@ -1634,6 +1636,9 @@ supplyRouter.post('/order-forms/:id/convert-to-booking', (req: Request, res: Res
       return {
         sNo: idx + 1,
         itemId: Number(oi.item_id),
+        variantId: oi.variant_id ? Number(oi.variant_id) : null,
+        variantCode: oi.variant_id ? (String(oi.variant_code || '').trim() || null) : null,
+        variantName: oi.variant_id ? (String(oi.variant_name || '').trim() || null) : null,
         itemCode: String(oi.item_code || ''),
         companyName: String(oi.company_name || ''),
         itemName: String(oi.item_name || ''),
@@ -1682,10 +1687,11 @@ supplyRouter.post('/order-forms/:id/convert-to-booking', (req: Request, res: Res
     const bookingId = Number(insertBooking.lastInsertRowid);
     const insertItem = db.prepare(`
       INSERT INTO supply_booking_items (
-        booking_id, s_no, item_id, item_code, company_name, item_name,
+        booking_id, s_no, item_id, variant_id, variant_code, variant_name,
+        item_code, company_name, item_name,
         packing, quantity, supplied_quantity, pending_quantity, bonus_quantity,
         trade_price, discount_percent, discount_amount, amount, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const l of preparedLines) {
@@ -1693,6 +1699,9 @@ supplyRouter.post('/order-forms/:id/convert-to-booking', (req: Request, res: Res
         bookingId,
         l.sNo,
         l.itemId,
+        l.variantId,
+        l.variantCode,
+        l.variantName,
         l.itemCode,
         l.companyName,
         l.itemName,
@@ -1883,9 +1892,17 @@ function upsertBooking(bookingId: number | null, body: Record<string, unknown>) 
     discountAmount = round2(discountAmount + lineDisc);
     netAmount = round2(netAmount + lineNet);
 
+    const lineVariantId = line.variant_id ? Number(line.variant_id) : null;
+    const variantRow = lineVariantId
+      ? (db.prepare('SELECT id, variant_code, variant_name FROM item_variants WHERE id = ?').get(lineVariantId) as { id: number; variant_code: string; variant_name: string } | undefined)
+      : undefined;
+
     return {
       sNo: idx + 1,
       itemId,
+      variantId: variantRow ? variantRow.id : lineVariantId,
+      variantCode: lineVariantId ? (String(variantRow?.variant_code || line.variant_code || '').trim() || null) : null,
+      variantName: lineVariantId ? (String(variantRow?.variant_name || line.variant_name || '').trim() || null) : null,
       itemCode: String(itemRow.item_code || ''),
       companyName: String(itemRow.company_name || ''),
       itemName: String(itemRow.item_name || ''),
@@ -1987,10 +2004,11 @@ function upsertBooking(bookingId: number | null, body: Record<string, unknown>) 
 
   const insertItemStmt = db.prepare(`
     INSERT INTO supply_booking_items (
-      booking_id, s_no, item_id, item_code, company_name, item_name,
+      booking_id, s_no, item_id, variant_id, variant_code, variant_name,
+      item_code, company_name, item_name,
       packing, quantity, supplied_quantity, pending_quantity, bonus_quantity,
       trade_price, discount_percent, discount_amount, amount, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const l of processedLines) {
@@ -1998,6 +2016,9 @@ function upsertBooking(bookingId: number | null, body: Record<string, unknown>) 
       finalId,
       l.sNo,
       l.itemId,
+      l.variantId,
+      l.variantCode,
+      l.variantName,
       l.itemCode,
       l.companyName,
       l.itemName,
@@ -2334,6 +2355,9 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
           bookingItemId: number | null;
           bookingNumber: string;
           itemId: number;
+          variantId: number | null;
+          variantCode: string | null;
+          variantName: string | null;
           itemCode: string;
           companyName: string;
           itemName: string;
@@ -2376,6 +2400,9 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
       let bookingId = raw.booking_id ? Number(raw.booking_id) : null;
       let bookingNumber = String(raw.booking_number || '').trim();
       let orderedQty = round2(Number(raw.ordered_quantity ?? supplyQty));
+      let resolvedVariantId: number | null = raw.variant_id ? Number(raw.variant_id) : null;
+      let resolvedVariantCode: string | null = resolvedVariantId ? (String(raw.variant_code || '').trim() || null) : null;
+      let resolvedVariantName: string | null = resolvedVariantId ? (String(raw.variant_name || '').trim() || null) : null;
 
       // Validate booking item pending quantity to prevent duplicate conversion
       if (bookingItemId) {
@@ -2391,6 +2418,11 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
         }
         bookingId = Number(bItem.booking_id);
         orderedQty = round2(Number(bItem.quantity || orderedQty));
+        if (!resolvedVariantId && bItem.variant_id) {
+          resolvedVariantId = Number(bItem.variant_id);
+          resolvedVariantCode = String(bItem.variant_code || '').trim() || null;
+          resolvedVariantName = String(bItem.variant_name || '').trim() || null;
+        }
         const bHeader = db
           .prepare('SELECT booking_number FROM supply_bookings WHERE id = ?')
           .get(bookingId) as { booking_number: string } | undefined;
@@ -2407,6 +2439,16 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
         `).run(newSupplied, newPending, bookingItemId);
 
         if (bookingId) impactedBookingIds.add(bookingId);
+      }
+
+      if (resolvedVariantId && (!resolvedVariantCode || !resolvedVariantName)) {
+        const vRow = db
+          .prepare('SELECT variant_code, variant_name FROM item_variants WHERE id = ?')
+          .get(resolvedVariantId) as { variant_code: string; variant_name: string } | undefined;
+        if (vRow) {
+          if (!resolvedVariantCode) resolvedVariantCode = vRow.variant_code || null;
+          if (!resolvedVariantName) resolvedVariantName = vRow.variant_name || null;
+        }
       }
 
       const bonusQty = round2(Math.max(0, Number(raw.bonus_quantity ?? raw.bonus ?? 0)));
@@ -2427,7 +2469,7 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
       const discountAmount = round2((gross * discountPercent) / 100);
       const amount = round2(gross - discountAmount);
 
-      const stock = getItemStockSummary(itemId);
+      const stock = getItemStockSummary(itemId, resolvedVariantId);
 
       if (!linesByParty.has(partyAccountId)) {
         linesByParty.set(partyAccountId, {
@@ -2448,6 +2490,9 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
         bookingItemId,
         bookingNumber,
         itemId,
+        variantId: resolvedVariantId,
+        variantCode: resolvedVariantId ? resolvedVariantCode : null,
+        variantName: resolvedVariantId ? resolvedVariantName : null,
         itemCode: String(itemRow.item_code || ''),
         companyName: String(itemRow.company_name || ''),
         itemName: String(itemRow.item_name || ''),
@@ -2561,6 +2606,7 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
       INSERT INTO party_supply_items (
         town_supply_id, party_supply_id, booking_id, booking_item_id, booking_number,
         party_account_id, party_name, s_no, item_id, inventory_id,
+        variant_id, variant_code, variant_name,
         item_code, company_name, item_name, packing, batch_number, expiry_date,
         ordered_quantity, supply_quantity, bonus_quantity,
         packed_quantity, remaining_pack_quantity, packing_status,
@@ -2568,7 +2614,7 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
         billed_quantity, net_billable_qty,
         trade_price, discount_percent, discount_amount, amount,
         return_amount, net_billable_amount
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'Pending', 0, 0, 0, 0, ?, ?, ?, ?, ?, 0, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'Pending', 0, 0, 0, 0, ?, ?, ?, ?, ?, 0, ?)
     `);
 
     let pIdx = 1;
@@ -2623,6 +2669,9 @@ supplyRouter.post('/supplies', (req: Request, res: Response) => {
           idx + 1,
           l.itemId,
           l.inventoryId,
+          l.variantId,
+          l.variantCode,
+          l.variantName,
           l.itemCode,
           l.companyName,
           l.itemName,
@@ -2715,8 +2764,9 @@ supplyRouter.post('/supplies/:id/pack', (req: Request, res: Response) => {
       const deltaPack = round2(targetPackedQty - oldPackedQty);
       if (Math.abs(deltaPack) > 0.0001) {
         // Check available stock if increasing packed quantity
+        const itemVariantId = item.variant_id ? Number(item.variant_id) : null;
         if (deltaPack > 0) {
-          const stock = getItemStockSummary(itemId);
+          const stock = getItemStockSummary(itemId, itemVariantId);
           if (deltaPack > stock.netPackablePacks && !body.allow_negative_stock) {
             throw new Error(
               `Insufficient available stock to pack "${String(item.item_name)}". Available unreserved stock: ${stock.netPackablePacks} Packs, Additional needed: ${deltaPack} Packs.`
@@ -2724,15 +2774,17 @@ supplyRouter.post('/supplies/:id/pack', (req: Request, res: Response) => {
           }
         }
 
-        // Reserve stock on primary inventory batch
+        // Reserve stock on primary inventory batch (variant-isolated when variant_id is present)
+        const vKey = itemVariantId || 0;
         const batchRow = db
           .prepare(`
             SELECT * FROM inventory
             WHERE item_id = ?
+              AND (? = 0 OR COALESCE(variant_key, 0) = ?)
             ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, expiry_date ASC, id ASC
             LIMIT 1
           `)
-          .get(itemId) as Record<string, unknown> | undefined;
+          .get(itemId, vKey, vKey) as Record<string, unknown> | undefined;
 
         if (batchRow) {
           const newReserved = round2(Math.max(0, Number(batchRow.reserved_pack_qty || 0) + deltaPack));
@@ -2916,10 +2968,12 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
       const totalUnitsToDeduct = round2(totalPackToDeduct * parsed.unitsPerPack);
 
       const todayIso = new Date().toISOString().slice(0, 10);
+      const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
       const allBatches = db
         .prepare(`
           SELECT * FROM inventory
           WHERE item_id = ?
+            AND (? = 0 OR COALESCE(variant_key, 0) = ?)
             AND COALESCE(is_blocked, 0) = 0
             AND COALESCE(batch_status, 'Active') != 'Blocked'
             AND (expiry_date IS NULL OR expiry_date = '' OR expiry_date >= ?)
@@ -2927,7 +2981,7 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
                    COALESCE(NULLIF(purchase_date, ''), substr(created_at, 1, 10), '1970-01-01') ASC,
                    id ASC
         `)
-        .all(itemId, todayIso) as Array<Record<string, unknown>>;
+        .all(itemId, lineVariantKey, lineVariantKey, todayIso) as Array<Record<string, unknown>>;
 
       const totalAvailUnits = allBatches.reduce((s, b) => s + Number(b.total_stock_units || 0), 0);
       if (totalUnitsToDeduct > totalAvailUnits && !body.allow_negative_stock) {
@@ -2994,6 +3048,9 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
             recordBatchStockMovement({
               movement_date: dispatchDate,
               item_id: itemId,
+              variant_id: line.variant_id ? Number(line.variant_id) : (bRow.variant_id ? Number(bRow.variant_id) : null),
+              variant_code: line.variant_id ? (String(line.variant_code || '').trim() || null) : null,
+              variant_name: line.variant_id ? (String(line.variant_name || '').trim() || null) : null,
               item_code: String(line.item_code || ''),
               item_name: String(line.item_name || itemRow?.item_name || ''),
               company_name: String(line.company_name || ''),
@@ -3392,17 +3449,21 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
       INSERT INTO supply_return_items (
         supply_return_id, town_supply_id, party_supply_id, party_supply_item_id,
         party_account_id, party_name, item_id, inventory_id,
+        variant_id, variant_code, variant_name,
         item_code, company_name, item_name, packing, batch_number,
         supplied_quantity, previously_returned_qty, new_return_quantity,
         accepted_quantity, damaged_quantity,
         trade_price, discount_percent, return_amount, return_reason
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const v of validatedLines) {
       const { psItem, newReturnQty, acceptedQty, damagedQty, returnReason, returnAmount } = v;
       const itemId = Number(psItem.item_id);
       const parsed = parsePacking(String(psItem.packing || '1x1'));
+      const psVariantId = psItem.variant_id ? Number(psItem.variant_id) : null;
+      const psVariantCode = psVariantId ? (String(psItem.variant_code || '').trim() || null) : null;
+      const psVariantName = psVariantId ? (String(psItem.variant_name || '').trim() || null) : null;
 
       insertReturnItem.run(
         supplyReturnId,
@@ -3413,6 +3474,9 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
         String(psItem.party_name || ''),
         itemId,
         psItem.inventory_id ? Number(psItem.inventory_id) : null,
+        psVariantId,
+        psVariantCode,
+        psVariantName,
         String(psItem.item_code || ''),
         String(psItem.company_name || ''),
         String(psItem.item_name || ''),
@@ -3461,14 +3525,16 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
       );
 
       // Restore accepted saleable stock to inventory; record damaged_pack_qty separately
+      const psVariantKey = psItem.variant_id ? Number(psItem.variant_id) : 0;
       const batchRow = db
         .prepare(`
           SELECT * FROM inventory
           WHERE item_id = ?
+            AND (? = 0 OR COALESCE(variant_key, 0) = ?)
           ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC
           LIMIT 1
         `)
-        .get(itemId, Number(psItem.inventory_id || 0)) as Record<string, unknown> | undefined;
+        .get(itemId, psVariantKey, psVariantKey, Number(psItem.inventory_id || 0)) as Record<string, unknown> | undefined;
 
       if (batchRow) {
         const acceptedUnits = round2(acceptedQty * parsed.unitsPerPack);
@@ -3519,6 +3585,9 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
           recordBatchStockMovement({
             movement_date: returnDate,
             item_id: itemId,
+            variant_id: psVariantId,
+            variant_code: psVariantCode,
+            variant_name: psVariantName,
             item_code: String(psItem.item_code || ''),
             item_name: String(psItem.item_name || ''),
             company_name: String(psItem.company_name || ''),
@@ -3862,20 +3931,28 @@ supplyRouter.post('/supplies/:id/finalize-billing', (req: Request, res: Response
 
       const insertSaleItem = db.prepare(`
         INSERT INTO sale_items (
-          sale_id, item_id, inventory_id, item_code, company_name, item_name,
+          sale_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+          item_code, company_name, item_name,
           packing, units_per_pack, batch_number, expiry_date,
           available_stock_packs, available_stock_units,
           quantity, bonus_quantity, unit_price, discount_percent, discount_amount,
           loose_quantity, loose_rate, total_units, cost_price_per_unit,
           gross_amount, taxable_amount, tax_percent, tax_amount, line_total
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 0, 0, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 0, 0, ?)
       `);
 
       for (const l of linesToBill) {
+        const billVariantId = l.psItem.variant_id ? Number(l.psItem.variant_id) : null;
+        const billVariantCode = billVariantId ? (String(l.psItem.variant_code || '').trim() || null) : null;
+        const billVariantName = billVariantId ? (String(l.psItem.variant_name || '').trim() || null) : null;
+
         insertSaleItem.run(
           saleId,
           Number(l.psItem.item_id),
           l.psItem.inventory_id ? Number(l.psItem.inventory_id) : null,
+          billVariantId,
+          billVariantCode,
+          billVariantName,
           String(l.psItem.item_code || ''),
           String(l.psItem.company_name || ''),
           String(l.psItem.item_name || ''),

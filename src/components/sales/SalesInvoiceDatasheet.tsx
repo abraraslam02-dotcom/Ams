@@ -1187,6 +1187,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             const resolvedThumb =
               catVariant?.effective_thumbnail_url ||
               catVariant?.effective_image_url ||
+              line.effective_thumbnail_url ||
+              line.thumbnail_url ||
               catMatch?.thumbnail_url ||
               catMatch?.image_url ||
               null;
@@ -2420,8 +2422,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         items: activeLines.map((r) => ({
           item_id: r.item_id,
           variant_id: r.variant_id || null,
-          variant_code: r.variant_code || '',
-          variant_name: r.variant_name || '',
+          variant_code: r.variant_id ? (r.variant_code || null) : null,
+          variant_name: r.variant_id ? (r.variant_name || null) : null,
           inventory_id: r.inventory_id,
           item_code: r.item_code,
           company_name: r.company_name,

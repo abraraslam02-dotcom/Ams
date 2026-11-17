@@ -1196,8 +1196,8 @@ enhancementsRouter.post('/offers', authenticateToken, (req, res) => {
         String(body.item_code || itemRow?.item_code || ''),
         String(body.item_name || itemRow?.item_name || ''),
         variantRow ? variantRow.id : null,
-        String(body.variant_code || variantRow?.variant_code || ''),
-        String(body.variant_name || variantRow?.variant_name || ''),
+        variantRow ? (String(body.variant_code || variantRow.variant_code || '').trim() || null) : null,
+        variantRow ? (String(body.variant_name || variantRow.variant_name || '').trim() || null) : null,
         townId,
         String(body.town_name || townRow?.town_name || ''),
         partyId,
@@ -1329,8 +1329,8 @@ enhancementsRouter.put('/offers/:id', authenticateToken, (req, res) => {
       String(itemRow?.item_code ?? existing.item_code ?? ''),
       String(itemRow?.item_name ?? existing.item_name ?? ''),
       variantRow ? variantRow.id : null,
-      String(variantRow?.variant_code ?? (variantId ? existing.variant_code : '') ?? ''),
-      String(variantRow?.variant_name ?? (variantId ? existing.variant_name : '') ?? ''),
+      variantRow ? (String(variantRow.variant_code || existing.variant_code || '').trim() || null) : null,
+      variantRow ? (String(variantRow.variant_name || existing.variant_name || '').trim() || null) : null,
       body.town_id !== undefined ? (body.town_id ? Number(body.town_id) : null) : existing.town_id,
       body.party_account_id !== undefined ? (body.party_account_id ? Number(body.party_account_id) : null) : existing.party_account_id,
       body.salesman_id !== undefined ? (body.salesman_id ? Number(body.salesman_id) : null) : existing.salesman_id,
@@ -1507,8 +1507,8 @@ enhancementsRouter.post('/party-discounts', authenticateToken, (req, res) => {
         String(body.item_code || itemRow?.item_code || ''),
         String(body.item_name || itemRow?.item_name || ''),
         variantRow ? variantRow.id : null,
-        String(body.variant_code || variantRow?.variant_code || ''),
-        String(body.variant_name || variantRow?.variant_name || ''),
+        variantRow ? (String(body.variant_code || variantRow.variant_code || '').trim() || null) : null,
+        variantRow ? (String(body.variant_name || variantRow.variant_name || '').trim() || null) : null,
         round2(Number(body.discount_percent || 0)),
         round2(Number(body.fixed_discount_amount || 0)),
         body.start_date ? String(body.start_date).slice(0, 10) : '',
@@ -1627,8 +1627,8 @@ enhancementsRouter.put('/party-discounts/:id', authenticateToken, (req, res) => 
       String(itemRow?.item_code ?? existing.item_code ?? ''),
       String(itemRow?.item_name ?? existing.item_name ?? ''),
       variantRow ? variantRow.id : null,
-      String(variantRow?.variant_code ?? (variantId ? existing.variant_code : '') ?? ''),
-      String(variantRow?.variant_name ?? (variantId ? existing.variant_name : '') ?? ''),
+      variantRow ? (String(variantRow.variant_code || existing.variant_code || '').trim() || null) : null,
+      variantRow ? (String(variantRow.variant_name || existing.variant_name || '').trim() || null) : null,
       newPct,
       round2(Number(body.fixed_discount_amount ?? existing.fixed_discount_amount ?? 0)),
       body.start_date !== undefined ? String(body.start_date || '') : String(existing.start_date || ''),
@@ -2209,18 +2209,25 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
 
         for (let lineIdx = 0; lineIdx < items.length; lineIdx++) {
           const it = items[lineIdx];
+          const itVariantId = it.variant_id ? Number(it.variant_id) : null;
+          const itVariantCode = itVariantId ? (String(it.variant_code || '').trim() || null) : null;
+          const itVariantName = itVariantId ? (String(it.variant_name || '').trim() || null) : null;
           db.prepare(
             `INSERT INTO supply_booking_items (
-              booking_id, s_no, item_id, item_code, company_name, item_name, packing,
+              booking_id, s_no, item_id, variant_id, variant_code, variant_name,
+              item_code, company_name, item_name, packing,
               quantity, supplied_quantity, pending_quantity, bonus_quantity, trade_price,
               offer_id, offer_name, offer_discount_percent, offer_discount_amount,
               party_discount_id, party_discount_percent, party_discount_amount,
               discount_percent, discount_amount, amount, remarks
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).run(
             bookingId,
             lineIdx + 1,
             Number(it.item_id),
+            itVariantId,
+            itVariantCode,
+            itVariantName,
             String(it.item_code || ''),
             String(it.company_name || ''),
             String(it.item_name || ''),
@@ -2373,8 +2380,13 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
 
             for (let sNo = 0; sNo < bkItems.length; sNo++) {
               const line = bkItems[sNo];
+              const lineVariantId = line.variant_id ? Number(line.variant_id) : null;
+              const lineVariantCode = lineVariantId ? (String(line.variant_code || '').trim() || null) : null;
+              const lineVariantName = lineVariantId ? (String(line.variant_name || '').trim() || null) : null;
+
               const evalRes = evaluateLineOfferAndPartyDiscount({
                 itemId: Number(line.item_id),
+                variantId: lineVariantId,
                 quantity: Number(line.quantity || 0),
                 tradePrice: Number(line.trade_price || 0),
                 partyAccountId: gb.party_account_id,
@@ -2390,7 +2402,8 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
                 `INSERT INTO party_supply_items (
                   party_supply_id, town_supply_id, supply_number,
                   party_account_id, party_name, booking_id, booking_item_id, booking_number,
-                  s_no, item_id, inventory_id, batch_number, expiry_date, fifo_batches_json,
+                  s_no, item_id, inventory_id, variant_id, variant_code, variant_name,
+                  batch_number, expiry_date, fifo_batches_json,
                   item_code, company_name, item_name, packing,
                   ordered_quantity, ordered_qty, supply_quantity, supply_qty,
                   bonus_quantity, bonus_qty, packed_quantity, packed_qty,
@@ -2399,7 +2412,7 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
                   offer_id, offer_name, offer_discount_percent, offer_discount_amount,
                   party_discount_id, party_discount_percent, party_discount_amount,
                   discount_percent, discount_amount, amount, net_billable_amount, remarks
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'Completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
               ).run(
                 partySupplyId,
                 townSupplyId,
@@ -2412,6 +2425,9 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
                 sNo + 1,
                 Number(line.item_id),
                 fifoAlloc.primary_inventory_id,
+                lineVariantId,
+                lineVariantCode,
+                lineVariantName,
                 fifoAlloc.primary_batch_number || 'FIFO-AUTO',
                 fifoAlloc.primary_expiry_date || '',
                 JSON.stringify(fifoAlloc.allocations),
@@ -2425,6 +2441,8 @@ enhancementsRouter.post('/booking-imports/commit', authenticateToken, (req, res)
                 evalRes.sale_quantity,
                 evalRes.bonus_quantity,
                 evalRes.bonus_quantity,
+                evalRes.sale_quantity,
+                evalRes.sale_quantity,
                 evalRes.sale_quantity,
                 evalRes.sale_quantity,
                 evalRes.sale_quantity,

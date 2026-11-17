@@ -737,9 +737,13 @@ salesRouter.get('/', (req: Request, res: Response) => {
             si.*,
             COALESCE(NULLIF(TRIM(si.company_name), ''), i.company_name, '') as company_name,
             COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
-            COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code
+            COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code,
+            COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, NULL) as variant_code,
+            COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, NULL) as variant_name,
+            COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url
           FROM sale_items si
           LEFT JOIN items i ON si.item_id = i.id
+          LEFT JOIN item_variants iv ON iv.id = si.variant_id
           WHERE si.sale_id IN (${placeholders})
           ORDER BY si.sale_id DESC, si.id ASC
         `)
@@ -873,8 +877,8 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         si.sale_id,
         COALESCE(si.item_id, i.id, ?) as item_id,
         si.variant_id,
-        COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, '') as variant_code,
-        COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, '') as variant_name,
+        COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, NULL) as variant_code,
+        COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, NULL) as variant_name,
         COALESCE(NULLIF(TRIM(i.item_code), ''), NULLIF(TRIM(si.item_code), ''), ?) as item_code,
         COALESCE(NULLIF(TRIM(i.item_name), ''), NULLIF(TRIM(si.item_name), ''), '') as item_name,
         COALESCE(si.packing, i.packing, '') as packing,
@@ -972,8 +976,8 @@ const handleGetItemHistory = (req: Request, res: Response) => {
           pi.purchase_id,
           COALESCE(pi.item_id, it.id, ?) as item_id,
           pi.variant_id,
-          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, '') as variant_code,
-          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, NULL) as variant_code,
+          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, NULL) as variant_name,
           COALESCE(NULLIF(TRIM(it.item_code), ''), NULLIF(TRIM(pi.item_code), ''), ?) as item_code,
           COALESCE(NULLIF(TRIM(it.item_name), ''), NULLIF(TRIM(pi.item_name), ''), '') as item_name,
           COALESCE(pi.batch_number, '') as batch_number,
@@ -1186,6 +1190,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
           COALESCE(s.buyer_name, '') as buyer_name,
           COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code,
           COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
+          si.variant_id,
+          COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, NULL) as variant_code,
+          COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, NULL) as variant_name,
           COALESCE(si.quantity, 0) as quantity,
           COALESCE(si.loose_quantity, 0) as loose_quantity,
           COALESCE(si.bonus_quantity, 0) as bonus_quantity,
@@ -1203,6 +1210,7 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
         INNER JOIN sales s ON s.id = si.sale_id
         LEFT JOIN accounts a ON a.id = s.customer_account_id
         LEFT JOIN items i ON i.id = si.item_id
+        LEFT JOIN item_variants iv ON iv.id = si.variant_id
         WHERE si.item_id = ?
           AND s.status = 'completed'
         ORDER BY s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
@@ -1227,6 +1235,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
         buyer_name: String(row.buyer_name || ''),
         item_code: String(row.item_code || ''),
         item_name: String(row.item_name || ''),
+        variant_id: row.variant_id ? Number(row.variant_id) : null,
+        variant_code: row.variant_code ? String(row.variant_code) : null,
+        variant_name: row.variant_name ? String(row.variant_name) : null,
         quantity: round2(row.quantity),
         loose_quantity: round2(row.loose_quantity),
         bonus_quantity: round2(row.bonus_quantity),
@@ -1255,6 +1266,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
           COALESCE(a.account_name, 'Supplier') as supplier_name,
           COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code,
           COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
+          pi.variant_id,
+          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, NULL) as variant_code,
+          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, NULL) as variant_name,
           COALESCE(pi.quantity, 0) as quantity,
           COALESCE(pi.bonus_quantity, 0) as bonus_quantity,
           COALESCE(pi.batch_number, '') as batch_number,
@@ -1270,6 +1284,7 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
         INNER JOIN purchases p ON p.id = pi.purchase_id
         LEFT JOIN accounts a ON a.id = p.supplier_account_id
         LEFT JOIN items i ON i.id = pi.item_id
+        LEFT JOIN item_variants iv ON iv.id = pi.variant_id
         LEFT JOIN inventory inv ON inv.id = pi.inventory_id
         WHERE pi.item_id = ?
           AND p.status = 'completed'
@@ -1367,8 +1382,8 @@ salesRouter.get('/:id', (req: Request, res: Response, next) => {
         SELECT
           si.*,
           COALESCE(NULLIF(TRIM(si.company_name), ''), i.company_name, '') as company_name,
-          COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, '') as variant_code,
-          COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, NULL) as variant_code,
+          COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, NULL) as variant_name,
           COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url,
           (si.total_units - si.returned_total_units) as eligible_return_units
         FROM sale_items si
@@ -1590,8 +1605,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       itemId: number;
       variantId: number | null;
       variantKey: number;
-      variantCode: string;
-      variantName: string;
+      variantCode: string | null;
+      variantName: string | null;
       inventoryId: number | null;
       itemCode: string;
       companyName: string;
@@ -1654,8 +1669,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         }
       }
       const variantKey = variantRow ? Number(variantRow.id) : 0;
-      const variantCode = variantRow ? String(variantRow.variant_code || '') : '';
-      const variantName = variantRow ? String(variantRow.variant_name || '') : '';
+      const variantCode = variantRow ? (String(variantRow.variant_code || '').trim() || null) : null;
+      const variantName = variantRow ? (String(variantRow.variant_name || '').trim() || null) : null;
       const useVarCustom = Boolean(variantRow && Number(variantRow.use_parent_pricing ?? 1) === 0);
 
       const parsed = parsePacking(String(line.packing || variantRow?.packing || itemRow.packing || '1x1'));
@@ -3062,8 +3077,8 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
         originalSaleItemId: number;
         itemId: number;
         variantId: number | null;
-        variantCode: string;
-        variantName: string;
+        variantCode: string | null;
+        variantName: string | null;
         inventoryId: number | null;
         itemCode: string;
         companyName: string;
@@ -3142,8 +3157,8 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
           originalSaleItemId: origItemId,
           itemId: Number(origLine.item_id),
           variantId: origLine.variant_id ? Number(origLine.variant_id) : null,
-          variantCode: String(origLine.variant_code || ''),
-          variantName: String(origLine.variant_name || ''),
+          variantCode: origLine.variant_id ? (String(origLine.variant_code || '').trim() || null) : null,
+          variantName: origLine.variant_id ? (String(origLine.variant_name || '').trim() || null) : null,
           inventoryId: origLine.inventory_id ? Number(origLine.inventory_id) : null,
           itemCode: String(origLine.item_code),
           companyName: String(origLine.company_name || ''),

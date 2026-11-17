@@ -611,10 +611,15 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                         {row.buyer_name || '—'}
                       </td>
                       <td className="px-2 py-1 border-r border-slate-200 font-mono text-slate-700 whitespace-nowrap">
-                        {row.item_code}
+                        {row.variant_code || row.item_code}
                       </td>
                       <td className="px-2 py-1 border-r border-slate-200 text-slate-900">
-                        {row.item_name}
+                        <span>{row.item_name}</span>
+                        {row.variant_name ? (
+                          <span className="ml-1.5 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[9px] font-bold">
+                            {row.variant_name}
+                          </span>
+                        ) : null}
                       </td>
                       <td className="px-2 py-1 border-r border-slate-200 text-right font-mono font-bold">
                         {row.quantity}
@@ -739,10 +744,15 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                       {row.supplier_name}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 font-mono text-slate-700 whitespace-nowrap">
-                      {row.item_code}
+                      {row.variant_code || row.item_code}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 text-slate-900">
-                      {row.item_name}
+                      <span>{row.item_name}</span>
+                      {row.variant_name ? (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[9px] font-bold">
+                          {row.variant_name}
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 text-right font-mono font-bold">
                       {row.quantity}

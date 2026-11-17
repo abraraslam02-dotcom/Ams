@@ -1630,18 +1630,26 @@ export function hydrateSqliteFromCloudRecords(
               const taxAmt = Number(ln?.tax_amount || 0);
               const lineTotal = Number(ln?.line_total || taxableAmt + taxAmt || 0);
 
+              const lnVariantId = ln?.variant_id ? Number(ln.variant_id) : null;
+              const lnVariantCode = lnVariantId ? (String(ln?.variant_code || '').trim() || null) : null;
+              const lnVariantName = lnVariantId ? (String(ln?.variant_name || '').trim() || null) : null;
+
               db.prepare(
                 `INSERT INTO sale_items (
-                  sale_id, item_id, inventory_id, item_code, company_name, item_name,
+                  sale_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+                  item_code, company_name, item_name,
                   packing, units_per_pack, batch_number, expiry_date,
                   quantity, loose_quantity, bonus_quantity, total_units,
                   unit_price, loose_rate, discount_percent, discount_amount,
                   gross_amount, taxable_amount, tax_percent, tax_amount, line_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
               ).run(
                 targetSaleId,
                 itemId,
                 ln?.inventory_id ? Number(ln.inventory_id) : null,
+                lnVariantId,
+                lnVariantCode,
+                lnVariantName,
                 itemCode,
                 companyName,
                 itemName,
@@ -1763,18 +1771,26 @@ export function hydrateSqliteFromCloudRecords(
               const taxAmt = Number(ln?.tax_amount || 0);
               const lineTotal = Number(ln?.line_total || taxableAmt + taxAmt || 0);
 
+              const lnVariantId = ln?.variant_id ? Number(ln.variant_id) : null;
+              const lnVariantCode = lnVariantId ? (String(ln?.variant_code || '').trim() || null) : null;
+              const lnVariantName = lnVariantId ? (String(ln?.variant_name || '').trim() || null) : null;
+
               db.prepare(
                 `INSERT INTO purchase_items (
-                  purchase_id, item_id, inventory_id, item_code, company_name, item_name,
+                  purchase_id, item_id, inventory_id, variant_id, variant_code, variant_name,
+                  item_code, company_name, item_name,
                   packing, units_per_pack, batch_number, manufacturing_date, expiry_date,
                   quantity, bonus_quantity, pack_quantity, loose_quantity, total_units,
                   purchase_rate, mrp_rate, gross_amount, discount_percent, discount_amount,
                   taxable_amount, tax_percent, tax_amount, line_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
               ).run(
                 targetPurchaseId,
                 itemId,
                 ln?.inventory_id ? Number(ln.inventory_id) : null,
+                lnVariantId,
+                lnVariantCode,
+                lnVariantName,
                 itemCode,
                 companyName,
                 itemName,

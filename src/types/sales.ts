@@ -317,6 +317,9 @@ export interface ItemLogSaleRow {
   buyer_name: string;
   item_code: string;
   item_name: string;
+  variant_id?: number | null;
+  variant_code?: string | null;
+  variant_name?: string | null;
   quantity: number;
   loose_quantity: number;
   bonus_quantity: number;
@@ -342,6 +345,9 @@ export interface ItemLogPurchaseRow {
   supplier_name: string;
   item_code: string;
   item_name: string;
+  variant_id?: number | null;
+  variant_code?: string | null;
+  variant_name?: string | null;
   quantity: number;
   bonus_quantity: number;
   batch_number: string;

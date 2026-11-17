@@ -4168,8 +4168,8 @@ export function runMigrations(): MigrationResult {
     ];
     for (const tbl of variantAwareTables) {
       ensureCol(tbl, 'variant_id', 'INTEGER DEFAULT NULL');
-      ensureCol(tbl, 'variant_code', "TEXT NOT NULL DEFAULT ''");
-      ensureCol(tbl, 'variant_name', "TEXT NOT NULL DEFAULT ''");
+      ensureCol(tbl, 'variant_code', 'TEXT DEFAULT NULL');
+      ensureCol(tbl, 'variant_name', 'TEXT DEFAULT NULL');
     }
 
     db.exec(`
@@ -4218,6 +4218,11 @@ export function runMigrations(): MigrationResult {
               bonus_qty REAL NOT NULL DEFAULT 0.0,
               returned_qty REAL NOT NULL DEFAULT 0.0,
               sold_qty REAL NOT NULL DEFAULT 0.0,
+              adjusted_qty REAL NOT NULL DEFAULT 0.0,
+              transferred_qty REAL NOT NULL DEFAULT 0.0,
+              sales_return_qty REAL NOT NULL DEFAULT 0.0,
+              purchase_return_qty REAL NOT NULL DEFAULT 0.0,
+              opening_stock_packs REAL NOT NULL DEFAULT 0.0,
               current_pack_qty REAL NOT NULL DEFAULT 0.0,
               current_strip_qty REAL NOT NULL DEFAULT 0.0,
               current_loose_qty REAL NOT NULL DEFAULT 0.0,
@@ -4269,10 +4274,133 @@ export function runMigrations(): MigrationResult {
       }
     }
 
+    // Ensure quantity tracking columns exist on inventory even if Migration 031 rebuilt the table earlier
+    const postUpgradeInvCols = (db.prepare('PRAGMA table_info("inventory")').all() as Array<{ name: string }>).map((c) => c.name);
+    for (const [colName, colDef] of [
+      ['adjusted_qty', 'REAL NOT NULL DEFAULT 0.0'],
+      ['transferred_qty', 'REAL NOT NULL DEFAULT 0.0'],
+      ['sales_return_qty', 'REAL NOT NULL DEFAULT 0.0'],
+      ['purchase_return_qty', 'REAL NOT NULL DEFAULT 0.0'],
+      ['opening_stock_packs', 'REAL NOT NULL DEFAULT 0.0'],
+    ] as const) {
+      if (!postUpgradeInvCols.includes(colName)) {
+        db.exec(`ALTER TABLE inventory ADD COLUMN ${colName} ${colDef};`);
+      }
+    }
+
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_inventory_item_variant ON inventory(item_id, variant_key);
       CREATE INDEX IF NOT EXISTS idx_inventory_variant_id ON inventory(variant_id);
     `);
+
+    // Migration 032: Make variant_code and variant_name nullable across all 13 variant-aware tables
+    const migrationName32 = '032_nullable_variant_columns';
+    const applied32 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName32);
+
+    const variantTablesToFix = [
+      'purchase_items',
+      'sale_items',
+      'purchase_return_items',
+      'sale_return_items',
+      'batch_stock_movements',
+      'stock_adjustment_items',
+      'stock_transfer_items',
+      'physical_verification_items',
+      'trade_offers',
+      'party_discounts',
+      'supply_booking_items',
+      'party_supply_items',
+      'supply_return_items',
+    ];
+
+    const tablesNeedingRebuild = variantTablesToFix.filter((tbl) => {
+      const cols = db.prepare(`PRAGMA table_info("${tbl}")`).all() as Array<{ name: string; notnull: number }>;
+      return cols.some((c) => (c.name === 'variant_code' || c.name === 'variant_name') && c.notnull === 1);
+    });
+
+    if (tablesNeedingRebuild.length > 0 || !applied32) {
+      if (tablesNeedingRebuild.length > 0) {
+        db.pragma('foreign_keys = OFF');
+        try {
+          const fixVariantNullabilityTx = db.transaction(() => {
+            for (const tbl of tablesNeedingRebuild) {
+              const preCount = Number(
+                (db.prepare(`SELECT COUNT(*) as c FROM "${tbl}"`).get() as { c: number })?.c || 0
+              );
+              const tableMeta = db
+                .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?")
+                .get(tbl) as { sql: string } | undefined;
+              if (!tableMeta?.sql) continue;
+
+              const existingIndexes = db
+                .prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name = ? AND sql IS NOT NULL")
+                .all(tbl) as Array<{ name: string; sql: string }>;
+
+              const colsInfo = db.prepare(`PRAGMA table_info("${tbl}")`).all() as Array<{ name: string }>;
+              const colNames = colsInfo.map((c) => c.name);
+              const tempTbl = `${tbl}_var_fix`;
+
+              db.exec(`DROP TABLE IF EXISTS "${tempTbl}";`);
+
+              let createTempSql = tableMeta.sql.replace(
+                new RegExp(`^(\\s*CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?)["'\`]?${tbl}["'\`]?`, 'i'),
+                `$1"${tempTbl}"`
+              );
+              createTempSql = createTempSql
+                .replace(
+                  /(["'`]?variant_code["'`]?\s+TEXT)\s+NOT\s+NULL(?:\s+DEFAULT\s+(?:''|""))?/gi,
+                  '$1 DEFAULT NULL'
+                )
+                .replace(
+                  /(["'`]?variant_name["'`]?\s+TEXT)\s+NOT\s+NULL(?:\s+DEFAULT\s+(?:''|""))?/gi,
+                  '$1 DEFAULT NULL'
+                );
+
+              db.exec(createTempSql);
+
+              const selectExprs = colNames.map((col) => {
+                if (col === 'variant_code' || col === 'variant_name') {
+                  return `CASE WHEN variant_id IS NULL AND TRIM(COALESCE("${col}", '')) = '' THEN NULL ELSE "${col}" END`;
+                }
+                return `"${col}"`;
+              });
+              const quotedCols = colNames.map((col) => `"${col}"`).join(', ');
+
+              db.exec(`
+                INSERT INTO "${tempTbl}" (${quotedCols})
+                SELECT ${selectExprs.join(', ')}
+                FROM "${tbl}";
+              `);
+
+              const postCount = Number(
+                (db.prepare(`SELECT COUNT(*) as c FROM "${tempTbl}"`).get() as { c: number })?.c || 0
+              );
+              if (postCount !== preCount) {
+                throw new Error(`Nullable variant migration count mismatch on ${tbl} (${postCount} vs ${preCount}).`);
+              }
+
+              db.exec(`DROP TABLE "${tbl}";`);
+              db.exec(`ALTER TABLE "${tempTbl}" RENAME TO "${tbl}";`);
+
+              for (const idx of existingIndexes) {
+                if (idx.sql) {
+                  db.exec(idx.sql);
+                }
+              }
+            }
+          });
+          fixVariantNullabilityTx();
+        } finally {
+          db.pragma('foreign_keys = ON');
+        }
+      }
+
+      if (!applied32) {
+        db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName32, 32);
+      }
+    }
 
     const tables = db
       .prepare(
@@ -4287,7 +4415,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

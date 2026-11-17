@@ -504,8 +504,8 @@ purchasesRouter.get('/batches', (req: Request, res: Response) => {
           i.category,
           i.minimum_stock,
           i.has_variants,
-          COALESCE(iv.variant_code, '') as variant_code,
-          COALESCE(iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(iv.variant_code), ''), NULL) as variant_code,
+          COALESCE(NULLIF(TRIM(iv.variant_name), ''), NULL) as variant_name,
           COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url,
           a.account_name as last_supplier_name
         FROM inventory inv
@@ -1304,6 +1304,8 @@ purchasesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
           .prepare(`
             SELECT
               pi.*,
+              COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, NULL) as variant_code,
+              COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, NULL) as variant_name,
               p.bill_number,
               p.supplier_invoice_number,
               p.bill_date,
@@ -1315,7 +1317,8 @@ purchasesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             FROM purchase_items pi
             INNER JOIN purchases p ON p.id = pi.purchase_id
             INNER JOIN accounts a ON a.id = p.supplier_account_id
-            LEFT JOIN inventory inv ON inv.item_id = pi.item_id AND inv.batch_number = pi.batch_number
+            LEFT JOIN item_variants iv ON iv.id = pi.variant_id
+            LEFT JOIN inventory inv ON (pi.inventory_id IS NOT NULL AND inv.id = pi.inventory_id) OR (pi.inventory_id IS NULL AND inv.item_id = pi.item_id AND inv.batch_number = pi.batch_number AND COALESCE(inv.variant_key, 0) = COALESCE(pi.variant_id, 0))
             WHERE ${batchConds.join(' AND ')}
             ORDER BY DATE(p.bill_date) DESC, pi.id DESC
           `)
@@ -1431,6 +1434,9 @@ purchasesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             SELECT
               pi.id,
               pi.item_id,
+              pi.variant_id,
+              COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, NULL) as variant_code,
+              COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, NULL) as variant_name,
               pi.item_code,
               pi.item_name,
               pi.company_name,
@@ -1452,7 +1458,8 @@ purchasesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
             FROM purchase_items pi
             INNER JOIN purchases p ON p.id = pi.purchase_id
             INNER JOIN accounts a ON a.id = p.supplier_account_id
-            LEFT JOIN inventory inv ON inv.item_id = pi.item_id AND inv.batch_number = pi.batch_number
+            LEFT JOIN item_variants iv ON iv.id = pi.variant_id
+            LEFT JOIN inventory inv ON (pi.inventory_id IS NOT NULL AND inv.id = pi.inventory_id) OR (pi.inventory_id IS NULL AND inv.item_id = pi.item_id AND inv.batch_number = pi.batch_number AND COALESCE(inv.variant_key, 0) = COALESCE(pi.variant_id, 0))
             WHERE ${expConds.join(' AND ')}
             ORDER BY DATE(pi.expiry_date) ASC, pi.item_name ASC
           `)
@@ -1557,9 +1564,13 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
             pi.*,
             COALESCE(NULLIF(TRIM(pi.company_name), ''), i.company_name, '') as company_name,
             COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
-            COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code
+            COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code,
+            COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, NULL) as variant_code,
+            COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, NULL) as variant_name,
+            COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url
           FROM purchase_items pi
           LEFT JOIN items i ON pi.item_id = i.id
+          LEFT JOIN item_variants iv ON iv.id = pi.variant_id
           WHERE pi.purchase_id IN (${placeholders})
           ORDER BY pi.purchase_id DESC, pi.id ASC
         `)
@@ -1647,8 +1658,8 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
           COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pi.company_name), ''), '') as company_name,
           COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
           COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code,
-          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, '') as variant_code,
-          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, NULL) as variant_code,
+          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, NULL) as variant_name,
           COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url
         FROM purchase_items pi
         LEFT JOIN items i ON pi.item_id = i.id
@@ -1867,8 +1878,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       }
     }
     const variantKey = dbVariant ? Number(dbVariant.id) : 0;
-    const variantCode = dbVariant ? String(dbVariant.variant_code || '') : '';
-    const variantName = dbVariant ? String(dbVariant.variant_name || '') : '';
+    const variantCode = dbVariant ? (String(dbVariant.variant_code || '').trim() || null) : null;
+    const variantName = dbVariant ? (String(dbVariant.variant_name || '').trim() || null) : null;
     const useVariantCustomPricing = Boolean(dbVariant && Number(dbVariant.use_parent_pricing ?? 1) === 0);
 
     const existingPrimaryBatch = !batchWisePurchase
@@ -2776,6 +2787,7 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
       const parsedPack = parsePacking(batch.packing);
       const newStripQty = round2(newPackQty * parsedPack.stripsPerBox);
       const newTotalUnits = round2(newPackQty * parsedPack.unitsPerPack);
+      const newLooseUnits = round2(newTotalUnits % Math.max(1, parsedPack.unitsPerPack));
       const newStatus = computeBatchStatus(newPackQty, batch.expiry_date);
 
       db.prepare(`
@@ -2794,7 +2806,7 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
         newBonusQty,
         newPackQty,
         newStripQty,
-        newTotalUnits,
+        newLooseUnits,
         newTotalUnits,
         newStatus,
         batch.id

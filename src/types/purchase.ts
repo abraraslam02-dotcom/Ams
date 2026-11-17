@@ -39,8 +39,8 @@ export interface PurchaseLineItem {
   purchase_id?: number;
   item_id: number;
   variant_id?: number | null;
-  variant_code?: string;
-  variant_name?: string;
+  variant_code?: string | null;
+  variant_name?: string | null;
   thumbnail_url?: string | null;
   inventory_id?: number;
   item_code: string;
