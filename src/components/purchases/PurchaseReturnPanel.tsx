@@ -473,39 +473,61 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
                   >
                     — All Suppliers —
                   </button>
-                  {filteredSuppliers.map((s, idx) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onMouseEnter={() => setSupplierHighlightIdx(idx)}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        setSelectedSupplierId(String(s.id));
-                        setSelectedPurchaseId('');
-                        setSelectedInvoiceDetails(null);
-                        setReturnLines([]);
-                        setSupplierDropdownOpen(false);
-                      }}
-                      className={`w-full px-3 py-1.5 text-left flex items-center justify-between cursor-pointer ${
-                        idx === supplierHighlightIdx
-                          ? 'bg-rose-50 text-slate-950 font-semibold'
-                          : 'hover:bg-slate-50 text-slate-800'
-                      }`}
-                    >
-                      <div>
-                        <div className="font-bold text-slate-900">
-                          <span className="font-mono text-rose-700">[{s.account_code}]</span>{' '}
-                          {s.account_name}
+                  {filteredSuppliers.map((s, idx) => {
+                    const isHighlighted = idx === supplierHighlightIdx;
+                    const isCurrent = String(selectedSupplierId) === String(s.id);
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onMouseEnter={() => setSupplierHighlightIdx(idx)}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setSelectedSupplierId(String(s.id));
+                          setSelectedPurchaseId('');
+                          setSelectedInvoiceDetails(null);
+                          setReturnLines([]);
+                          setSupplierDropdownOpen(false);
+                        }}
+                        className={`w-full px-3 py-1.5 text-left flex items-center justify-between cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
+                          isHighlighted
+                            ? 'bg-sky-700 text-white font-semibold'
+                            : isCurrent
+                            ? 'bg-emerald-100 text-emerald-950 font-semibold border-l-4 border-emerald-600'
+                            : 'hover:bg-sky-100 text-slate-900'
+                        }`}
+                      >
+                        <div>
+                          <div className={`font-bold ${isHighlighted ? 'text-white' : 'text-slate-900'}`}>
+                            <span
+                              className={`font-mono ${
+                                isHighlighted ? 'text-amber-200' : 'text-sky-700'
+                              }`}
+                            >
+                              [{s.account_code}]
+                            </span>{' '}
+                            {s.account_name}
+                          </div>
+                          <div
+                            className={`text-[10px] font-mono ${
+                              isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                            }`}
+                          >
+                            Mobile: {s.phone || 'N/A'}
+                          </div>
                         </div>
-                        <div className="text-[10px] font-mono text-slate-500">
-                          Mobile: {s.phone || 'N/A'}
-                        </div>
-                      </div>
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">
-                        {s.filer_status || 'Filer'}
-                      </span>
-                    </button>
-                  ))}
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                            isHighlighted
+                              ? 'bg-sky-900 text-sky-100 border border-sky-400'
+                              : 'bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          {s.filer_status || 'Filer'}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>

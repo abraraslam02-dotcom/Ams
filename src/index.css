@@ -250,8 +250,28 @@
   }
 
   /* Dropdown Options & Item Search Results */
+  .ams-readable-invoice-scope select:not(.print-modal-container *):focus,
+  .ams-readable-invoice-scope select:not(.print-modal-container *):focus-visible {
+    outline: none;
+    border-color: #0369a1 !important;
+    box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.25);
+  }
+
   .ams-readable-invoice-scope option:not(.print-modal-container *) {
     font-size: 15px !important;
+    background-color: #ffffff;
+    color: #0f172a;
+  }
+
+  .ams-readable-invoice-scope option:not(.print-modal-container *):checked {
+    background-color: #0369a1;
+    color: #ffffff;
+    font-weight: 600;
+  }
+
+  .ams-readable-invoice-scope option:not(.print-modal-container *):hover {
+    background-color: #e0f2fe;
+    color: #0f172a;
   }
 
   /* Invoice Table Headers & Rows */

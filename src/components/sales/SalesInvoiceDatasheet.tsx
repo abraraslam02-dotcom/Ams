@@ -350,6 +350,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [itemHistoryMap, setItemHistoryMap] = useState<Record<string, CustomerItemHistoryResponse>>({});
   const [historyLoading, setHistoryLoading] = useState<boolean>(false);
   const [showCompactHistoryPopup, setShowCompactHistoryPopup] = useState<boolean>(false);
+  const ctrlPriceHistoryArmedRef = useRef<boolean>(false);
 
   // Live Customer Balance Summary (from actual ledger + Last Payment Date/Amount)
   const [liveBalanceSummary, setLiveBalanceSummary] = useState<{
@@ -1651,8 +1652,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setEditingItemCode(null);
     setEditingItemName(null);
 
-    // Immediately fetch and display Item History by unique ItemCode (+ variantId) without requiring page refresh
-    setShowCompactHistoryPopup(true);
+    // Pre-fetch Customer-wise Item History silently without auto-opening the popup
     fetchAndApplyItemHistory(
       rowIdx,
       item.id,
@@ -1986,20 +1986,30 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       : round2(it.retail_price);
                   const stockQty = it.total_available_packs ?? it.consolidated_stock_packs ?? it.default_batch?.available_packs ?? 0;
                   const variantCount = Number(it.has_variants || 0) === 1 ? getActiveVariants(it).length : 0;
+                  const activeRowForMatch =
+                    context === 'row' && typeof rowIdx === 'number'
+                      ? rows[rowIdx]
+                      : rows[selectedRowIndex];
+                  const isCurrentItem = Boolean(
+                    activeRowForMatch?.item_id && Number(activeRowForMatch.item_id) === Number(it.id)
+                  );
                   return (
                     <tr
                       key={it.id}
                       data-sales-search-idx={idx}
+                      tabIndex={-1}
                       onMouseEnter={() => setSearchHighlightIdx(idx)}
                       onMouseDown={(e) => {
                         e.preventDefault();
                         const exact = findExactBarcodeOrCodeMatch([it], quickSearchQuery);
                         handleSelectFromTopSearch(it, rowIdx, exact?.variant || null);
                       }}
-                      className={`cursor-pointer transition-colors h-[26px] ${
+                      className={`cursor-pointer transition-colors h-[26px] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
                         isHighlighted
-                          ? 'bg-emerald-100 text-slate-950 font-bold'
-                          : 'hover:bg-emerald-50/70 text-slate-900'
+                          ? 'bg-sky-700 text-white font-semibold'
+                          : isCurrentItem
+                          ? 'bg-emerald-100 text-emerald-950 font-semibold border-l-4 border-emerald-600'
+                          : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
                       <td className="px-2.5 py-1 border-r border-slate-200">
@@ -2011,20 +2021,46 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               size="xs"
                               className="!w-5 !h-5 shrink-0"
                             />
-                            <span className="font-mono text-[10px] text-emerald-700 font-bold shrink-0">
+                            <span
+                              className={`font-mono text-[10px] font-bold shrink-0 ${
+                                isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                              }`}
+                            >
                               [{it.item_code}]
                             </span>
-                            <span className="font-bold text-slate-900 truncate">{it.item_name}</span>
-                            <span className="text-[10px] text-slate-500 shrink-0">({it.packing})</span>
+                            <span
+                              className={`font-bold truncate ${
+                                isHighlighted ? 'text-white' : 'text-slate-900'
+                              }`}
+                            >
+                              {it.item_name}
+                            </span>
+                            <span
+                              className={`text-[10px] shrink-0 ${
+                                isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                              }`}
+                            >
+                              ({it.packing})
+                            </span>
                             {variantCount > 0 && (
-                              <span className="text-[9px] font-bold px-1 rounded bg-amber-100 text-amber-800 border border-amber-200 shrink-0">
+                              <span
+                                className={`text-[9px] font-bold px-1 rounded border shrink-0 ${
+                                  isHighlighted
+                                    ? 'bg-sky-900 text-amber-200 border-sky-400'
+                                    : 'bg-amber-100 text-amber-800 border-amber-200'
+                                }`}
+                              >
                                 {variantCount} Var
                               </span>
                             )}
                           </div>
                           <span
                             className={`text-[9.5px] font-mono px-1 rounded shrink-0 ${
-                              stockQty > 0
+                              isHighlighted
+                                ? stockQty > 0
+                                  ? 'bg-sky-900 text-emerald-200 border border-sky-400'
+                                  : 'bg-rose-900 text-rose-100 border border-rose-400'
+                                : stockQty > 0
                                 ? 'bg-emerald-50 text-emerald-700'
                                 : 'bg-rose-50 text-rose-600'
                             }`}
@@ -2033,13 +2069,25 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           </span>
                         </div>
                       </td>
-                      <td className="px-2.5 py-1 border-r border-slate-200 text-slate-700 truncate max-w-[160px]">
+                      <td
+                        className={`px-2.5 py-1 border-r border-slate-200 truncate max-w-[160px] ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
                         {it.company_name || '—'}
                       </td>
-                      <td className="px-2.5 py-1 border-r border-slate-200 text-right font-mono font-semibold text-slate-700">
+                      <td
+                        className={`px-2.5 py-1 border-r border-slate-200 text-right font-mono font-semibold ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
                         Rs. {purchasePrice.toFixed(2)}
                       </td>
-                      <td className="px-2.5 py-1 text-right font-mono font-black text-emerald-800">
+                      <td
+                        className={`px-2.5 py-1 text-right font-mono font-black ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-800'
+                        }`}
+                      >
                         Rs. {salePrice.toFixed(2)}
                       </td>
                     </tr>
@@ -3184,6 +3232,46 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     >;
     const curIdx = posOrder.indexOf(fieldName);
 
+    if (e.key === 'Escape') {
+      if (showCompactHistoryPopup) {
+        e.preventDefault();
+        e.stopPropagation();
+        ctrlPriceHistoryArmedRef.current = false;
+        setShowCompactHistoryPopup(false);
+        return;
+      }
+    }
+
+    if (ctrlPriceHistoryArmedRef.current && e.ctrlKey && e.key !== 'Control') {
+      ctrlPriceHistoryArmedRef.current = false;
+      setShowCompactHistoryPopup(false);
+    }
+
+    // Ctrl while Sale Price field is focused -> Open Customer+Item History once per key press
+    if (
+      fieldName === 'unit_price' &&
+      row?.item_id &&
+      e.key === 'Control' &&
+      !e.repeat &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !e.metaKey
+    ) {
+      ctrlPriceHistoryArmedRef.current = true;
+      setSelectedRowIndex(rowIdx);
+      fetchAndApplyItemHistory(
+        rowIdx,
+        Number(row.item_id || 0),
+        customerAccountId,
+        invoiceType,
+        false,
+        row.item_code,
+        row.variant_id || null
+      );
+      setShowCompactHistoryPopup(true);
+      return;
+    }
+
     // Price column keyboard trigger -> Open Customer+Item Sales Price History
     if (fieldName === 'unit_price' && row?.item_id) {
       const ignoredKeys = new Set([
@@ -3406,6 +3494,44 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
     }
 
+    if (e.key === 'Escape' && showCompactHistoryPopup) {
+      e.preventDefault();
+      e.stopPropagation();
+      ctrlPriceHistoryArmedRef.current = false;
+      setShowCompactHistoryPopup(false);
+      return;
+    }
+
+    if (ctrlPriceHistoryArmedRef.current && e.ctrlKey && e.key !== 'Control') {
+      ctrlPriceHistoryArmedRef.current = false;
+      setShowCompactHistoryPopup(false);
+    }
+
+    // Ctrl while Sale Price field is focused -> Open Customer+Item History once per key press
+    if (
+      colName === 'unit_price' &&
+      row?.item_id &&
+      e.key === 'Control' &&
+      !e.repeat &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !e.metaKey
+    ) {
+      ctrlPriceHistoryArmedRef.current = true;
+      setSelectedRowIndex(rowIndex);
+      fetchAndApplyItemHistory(
+        rowIndex,
+        Number(row.item_id || 0),
+        customerAccountId,
+        invoiceType,
+        false,
+        row.item_code,
+        row.variant_id || null
+      );
+      setShowCompactHistoryPopup(true);
+      return;
+    }
+
     // Price column keyboard trigger in MS Access Datasheet -> Open Customer+Item Sales Price History
     if (colName === 'unit_price' && row?.item_id) {
       const ignoredKeys = new Set([
@@ -3578,6 +3704,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
+        setShowCompactHistoryPopup(false);
         handleSaveInvoice('completed');
       } else if (e.key === 'F2') {
         e.preventDefault();
@@ -3588,9 +3715,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
         e.preventDefault();
+        setShowCompactHistoryPopup(false);
         handleSaveInvoice('completed', 'a4');
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
         e.preventDefault();
+        setShowCompactHistoryPopup(false);
         resetToNewInvoice();
       } else if (e.key === 'F3') {
         e.preventDefault();
@@ -3599,12 +3728,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         targetSearch?.select?.();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
+        setShowCompactHistoryPopup(false);
         setShowEditSearchModal(true);
       } else if (e.key === 'F9') {
         e.preventDefault();
         handleSaveInvoice('held');
       } else if (e.key === 'Escape') {
-        if (showItemListModal) {
+        if (showCompactHistoryPopup) {
+          e.preventDefault();
+          setShowCompactHistoryPopup(false);
+        } else if (showItemListModal) {
           e.preventDefault();
           setShowItemListModal(false);
           setItemListTargetRowIdx(null);
@@ -3616,12 +3749,23 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
     };
 
+    const handleGlobalKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control') {
+        ctrlPriceHistoryArmedRef.current = false;
+      }
+    };
+
     window.addEventListener('keydown', handleGlobalShortcuts);
-    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+    window.addEventListener('keyup', handleGlobalKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalShortcuts);
+      window.removeEventListener('keyup', handleGlobalKeyUp);
+    };
   }, [
     handleSaveInvoice,
     resetToNewInvoice,
     selectedRowIndex,
+    showCompactHistoryPopup,
     showItemListModal,
     showSearchDropdown,
     pendingDuplicatePrompt,
@@ -4296,17 +4440,25 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const isSelected = rIdx === selectedRowIndex;
                     const isActiveSearchMatch = invoiceSearchActiveRow === rIdx;
                     const isSearchMatch = invoiceSearchMatchedRows.includes(rIdx);
+                    const hasItem = row.item_id !== null && Number(row.item_id) > 0;
+                    const isZeroQty = hasItem && Number(row.quantity || 0) === 0;
+                    const isZeroNet = hasItem && round2(Number(row.line_total || 0)) === 0;
+                    const isZeroRow = isZeroQty || isZeroNet;
 
                     return (
                       <tr
                         key={row.row_id}
                         data-sales-row-idx={rIdx}
+                        data-zero-qty={isZeroQty ? 'true' : 'false'}
+                        data-zero-net={isZeroNet ? 'true' : 'false'}
                         onClick={() => setSelectedRowIndex(rIdx)}
                         className={`cursor-pointer transition-colors border-b border-slate-200 h-8 leading-none ${
                           isActiveSearchMatch
                             ? 'bg-amber-200/80 ring-2 ring-inset ring-amber-500 font-semibold'
                             : isSearchMatch
                             ? 'bg-sky-100/80 font-medium'
+                            : isZeroRow
+                            ? 'bg-orange-50/90 hover:bg-orange-100/75'
                             : isSelected
                             ? 'bg-emerald-50/90 font-medium'
                             : rIdx % 2 === 0
@@ -4377,6 +4529,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 setShowSearchDropdown(false);
                                 setActiveSearchRowIdx(null);
                                 setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                setShowCompactHistoryPopup(false);
                                 return;
                               }
                               if (e.key === 'ArrowDown' && isDropdownActive && searchResults.length > 0) {
@@ -4450,7 +4603,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 setSelectedRowIndex(rIdx);
                                 setShowSearchDropdown(false);
                                 if (row.item_code || row.item_id) {
-                                  setShowCompactHistoryPopup(true);
                                   fetchAndApplyItemHistory(
                                     rIdx,
                                     Number(row.item_id || 0),
@@ -4569,14 +4721,23 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 4. Qty */}
-                        <td className="p-0 border-r border-slate-200 h-9 align-middle bg-emerald-50/20">
+                        <td
+                          className={`p-0 border-r border-slate-200 h-9 align-middle ${
+                            isZeroQty
+                              ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
+                              : 'bg-emerald-50/20'
+                          }`}
+                        >
                           <NumericInput
                             id={`pos_row_${rIdx}_quantity`}
                             value={row.quantity}
+                            displayZero={hasItem}
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'quantity', e.target.value)}
                             onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'quantity', true)}
-                            className="w-full px-1 py-0 text-center font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-full leading-none outline-none"
+                            className={`w-full px-1 py-0 text-center font-mono font-bold text-[11px] border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-full leading-none outline-none ${
+                              isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
+                            }`}
                           />
                         </td>
 
@@ -4616,7 +4777,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
                             onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'unit_price', true)}
-                            title={row.item_id ? 'Sale Price — Press Space, H, or F4 to open Customer Sales Price History' : 'Sale Price'}
+                            title={
+                              row.item_id
+                                ? 'Sale Price — Press Ctrl to view Customer Item History, or Space / H / F4 for Sales Price History'
+                                : 'Sale Price'
+                            }
                             className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-full leading-none outline-none"
                           />
                         </td>
@@ -4649,12 +4814,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
                         {/* 10. Gross Amount */}
                         <td className="py-0 px-1.5 text-right font-mono font-semibold text-slate-700 text-[11px] border-r border-slate-200 h-9 align-middle whitespace-nowrap">
-                          {row.gross_amount > 0 ? row.gross_amount.toFixed(2) : '0.00'}
+                          {hasItem ? Number(row.gross_amount || 0).toFixed(2) : ''}
                         </td>
 
                         {/* 11. Net Amount */}
-                        <td className="py-0 px-1.5 text-right font-mono font-black text-slate-900 bg-slate-50/80 text-[11px] border-r border-slate-200 h-9 align-middle whitespace-nowrap">
-                          {row.line_total > 0 ? row.line_total.toFixed(2) : '0.00'}
+                        <td
+                          className={`py-0 px-1.5 text-right font-mono font-black text-[11px] border-r border-slate-200 h-9 align-middle whitespace-nowrap ${
+                            isZeroNet
+                              ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                              : 'text-slate-900 bg-slate-50/80'
+                          }`}
+                        >
+                          {hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
                         </td>
 
                         <td className="py-0 px-1 text-center h-9 align-middle whitespace-nowrap">
@@ -5667,10 +5838,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         ? Number(catalogItems.find((c) => c.id === row.item_id)?.purchase_price || 0)
                         : Number(row.lastPurchaseCostRate || 0);
 
+                    const hasItem = row.item_id !== null && Number(row.item_id) > 0;
+                    const isZeroQty = hasItem && Number(row.quantity || 0) === 0;
+                    const isZeroNet = hasItem && round2(Number(row.line_total || 0)) === 0;
+                    const isZeroRow = isZeroQty || isZeroNet;
+
                     return (
                       <tr
                         key={row.row_id}
                         data-sales-row-idx={rIdx}
+                        data-zero-qty={isZeroQty ? 'true' : 'false'}
+                        data-zero-net={isZeroNet ? 'true' : 'false'}
                         onClick={() => setSelectedRowIndex(rIdx)}
                         className={`border-b border-slate-300 font-sans transition-colors h-[16px] leading-none ${
                           isActiveSearchMatch
@@ -5679,6 +5857,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             ? 'bg-sky-100/90 font-medium'
                             : isOverStock
                             ? 'bg-rose-100/90'
+                            : isZeroRow
+                            ? 'bg-orange-50/90 hover:bg-orange-100/75'
                             : isSelected
                             ? 'bg-amber-50/90 font-medium'
                             : rIdx % 2 === 0
@@ -5771,7 +5951,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 setSelectedRowIndex(rIdx);
                                 setShowSearchDropdown(false);
                                 if (row.item_code || row.item_id) {
-                                  setShowCompactHistoryPopup(true);
                                   fetchAndApplyItemHistory(
                                     rIdx,
                                     Number(row.item_id || 0),
@@ -5840,14 +6019,23 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 3. Qty */}
-                        <td className="border-r border-slate-300 p-0 bg-emerald-50/20 h-[16px] align-middle">
+                        <td
+                          className={`border-r border-slate-300 p-0 h-[16px] align-middle ${
+                            isZeroQty
+                              ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
+                              : 'bg-emerald-50/20'
+                          }`}
+                        >
                           <NumericInput
                             id={`cell_${rIdx}_quantity`}
                             value={row.quantity}
+                            displayZero={hasItem}
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'quantity', e.target.value)}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'quantity')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                            className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
+                              isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
+                            }`}
                           />
                         </td>
 
@@ -5871,7 +6059,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'unit_price')}
-                            title={row.item_id ? 'Sale Price — Press Space, H, or F4 to open Customer Sales Price History' : 'Sale Price'}
+                            title={
+                              row.item_id
+                                ? 'Sale Price — Press Ctrl to view Customer Item History, or Space / H / F4 for Sales Price History'
+                                : 'Sale Price'
+                            }
                             className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                           />
                         </td>
@@ -5942,8 +6134,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 9. Net Amount */}
-                        <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-slate-900 bg-slate-50/60 text-[11px] h-[16px] align-middle">
-                          {row.line_total > 0 ? row.line_total.toFixed(2) : ''}
+                        <td
+                          className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
+                            isZeroNet
+                              ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                              : 'text-slate-900 bg-slate-50/60'
+                          }`}
+                        >
+                          {hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
                         </td>
 
                         {/* 10. Last Purchase Price */}

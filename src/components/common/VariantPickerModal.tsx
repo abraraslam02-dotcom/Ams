@@ -211,8 +211,10 @@ export const VariantPickerModal: React.FC<VariantPickerModalProps> = ({
                   data-variant-idx={idx}
                   onMouseEnter={() => setHighlightIdx(idx)}
                   onClick={() => onSelectVariant(v)}
-                  className={`px-4 py-2.5 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
-                    isHighlighted ? 'bg-emerald-50' : 'hover:bg-slate-50'
+                  className={`px-4 py-2.5 flex items-center justify-between gap-3 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
+                    isHighlighted
+                      ? 'bg-sky-700 text-white'
+                      : 'hover:bg-sky-100 text-slate-900'
                   }`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -225,17 +227,33 @@ export const VariantPickerModal: React.FC<VariantPickerModalProps> = ({
                     />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-xs font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-200">
+                        <span
+                          className={`font-mono text-xs font-bold px-1.5 py-0.5 rounded border ${
+                            isHighlighted
+                              ? 'bg-sky-900 text-amber-200 border-sky-400'
+                              : 'bg-slate-100 text-slate-800 border-slate-200'
+                          }`}
+                        >
                           {v.variant_code}
                         </span>
-                        <span className="text-xs font-bold text-slate-900 truncate">
+                        <span
+                          className={`text-xs font-bold truncate ${
+                            isHighlighted ? 'text-white' : 'text-slate-900'
+                          }`}
+                        >
                           {v.variant_name}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500 flex-wrap">
+                      <div
+                        className={`flex items-center gap-2 mt-0.5 text-[11px] flex-wrap ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                        }`}
+                      >
                         {attrTags.length > 0 && <span>{attrTags.join(' • ')}</span>}
                         {v.barcode && (
-                          <span className="font-mono text-slate-600">BC: {v.barcode}</span>
+                          <span className={`font-mono ${isHighlighted ? 'text-sky-100' : 'text-slate-600'}`}>
+                            BC: {v.barcode}
+                          </span>
                         )}
                       </div>
                     </div>
@@ -243,20 +261,40 @@ export const VariantPickerModal: React.FC<VariantPickerModalProps> = ({
 
                   <div className="flex items-center gap-4 shrink-0 text-right">
                     <div>
-                      <div className="text-[10px] uppercase font-bold text-slate-400">Stock</div>
+                      <div
+                        className={`text-[10px] uppercase font-bold ${
+                          isHighlighted ? 'text-sky-200' : 'text-slate-400'
+                        }`}
+                      >
+                        Stock
+                      </div>
                       <div
                         className={`text-xs font-mono font-bold ${
-                          stockPacks <= 0 ? 'text-rose-600' : 'text-emerald-700'
+                          isHighlighted
+                            ? stockPacks <= 0
+                              ? 'text-rose-200'
+                              : 'text-emerald-200'
+                            : stockPacks <= 0
+                            ? 'text-rose-600'
+                            : 'text-emerald-700'
                         }`}
                       >
                         {stockPacks}P
                       </div>
                     </div>
                     <div>
-                      <div className="text-[10px] uppercase font-bold text-slate-400">
+                      <div
+                        className={`text-[10px] uppercase font-bold ${
+                          isHighlighted ? 'text-sky-200' : 'text-slate-400'
+                        }`}
+                      >
                         {mode === 'purchase' ? 'Pur. Rate' : 'MRP'}
                       </div>
-                      <div className="text-xs font-mono font-extrabold text-slate-900">
+                      <div
+                        className={`text-xs font-mono font-extrabold ${
+                          isHighlighted ? 'text-amber-200' : 'text-slate-900'
+                        }`}
+                      >
                         {formatPKR(price)}
                       </div>
                     </div>
@@ -266,10 +304,10 @@ export const VariantPickerModal: React.FC<VariantPickerModalProps> = ({
                         e.stopPropagation();
                         onSelectVariant(v);
                       }}
-                      className={`px-3 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer ${
+                      className={`px-3 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
                         isHighlighted
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-slate-900 text-white hover:bg-emerald-600'
+                          ? 'bg-white text-sky-900 hover:bg-amber-100'
+                          : 'bg-slate-900 text-white hover:bg-sky-700'
                       }`}
                     >
                       Select

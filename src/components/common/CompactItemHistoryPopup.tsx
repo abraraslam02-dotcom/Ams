@@ -57,6 +57,8 @@ const sortSalesLatest10 = (
     .sort((a, b) => {
       const dCmp = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
       if (dCmp !== 0) return dCmp;
+      const idCmp = Number(b.sale_id || 0) - Number(a.sale_id || 0);
+      if (idCmp !== 0) return idCmp;
       return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, {
         numeric: true,
       });
@@ -74,6 +76,8 @@ const sortPurchasesLatest10 = (
       const dB = String(b.bill_date || b.invoice_date || '');
       const dCmp = dB.localeCompare(dA);
       if (dCmp !== 0) return dCmp;
+      const idCmp = Number(b.purchase_id || 0) - Number(a.purchase_id || 0);
+      if (idCmp !== 0) return idCmp;
       const nA = String(a.bill_number || a.invoice_number || '');
       const nB = String(b.bill_number || b.invoice_number || '');
       return nB.localeCompare(nA, undefined, { numeric: true });
@@ -100,10 +104,11 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
     mode === 'purchase' ? 'purchases' : 'sales'
   );
 
-  // Sync default tab when mode changes
+  // Sync default tab whenever popup opens, mode changes, or selected item/customer changes
   useEffect(() => {
+    if (!isOpen) return;
     setActiveTab(mode === 'purchase' ? 'purchases' : 'sales');
-  }, [mode, itemCode]);
+  }, [isOpen, mode, itemCode, selectedCustomerId]);
 
   if (!isOpen || !itemCode) return null;
 
@@ -319,26 +324,27 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
           >
             <thead className="bg-slate-100 text-slate-800 sticky top-0 z-10 border-b border-slate-300 font-bold">
               <tr>
-                <th className="px-2 py-0.5 border-r border-slate-200">Invoice Date</th>
+                <th className="px-2 py-0.5 border-r border-slate-200">Transaction Date</th>
                 <th className="px-2 py-0.5 border-r border-slate-200">Invoice Number</th>
+                <th className="px-2 py-0.5 border-r border-slate-200">Customer</th>
                 <th className="px-2 py-0.5 border-r border-slate-200">Item Name</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Quantity</th>
-                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Loose Quantity</th>
-                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Sale Price</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Loose Qty</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Rate</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Discount</th>
-                <th className="px-2 py-0.5 text-right">Net Amount</th>
+                <th className="px-2 py-0.5 text-right">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 font-mono">
               {mode === 'sales' && !hasSelectedCustomer ? (
                 <tr>
-                  <td colSpan={8} className="px-3 py-2 text-center font-sans text-amber-700 font-semibold">
+                  <td colSpan={9} className="px-3 py-2 text-center font-sans text-amber-700 font-semibold">
                     Please select a customer first.
                   </td>
                 </tr>
               ) : latestSales.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-3 py-2 text-center font-sans text-slate-500 italic">
+                  <td colSpan={9} className="px-3 py-2 text-center font-sans text-slate-500 italic">
                     {loading
                       ? `Loading sales history for Item Code [${itemCode}]...`
                       : mode === 'sales'
@@ -376,7 +382,10 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                       <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-emerald-800 whitespace-nowrap">
                         {s.invoice_number}
                       </td>
-                      <td className="px-2 py-0.5 border-r border-slate-200 font-sans truncate max-w-[220px]">
+                      <td className="px-2 py-0.5 border-r border-slate-200 font-sans font-semibold text-slate-800 truncate max-w-[180px]">
+                        {s.customer_name || (mode === 'sales' && selectedCustomerName) || 'Walk-in Cash Customer'}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 font-sans truncate max-w-[200px]">
                         {s.item_name || itemName}
                       </td>
                       <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold">
@@ -407,19 +416,20 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
           >
             <thead className="bg-slate-100 text-slate-800 sticky top-0 z-10 border-b border-slate-300 font-bold">
               <tr>
-                <th className="px-2 py-0.5 border-r border-slate-200">Invoice Date</th>
+                <th className="px-2 py-0.5 border-r border-slate-200">Transaction Date</th>
                 <th className="px-2 py-0.5 border-r border-slate-200">Invoice Number</th>
-                <th className="px-2 py-0.5 border-r border-slate-200">Supplier Name</th>
+                <th className="px-2 py-0.5 border-r border-slate-200">Supplier</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Quantity</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Bonus</th>
-                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Purchase Price</th>
-                <th className="px-2 py-0.5 text-right">Discount</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Rate</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Discount</th>
+                <th className="px-2 py-0.5 text-right">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 font-mono">
               {latestPurchases.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-2 text-center font-sans text-slate-500 italic">
+                  <td colSpan={8} className="px-3 py-2 text-center font-sans text-slate-500 italic">
                     {loading
                       ? `Loading purchase history for Item Code [${itemCode}]...`
                       : `No previous purchase transactions found for Item Code [${itemCode}].`}
@@ -450,8 +460,11 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                     <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold text-sky-900">
                       Rs. {formatNumber(p.purchase_price)}
                     </td>
-                    <td className="px-2 py-0.5 text-right text-rose-700 whitespace-nowrap">
+                    <td className="px-2 py-0.5 border-r border-slate-200 text-right text-rose-700 whitespace-nowrap">
                       {formatDisc(p.discount_percent, p.discount_amount)}
+                    </td>
+                    <td className="px-2 py-0.5 text-right font-bold text-slate-900 whitespace-nowrap">
+                      Rs. {formatNumber(p.line_total)}
                     </td>
                   </tr>
                 ))

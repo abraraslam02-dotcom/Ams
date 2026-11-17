@@ -261,35 +261,57 @@ export const SalesPriceHistoryModal: React.FC<SalesPriceHistoryModalProps> = ({
                       onDoubleClick={() => onSelectPrice(Number(entry.unit_price || 0), entry)}
                       className={`border-b border-slate-200 cursor-pointer transition-colors ${
                         isHighlighted
-                          ? 'bg-emerald-100 text-slate-950 font-semibold'
+                          ? 'bg-sky-700 text-white font-semibold'
                           : idx % 2 === 0
-                          ? 'bg-white hover:bg-slate-50'
-                          : 'bg-slate-50/50 hover:bg-slate-100/60'
+                          ? 'bg-white hover:bg-sky-100 text-slate-900'
+                          : 'bg-slate-50/70 hover:bg-sky-100 text-slate-900'
                       }`}
                     >
                       <td className="px-2.5 py-1.5 border-r border-slate-200 font-mono whitespace-nowrap">
                         {entry.invoice_date}
                       </td>
-                      <td className="px-2.5 py-1.5 border-r border-slate-200 font-mono font-bold text-slate-900 whitespace-nowrap">
+                      <td
+                        className={`px-2.5 py-1.5 border-r border-slate-200 font-mono font-bold whitespace-nowrap ${
+                          isHighlighted ? 'text-amber-200' : 'text-slate-900'
+                        }`}
+                      >
                         {entry.invoice_number}
                       </td>
-                      <td className="px-2.5 py-1.5 border-r border-slate-200 text-slate-900">
+                      <td
+                        className={`px-2.5 py-1.5 border-r border-slate-200 ${
+                          isHighlighted ? 'text-white' : 'text-slate-900'
+                        }`}
+                      >
                         {entry.item_name}
                       </td>
                       <td className="px-2.5 py-1.5 border-r border-slate-200 text-right font-mono whitespace-nowrap">
                         {entry.quantity}
                         {Number(entry.loose_quantity || 0) > 0 ? ` (+${entry.loose_quantity}L)` : ''}
                       </td>
-                      <td className="px-2.5 py-1.5 border-r border-slate-200 text-right font-mono font-black text-emerald-800 bg-emerald-50/50 whitespace-nowrap">
+                      <td
+                        className={`px-2.5 py-1.5 border-r border-slate-200 text-right font-mono font-black whitespace-nowrap ${
+                          isHighlighted
+                            ? 'text-amber-200 bg-sky-800/70'
+                            : 'text-emerald-800 bg-emerald-50/50'
+                        }`}
+                      >
                         {formatPKR(entry.unit_price)}
                       </td>
-                      <td className="px-2.5 py-1.5 border-r border-slate-200 text-right font-mono text-rose-700 whitespace-nowrap">
+                      <td
+                        className={`px-2.5 py-1.5 border-r border-slate-200 text-right font-mono whitespace-nowrap ${
+                          isHighlighted ? 'text-rose-200' : 'text-rose-700'
+                        }`}
+                      >
                         {Number(entry.discount_percent || 0)}%
                         {Number(entry.discount_amount || 0) > 0
                           ? ` (${formatPKR(entry.discount_amount)})`
                           : ''}
                       </td>
-                      <td className="px-2.5 py-1.5 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
+                      <td
+                        className={`px-2.5 py-1.5 text-right font-mono font-bold whitespace-nowrap ${
+                          isHighlighted ? 'text-white' : 'text-slate-900'
+                        }`}
+                      >
                         {formatPKR(entry.line_total)}
                       </td>
                     </tr>

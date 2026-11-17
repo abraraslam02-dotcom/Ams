@@ -813,12 +813,35 @@ const handleGetItemHistory = (req: Request, res: Response) => {
     const itemSelectCols =
       'id, item_code, item_name, company_name, packing, purchase_price, trade_price, wholesale_price, retail_price, tax_percent';
 
-    // 1. Primary lookup by unique ItemCode (case-insensitive)
+    // 1. Primary lookup by explicit numeric item.id when provided, then unique ItemCode / historical code
     let itemRow: Record<string, unknown> | undefined;
-    if (lookupCode) {
+    const explicitNumericId = rawQueryItemId > 0 ? rawQueryItemId : /^\d+$/.test(rawParam) ? Number(rawParam) : 0;
+    if (rawQueryItemId > 0) {
+      itemRow = db
+        .prepare(`SELECT ${itemSelectCols} FROM items WHERE id = ? LIMIT 1`)
+        .get(rawQueryItemId) as Record<string, unknown> | undefined;
+    }
+
+    if (!itemRow && lookupCode) {
       itemRow = db
         .prepare(`SELECT ${itemSelectCols} FROM items WHERE LOWER(TRIM(item_code)) = LOWER(TRIM(?)) LIMIT 1`)
         .get(lookupCode) as Record<string, unknown> | undefined;
+
+      // Check item_variants variant_code if a variant code was passed
+      if (!itemRow) {
+        try {
+          const varMatch = db
+            .prepare('SELECT item_id FROM item_variants WHERE LOWER(TRIM(variant_code)) = LOWER(TRIM(?)) AND item_id IS NOT NULL LIMIT 1')
+            .get(lookupCode) as { item_id: number } | undefined;
+          if (varMatch?.item_id) {
+            itemRow = db
+              .prepare(`SELECT ${itemSelectCols} FROM items WHERE id = ? LIMIT 1`)
+              .get(Number(varMatch.item_id)) as Record<string, unknown> | undefined;
+          }
+        } catch {
+          // ignore
+        }
+      }
 
       // Check item_code_history if code was previously reassigned
       if (!itemRow) {
@@ -837,12 +860,11 @@ const handleGetItemHistory = (req: Request, res: Response) => {
       }
     }
 
-    // 2. Fallback lookup by numeric item.id if itemCode was passed as id
-    const fallbackNumericId = rawQueryItemId > 0 ? rawQueryItemId : /^\d+$/.test(rawParam) ? Number(rawParam) : 0;
-    if (!itemRow && fallbackNumericId > 0) {
+    // 2. Final fallback lookup by numeric path parameter
+    if (!itemRow && explicitNumericId > 0) {
       itemRow = db
         .prepare(`SELECT ${itemSelectCols} FROM items WHERE id = ? LIMIT 1`)
-        .get(fallbackNumericId) as Record<string, unknown> | undefined;
+        .get(explicitNumericId) as Record<string, unknown> | undefined;
     }
 
     if (!itemRow) {
@@ -913,23 +935,26 @@ const handleGetItemHistory = (req: Request, res: Response) => {
     const variantFilterSaleSql = variantIdParam > 0 ? ' AND si.variant_id = ? ' : '';
     const variantFilterSaleParams = variantIdParam > 0 ? [variantIdParam] : [];
 
-    // 1. Customer-Specific Confirmed Sales History (strictly filtered by AccountID AND ItemCode/ItemID)
+    // 1. Customer-Specific Confirmed Sales History (strictly filtered by AccountID AND ItemID)
     let customerSalesHistory: Array<Record<string, unknown>> = [];
     if (customerId > 0) {
       customerSalesHistory = db
         .prepare(`
           ${saleSelectSql}
           WHERE (
-            LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
-            OR si.item_id = ?
+            si.item_id = ?
+            OR (
+              (si.item_id IS NULL OR si.item_id = 0)
+              AND LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
+            )
           )
             AND s.customer_account_id = ?
             ${variantFilterSaleSql}
             AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
-          ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+          ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.id DESC, s.invoice_number DESC, si.id DESC
           LIMIT 25
         `)
-        .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, customerId, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
+        .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, customerId, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
     }
 
     const lastCustomerSale = customerSalesHistory.length > 0 ? customerSalesHistory[0] : null;
@@ -956,15 +981,18 @@ const handleGetItemHistory = (req: Request, res: Response) => {
       .prepare(`
         ${saleSelectSql}
         WHERE (
-          LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
-          OR si.item_id = ?
+          si.item_id = ?
+          OR (
+            (si.item_id IS NULL OR si.item_id = 0)
+            AND LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
+          )
         )
           ${variantFilterSaleSql}
           AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
-        ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+        ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.id DESC, s.invoice_number DESC, si.id DESC
         LIMIT 10
       `)
-      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
+      .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
 
     // 3. Latest 10 Confirmed Purchase Transactions for this ItemCode (used by Purchase Item History view)
     const variantFilterPurSql = variantIdParam > 0 ? ' AND pi.variant_id = ? ' : '';
@@ -1015,15 +1043,18 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         LEFT JOIN item_variants iv ON iv.id = pi.variant_id
         LEFT JOIN inventory inv ON inv.id = pi.inventory_id
         WHERE (
-          LOWER(TRIM(COALESCE(NULLIF(TRIM(pi.item_code), ''), it.item_code, ''))) IN (${codePlaceholders})
-          OR pi.item_id = ?
+          pi.item_id = ?
+          OR (
+            (pi.item_id IS NULL OR pi.item_id = 0)
+            AND LOWER(TRIM(COALESCE(NULLIF(TRIM(pi.item_code), ''), it.item_code, ''))) IN (${codePlaceholders})
+          )
         )
           ${variantFilterPurSql}
           AND LOWER(TRIM(COALESCE(p.status, 'completed'))) IN ('completed', 'posted')
-        ORDER BY DATE(p.bill_date) DESC, p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
+        ORDER BY DATE(p.bill_date) DESC, p.bill_date DESC, p.id DESC, p.bill_number DESC, pi.id DESC
         LIMIT 10
       `)
-      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, ...variantFilterPurParams) as Array<Record<string, unknown>>;
+      .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, ...variantFilterPurParams) as Array<Record<string, unknown>>;
 
     const lastPurchase = purchaseHistory.length > 0 ? purchaseHistory[0] : null;
 

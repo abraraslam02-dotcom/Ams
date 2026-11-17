@@ -220,33 +220,57 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                     ? it.variants.filter((v: any) => String(v?.status || 'Active') !== 'Inactive').length
                     : Number(it.active_variant_count || it.variant_count || 0);
                   const hasVariants = Number(it.has_variants) === 1 && activeVariantsCount > 0;
+                  const isCurrentItem = Boolean(
+                    targetRowItem?.item_id && Number(targetRowItem.item_id) === Number(it.id)
+                  );
                   return (
                     <tr
                       key={it.id}
                       data-item-list-modal-idx={idx}
+                      tabIndex={-1}
                       onMouseEnter={() => setHighlightIdx(idx)}
                       onClick={() => onSelectItem(it)}
-                      className={`cursor-pointer transition-colors ${
-                        isHighlighted ? 'bg-emerald-100 font-semibold' : 'hover:bg-emerald-50/60'
+                      className={`cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
+                        isHighlighted
+                          ? 'bg-sky-700 text-white font-semibold'
+                          : isCurrentItem
+                          ? 'bg-emerald-100 text-emerald-950 font-semibold border-l-4 border-emerald-600'
+                          : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
-                      <td className="px-3 py-2 font-mono font-bold text-emerald-700">
+                      <td
+                        className={`px-3 py-2 font-mono font-bold ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                        }`}
+                      >
                         {it.item_code}
                       </td>
-                      <td className="px-3 py-2 font-semibold text-slate-900">
+                      <td className={`px-3 py-2 font-semibold ${isHighlighted ? 'text-white' : 'text-slate-900'}`}>
                         <div className="flex items-center gap-1.5">
                           <span>{it.item_name}</span>
                           {hasVariants && (
-                            <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[9px] font-bold">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                isHighlighted
+                                  ? 'bg-sky-900 text-sky-100 border border-sky-400'
+                                  : 'bg-sky-100 text-sky-800'
+                              }`}
+                            >
                               {activeVariantsCount} Variants
                             </span>
                           )}
                         </div>
                       </td>
-                      <td className="px-3 py-2 text-slate-600">{it.company_name || '—'}</td>
-                      <td className="px-3 py-2 text-slate-500">{it.packing || '1x1'}</td>
-                      <td className="px-3 py-2 text-right font-mono">{stockPacks}P</td>
-                      <td className="px-3 py-2 text-right font-mono font-bold">
+                      <td className={`px-3 py-2 ${isHighlighted ? 'text-sky-100' : 'text-slate-600'}`}>
+                        {it.company_name || '—'}
+                      </td>
+                      <td className={`px-3 py-2 ${isHighlighted ? 'text-sky-100' : 'text-slate-500'}`}>
+                        {it.packing || '1x1'}
+                      </td>
+                      <td className={`px-3 py-2 text-right font-mono ${isHighlighted ? 'text-white' : 'text-slate-800'}`}>
+                        {stockPacks}P
+                      </td>
+                      <td className={`px-3 py-2 text-right font-mono font-bold ${isHighlighted ? 'text-amber-200' : 'text-slate-900'}`}>
                         {formatPKR(rate)}
                       </td>
                       <td className="px-3 py-2 text-right">
@@ -256,7 +280,11 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                             e.stopPropagation();
                             onSelectItem(it);
                           }}
-                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
+                          className={`px-2.5 py-1 rounded-lg font-bold text-[10px] cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
+                            isHighlighted
+                              ? 'bg-white text-sky-900 hover:bg-amber-100'
+                              : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                          }`}
                         >
                           Select
                         </button>

@@ -6032,10 +6032,10 @@ export const api = {
 
     const cleanCodeLower = cleanCode.toLowerCase();
     const item =
+      (numericId > 0 ? allItems.find((it) => Number(it.id) === numericId) : undefined) ||
       (cleanCodeLower
         ? allItems.find((it) => String(it.item_code || '').trim().toLowerCase() === cleanCodeLower)
         : undefined) ||
-      (numericId > 0 ? allItems.find((it) => Number(it.id) === numericId) : undefined) ||
       {};
 
     const resolvedItemId = Number(item.id || numericId || 0);
@@ -6044,14 +6044,14 @@ export const api = {
     const accMap = new Map<number, any>(allAccounts.map((a) => [Number(a.id), a]));
 
     const matchesItemLine = (ln: any): boolean => {
+      if (variantId > 0 && Number(ln?.variant_id || 0) !== variantId) {
+        return false;
+      }
+      if (resolvedItemId > 0 && Number(ln?.item_id || 0) > 0) {
+        return Number(ln.item_id) === resolvedItemId;
+      }
       const lnCode = String(ln?.item_code || '').trim().toLowerCase();
       if (lnCode && (lnCode === canonicalCodeLower || (cleanCodeLower && lnCode === cleanCodeLower))) {
-        return true;
-      }
-      if (!lnCode && resolvedItemId > 0 && Number(ln?.item_id) === resolvedItemId) {
-        return true;
-      }
-      if (resolvedItemId > 0 && Number(ln?.item_id) === resolvedItemId) {
         return true;
       }
       return false;

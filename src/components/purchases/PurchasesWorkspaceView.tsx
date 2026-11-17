@@ -568,6 +568,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [purchaseHistoryLoading, setPurchaseHistoryLoading] = useState<boolean>(false);
   const [showPurchaseCompactHistoryPopup, setShowPurchaseCompactHistoryPopup] =
     useState<boolean>(false);
+  const ctrlPriceHistoryArmedRef = useRef<boolean>(false);
 
   const fetchPurchaseItemHistoryByCode = useCallback(
     async (itemCode: string, itemId?: number, variantId?: number | null) => {
@@ -606,26 +607,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     []
   );
 
-  // Ensure the currently selected purchase row has its Item History loaded by ItemCode
+  // Refresh the currently selected purchase row's Item History whenever row, item, or variant changes
+  const activePurRowItemId = Number(lines[selectedPurchaseLineIndex]?.item_id || 0);
+  const activePurRowItemCode = String(lines[selectedPurchaseLineIndex]?.item_code || '');
+  const activePurRowVariantId = Number(lines[selectedPurchaseLineIndex]?.variant_id || 0);
   useEffect(() => {
     const activeLine = lines[selectedPurchaseLineIndex];
     if (activeLine && (activeLine.item_code || activeLine.item_id)) {
-      const vSuffix = activeLine.variant_id ? `::v${activeLine.variant_id}` : '';
-      const codeKey = `${
-        activeLine.item_code
-          ? activeLine.item_code.trim().toLowerCase()
-          : String(activeLine.item_id)
-      }${vSuffix}`;
-      if (!purchaseItemHistoryMap[codeKey]) {
-        fetchPurchaseItemHistoryByCode(
-          activeLine.item_code,
-          Number(activeLine.item_id || 0),
-          activeLine.variant_id || null
-        );
-      }
+      fetchPurchaseItemHistoryByCode(
+        activeLine.item_code,
+        Number(activeLine.item_id || 0),
+        activeLine.variant_id || null
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPurchaseLineIndex]);
+  }, [selectedPurchaseLineIndex, activePurRowItemId, activePurRowItemCode, activePurRowVariantId]);
 
   // Resilient Master Data & Transactions Loader (Each promise catches individually like Sales!)
   const fetchWorkspaceData = useCallback(async () => {
@@ -1809,14 +1805,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
-    setShowPurchaseCompactHistoryPopup(true);
     fetchPurchaseItemHistoryByCode(found.item_code, found.id, chosenVariant?.id || null);
     if (focusQty) {
+      const prefix: 'pur_cell' | 'pos_row' =
+        purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
       requestAnimationFrame(() => {
         setTimeout(() => {
-          const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
           focusPurchaseCell(idx, 'quantity', prefix);
-        }, 25);
+        }, 30);
       });
     }
   };
@@ -1825,7 +1821,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const populatePurchaseRowWithItem = (
     idx: number,
     found: Item,
-    fromPosRow: boolean = true,
+    focusQty: boolean = true,
     preMatchedVariant?: ItemVariant | null
   ) => {
     const activeVars = getActiveVariants(found);
@@ -1838,7 +1834,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setPendingVariantPicker({
         item: found,
         targetRowIdx: idx,
-        focusQty: fromPosRow,
+        focusQty,
         fromTopSearch: false,
       });
       return;
@@ -1876,7 +1872,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       return;
     }
 
-    applyItemToPurchaseRow(idx, found, fromPosRow, preMatchedVariant || null);
+    applyItemToPurchaseRow(idx, found, focusQty, preMatchedVariant || null);
   };
 
   const handleConfirmAddDuplicatePurchaseRow = () => {
@@ -1910,7 +1906,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setActiveRowItemSearchField(null);
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
-    setShowPurchaseCompactHistoryPopup(true);
     fetchPurchaseItemHistoryByCode(item.item_code, item.id, variant?.id || null);
 
     requestAnimationFrame(() => {
@@ -1994,7 +1989,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       suppressItemListReopenRef.current = false;
     }, 260);
 
-    const origin = purchaseItemListOriginRef.current;
     const targetRowIdx = purchaseItemListTargetRowIdx;
     setShowPurchaseItemListModal(false);
     setPurchaseItemListTargetRowIdx(null);
@@ -2004,8 +1998,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setPendingVariantPicker({
         item: chosen,
         targetRowIdx,
-        focusQty: targetRowIdx !== null ? (purchaseViewMode === 'pos' && origin === 'pos_row') : true,
-        fromTopSearch: targetRowIdx === null,
+        focusQty: true,
+        fromTopSearch: false,
       });
       return;
     }
@@ -2035,8 +2029,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
 
     if (targetRowIdx !== null) {
-      const fromPosRow = purchaseViewMode === 'pos' && origin === 'pos_row';
-      populatePurchaseRowWithItem(targetRowIdx, chosen, fromPosRow);
+      populatePurchaseRowWithItem(targetRowIdx, chosen, true);
       return;
     }
 
@@ -2365,7 +2358,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setActiveRowItemSearchIdx(null);
     setItemHighlightIndex(0);
     setShowPurchaseSearchDropdown(false);
-    setShowPurchaseCompactHistoryPopup(true);
     fetchPurchaseItemHistoryByCode(it.item_code, it.id, preMatchedVariant?.id || null);
 
     // Requirement 9: After selecting an item:
@@ -2703,6 +2695,33 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       return;
     }
 
+    if (ctrlPriceHistoryArmedRef.current && e.ctrlKey && e.key !== 'Control') {
+      ctrlPriceHistoryArmedRef.current = false;
+      setShowPurchaseCompactHistoryPopup(false);
+    }
+
+    const activeRowForHistory = lines[rowIdx];
+    if (
+      field === 'purchase_rate' &&
+      activeRowForHistory &&
+      (activeRowForHistory.item_id > 0 || activeRowForHistory.item_code?.trim()) &&
+      e.key === 'Control' &&
+      !e.repeat &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !e.metaKey
+    ) {
+      ctrlPriceHistoryArmedRef.current = true;
+      setSelectedPurchaseLineIndex(rowIdx);
+      fetchPurchaseItemHistoryByCode(
+        activeRowForHistory.item_code,
+        Number(activeRowForHistory.item_id || 0),
+        activeRowForHistory.variant_id || null
+      );
+      setShowPurchaseCompactHistoryPopup(true);
+      return;
+    }
+
     if (e.key === 'Escape') {
       if (activeRowItemSearchIdx !== null) {
         e.preventDefault();
@@ -2710,7 +2729,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         setActiveRowItemSearchField(null);
         setRowItemSearchQuery('');
       }
-      setShowPurchaseCompactHistoryPopup(false);
+      if (showPurchaseCompactHistoryPopup) {
+        e.preventDefault();
+        e.stopPropagation();
+        ctrlPriceHistoryArmedRef.current = false;
+        setShowPurchaseCompactHistoryPopup(false);
+      }
       return;
     }
 
@@ -2785,7 +2809,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         if (field === 'item_code' && typedRaw) {
           const exactScan = findExactBarcodeOrCodeMatch(items, typedRaw);
           if (exactScan) {
-            populatePurchaseRowWithItem(rowIdx, exactScan.item, prefix === 'pos_row', exactScan.variant || null);
+            populatePurchaseRowWithItem(rowIdx, exactScan.item, true, exactScan.variant || null);
             return;
           }
         }
@@ -2915,6 +2939,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
     setIsSupplierDropdownOpen(false);
+    setShowPurchaseCompactHistoryPopup(false);
     setClientRequestId(`pur-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
     setTimeout(() => {
       supplierSearchInputRef.current?.focus();
@@ -3238,6 +3263,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         }
         const priceUpdateProblems =
           targetStatus === 'completed' ? await applyDeferredMasterPriceUpdates(sanitizedItems) : [];
+        if (targetStatus === 'completed') {
+          setPurchaseItemHistoryMap({});
+        }
         await resetInvoiceForm();
         await fetchWorkspaceData();
         await fetchHeldPurchases();
@@ -3265,6 +3293,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         }
         const priceUpdateProblems =
           targetStatus === 'completed' ? await applyDeferredMasterPriceUpdates(sanitizedItems) : [];
+        if (targetStatus === 'completed') {
+          setPurchaseItemHistoryMap({});
+        }
         await resetInvoiceForm();
         await fetchWorkspaceData();
         await fetchHeldPurchases();
@@ -3593,23 +3624,39 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }
       if (e.key === 'F2' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's')) {
         e.preventDefault();
+        setShowPurchaseCompactHistoryPopup(false);
         handleSavePurchaseInvoice();
       } else if (e.key === 'F4') {
         e.preventDefault();
         handlePreviewInvoice();
       } else if (e.key === 'F3') {
         e.preventDefault();
+        setShowPurchaseCompactHistoryPopup(false);
         handleSavePurchaseInvoice(undefined, false, 'held');
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
         e.preventDefault();
+        setShowPurchaseCompactHistoryPopup(false);
         handleSavePurchaseInvoice(undefined, true, 'completed');
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
         e.preventDefault();
+        setShowPurchaseCompactHistoryPopup(false);
         resetInvoiceForm();
+      } else if (e.key === 'Escape' && showPurchaseCompactHistoryPopup) {
+        e.preventDefault();
+        setShowPurchaseCompactHistoryPopup(false);
+      }
+    };
+    const handleGlobalKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control') {
+        ctrlPriceHistoryArmedRef.current = false;
       }
     };
     window.addEventListener('keydown', handleGlobalShortcuts);
-    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+    window.addEventListener('keyup', handleGlobalKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalShortcuts);
+      window.removeEventListener('keyup', handleGlobalKeyUp);
+    };
   }, [
     subTab,
     billNumber,
@@ -3621,6 +3668,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     billDate,
     priceChangePrompt,
     showPurchaseItemListModal,
+    showPurchaseCompactHistoryPopup,
     pendingDuplicatePrompt,
     itemLogModalState.isOpen,
     netAmountModalState.isOpen,
@@ -3820,24 +3868,40 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     e.preventDefault();
                     handleSelectSupplierFromDropdown(s);
                   }}
-                  className={`w-full px-3 py-1.5 text-left flex items-center justify-between text-xs cursor-pointer transition-colors ${
+                  className={`w-full px-3 py-1.5 text-left flex items-center justify-between text-xs cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
                     isHighlighted
-                      ? 'bg-emerald-100/90 text-slate-950 font-semibold'
+                      ? 'bg-sky-700 text-white font-semibold'
                       : isCurrent
-                      ? 'bg-emerald-50/70 text-slate-900'
-                      : 'hover:bg-slate-50 text-slate-800'
+                      ? 'bg-emerald-100 text-emerald-950 font-semibold border-l-4 border-emerald-600'
+                      : 'hover:bg-sky-100 text-slate-900'
                   }`}
                 >
                   <div className="min-w-0 pr-2">
-                    <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
-                      <span className="font-mono text-emerald-700 bg-emerald-50 px-1.5 py-0 rounded-lg border border-emerald-200 text-[11px]">
+                    <div
+                      className={`font-bold flex items-center gap-1.5 flex-wrap ${
+                        isHighlighted ? 'text-white' : 'text-slate-900'
+                      }`}
+                    >
+                      <span
+                        className={`font-mono px-1.5 py-0 rounded-lg border text-[11px] ${
+                          isHighlighted
+                            ? 'bg-sky-900 text-amber-200 border-sky-400'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}
+                      >
                         {s.account_code}
                       </span>
                       <span className="truncate">{s.account_name}</span>
                     </div>
-                    <div className="text-[10px] text-slate-600 flex items-center gap-2 mt-0.5 font-mono">
+                    <div
+                      className={`text-[10px] flex items-center gap-2 mt-0.5 font-mono ${
+                        isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                      }`}
+                    >
                       <span className="inline-flex items-center gap-1">
-                        <Phone className="w-2.5 h-2.5 text-slate-400" />
+                        <Phone
+                          className={`w-2.5 h-2.5 ${isHighlighted ? 'text-sky-200' : 'text-slate-400'}`}
+                        />
                         {s.phone || (s as any).mobile || 'No Mobile #'}
                       </span>
                       {s.city && <span>• {s.city}</span>}
@@ -3846,7 +3910,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   <div className="text-right shrink-0">
                     <span
                       className={`px-1.5 py-0.5 rounded-lg text-[9px] font-bold uppercase ${
-                        s.filer_status === 'Filer'
+                        isHighlighted
+                          ? 'bg-sky-900 text-sky-100 border border-sky-400'
+                          : s.filer_status === 'Filer'
                           ? 'bg-emerald-100 text-emerald-800'
                           : s.filer_status === 'Non-Filer'
                           ? 'bg-amber-100 text-amber-800'
@@ -3889,7 +3955,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           <span>
             Matching Items ({purchaseSearchResults.length}) • Search by Item Name, Company, Code or Barcode
           </span>
-          <span className="font-mono text-emerald-700">
+          <span className="font-mono text-sky-700">
             ↑/↓ Navigate • Enter Select • Esc Close
           </span>
         </div>
@@ -3911,6 +3977,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               <tbody className="divide-y divide-slate-200">
                 {purchaseSearchResults.map((it, idx) => {
                   const isHighlighted = idx === itemHighlightIndex;
+                  const activeLine = lines[selectedPurchaseLineIndex];
+                  const isCurrentItem = Boolean(activeLine?.item_id && Number(activeLine.item_id) === Number(it.id));
                   const purRate =
                     Number(it.purchase_price) ||
                     Number(it.trade_price) ||
@@ -3921,15 +3989,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     <tr
                       key={it.id}
                       data-item-idx={idx}
+                      tabIndex={-1}
                       onMouseEnter={() => setItemHighlightIndex(idx)}
                       onMouseDown={(e) => {
                         e.preventDefault();
                         handleSelectPurchaseSearchItem(it);
                       }}
-                      className={`cursor-pointer transition-colors h-[26px] ${
+                      className={`cursor-pointer transition-colors h-[26px] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
                         isHighlighted
-                          ? 'bg-emerald-100 text-slate-950 font-bold'
-                          : 'hover:bg-emerald-50/70 text-slate-900'
+                          ? 'bg-sky-700 text-white font-semibold'
+                          : isCurrentItem
+                          ? 'bg-emerald-100 text-emerald-950 font-semibold border-l-4 border-emerald-600'
+                          : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
                       <td className="px-2.5 py-1 border-r border-slate-200">
@@ -3940,26 +4011,60 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             size="xs"
                           />
                           <div className="truncate">
-                            <span className="font-mono text-[10px] font-bold text-emerald-700 mr-1">
+                            <span
+                              className={`font-mono text-[10px] font-bold mr-1 ${
+                                isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                              }`}
+                            >
                               [{it.item_code}]
                             </span>
-                            <span className="font-bold text-slate-900">{it.item_name}</span>
-                            <span className="text-[10px] text-slate-500 ml-1">({it.packing})</span>
+                            <span
+                              className={`font-bold ${
+                                isHighlighted ? 'text-white' : 'text-slate-900'
+                              }`}
+                            >
+                              {it.item_name}
+                            </span>
+                            <span
+                              className={`text-[10px] ml-1 ${
+                                isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                              }`}
+                            >
+                              ({it.packing})
+                            </span>
                             {Number(it.has_variants || 0) === 1 && (
-                              <span className="ml-1.5 px-1 py-0 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 text-[9px] font-bold">
+                              <span
+                                className={`ml-1.5 px-1 py-0 rounded border text-[9px] font-bold ${
+                                  isHighlighted
+                                    ? 'bg-sky-900 text-amber-200 border-sky-400'
+                                    : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                }`}
+                              >
                                 {Number(it.active_variant_count || it.variants?.length || 0)} Variants
                               </span>
                             )}
                           </div>
                         </div>
                       </td>
-                      <td className="px-2.5 py-1 border-r border-slate-200 text-slate-700">
+                      <td
+                        className={`px-2.5 py-1 border-r border-slate-200 ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
                         {it.company_name || '—'}
                       </td>
-                      <td className="px-2.5 py-1 border-r border-slate-200 text-right font-mono font-black text-emerald-800">
+                      <td
+                        className={`px-2.5 py-1 border-r border-slate-200 text-right font-mono font-black ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-800'
+                        }`}
+                      >
                         Rs. {purRate.toFixed(2)}
                       </td>
-                      <td className="px-2.5 py-1 text-right font-mono font-semibold text-slate-700">
+                      <td
+                        className={`px-2.5 py-1 text-right font-mono font-semibold ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
                         Rs. {saleRate.toFixed(2)}
                       </td>
                     </tr>
@@ -3982,7 +4087,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           <span>
             Matching Items ({rowItemSearchResults.length}) • Search by Name, Company, Code or Barcode
           </span>
-          <span className="font-mono text-emerald-700">↑/↓ Navigate • Enter Select • Esc Close</span>
+          <span className="font-mono text-sky-700">↑/↓ Navigate • Enter Select • Esc Close</span>
         </div>
         <div className="max-h-[340px] overflow-y-auto">
           {rowItemSearchResults.length === 0 ? (
@@ -4002,6 +4107,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               <tbody className="divide-y divide-slate-200">
                 {rowItemSearchResults.map((it, iIdx) => {
                   const isHighlighted = iIdx === rowItemHighlightIndex;
+                  const rowLine = lines[rowIdx];
+                  const isCurrentItem = Boolean(rowLine?.item_id && Number(rowLine.item_id) === Number(it.id));
                   const purRate =
                     Number(it.purchase_price) ||
                     Number(it.trade_price) ||
@@ -4012,15 +4119,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     <tr
                       key={it.id}
                       data-row-item-idx={`${rowIdx}-${iIdx}`}
+                      tabIndex={-1}
                       onMouseEnter={() => setRowItemHighlightIndex(iIdx)}
                       onMouseDown={(ev) => {
                         ev.preventDefault();
-                        populatePurchaseRowWithItem(rowIdx, it, fromPosRow);
+                        populatePurchaseRowWithItem(rowIdx, it, true);
                       }}
-                      className={`cursor-pointer transition-colors h-[26px] ${
+                      className={`cursor-pointer transition-colors h-[26px] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
                         isHighlighted
-                          ? 'bg-emerald-100 font-bold text-slate-950'
-                          : 'hover:bg-emerald-50/70 text-slate-900'
+                          ? 'bg-sky-700 font-semibold text-white'
+                          : isCurrentItem
+                          ? 'bg-emerald-100 text-emerald-950 font-semibold border-l-4 border-emerald-600'
+                          : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
                       <td className="px-2.5 py-1 border-r border-slate-200">
@@ -4031,26 +4141,60 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             size="xs"
                           />
                           <div className="truncate">
-                            <span className="font-mono text-[10px] font-bold text-emerald-700 mr-1">
+                            <span
+                              className={`font-mono text-[10px] font-bold mr-1 ${
+                                isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                              }`}
+                            >
                               [{it.item_code}]
                             </span>
-                            <span className="font-bold text-slate-900">{it.item_name}</span>
-                            <span className="text-[10px] text-slate-500 ml-1">({it.packing})</span>
+                            <span
+                              className={`font-bold ${
+                                isHighlighted ? 'text-white' : 'text-slate-900'
+                              }`}
+                            >
+                              {it.item_name}
+                            </span>
+                            <span
+                              className={`text-[10px] ml-1 ${
+                                isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                              }`}
+                            >
+                              ({it.packing})
+                            </span>
                             {Number(it.has_variants || 0) === 1 && (
-                              <span className="ml-1.5 px-1 py-0 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 text-[9px] font-bold">
+                              <span
+                                className={`ml-1.5 px-1 py-0 rounded border text-[9px] font-bold ${
+                                  isHighlighted
+                                    ? 'bg-sky-900 text-amber-200 border-sky-400'
+                                    : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                }`}
+                              >
                                 {Number(it.active_variant_count || it.variants?.length || 0)} Variants
                               </span>
                             )}
                           </div>
                         </div>
                       </td>
-                      <td className="px-2.5 py-1 border-r border-slate-200 text-slate-700 truncate max-w-[160px]">
+                      <td
+                        className={`px-2.5 py-1 border-r border-slate-200 truncate max-w-[160px] ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
                         {it.company_name || '—'}
                       </td>
-                      <td className="px-2.5 py-1 border-r border-slate-200 text-right font-mono font-black text-emerald-800">
+                      <td
+                        className={`px-2.5 py-1 border-r border-slate-200 text-right font-mono font-black ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-800'
+                        }`}
+                      >
                         Rs. {purRate.toFixed(2)}
                       </td>
-                      <td className="px-2.5 py-1 text-right font-mono font-semibold text-slate-700">
+                      <td
+                        className={`px-2.5 py-1 text-right font-mono font-semibold ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
                         Rs. {saleRate.toFixed(2)}
                       </td>
                     </tr>
@@ -4588,17 +4732,25 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         const isSelected = rIdx === selectedPurchaseLineIndex;
                         const isActiveSearchMatch = purchaseSearchActiveRow === rIdx;
                         const isSearchMatch = purchaseSearchMatchedRows.includes(rIdx);
+                        const hasItem = Boolean(line.item_id && Number(line.item_id) > 0);
+                        const isZeroQty = hasItem && Number(line.quantity || 0) === 0;
+                        const isZeroNet = hasItem && round2(Number(line.taxable_amount || 0)) === 0;
+                        const isZeroRow = isZeroQty || isZeroNet;
 
                         return (
                           <tr
                             key={rIdx}
                             data-purchase-row-idx={rIdx}
+                            data-zero-qty={isZeroQty ? 'true' : 'false'}
+                            data-zero-net={isZeroNet ? 'true' : 'false'}
                             onClick={() => setSelectedPurchaseLineIndex(rIdx)}
                             className={`cursor-pointer transition-colors h-[16px] leading-none ${
                               isActiveSearchMatch
                                 ? 'bg-amber-200/80 ring-2 ring-inset ring-amber-500 font-semibold'
                                 : isSearchMatch
                                 ? 'bg-sky-100/80 font-medium'
+                                : isZeroRow
+                                ? 'bg-orange-50/90 hover:bg-orange-100/75'
                                 : isSelected
                                 ? 'bg-emerald-50/90 font-medium'
                                 : rIdx % 2 === 0
@@ -4648,11 +4800,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
                                 }}
                                 onKeyDown={(e) => {
-                                  if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
+                                  if (e.key === 'Escape' && (activeRowItemSearchIdx === rIdx || showPurchaseCompactHistoryPopup)) {
                                     e.preventDefault();
                                     setActiveRowItemSearchIdx(null);
                                     setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
+                                    setShowPurchaseCompactHistoryPopup(false);
                                     return;
                                   }
                                   if (
@@ -4738,7 +4891,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                       setRowItemSearchQuery('');
                                     }
                                     if (line.item_code || line.item_id) {
-                                      setShowPurchaseCompactHistoryPopup(true);
                                       fetchPurchaseItemHistoryByCode(
                                         line.item_code,
                                         Number(line.item_id || 0),
@@ -4846,9 +4998,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               {renderRowItemSearchCombobox(rIdx, true)}
                             </td>
                             {/* 3. Qty */}
-                            <td className="p-0 h-[16px] align-middle">
+                            <td
+                              className={`p-0 h-[16px] align-middle ${
+                                isZeroQty
+                                  ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
+                                  : ''
+                              }`}
+                            >
                               <NumericInput
                                 id={`pos_row_${rIdx}_quantity`}
+                                displayZero={hasItem}
                                 value={
                                   line.item_id || line.item_code?.trim() || line.item_name?.trim()
                                     ? line.quantity
@@ -4865,7 +5024,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 onKeyDown={(e) =>
                                   handlePurchaseCellKeyDown(e, rIdx, 'quantity', 'pos_row')
                                 }
-                                className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                className={`w-full px-1 py-0 text-right font-mono font-bold text-[11px] border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none ${
+                                  isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
+                                }`}
                               />
                             </td>
 
@@ -4921,10 +5082,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             </td>
 
                             {/* 7. Net Amount */}
-                            <td className="py-0 px-1.5 text-right font-mono font-semibold text-slate-900 text-[11px] h-[16px] align-middle">
-                              {line.item_id && line.taxable_amount > 0
-                                ? formatPKR(line.taxable_amount)
-                                : ''}
+                            <td
+                              className={`py-0 px-1.5 text-right font-mono font-semibold text-[11px] h-[16px] align-middle ${
+                                isZeroNet
+                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                                  : 'text-slate-900'
+                              }`}
+                            >
+                              {hasItem ? formatPKR(Number(line.taxable_amount || 0)) : ''}
                             </td>
 
                             {/* 8. Packing */}
@@ -4984,6 +5149,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 onKeyDown={(e) =>
                                   handlePurchaseCellKeyDown(e, rIdx, 'purchase_rate', 'pos_row')
                                 }
+                                title={
+                                  line.item_id
+                                    ? 'Purchase Price — Press Ctrl to view Item Purchase History'
+                                    : 'Purchase Price'
+                                }
                                 className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                               />
                             </td>
@@ -5036,8 +5206,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             </td>
 
                             {/* 14. Line Total */}
-                            <td className="py-0 px-1.5 text-right font-mono font-black text-slate-900 text-[11px] h-[16px] align-middle">
-                              {line.line_total > 0 ? formatPKR(line.line_total) : ''}
+                            <td
+                              className={`py-0 px-1.5 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
+                                isZeroNet
+                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                                  : 'text-slate-900'
+                              }`}
+                            >
+                              {hasItem ? formatPKR(Number(line.line_total || 0)) : ''}
                             </td>
                             <td className="py-0 px-1 text-center h-[16px] align-middle whitespace-nowrap">
                               <div className="inline-flex items-center gap-1">
@@ -5779,16 +5955,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         const isSelected = idx === selectedPurchaseLineIndex;
                         const isActiveSearchMatch = purchaseSearchActiveRow === idx;
                         const isSearchMatch = purchaseSearchMatchedRows.includes(idx);
+                        const hasItem = Boolean(line.item_id && Number(line.item_id) > 0);
+                        const isZeroQty = hasItem && Number(line.quantity || 0) === 0;
+                        const isZeroNet = hasItem && round2(Number(line.taxable_amount || 0)) === 0;
+                        const isZeroRow = isZeroQty || isZeroNet;
                         return (
                           <tr
                             key={idx}
                             data-purchase-row-idx={idx}
+                            data-zero-qty={isZeroQty ? 'true' : 'false'}
+                            data-zero-net={isZeroNet ? 'true' : 'false'}
                             onClick={() => setSelectedPurchaseLineIndex(idx)}
                             className={`border-b border-slate-300 font-sans transition-colors h-[16px] leading-none ${
                               isActiveSearchMatch
                                 ? 'bg-amber-200/90 ring-2 ring-inset ring-amber-500 font-semibold'
                                 : isSearchMatch
                                 ? 'bg-sky-100/90 font-medium'
+                                : isZeroRow
+                                ? 'bg-orange-50/90 hover:bg-orange-100/75'
                                 : isSelected
                                 ? 'bg-amber-50/90 font-medium'
                                 : idx % 2 === 0
@@ -5845,11 +6029,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
                                 }}
                                 onKeyDown={(e) => {
-                                  if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
+                                  if (e.key === 'Escape' && (activeRowItemSearchIdx === idx || showPurchaseCompactHistoryPopup)) {
                                     e.preventDefault();
                                     setActiveRowItemSearchIdx(null);
                                     setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
+                                    setShowPurchaseCompactHistoryPopup(false);
                                     return;
                                   }
                                   if (
@@ -5892,7 +6077,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                         rowItemSearchResults[rowItemHighlightIndex] ||
                                         rowItemSearchResults[0];
                                       if (chosen) {
-                                        populatePurchaseRowWithItem(idx, chosen, false);
+                                        populatePurchaseRowWithItem(idx, chosen, true);
                                       }
                                       return;
                                     }
@@ -5935,7 +6120,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                       setRowItemSearchQuery('');
                                     }
                                     if (line.item_code || line.item_id) {
-                                      setShowPurchaseCompactHistoryPopup(true);
                                       fetchPurchaseItemHistoryByCode(
                                         line.item_code,
                                         Number(line.item_id || 0),
@@ -6024,7 +6208,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                           rowItemSearchResults[rowItemHighlightIndex] ||
                                           rowItemSearchResults[0];
                                         if (chosen) {
-                                          populatePurchaseRowWithItem(idx, chosen, false);
+                                          populatePurchaseRowWithItem(idx, chosen, true);
                                         }
                                         return;
                                       }
@@ -6044,9 +6228,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             </td>
 
                             {/* 3. Qty */}
-                            <td className="border-r border-slate-300 p-0 bg-emerald-50/20 h-[16px] align-middle">
+                            <td
+                              className={`border-r border-slate-300 p-0 h-[16px] align-middle ${
+                                isZeroQty
+                                  ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
+                                  : 'bg-emerald-50/20'
+                              }`}
+                            >
                               <NumericInput
                                 id={`pur_cell_${idx}_quantity`}
+                                displayZero={hasItem}
                                 value={
                                   line.item_id || line.item_code?.trim() || line.item_name?.trim()
                                     ? line.quantity
@@ -6061,7 +6252,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   )
                                 }
                                 onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'quantity')}
-                                className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
+                                  isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
+                                }`}
                               />
                             </td>
 
@@ -6108,6 +6301,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 onKeyDown={(e) =>
                                   handlePurchaseCellKeyDown(e, idx, 'purchase_rate')
                                 }
+                                title={
+                                  line.item_id
+                                    ? 'Purchase Price — Press Ctrl to view Item Purchase History'
+                                    : 'Purchase Price'
+                                }
                                 className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                               />
                             </td>
@@ -6133,10 +6331,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             </td>
 
                             {/* 7. Net Amount */}
-                            <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-900 text-[11px] h-[16px] align-middle">
-                              {line.item_id && line.taxable_amount > 0
-                                ? line.taxable_amount.toFixed(2)
-                                : ''}
+                            <td
+                              className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-[11px] h-[16px] align-middle ${
+                                isZeroNet
+                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                                  : 'text-slate-900'
+                              }`}
+                            >
+                              {hasItem ? Number(line.taxable_amount || 0).toFixed(2) : ''}
                             </td>
 
                             {/* 6. Gross Amount */}
@@ -6228,8 +6430,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             </td>
 
                             {/* 14. Line Total */}
-                            <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-slate-900 bg-slate-50/50 text-[11px] h-[16px] align-middle">
-                              {line.line_total > 0 ? line.line_total.toFixed(2) : ''}
+                            <td
+                              className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
+                                isZeroNet
+                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                                  : 'text-slate-900 bg-slate-50/50'
+                              }`}
+                            >
+                              {hasItem ? Number(line.line_total || 0).toFixed(2) : ''}
                             </td>
 
                             {/* Select Item List / Delete Row */}
