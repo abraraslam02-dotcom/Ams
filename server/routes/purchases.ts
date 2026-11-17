@@ -11,6 +11,7 @@ import {
   generateTemporaryHeldInvoiceNumber,
 } from '../services/invoiceSequenceService.ts';
 import { recordBatchStockMovement } from '../services/fifoAndOfferEngine.ts';
+import { getEnrichedVariants, type EnrichedVariantRecord } from '../services/itemVariantService.ts';
 import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const purchasesRouter = Router();
@@ -324,9 +325,29 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
             OR company_name LIKE ?
             OR category LIKE ?
             OR packing LIKE ?
+            OR id IN (
+              SELECT parent_item_id FROM item_variants
+              WHERE LOWER(COALESCE(status, 'Active')) = 'active'
+                AND (
+                  variant_code LIKE ?
+                  OR variant_name LIKE ?
+                  OR colour LIKE ?
+                  OR flavour LIKE ?
+                  OR variant_type LIKE ?
+                  OR barcode LIKE ?
+                )
+            )
+            OR id IN (
+              SELECT item_id FROM item_variant_barcodes
+              WHERE barcode LIKE ?
+            )
           )
         `;
-        params.push(likeTok, likeTok, likeTok, likeTok, likeTok, likeTok, likeTok);
+        params.push(
+          likeTok, likeTok, likeTok, likeTok, likeTok, likeTok, likeTok,
+          likeTok, likeTok, likeTok, likeTok, likeTok, likeTok,
+          likeTok
+        );
       }
 
       const exactTerm = q;
@@ -336,6 +357,8 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
           CASE
             WHEN LOWER(item_code) = LOWER(?) THEN 0
             WHEN LOWER(barcode) = LOWER(?) THEN 1
+            WHEN id IN (SELECT parent_item_id FROM item_variants WHERE LOWER(barcode) = LOWER(?) OR LOWER(variant_code) = LOWER(?)) THEN 1
+            WHEN id IN (SELECT item_id FROM item_variant_barcodes WHERE LOWER(barcode) = LOWER(?)) THEN 1
             WHEN LOWER(item_name) = LOWER(?) THEN 2
             WHEN LOWER(item_code) LIKE LOWER(?) THEN 3
             WHEN LOWER(item_name) LIKE LOWER(?) THEN 4
@@ -344,13 +367,35 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
           item_name ASC
         LIMIT ?
       `;
-      params.push(exactTerm, exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
+      params.push(exactTerm, exactTerm, exactTerm, exactTerm, exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
     } else {
       sql += ` ORDER BY item_name ASC LIMIT ?`;
       params.push(limit);
     }
 
-    const items = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    const rawItems = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    const itemIds = rawItems.map((it) => Number(it.id));
+    const variantsByParent = new Map<number, EnrichedVariantRecord[]>();
+    if (itemIds.length > 0) {
+      const variants = getEnrichedVariants({ parentItemIds: itemIds, includeInactive: false });
+      for (const v of variants) {
+        const pid = Number(v.parent_item_id);
+        if (!variantsByParent.has(pid)) variantsByParent.set(pid, []);
+        variantsByParent.get(pid)!.push(v);
+      }
+    }
+
+    const items = rawItems.map((it) => {
+      const iid = Number(it.id);
+      const itemVars = variantsByParent.get(iid) || [];
+      return {
+        ...it,
+        has_variants: Number(it.has_variants || 0),
+        variants: itemVars,
+        active_variant_count: itemVars.length,
+      };
+    });
+
     return res.json({
       success: true,
       items,
@@ -458,9 +503,14 @@ purchasesRouter.get('/batches', (req: Request, res: Response) => {
           i.generic_name,
           i.category,
           i.minimum_stock,
+          i.has_variants,
+          COALESCE(iv.variant_code, '') as variant_code,
+          COALESCE(iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url,
           a.account_name as last_supplier_name
         FROM inventory inv
         INNER JOIN items i ON i.id = inv.item_id
+        LEFT JOIN item_variants iv ON iv.id = inv.variant_id
         LEFT JOIN accounts a ON a.id = inv.last_supplier_id
         ${whereClause}
         ORDER BY inv.expiry_date ASC, i.item_name ASC
@@ -744,15 +794,25 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           );
         }
 
-        // Verify batch stock availability in inventory
-        const batchRow = db
-          .prepare('SELECT * FROM inventory WHERE item_id = ? AND batch_number = ?')
-          .get(origItem.item_id, origItem.batch_number) as Record<string, any> | undefined;
+        // Verify batch stock availability in inventory (variant-isolated)
+        const origVariantKey = origItem.variant_id ? Number(origItem.variant_id) : 0;
+        let batchRow = origItem.inventory_id
+          ? (db
+              .prepare('SELECT * FROM inventory WHERE id = ?')
+              .get(origItem.inventory_id) as Record<string, any> | undefined)
+          : undefined;
+        if (!batchRow) {
+          batchRow = db
+            .prepare(
+              'SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?'
+            )
+            .get(origItem.item_id, origVariantKey, origItem.batch_number) as Record<string, any> | undefined;
+        }
 
         if (!batchRow || round2(batchRow.current_pack_qty) < retQty) {
           const avail = batchRow ? round2(batchRow.current_pack_qty) : 0;
           throw new Error(
-            `Insufficient batch stock for "${origItem.item_name}" (Batch: ${origItem.batch_number}). Available in batch: ${avail}, Requested return: ${retQty}.`
+            `Insufficient batch stock for "${origItem.item_name}${origItem.variant_name ? ` (${origItem.variant_name})` : ''}" (Batch: ${origItem.batch_number}). Available in batch: ${avail}, Requested return: ${retQty}.`
           );
         }
 
@@ -857,13 +917,14 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
       const insertRetItemStmt = db.prepare(`
         INSERT INTO purchase_return_items (
           purchase_return_id, original_purchase_item_id, item_id, inventory_id,
+          variant_id, variant_code, variant_name,
           item_code, company_name, item_name, packing, units_per_pack,
           batch_number, manufacturing_date, expiry_date,
           purchased_quantity, return_quantity, return_units,
           debit_unit_rate, discount_percent, discount_amount,
           taxable_amount, tax_percent, gst_amount,
           advance_tax_rate, advance_tax_amount, line_total, return_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const pl of preparedLines) {
@@ -872,6 +933,9 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           pl.origItem.id,
           pl.origItem.item_id,
           pl.batchRow.id,
+          pl.origItem.variant_id || null,
+          pl.origItem.variant_code || null,
+          pl.origItem.variant_name || null,
           pl.origItem.item_code,
           pl.origItem.company_name,
           pl.origItem.item_name,
@@ -1582,9 +1646,13 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
           pi.*,
           COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(pi.company_name), ''), '') as company_name,
           COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
-          COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code
+          COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code,
+          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, '') as variant_code,
+          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url
         FROM purchase_items pi
         LEFT JOIN items i ON pi.item_id = i.id
+        LEFT JOIN item_variants iv ON iv.id = pi.variant_id
         WHERE pi.purchase_id = ?
         ORDER BY pi.id ASC
       `)
@@ -1788,20 +1856,36 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       throw new Error(`Row ${rowIdx}: Selected Item does not exist in Items Master.`);
     }
 
+    const variantId = raw.variant_id ? parseInt(String(raw.variant_id), 10) : null;
+    let dbVariant: Record<string, any> | undefined;
+    if (variantId) {
+      dbVariant = db
+        .prepare('SELECT * FROM item_variants WHERE id = ? AND parent_item_id = ?')
+        .get(variantId, itemId) as Record<string, any> | undefined;
+      if (!dbVariant) {
+        throw new Error(`Row ${rowIdx}: Selected Variant does not belong to "${dbItem.item_name}".`);
+      }
+    }
+    const variantKey = dbVariant ? Number(dbVariant.id) : 0;
+    const variantCode = dbVariant ? String(dbVariant.variant_code || '') : '';
+    const variantName = dbVariant ? String(dbVariant.variant_name || '') : '';
+    const useVariantCustomPricing = Boolean(dbVariant && Number(dbVariant.use_parent_pricing ?? 1) === 0);
+
     const existingPrimaryBatch = !batchWisePurchase
       ? (db
           .prepare(`
             SELECT * FROM inventory
-            WHERE item_id = ?
+            WHERE item_id = ? AND COALESCE(variant_key, 0) = ?
             ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, id DESC
             LIMIT 1
           `)
-          .get(itemId) as Record<string, any> | undefined)
+          .get(itemId, variantKey) as Record<string, any> | undefined)
       : undefined;
 
+    const batchCodeBase = variantCode || dbItem.item_code;
     const batchNo = batchWisePurchase
-      ? String(raw.batch_number || '').trim() || `B-${dbItem.item_code}-01`
-      : String(existingPrimaryBatch?.batch_number || raw.batch_number || `B-${dbItem.item_code}-01`).trim();
+      ? String(raw.batch_number || '').trim() || `B-${batchCodeBase}-01`
+      : String(existingPrimaryBatch?.batch_number || raw.batch_number || `B-${batchCodeBase}-01`).trim();
     const expiryDate = batchWisePurchase
       ? String(raw.expiry_date || '').trim() || '2028-12-31'
       : String(existingPrimaryBatch?.expiry_date || raw.expiry_date || '2028-12-31').trim();
@@ -1813,7 +1897,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       );
     }
 
-    const packingStr = String(raw.packing || dbItem.packing || '1x1').trim();
+    const packingStr = String(raw.packing || dbVariant?.packing || dbItem.packing || '1x1').trim();
     const parsedPack = parsePacking(packingStr);
     const rawQty = Math.max(0, round2(raw.quantity || 0));
     const bonusQty = Math.max(0, round2(raw.bonus_quantity || 0));
@@ -1826,15 +1910,25 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     }
     const qty = rawQty;
 
-    const purchaseRate = Math.max(0, round2(raw.purchase_rate ?? dbItem.purchase_price));
+    const defaultPurchasePrice = useVariantCustomPricing
+      ? Number(dbVariant?.purchase_price || dbItem.purchase_price)
+      : Number(dbItem.purchase_price);
+    const defaultRetailPrice = useVariantCustomPricing
+      ? Number(dbVariant?.retail_price || dbItem.retail_price)
+      : Number(dbItem.retail_price);
+    const defaultTaxPct = useVariantCustomPricing
+      ? Number(dbVariant?.tax_percent ?? dbItem.tax_percent ?? 0)
+      : Number(dbItem.tax_percent ?? 0);
+
+    const purchaseRate = Math.max(0, round2(raw.purchase_rate ?? defaultPurchasePrice));
     const defaultLooseRate = round2(purchaseRate / Math.max(1, parsedPack.unitsPerPack));
     const looseRate =
       raw.loose_rate !== undefined && Number(raw.loose_rate) > 0
         ? round2(Number(raw.loose_rate))
         : defaultLooseRate;
-    const mrpRate = Math.max(0, round2(raw.mrp_rate ?? dbItem.retail_price));
+    const mrpRate = Math.max(0, round2(raw.mrp_rate ?? defaultRetailPrice));
     const discPct = Math.max(0, round2(raw.discount_percent ?? 0));
-    const taxPct = Math.max(0, round2(raw.tax_percent ?? dbItem.tax_percent ?? 0));
+    const taxPct = Math.max(0, round2(raw.tax_percent ?? defaultTaxPct));
 
     const lineGross = round2(qty * purchaseRate + looseQty * looseRate);
     const lineItemDisc =
@@ -1852,7 +1946,13 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
     processedLines.push({
       dbItem,
+      dbVariant,
       itemId,
+      variantId: dbVariant ? Number(dbVariant.id) : null,
+      variantKey,
+      variantCode,
+      variantName,
+      useVariantCustomPricing,
       itemCode: dbItem.item_code,
       companyName: raw.company_name || dbItem.company_name,
       itemName: dbItem.item_name,
@@ -2143,32 +2243,45 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
   const insertItemStmt = db.prepare(`
     INSERT INTO purchase_items (
       purchase_id, item_id, inventory_id,
+      variant_id, variant_code, variant_name,
       item_code, company_name, item_name, packing, units_per_pack,
       batch_number, manufacturing_date, expiry_date,
       quantity, bonus_quantity, pack_quantity, loose_quantity, loose_rate, total_units,
       purchase_rate, mrp_rate, gross_amount,
       discount_percent, discount_amount, taxable_amount,
       tax_percent, tax_amount, line_total, returned_quantity
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
 
   for (const line of processedLines) {
     let inventoryId: number | null = null;
 
     if (targetStatus === 'completed') {
-      // Upsert batch in inventory (when batchWisePurchase is OFF, update the item's existing active batch record while preserving its batch_number & expiry_date)
+      const effectiveMinStock = Number(
+        line.dbVariant?.minimum_stock > 0 ? line.dbVariant.minimum_stock : line.dbItem.minimum_stock || 0
+      );
+      const effectiveTradePrice = line.useVariantCustomPricing
+        ? Number(line.dbVariant?.trade_price || line.dbItem.trade_price || line.mrpRate || 0)
+        : Number(line.dbItem.trade_price || line.mrpRate || 0);
+      const effectiveWholesalePrice = line.useVariantCustomPricing
+        ? Number(line.dbVariant?.wholesale_price || line.dbItem.wholesale_price || line.purchaseRate || 0)
+        : Number(line.dbItem.wholesale_price || line.purchaseRate || 0);
+
+      // Upsert batch in inventory (isolated by variant_key = COALESCE(variant_id, 0))
       const existingBatch = batchWisePurchase
         ? (db
-            .prepare('SELECT * FROM inventory WHERE item_id = ? AND batch_number = ?')
-            .get(line.itemId, line.batchNo) as Record<string, any> | undefined)
+            .prepare(
+              'SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?'
+            )
+            .get(line.itemId, line.variantKey, line.batchNo) as Record<string, any> | undefined)
         : (db
             .prepare(`
               SELECT * FROM inventory
-              WHERE item_id = ?
+              WHERE item_id = ? AND COALESCE(variant_key, 0) = ?
               ORDER BY CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END, id DESC
               LIMIT 1
             `)
-            .get(line.itemId) as Record<string, any> | undefined);
+            .get(line.itemId, line.variantKey) as Record<string, any> | undefined);
 
       if (existingBatch) {
         const nextPurchasedQty = round2(Number(existingBatch.purchased_qty || 0) + line.qty);
@@ -2183,11 +2296,13 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         const nextStatus = computeBatchStatus(
           nextPackQty,
           preservedExpiryDate,
-          Number(line.dbItem.minimum_stock || 0)
+          effectiveMinStock
         );
 
         db.prepare(`
           UPDATE inventory SET
+            variant_id = COALESCE(variant_id, ?),
+            variant_key = ?,
             manufacturing_date = COALESCE(?, manufacturing_date),
             expiry_date = ?,
             packing = ?,
@@ -2214,6 +2329,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
+          line.variantId,
+          line.variantKey,
           line.mfgDate,
           preservedExpiryDate,
           line.packing,
@@ -2243,6 +2360,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         recordBatchStockMovement({
           movementDate: invoiceDate,
           itemId: line.itemId,
+          variantId: line.variantId,
+          variantCode: line.variantCode,
+          variantName: line.variantName,
           itemCode: line.itemCode,
           itemName: line.itemName,
           companyName: line.companyName,
@@ -2260,9 +2380,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           bonusPacks: line.bonusQty,
           totalUnits: line.totalLooseUnits,
           purchaseRate: line.purchaseRate,
-          tradePrice: Number(line.dbItem.trade_price || line.mrpRate || 0),
+          tradePrice: effectiveTradePrice,
           balanceAfterPacks: nextPackQty,
-          remarks: `Purchase Invoice ${finalBillNumber}`,
+          remarks: `Purchase Invoice ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`,
           performedBy: 'Super Admin',
         });
       } else {
@@ -2273,13 +2393,13 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         const nextStatus = computeBatchStatus(
           nextPackQty,
           line.expiryDate,
-          Number(line.dbItem.minimum_stock || 0)
+          effectiveMinStock
         );
 
         const invResult = db
           .prepare(`
             INSERT INTO inventory (
-              item_id, batch_number, manufacturing_date, expiry_date,
+              item_id, variant_id, variant_key, batch_number, manufacturing_date, expiry_date,
               packing, strips_per_box, units_per_strip, units_per_pack,
               cost_price, trade_price, wholesale_price, retail_price,
               pack_cost, pack_retail,
@@ -2287,10 +2407,12 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
               current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
               rack_shelf, last_purchase_id, last_supplier_id,
               purchase_date, purchase_invoice_number, supplier_name, status, batch_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
           `)
           .run(
             line.itemId,
+            line.variantId,
+            line.variantKey,
             line.batchNo,
             line.mfgDate,
             line.expiryDate,
@@ -2299,8 +2421,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             line.parsedPack.unitsPerStrip,
             line.parsedPack.unitsPerPack,
             line.purchaseRate,
-            line.dbItem.trade_price || line.purchaseRate,
-            line.dbItem.wholesale_price || line.purchaseRate,
+            effectiveTradePrice,
+            effectiveWholesalePrice,
             line.mrpRate,
             line.purchaseRate,
             line.mrpRate,
@@ -2310,7 +2432,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             nextStripQty,
             nextLooseRemainder,
             nextTotalUnits,
-            line.dbItem.rack_number || null,
+            line.dbVariant?.rack_number || line.dbItem.rack_number || null,
             purchaseId,
             supplierId,
             invoiceDate,
@@ -2323,6 +2445,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         recordBatchStockMovement({
           movementDate: invoiceDate,
           itemId: line.itemId,
+          variantId: line.variantId,
+          variantCode: line.variantCode,
+          variantName: line.variantName,
           itemCode: line.itemCode,
           itemName: line.itemName,
           companyName: line.companyName,
@@ -2340,16 +2465,38 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           bonusPacks: line.bonusQty,
           totalUnits: nextTotalUnits,
           purchaseRate: line.purchaseRate,
-          tradePrice: Number(line.dbItem.trade_price || line.mrpRate || 0),
+          tradePrice: effectiveTradePrice,
           balanceAfterPacks: nextPackQty,
-          remarks: `Purchase Invoice ${finalBillNumber}`,
+          remarks: `Purchase Invoice ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`,
           performedBy: 'Super Admin',
         });
       }
 
-      // Update Item Master prices ONLY when explicitly approved by user confirmation
+      // Update Item Master (or custom-priced Variant) prices ONLY when explicitly approved by user confirmation
       if (line.updateMasterPurchasePrice) {
-        if (line.updateMasterRetailPrice) {
+        if (line.variantId && line.useVariantCustomPricing) {
+          if (line.updateMasterRetailPrice) {
+            const roundedRetail =
+              line.purchaseRate > 0 ? round2(line.purchaseRate / 0.85) : line.mrpRate;
+            const unitsPerPack = Math.max(1, Number(line.parsedPack.unitsPerPack) || 1);
+            const nextLooseRate = round2(roundedRetail / unitsPerPack);
+            db.prepare(`
+              UPDATE item_variants SET
+                purchase_price = ?,
+                retail_price = ?,
+                loose_rate = ?,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `).run(line.purchaseRate, roundedRetail, nextLooseRate, line.variantId);
+          } else {
+            db.prepare(`
+              UPDATE item_variants SET
+                purchase_price = ?,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `).run(line.purchaseRate, line.variantId);
+          }
+        } else if (line.updateMasterRetailPrice) {
           const roundedRetail =
             line.purchaseRate > 0
               ? round2(line.purchaseRate / 0.85)
@@ -2379,6 +2526,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       purchaseId,
       line.itemId,
       inventoryId,
+      line.variantId || null,
+      line.variantCode || null,
+      line.variantName || null,
       line.itemCode,
       line.companyName,
       line.itemName,
@@ -2606,9 +2756,17 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
     .all(purchaseId) as Array<Record<string, any>>;
 
   for (const item of oldItems) {
-    const batch = db
-      .prepare('SELECT * FROM inventory WHERE item_id = ? AND batch_number = ?')
-      .get(item.item_id, item.batch_number) as Record<string, any> | undefined;
+    const itemVariantKey = item.variant_id ? Number(item.variant_id) : 0;
+    let batch = item.inventory_id
+      ? (db
+          .prepare('SELECT * FROM inventory WHERE id = ?')
+          .get(item.inventory_id) as Record<string, any> | undefined)
+      : undefined;
+    if (!batch) {
+      batch = db
+        .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
+        .get(item.item_id, itemVariantKey, item.batch_number) as Record<string, any> | undefined;
+    }
 
     if (batch) {
       const packsToRemove = round2(Number(item.quantity || 0) + Number(item.bonus_quantity || 0));

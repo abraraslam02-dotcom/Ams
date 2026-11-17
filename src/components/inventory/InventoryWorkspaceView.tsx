@@ -22,6 +22,7 @@ import { StockLedgerView } from './StockLedgerView';
 import { PhysicalVerificationView } from './PhysicalVerificationView';
 import { CompanyStockStatementView } from './CompanyStockStatementView';
 import { DetailedItemStockReportView } from './DetailedItemStockReportView';
+import { VariantReportsView } from './VariantReportsView';
 
 export type InventorySubTab =
   | 'inv-overview'
@@ -36,7 +37,8 @@ export type InventorySubTab =
   | 'inv-adjustment'
   | 'inv-transfer'
   | 'inv-ledger'
-  | 'inv-verification';
+  | 'inv-verification'
+  | 'inv-variant-reports';
 
 interface InventoryWorkspaceViewProps {
   initialSubTab?: InventorySubTab;
@@ -75,6 +77,7 @@ export const InventoryWorkspaceView: React.FC<InventoryWorkspaceViewProps> = ({
     { id: 'inv-transfer', label: 'Stock Transfer', icon: ArrowRightLeft },
     { id: 'inv-ledger', label: 'Item Log / Ledger', icon: Calendar },
     { id: 'inv-verification', label: 'Physical Stock Adjustment', icon: CheckCircle2 },
+    { id: 'inv-variant-reports', label: 'Variant Stock & Reports', icon: Layers },
   ];
 
   return (
@@ -122,6 +125,7 @@ export const InventoryWorkspaceView: React.FC<InventoryWorkspaceViewProps> = ({
       {activeSubTab === 'inv-transfer' && <StockTransferView />}
       {activeSubTab === 'inv-ledger' && <StockLedgerView />}
       {activeSubTab === 'inv-verification' && <PhysicalVerificationView />}
+      {activeSubTab === 'inv-variant-reports' && <VariantReportsView />}
     </div>
   );
 };

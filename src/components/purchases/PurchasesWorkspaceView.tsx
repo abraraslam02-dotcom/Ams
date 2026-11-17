@@ -33,7 +33,7 @@ import {
   PackageSearch,
   Calculator,
 } from 'lucide-react';
-import { Item } from '../../types/item';
+import { Item, ItemVariant } from '../../types/item';
 import { Account, FilerStatus } from '../../types/account';
 import { PartyCitySelect } from '../accounts/PartyCitySelect';
 import {
@@ -49,7 +49,7 @@ import {
 } from '../../types/purchase';
 import { api } from '../../services/api';
 import { formatPKR } from '../../utils/formatters';
-import { prepareItemIndex } from '../../utils/itemSearch';
+import { findExactBarcodeOrCodeMatch, prepareItemIndex } from '../../utils/itemSearch';
 import { PurchasePrintModal } from './PurchasePrintModal';
 import { AdvanceTaxSettingsPanel } from './AdvanceTaxSettingsPanel';
 import { BatchInventoryPanel } from './BatchInventoryPanel';
@@ -61,6 +61,8 @@ import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
 import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
+import { VariantPickerModal } from '../common/VariantPickerModal';
+import { ProductThumb } from '../common/ProductThumb';
 import { ItemLogModal } from '../common/ItemLogModal';
 import { CompactItemHistoryPopup } from '../common/CompactItemHistoryPopup';
 import { CustomerItemHistoryResponse } from '../../types/sales';
@@ -109,6 +111,10 @@ function calculateRetailFromPurchasePrice(newPurchasePrice: number): {
 
 export const createBlankPurchaseLine = (): PurchaseLineItem => ({
   item_id: 0,
+  variant_id: null,
+  variant_code: '',
+  variant_name: '',
+  thumbnail_url: null,
   item_code: '',
   company_name: '',
   item_name: '',
@@ -351,7 +357,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const lastPurchaseItemListTriggerElIdRef = useRef<string | null>(null);
   const [pendingDuplicatePrompt, setPendingDuplicatePrompt] = useState<{
     item: Item;
+    variant?: ItemVariant | null;
     clearRowIdx: number | null;
+  } | null>(null);
+  const [pendingVariantPicker, setPendingVariantPicker] = useState<{
+    item: Item;
+    targetRowIdx: number | null;
+    focusQty: boolean;
+    fromTopSearch: boolean;
   } | null>(null);
   const [itemLogModalState, setItemLogModalState] = useState<{
     isOpen: boolean;
@@ -557,7 +570,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     useState<boolean>(false);
 
   const fetchPurchaseItemHistoryByCode = useCallback(
-    async (itemCode: string, itemId?: number) => {
+    async (itemCode: string, itemId?: number, variantId?: number | null) => {
       const cleanCode = String(itemCode || '').trim();
       if (!cleanCode && !itemId) return;
       try {
@@ -565,16 +578,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         const res: CustomerItemHistoryResponse = await api.getItemCustomerHistory(
           itemId || cleanCode,
           null,
-          cleanCode
+          cleanCode,
+          variantId ? { variantId } : undefined
         );
         const resolvedCode = String(res.itemCode || res.item?.item_code || cleanCode || '')
           .trim()
           .toLowerCase();
+        const vSuffix = variantId ? `::v${variantId}` : '';
         setPurchaseItemHistoryMap((prev) => {
           const next = { ...prev };
-          if (cleanCode) next[cleanCode.toLowerCase()] = res;
-          if (resolvedCode) next[resolvedCode] = res;
-          if (itemId) next[String(itemId)] = res;
+          if (cleanCode) next[`${cleanCode.toLowerCase()}${vSuffix}`] = res;
+          if (resolvedCode) next[`${resolvedCode}${vSuffix}`] = res;
+          if (itemId) next[`${itemId}${vSuffix}`] = res;
+          if (!vSuffix) {
+            if (cleanCode) next[cleanCode.toLowerCase()] = res;
+            if (resolvedCode) next[resolvedCode] = res;
+            if (itemId) next[String(itemId)] = res;
+          }
           return next;
         });
       } catch {
@@ -590,11 +610,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   useEffect(() => {
     const activeLine = lines[selectedPurchaseLineIndex];
     if (activeLine && (activeLine.item_code || activeLine.item_id)) {
-      const codeKey = activeLine.item_code
-        ? activeLine.item_code.trim().toLowerCase()
-        : String(activeLine.item_id);
+      const vSuffix = activeLine.variant_id ? `::v${activeLine.variant_id}` : '';
+      const codeKey = `${
+        activeLine.item_code
+          ? activeLine.item_code.trim().toLowerCase()
+          : String(activeLine.item_id)
+      }${vSuffix}`;
       if (!purchaseItemHistoryMap[codeKey]) {
-        fetchPurchaseItemHistoryByCode(activeLine.item_code, Number(activeLine.item_id || 0));
+        fetchPurchaseItemHistoryByCode(
+          activeLine.item_code,
+          Number(activeLine.item_id || 0),
+          activeLine.variant_id || null
+        );
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -936,6 +963,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       const ranked = items
         .map((item) => {
+          const variantText = Array.isArray(item.variants)
+            ? item.variants
+                .filter((v) => String(v.status || 'Active') !== 'Inactive')
+                .map((v) =>
+                  [
+                    v.variant_code,
+                    v.variant_name,
+                    v.colour,
+                    v.flavour,
+                    v.variant_type,
+                    v.other_attributes,
+                    v.barcode,
+                    ...(Array.isArray(v.barcodes) ? v.barcodes.map((b) => b.barcode) : []),
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                )
+                .join(' ')
+            : '';
+
           const searchable = normalize([
             item.item_code,
             item.item_name,
@@ -943,13 +990,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             item.packing,
             (item as any).barcode,
             (item as any).bar_code,
+            variantText,
           ].filter(Boolean).join(' '));
           if (!tokens.every((token) => searchable.includes(token))) return null;
 
           const code = normalize(item.item_code);
           const name = normalize(item.item_name);
+          const normQ = normalize(q);
+          const exactVariant = Array.isArray(item.variants) && item.variants.some((v) =>
+            normalize(v.variant_code) === normQ ||
+            normalize(v.barcode) === normQ ||
+            (Array.isArray(v.barcodes) && v.barcodes.some((b) => normalize(b.barcode) === normQ))
+          );
           const score =
-            (code === normalize(q) ? 1000 : 0) +
+            (exactVariant ? 1500 : 0) +
+            (code === normQ ? 1000 : 0) +
             (code.startsWith(tokens[0]) ? 300 : 0) +
             (name.startsWith(tokens[0]) ? 200 : 0) +
             (tokens.every((token) => code.includes(token)) ? 100 : 0);
@@ -1272,24 +1327,49 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     ? Math.max(0, round2(customAdvanceTaxRate))
     : getStatutoryAdvanceTaxRate();
 
-  // Build a populated PurchaseLineItem from an Item record (Default Quantity = 0)
+  const getActiveVariants = (it?: Item | null): ItemVariant[] =>
+    Array.isArray(it?.variants)
+      ? it!.variants.filter((v) => String(v.status || 'Active') !== 'Inactive')
+      : [];
+
+  // Build a populated PurchaseLineItem from an Item record (and optional Variant) (Default Quantity = 0)
   const buildPopulatedLineFromItem = (
     found: Item,
     existingRow?: Partial<PurchaseLineItem>,
-    preserveQtyAndDiscountOnly: boolean = false
+    preserveQtyAndDiscountOnly: boolean = false,
+    chosenVariant?: ItemVariant | null
   ): PurchaseLineItem => {
     const rate = round2(
-      Number(found.purchase_price) || Number(found.trade_price) || Number(found.retail_price) || 0
+      Number(
+        chosenVariant
+          ? chosenVariant.effective_purchase_price ?? chosenVariant.purchase_price ?? found.purchase_price
+          : found.purchase_price
+      ) ||
+        Number(found.trade_price) ||
+        Number(found.retail_price) ||
+        0
     );
-    const unitsPerPack = Math.max(1, parseUnitsPerPack(found.packing));
+    const retailPrice = round2(
+      Number(
+        chosenVariant
+          ? chosenVariant.effective_retail_price ?? chosenVariant.retail_price ?? found.retail_price
+          : found.retail_price
+      ) || 0
+    );
+    const packingStr =
+      (chosenVariant?.effective_packing || chosenVariant?.packing || found.packing || '1x1').trim() || '1x1';
+    const unitsPerPack = Math.max(1, parseUnitsPerPack(packingStr));
     const hasExistingQty =
       existingRow?.quantity !== undefined && existingRow?.quantity !== null;
     const qty = hasExistingQty ? Math.max(0, Number(existingRow.quantity) || 0) : 0;
     const hasExistingDiscount =
       existingRow?.discount_percent !== undefined && existingRow?.discount_percent !== null;
+    const defaultDisc = chosenVariant
+      ? Number(chosenVariant.effective_discount_percent ?? found.discount_percent ?? 0)
+      : Number(found.discount_percent || 0);
     const discPct = hasExistingDiscount
       ? Math.max(0, round2(Number(existingRow.discount_percent) || 0))
-      : round2(found.discount_percent || 0);
+      : round2(defaultDisc);
 
     const looseQty =
       !preserveQtyAndDiscountOnly && existingRow?.loose_quantity && existingRow.loose_quantity > 0
@@ -1306,25 +1386,40 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       existingRow.loose_rate > 0
         ? round2(existingRow.loose_rate)
         : defaultLooseRate;
-    const taxPct = round2(found.tax_percent || 0);
+    const taxPct = round2(
+      chosenVariant ? chosenVariant.effective_tax_percent ?? found.tax_percent ?? 0 : found.tax_percent || 0
+    );
     const gross = round2(qty * rate + looseQty * looseRate);
     const discAmt = round2(gross * (discPct / 100));
     const taxable = round2(gross - discAmt);
     const taxAmt = round2(taxable * (taxPct / 100));
     const net = round2(taxable + taxAmt);
+    const thumb = chosenVariant
+      ? chosenVariant.effective_thumbnail_url ||
+        chosenVariant.effective_image_url ||
+        chosenVariant.thumbnail_url ||
+        chosenVariant.image_url ||
+        found.thumbnail_url ||
+        found.image_url ||
+        null
+      : found.thumbnail_url || found.image_url || null;
 
     return {
       item_id: found.id,
+      variant_id: chosenVariant ? chosenVariant.id : null,
+      variant_code: chosenVariant ? chosenVariant.variant_code : '',
+      variant_name: chosenVariant ? chosenVariant.variant_name : '',
+      thumbnail_url: thumb,
       item_code: found.item_code,
-      barcode: found.barcode || '',
+      barcode: (chosenVariant?.barcode || found.barcode || ''),
       company_name: found.company_name,
       item_name: found.item_name,
-      packing: found.packing || '1x1',
+      packing: packingStr,
       units_per_pack: unitsPerPack,
       batch_number:
         !preserveQtyAndDiscountOnly && existingRow?.batch_number
           ? existingRow.batch_number
-          : `B-${found.item_code}-01`,
+          : `B-${chosenVariant?.variant_code || found.item_code}-01`,
       manufacturing_date:
         !preserveQtyAndDiscountOnly && existingRow?.manufacturing_date
           ? existingRow.manufacturing_date
@@ -1340,7 +1435,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       loose_rate: looseRate,
       is_loose_rate_manual:
         !preserveQtyAndDiscountOnly && Boolean(existingRow?.is_loose_rate_manual),
-      mrp_rate: round2(found.retail_price || 0),
+      mrp_rate: retailPrice,
       gross_amount: gross,
       discount_percent: discPct,
       discount_amount: discAmt,
@@ -1349,7 +1444,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       tax_amount: taxAmt,
       line_total: net,
       master_purchase_price: rate,
-      master_retail_price: round2(found.retail_price || 0),
+      master_retail_price: retailPrice,
       last_prompted_purchase_rate: rate,
       update_master_purchase_price: false,
       update_master_retail_price: false,
@@ -1423,8 +1518,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     if (!row || !row.item_id || row.item_id <= 0) return false;
 
     const masterItem = items.find((it) => it.id === row.item_id);
+    const masterVariant =
+      row.variant_id && masterItem?.variants
+        ? masterItem.variants.find((v) => Number(v.id) === Number(row.variant_id))
+        : null;
+    const isCustomVariantPrice = Boolean(masterVariant && Number(masterVariant.use_parent_pricing) === 0);
+
     const oldPurchasePrice = round2(
-      masterItem
+      isCustomVariantPrice && masterVariant
+        ? Number(masterVariant.effective_purchase_price ?? masterVariant.purchase_price ?? 0)
+        : masterItem
         ? Number(masterItem.purchase_price || 0)
         : Number(row.master_purchase_price || 0)
     );
@@ -1457,16 +1560,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       return next;
     });
 
-    const packingStr = masterItem?.packing || row.packing || '1x1';
+    const packingStr =
+      (isCustomVariantPrice && masterVariant?.effective_packing) ||
+      masterItem?.packing ||
+      row.packing ||
+      '1x1';
     const unitsPerPack = Math.max(1, parseUnitsPerPack(packingStr));
     const pricing = calculateItemPricingFromPurchase(newPurchasePrice, packingStr);
     const oldRetailPrice = round2(
-      masterItem
+      isCustomVariantPrice && masterVariant
+        ? Number(masterVariant.effective_retail_price ?? masterVariant.retail_price ?? 0)
+        : masterItem
         ? Number(masterItem.retail_price || 0)
         : Number(row.master_retail_price || row.mrp_rate || 0)
     );
     const oldLooseRate = round2(
-      masterItem && Number(masterItem.loose_rate || 0) > 0
+      isCustomVariantPrice && masterVariant && Number(masterVariant.effective_loose_rate || 0) > 0
+        ? Number(masterVariant.effective_loose_rate)
+        : masterItem && Number(masterItem.loose_rate || 0) > 0
         ? Number(masterItem.loose_rate)
         : oldRetailPrice / unitsPerPack
     );
@@ -1476,7 +1587,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       rowIndex: rowIdx,
       itemId: row.item_id,
       itemCode: row.item_code,
-      itemName: row.item_name,
+      itemName: row.variant_name ? `${row.item_name} (${row.variant_name})` : row.item_name,
       companyName: row.company_name || masterItem?.company_name || '',
       packing: packingStr,
       unitsPerPack,
@@ -1664,14 +1775,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const applyItemToPurchaseRow = (
     idx: number,
     found: Item,
-    focusQty: boolean = true
+    focusQty: boolean = true,
+    chosenVariant?: ItemVariant | null
   ) => {
     delete lastPromptedRateByRowRef.current[idx];
     setLines((prev) => {
       const copy = [...prev];
       const prevRow = copy[idx];
       const hasExistingItem = Boolean(prevRow && prevRow.item_id && prevRow.item_id > 0);
-      const isSameItem = Boolean(prevRow && prevRow.item_id === found.id);
+      const isSameItem = Boolean(
+        prevRow &&
+          prevRow.item_id === found.id &&
+          Number(prevRow.variant_id || 0) === Number(chosenVariant?.id || 0)
+      );
       const hasPreEnteredQtyOrDisc = Boolean(
         prevRow && (Number(prevRow.quantity || 0) > 0 || Number(prevRow.discount_percent || 0) > 0)
       );
@@ -1681,7 +1797,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       copy[idx] = buildPopulatedLineFromItem(
         found,
         hasExistingItem || hasPreEnteredQtyOrDisc ? prevRow : undefined,
-        hasExistingItem ? !isSameItem : hasPreEnteredQtyOrDisc
+        hasExistingItem ? !isSameItem : hasPreEnteredQtyOrDisc,
+        chosenVariant
       );
       return ensureMinimumPurchaseRows(copy, visibleRowCapacityRef.current, idx);
     });
@@ -1693,7 +1810,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
     setShowPurchaseCompactHistoryPopup(true);
-    fetchPurchaseItemHistoryByCode(found.item_code, found.id);
+    fetchPurchaseItemHistoryByCode(found.item_code, found.id, chosenVariant?.id || null);
     if (focusQty) {
       requestAnimationFrame(() => {
         setTimeout(() => {
@@ -1704,9 +1821,36 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
   };
 
-  // Populate a specific row with an Item (prompts on duplicate before adding in a new row)
-  const populatePurchaseRowWithItem = (idx: number, found: Item, _fromPosRow: boolean = true) => {
-    const hasDuplicate = lines.some((l, i) => i !== idx && l.item_id === found.id);
+  // Populate a specific row with an Item (and optional Variant)
+  const populatePurchaseRowWithItem = (
+    idx: number,
+    found: Item,
+    fromPosRow: boolean = true,
+    preMatchedVariant?: ItemVariant | null
+  ) => {
+    const activeVars = getActiveVariants(found);
+    if (!preMatchedVariant && Number(found.has_variants || 0) === 1 && activeVars.length > 0) {
+      setActiveRowItemSearchIdx(null);
+      setActiveRowItemSearchField(null);
+      setRowItemSearchQuery('');
+      setPurchaseSearchQuery('');
+      setShowPurchaseSearchDropdown(false);
+      setPendingVariantPicker({
+        item: found,
+        targetRowIdx: idx,
+        focusQty: fromPosRow,
+        fromTopSearch: false,
+      });
+      return;
+    }
+
+    const variantId = preMatchedVariant ? Number(preMatchedVariant.id) : 0;
+    const hasDuplicate = lines.some(
+      (l, i) =>
+        i !== idx &&
+        l.item_id === found.id &&
+        Number(l.variant_id || 0) === variantId
+    );
     if (hasDuplicate) {
       const isRowEmpty = !lines[idx]?.item_id || lines[idx].item_id === 0;
       if (isRowEmpty) {
@@ -1726,17 +1870,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setItemHighlightIndex(0);
       setPendingDuplicatePrompt({
         item: found,
+        variant: preMatchedVariant || null,
         clearRowIdx: isRowEmpty ? idx : null,
       });
       return;
     }
 
-    applyItemToPurchaseRow(idx, found, true);
+    applyItemToPurchaseRow(idx, found, fromPosRow, preMatchedVariant || null);
   };
 
   const handleConfirmAddDuplicatePurchaseRow = () => {
     if (!pendingDuplicatePrompt) return;
-    const { item, clearRowIdx } = pendingDuplicatePrompt;
+    const { item, variant, clearRowIdx } = pendingDuplicatePrompt;
     setPendingDuplicatePrompt(null);
 
     let targetIdx = lines.length;
@@ -1755,7 +1900,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       while (next.length <= targetIdx) {
         next.push(createBlankPurchaseLine());
       }
-      next[targetIdx] = buildPopulatedLineFromItem(item);
+      next[targetIdx] = buildPopulatedLineFromItem(item, undefined, false, variant || null);
       return ensureMinimumPurchaseRows(next, visibleRowCapacityRef.current, targetIdx);
     });
     setSelectedPurchaseLineIndex(targetIdx);
@@ -1766,7 +1911,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
     setShowPurchaseCompactHistoryPopup(true);
-    fetchPurchaseItemHistoryByCode(item.item_code, item.id);
+    fetchPurchaseItemHistoryByCode(item.item_code, item.id, variant?.id || null);
 
     requestAnimationFrame(() => {
       setTimeout(() => {
@@ -1854,8 +1999,22 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseItemListModal(false);
     setPurchaseItemListTargetRowIdx(null);
 
+    const activeVars = getActiveVariants(chosen);
+    if (Number(chosen.has_variants || 0) === 1 && activeVars.length > 0) {
+      setPendingVariantPicker({
+        item: chosen,
+        targetRowIdx,
+        focusQty: targetRowIdx !== null ? (purchaseViewMode === 'pos' && origin === 'pos_row') : true,
+        fromTopSearch: targetRowIdx === null,
+      });
+      return;
+    }
+
     const hasDuplicate = lines.some(
-      (l, i) => (targetRowIdx !== null ? i !== targetRowIdx : true) && l.item_id === chosen.id
+      (l, i) =>
+        (targetRowIdx !== null ? i !== targetRowIdx : true) &&
+        l.item_id === chosen.id &&
+        Number(l.variant_id || 0) === 0
     );
     if (hasDuplicate) {
       const isTargetEmpty =
@@ -1869,6 +2028,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }
       setPendingDuplicatePrompt({
         item: chosen,
+        variant: null,
         clearRowIdx: isTargetEmpty ? targetRowIdx : null,
       });
       return;
@@ -2153,15 +2313,34 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // Atomic Item Selection from Top Item Search Dropdown (Identical to Sales handleSelectFromTopSearch):
   // Finds the first empty row in the datasheet (or appends a new row if items are already added),
   // NEVER replaces any existing item row, selects the newly added row, and focuses back on Item Search!
-  const handleSelectPurchaseSearchItem = (it: Item) => {
-    const hasDuplicate = lines.some((l) => l.item_id === it.id);
+  const handleSelectPurchaseSearchItem = (it: Item, preMatchedVariant?: ItemVariant | null) => {
+    const activeVars = getActiveVariants(it);
+    if (!preMatchedVariant && Number(it.has_variants || 0) === 1 && activeVars.length > 0) {
+      setPurchaseSearchQuery('');
+      setRowItemSearchQuery('');
+      setActiveRowItemSearchIdx(null);
+      setItemHighlightIndex(0);
+      setShowPurchaseSearchDropdown(false);
+      setPendingVariantPicker({
+        item: it,
+        targetRowIdx: null,
+        focusQty: false,
+        fromTopSearch: true,
+      });
+      return;
+    }
+
+    const variantId = preMatchedVariant ? Number(preMatchedVariant.id) : 0;
+    const hasDuplicate = lines.some(
+      (l) => l.item_id === it.id && Number(l.variant_id || 0) === variantId
+    );
     if (hasDuplicate) {
       setPurchaseSearchQuery('');
       setRowItemSearchQuery('');
       setActiveRowItemSearchIdx(null);
       setItemHighlightIndex(0);
       setShowPurchaseSearchDropdown(false);
-      setPendingDuplicatePrompt({ item: it, clearRowIdx: null });
+      setPendingDuplicatePrompt({ item: it, variant: preMatchedVariant || null, clearRowIdx: null });
       return;
     }
 
@@ -2173,9 +2352,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       const existingEmpty = next.findIndex((l) => !l.item_id || l.item_id === 0);
       const idxToFill = existingEmpty >= 0 ? existingEmpty : next.length;
       if (idxToFill >= next.length) {
-        next.push(buildPopulatedLineFromItem(it));
+        next.push(buildPopulatedLineFromItem(it, undefined, false, preMatchedVariant || null));
       } else {
-        next[idxToFill] = buildPopulatedLineFromItem(it);
+        next[idxToFill] = buildPopulatedLineFromItem(it, undefined, false, preMatchedVariant || null);
       }
       return ensureMinimumPurchaseRows(next, visibleRowCapacityRef.current, idxToFill);
     });
@@ -2187,7 +2366,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setItemHighlightIndex(0);
     setShowPurchaseSearchDropdown(false);
     setShowPurchaseCompactHistoryPopup(true);
-    fetchPurchaseItemHistoryByCode(it.item_code, it.id);
+    fetchPurchaseItemHistoryByCode(it.item_code, it.id, preMatchedVariant?.id || null);
 
     // Requirement 9: After selecting an item:
     // Add it to the invoice, clear search field, automatically focus search field for next item
@@ -2235,17 +2414,32 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
     if (e.key === 'Enter') {
       e.preventDefault();
-      // If user typed a search query or dropdown is open with highlighted item, select that item
-      if (
-        (purchaseSearchQuery.trim().length > 0 || showPurchaseSearchDropdown) &&
-        purchaseSearchResults.length > 0
-      ) {
-        const chosen =
-          purchaseSearchResults[itemHighlightIndex] || purchaseSearchResults[0];
-        if (chosen) {
-          handleSelectPurchaseSearchItem(chosen);
+      const qTrim = purchaseSearchQuery.trim();
+      if (qTrim) {
+        // Check exact barcode / variant code / item code scan first
+        const exactScan = findExactBarcodeOrCodeMatch(items, qTrim);
+        if (exactScan) {
+          handleSelectPurchaseSearchItem(exactScan.item, exactScan.variant || null);
           return;
         }
+        if (showPurchaseSearchDropdown && purchaseSearchResults.length > 0) {
+          const chosen =
+            purchaseSearchResults[itemHighlightIndex] || purchaseSearchResults[0];
+          if (chosen) {
+            handleSelectPurchaseSearchItem(chosen);
+            return;
+          }
+        }
+        // Fallback live barcode lookup (covers extra barcodes not yet in local cache)
+        api
+          .lookupBarcodeExact(qTrim)
+          .then((lookup) => {
+            if (lookup?.matched && lookup.item) {
+              handleSelectPurchaseSearchItem(lookup.item, lookup.variant || null);
+            }
+          })
+          .catch(() => null);
+        return;
       }
       // If Item Search is empty and dropdown is closed, pressing Enter moves into Active Row's Quantity field!
       const activeLine = lines[selectedPurchaseLineIndex];
@@ -2586,16 +2780,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         (!lines[rowIdx]?.item_id || lines[rowIdx]?.item_id === 0)
       ) {
         e.preventDefault();
-        // Exact Item Code / Barcode typed -> fill row directly (no popup)
-        const typedCode = rowItemSearchQuery.trim().toLowerCase();
-        if (field === 'item_code' && typedCode) {
-          const exact = items.find(
-            (it) =>
-              String(it.item_code || '').toLowerCase() === typedCode ||
-              (it.barcode && String(it.barcode).toLowerCase() === typedCode)
-          );
-          if (exact) {
-            populatePurchaseRowWithItem(rowIdx, exact, true);
+        // Exact Item Code / Variant Code / Barcode typed -> fill row directly (no popup)
+        const typedRaw = rowItemSearchQuery.trim();
+        if (field === 'item_code' && typedRaw) {
+          const exactScan = findExactBarcodeOrCodeMatch(items, typedRaw);
+          if (exactScan) {
+            populatePurchaseRowWithItem(rowIdx, exactScan.item, prefix === 'pos_row', exactScan.variant || null);
             return;
           }
         }
@@ -2801,6 +2991,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           id: it.id,
           purchase_id: it.purchase_id,
           item_id: Number(it.item_id || 0),
+          variant_id: it.variant_id ? Number(it.variant_id) : null,
+          variant_code: it.variant_code || '',
+          variant_name: it.variant_name || '',
+          thumbnail_url: it.effective_thumbnail_url || it.thumbnail_url || null,
           inventory_id: it.inventory_id,
           item_code: it.item_code || '',
           company_name: it.company_name || '',
@@ -2875,7 +3069,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }
       const updateRetail = Boolean(l.update_master_retail_price);
       const masterItem = items.find((it) => it.id === l.item_id);
-      const packingStr = masterItem?.packing || l.packing || '1x1';
+      const masterVariant =
+        l.variant_id && masterItem?.variants
+          ? masterItem.variants.find((v) => Number(v.id) === Number(l.variant_id))
+          : null;
+      const isCustomVariantPrice = Boolean(masterVariant && Number(masterVariant.use_parent_pricing) === 0);
+      const packingStr =
+        (isCustomVariantPrice && masterVariant?.effective_packing) ||
+        masterItem?.packing ||
+        l.packing ||
+        '1x1';
       const { roundedRetailPrice } = calculateRetailFromPurchasePrice(newPurchase);
       const finalRetail =
         l.master_retail_price && l.master_retail_price > 0
@@ -2897,7 +3100,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           : {}),
       };
       try {
-        await api.updateItemPriceCascade(l.item_id, body);
+        if (isCustomVariantPrice && l.variant_id) {
+          await api.updateItemVariant(Number(l.variant_id), {
+            purchase_price: newPurchase,
+            ...(updateRetail
+              ? {
+                  trade_price: finalRetail,
+                  wholesale_price: finalRetail,
+                  retail_price: finalRetail,
+                  loose_rate: finalLoose,
+                }
+              : {}),
+          });
+        } else {
+          await api.updateItemPriceCascade(l.item_id, body);
+        }
       } catch (err: unknown) {
         problems.push(`${l.item_name}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -2959,7 +3176,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
     const sanitizedItems = validLines.map((l) => ({
       ...l,
-      batch_number: l.batch_number?.trim() || `B-${l.item_code || l.item_id}-01`,
+      variant_id: l.variant_id || null,
+      variant_code: l.variant_code || '',
+      variant_name: l.variant_name || '',
+      batch_number: l.batch_number?.trim() || `B-${l.variant_code || l.item_code || l.item_id}-01`,
       expiry_date: l.expiry_date || '2028-12-31',
       quantity: Number(l.quantity) || 0,
       loose_quantity: Number(l.loose_quantity) || 0,
@@ -3228,9 +3448,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       items: validLines.map((l, idx) => ({
         id: idx + 1,
         item_id: l.item_id,
+        variant_id: l.variant_id || null,
+        variant_code: l.variant_code || '',
+        variant_name: l.variant_name || '',
         item_code: l.item_code,
         company_name: l.company_name,
-        item_name: l.item_name,
+        item_name: l.variant_name ? `${l.item_name} — ${l.variant_name}` : l.item_name,
         packing: l.packing,
         batch_number: l.batch_number?.trim() || `B-${l.item_code || l.item_id}-01`,
         expiry_date: l.expiry_date || '2028-12-31',
@@ -3706,11 +3929,25 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       }`}
                     >
                       <td className="px-2.5 py-1 border-r border-slate-200">
-                        <span className="font-mono text-[10px] font-bold text-emerald-700 mr-1">
-                          [{it.item_code}]
-                        </span>
-                        <span className="font-bold text-slate-900">{it.item_name}</span>
-                        <span className="text-[10px] text-slate-500 ml-1">({it.packing})</span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <ProductThumb
+                            src={it.thumbnail_url || it.image_url}
+                            alt={it.item_name}
+                            size="xs"
+                          />
+                          <div className="truncate">
+                            <span className="font-mono text-[10px] font-bold text-emerald-700 mr-1">
+                              [{it.item_code}]
+                            </span>
+                            <span className="font-bold text-slate-900">{it.item_name}</span>
+                            <span className="text-[10px] text-slate-500 ml-1">({it.packing})</span>
+                            {Number(it.has_variants || 0) === 1 && (
+                              <span className="ml-1.5 px-1 py-0 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 text-[9px] font-bold">
+                                {Number(it.active_variant_count || it.variants?.length || 0)} Variants
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </td>
                       <td className="px-2.5 py-1 border-r border-slate-200 text-slate-700">
                         {it.company_name || '—'}
@@ -3783,11 +4020,25 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       }`}
                     >
                       <td className="px-2.5 py-1 border-r border-slate-200">
-                        <span className="font-mono text-[10px] font-bold text-emerald-700 mr-1">
-                          [{it.item_code}]
-                        </span>
-                        <span className="font-bold text-slate-900">{it.item_name}</span>
-                        <span className="text-[10px] text-slate-500 ml-1">({it.packing})</span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <ProductThumb
+                            src={it.thumbnail_url || it.image_url}
+                            alt={it.item_name}
+                            size="xs"
+                          />
+                          <div className="truncate">
+                            <span className="font-mono text-[10px] font-bold text-emerald-700 mr-1">
+                              [{it.item_code}]
+                            </span>
+                            <span className="font-bold text-slate-900">{it.item_name}</span>
+                            <span className="text-[10px] text-slate-500 ml-1">({it.packing})</span>
+                            {Number(it.has_variants || 0) === 1 && (
+                              <span className="ml-1.5 px-1 py-0 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 text-[9px] font-bold">
+                                {Number(it.active_variant_count || it.variants?.length || 0)} Variants
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </td>
                       <td className="px-2.5 py-1 border-r border-slate-200 text-slate-700 truncate max-w-[160px]">
                         {it.company_name || '—'}
@@ -4452,126 +4703,142 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
                             <td className="p-0 h-[16px] align-middle relative min-w-[200px]">
-                              <input
-                                id={`pos_row_${rIdx}_item_name`}
-                                type="text"
-                                value={
-                                  activeRowItemSearchIdx === rIdx &&
-                                  activeRowItemSearchField === 'item_name'
-                                    ? rowItemSearchQuery
-                                    : line.item_name
-                                    ? `${line.item_name}${line.company_name ? ` (${line.company_name})` : ''}`
-                                    : ''
-                                }
-                                onFocus={() => {
-                                  setSelectedPurchaseLineIndex(rIdx);
-                                  if (
-                                    activeRowItemSearchIdx !== rIdx ||
-                                    activeRowItemSearchField !== 'item_name'
-                                  ) {
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }
-                                  if (line.item_code || line.item_id) {
-                                    setShowPurchaseCompactHistoryPopup(true);
-                                    fetchPurchaseItemHistoryByCode(
-                                      line.item_code,
-                                      Number(line.item_id || 0)
-                                    );
-                                  }
-                                }}
-                                onDoubleClick={(e) => {
-                                  if (!line.item_id) return;
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setActiveRowItemSearchIdx(null);
-                                  setActiveRowItemSearchField(null);
-                                  setRowItemSearchQuery('');
-                                  setItemLogModalState({
-                                    isOpen: true,
-                                    itemId: Number(line.item_id),
-                                    itemCode: line.item_code,
-                                    itemName: line.item_name,
-                                    returnFocusId: `pos_row_${rIdx}_item_name`,
-                                  });
-                                }}
-                                title={line.item_id ? `${line.item_name} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
-                                onBlur={() => {
-                                  setTimeout(() => {
-                                    setActiveRowItemSearchIdx((prev) =>
-                                      prev === rIdx ? null : prev
-                                    );
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }, 180);
-                                }}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  setSelectedPurchaseLineIndex(rIdx);
-                                  setRowItemSearchQuery(v);
-                                  setRowItemHighlightIndex(0);
-                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
-                                  setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
-                                    e.preventDefault();
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                    return;
-                                  }
-                                  if (
+                              <div className="flex items-center gap-1 h-[15px] px-0.5">
+                                {line.item_id > 0 && line.thumbnail_url && (
+                                  <ProductThumb
+                                    src={line.thumbnail_url}
+                                    alt={line.item_name}
+                                    size="xs"
+                                    className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
+                                  />
+                                )}
+                                <input
+                                  id={`pos_row_${rIdx}_item_name`}
+                                  type="text"
+                                  value={
                                     activeRowItemSearchIdx === rIdx &&
-                                    activeRowItemSearchField === 'item_name' &&
-                                    rowItemSearchResults.length > 0
-                                  ) {
-                                    if (e.key === 'ArrowDown') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.min(
-                                          prev + 1,
-                                          rowItemSearchResults.length - 1
-                                        );
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'ArrowUp') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.max(0, prev - 1);
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      const chosen =
-                                        rowItemSearchResults[rowItemHighlightIndex] ||
-                                        rowItemSearchResults[0];
-                                      if (chosen) {
-                                        populatePurchaseRowWithItem(rIdx, chosen, true);
-                                      }
-                                      return;
-                                    }
+                                    activeRowItemSearchField === 'item_name'
+                                      ? rowItemSearchQuery
+                                      : line.item_name
+                                      ? `${line.item_name}${line.company_name ? ` (${line.company_name})` : ''}`
+                                      : ''
                                   }
-                                  handlePurchaseCellKeyDown(e, rIdx, 'item_name', 'pos_row');
-                                }}
-                                placeholder="Type Item Name / Code (or F2)..."
-                                className="w-full px-1.5 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
-                              />
+                                  onFocus={() => {
+                                    setSelectedPurchaseLineIndex(rIdx);
+                                    if (
+                                      activeRowItemSearchIdx !== rIdx ||
+                                      activeRowItemSearchField !== 'item_name'
+                                    ) {
+                                      setActiveRowItemSearchIdx(null);
+                                      setActiveRowItemSearchField(null);
+                                      setRowItemSearchQuery('');
+                                    }
+                                    if (line.item_code || line.item_id) {
+                                      setShowPurchaseCompactHistoryPopup(true);
+                                      fetchPurchaseItemHistoryByCode(
+                                        line.item_code,
+                                        Number(line.item_id || 0),
+                                        line.variant_id || null
+                                      );
+                                    }
+                                  }}
+                                  onDoubleClick={(e) => {
+                                    if (!line.item_id) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
+                                    setRowItemSearchQuery('');
+                                    setItemLogModalState({
+                                      isOpen: true,
+                                      itemId: Number(line.item_id),
+                                      itemCode: line.item_code,
+                                      itemName: line.item_name,
+                                      returnFocusId: `pos_row_${rIdx}_item_name`,
+                                    });
+                                  }}
+                                  title={line.item_id ? `${line.item_name}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
+                                  onBlur={() => {
+                                    setTimeout(() => {
+                                      setActiveRowItemSearchIdx((prev) =>
+                                        prev === rIdx ? null : prev
+                                      );
+                                      setActiveRowItemSearchField(null);
+                                      setRowItemSearchQuery('');
+                                    }, 180);
+                                  }}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setSelectedPurchaseLineIndex(rIdx);
+                                    setRowItemSearchQuery(v);
+                                    setRowItemHighlightIndex(0);
+                                    setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
+                                    setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
+                                      e.preventDefault();
+                                      setActiveRowItemSearchIdx(null);
+                                      setActiveRowItemSearchField(null);
+                                      setRowItemSearchQuery('');
+                                      return;
+                                    }
+                                    if (
+                                      activeRowItemSearchIdx === rIdx &&
+                                      activeRowItemSearchField === 'item_name' &&
+                                      rowItemSearchResults.length > 0
+                                    ) {
+                                      if (e.key === 'ArrowDown') {
+                                        e.preventDefault();
+                                        setRowItemHighlightIndex((prev) => {
+                                          const next = Math.min(
+                                            prev + 1,
+                                            rowItemSearchResults.length - 1
+                                          );
+                                          setTimeout(() => {
+                                            document
+                                              .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
+                                              ?.scrollIntoView({ block: 'nearest' });
+                                          }, 0);
+                                          return next;
+                                        });
+                                        return;
+                                      }
+                                      if (e.key === 'ArrowUp') {
+                                        e.preventDefault();
+                                        setRowItemHighlightIndex((prev) => {
+                                          const next = Math.max(0, prev - 1);
+                                          setTimeout(() => {
+                                            document
+                                              .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
+                                              ?.scrollIntoView({ block: 'nearest' });
+                                          }, 0);
+                                          return next;
+                                        });
+                                        return;
+                                      }
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        const chosen =
+                                          rowItemSearchResults[rowItemHighlightIndex] ||
+                                          rowItemSearchResults[0];
+                                        if (chosen) {
+                                          populatePurchaseRowWithItem(rIdx, chosen, true);
+                                        }
+                                        return;
+                                      }
+                                    }
+                                    handlePurchaseCellKeyDown(e, rIdx, 'item_name', 'pos_row');
+                                  }}
+                                  placeholder="Type Item Name / Code (or F2)..."
+                                  className="flex-1 min-w-0 px-1 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
+                                />
+                                {line.variant_name && !(activeRowItemSearchIdx === rIdx && activeRowItemSearchField === 'item_name') && (
+                                  <span className="shrink-0 px-1 py-0 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[9px] leading-tight">
+                                    {line.variant_name}
+                                  </span>
+                                )}
+                              </div>
                               {renderRowItemSearchCombobox(rIdx, true)}
                             </td>
                             {/* 3. Qty */}
@@ -4895,11 +5162,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               {/* Compact Item History Popup (Purchase POS View) */}
               {(() => {
                 const activePurchaseLine = lines[selectedPurchaseLineIndex] || lines[0];
+                const vSuffix = activePurchaseLine?.variant_id ? `::v${activePurchaseLine.variant_id}` : '';
                 const codeKey = activePurchaseLine?.item_code
-                  ? activePurchaseLine.item_code.trim().toLowerCase()
+                  ? `${activePurchaseLine.item_code.trim().toLowerCase()}${vSuffix}`
                   : '';
                 const idKey = activePurchaseLine?.item_id
-                  ? String(activePurchaseLine.item_id)
+                  ? `${activePurchaseLine.item_id}${vSuffix}`
                   : '';
                 const activePurHistory =
                   (codeKey && purchaseItemHistoryMap[codeKey]) ||
@@ -4913,6 +5181,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     mode="purchase"
                     itemCode={activePurchaseLine.item_code}
                     itemName={activePurchaseLine.item_name}
+                    variantName={activePurchaseLine.variant_name}
+                    thumbnailUrl={activePurchaseLine.thumbnail_url}
                     packing={activePurchaseLine.packing}
                     selectedSupplierName={selectedSupplier?.account_name || 'Supplier'}
                     historyData={activePurHistory}
@@ -5632,124 +5902,140 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                             {/* 2. Item Name (Direct typing + inline search; Enter on blank opens Item List) */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
-                              <input
-                                id={`pur_cell_${idx}_item_name`}
-                                type="text"
-                                value={
-                                  activeRowItemSearchIdx === idx &&
-                                  activeRowItemSearchField === 'item_name'
-                                    ? rowItemSearchQuery
-                                    : line.item_name
-                                }
-                                onFocus={() => {
-                                  setSelectedPurchaseLineIndex(idx);
-                                  if (
-                                    activeRowItemSearchIdx !== idx ||
-                                    activeRowItemSearchField !== 'item_name'
-                                  ) {
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }
-                                  if (line.item_code || line.item_id) {
-                                    setShowPurchaseCompactHistoryPopup(true);
-                                    fetchPurchaseItemHistoryByCode(
-                                      line.item_code,
-                                      Number(line.item_id || 0)
-                                    );
-                                  }
-                                }}
-                                onDoubleClick={(e) => {
-                                  if (!line.item_id) return;
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setActiveRowItemSearchIdx(null);
-                                  setActiveRowItemSearchField(null);
-                                  setRowItemSearchQuery('');
-                                  setItemLogModalState({
-                                    isOpen: true,
-                                    itemId: Number(line.item_id),
-                                    itemCode: line.item_code,
-                                    itemName: line.item_name,
-                                    returnFocusId: `pur_cell_${idx}_item_name`,
-                                  });
-                                }}
-                                title={line.item_id ? `${line.item_name} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
-                                onBlur={() => {
-                                  setTimeout(() => {
-                                    setActiveRowItemSearchIdx((prev) =>
-                                      prev === idx ? null : prev
-                                    );
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }, 180);
-                                }}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  setSelectedPurchaseLineIndex(idx);
-                                  setRowItemSearchQuery(v);
-                                  setRowItemHighlightIndex(0);
-                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
-                                  setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
-                                    e.preventDefault();
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                    return;
-                                  }
-                                  if (
+                              <div className="flex items-center gap-1 h-[15px] px-0.5">
+                                {line.item_id > 0 && line.thumbnail_url && (
+                                  <ProductThumb
+                                    src={line.thumbnail_url}
+                                    alt={line.item_name}
+                                    size="xs"
+                                    className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
+                                  />
+                                )}
+                                <input
+                                  id={`pur_cell_${idx}_item_name`}
+                                  type="text"
+                                  value={
                                     activeRowItemSearchIdx === idx &&
-                                    activeRowItemSearchField === 'item_name' &&
-                                    rowItemSearchResults.length > 0
-                                  ) {
-                                    if (e.key === 'ArrowDown') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.min(
-                                          prev + 1,
-                                          rowItemSearchResults.length - 1
-                                        );
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'ArrowUp') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.max(0, prev - 1);
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      const chosen =
-                                        rowItemSearchResults[rowItemHighlightIndex] ||
-                                        rowItemSearchResults[0];
-                                      if (chosen) {
-                                        populatePurchaseRowWithItem(idx, chosen, false);
-                                      }
-                                      return;
-                                    }
+                                    activeRowItemSearchField === 'item_name'
+                                      ? rowItemSearchQuery
+                                      : line.item_name
                                   }
-                                  handlePurchaseCellKeyDown(e, idx, 'item_name', 'pur_cell');
-                                }}
-                                placeholder="Type Item Name / Code (or F2)..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
+                                  onFocus={() => {
+                                    setSelectedPurchaseLineIndex(idx);
+                                    if (
+                                      activeRowItemSearchIdx !== idx ||
+                                      activeRowItemSearchField !== 'item_name'
+                                    ) {
+                                      setActiveRowItemSearchIdx(null);
+                                      setActiveRowItemSearchField(null);
+                                      setRowItemSearchQuery('');
+                                    }
+                                    if (line.item_code || line.item_id) {
+                                      setShowPurchaseCompactHistoryPopup(true);
+                                      fetchPurchaseItemHistoryByCode(
+                                        line.item_code,
+                                        Number(line.item_id || 0),
+                                        line.variant_id || null
+                                      );
+                                    }
+                                  }}
+                                  onDoubleClick={(e) => {
+                                    if (!line.item_id) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setActiveRowItemSearchIdx(null);
+                                    setActiveRowItemSearchField(null);
+                                    setRowItemSearchQuery('');
+                                    setItemLogModalState({
+                                      isOpen: true,
+                                      itemId: Number(line.item_id),
+                                      itemCode: line.item_code,
+                                      itemName: line.item_name,
+                                      returnFocusId: `pur_cell_${idx}_item_name`,
+                                    });
+                                  }}
+                                  title={line.item_id ? `${line.item_name}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
+                                  onBlur={() => {
+                                    setTimeout(() => {
+                                      setActiveRowItemSearchIdx((prev) =>
+                                        prev === idx ? null : prev
+                                      );
+                                      setActiveRowItemSearchField(null);
+                                      setRowItemSearchQuery('');
+                                    }, 180);
+                                  }}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setSelectedPurchaseLineIndex(idx);
+                                    setRowItemSearchQuery(v);
+                                    setRowItemHighlightIndex(0);
+                                    setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
+                                    setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
+                                      e.preventDefault();
+                                      setActiveRowItemSearchIdx(null);
+                                      setActiveRowItemSearchField(null);
+                                      setRowItemSearchQuery('');
+                                      return;
+                                    }
+                                    if (
+                                      activeRowItemSearchIdx === idx &&
+                                      activeRowItemSearchField === 'item_name' &&
+                                      rowItemSearchResults.length > 0
+                                    ) {
+                                      if (e.key === 'ArrowDown') {
+                                        e.preventDefault();
+                                        setRowItemHighlightIndex((prev) => {
+                                          const next = Math.min(
+                                            prev + 1,
+                                            rowItemSearchResults.length - 1
+                                          );
+                                          setTimeout(() => {
+                                            document
+                                              .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
+                                              ?.scrollIntoView({ block: 'nearest' });
+                                          }, 0);
+                                          return next;
+                                        });
+                                        return;
+                                      }
+                                      if (e.key === 'ArrowUp') {
+                                        e.preventDefault();
+                                        setRowItemHighlightIndex((prev) => {
+                                          const next = Math.max(0, prev - 1);
+                                          setTimeout(() => {
+                                            document
+                                              .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
+                                              ?.scrollIntoView({ block: 'nearest' });
+                                          }, 0);
+                                          return next;
+                                        });
+                                        return;
+                                      }
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        const chosen =
+                                          rowItemSearchResults[rowItemHighlightIndex] ||
+                                          rowItemSearchResults[0];
+                                        if (chosen) {
+                                          populatePurchaseRowWithItem(idx, chosen, false);
+                                        }
+                                        return;
+                                      }
+                                    }
+                                    handlePurchaseCellKeyDown(e, idx, 'item_name', 'pur_cell');
+                                  }}
+                                  placeholder="Type Item Name / Code (or F2)..."
+                                  className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                />
+                                {line.variant_name && !(activeRowItemSearchIdx === idx && activeRowItemSearchField === 'item_name') && (
+                                  <span className="shrink-0 px-1 py-0 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[9px] leading-tight">
+                                    {line.variant_name}
+                                  </span>
+                                )}
+                              </div>
                               {renderRowItemSearchCombobox(idx, false)}
                             </td>
 
@@ -6079,11 +6365,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               {/* Compact Item History Popup (Purchase MS Access View) */}
               {(() => {
                 const activePurchaseLine = lines[selectedPurchaseLineIndex] || lines[0];
+                const vSuffix = activePurchaseLine?.variant_id ? `::v${activePurchaseLine.variant_id}` : '';
                 const codeKey = activePurchaseLine?.item_code
-                  ? activePurchaseLine.item_code.trim().toLowerCase()
+                  ? `${activePurchaseLine.item_code.trim().toLowerCase()}${vSuffix}`
                   : '';
                 const idKey = activePurchaseLine?.item_id
-                  ? String(activePurchaseLine.item_id)
+                  ? `${activePurchaseLine.item_id}${vSuffix}`
                   : '';
                 const activePurHistory =
                   (codeKey && purchaseItemHistoryMap[codeKey]) ||
@@ -6097,6 +6384,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     mode="purchase"
                     itemCode={activePurchaseLine.item_code}
                     itemName={activePurchaseLine.item_name}
+                    variantName={activePurchaseLine.variant_name}
+                    thumbnailUrl={activePurchaseLine.thumbnail_url}
                     packing={activePurchaseLine.packing}
                     selectedSupplierName={selectedSupplier?.account_name || 'Supplier'}
                     historyData={activePurHistory}
@@ -7192,7 +7481,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           )
         }
         getItemStock={(it) =>
-          stockPacksByItemId.has(Number(it.id))
+          it.consolidated_stock_packs !== undefined && Number(it.has_variants || 0) === 1
+            ? Number(it.consolidated_stock_packs || 0)
+            : stockPacksByItemId.has(Number(it.id))
             ? stockPacksByItemId.get(Number(it.id)) || 0
             : Number(it.opening_stock || 0)
         }
@@ -7203,10 +7494,43 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       <DuplicateItemConfirmModal
         isOpen={Boolean(pendingDuplicatePrompt)}
-        itemName={pendingDuplicatePrompt?.item.item_name}
-        itemCode={pendingDuplicatePrompt?.item.item_code}
+        itemName={
+          pendingDuplicatePrompt
+            ? pendingDuplicatePrompt.variant
+              ? `${pendingDuplicatePrompt.item.item_name} — ${pendingDuplicatePrompt.variant.variant_name}`
+              : pendingDuplicatePrompt.item.item_name
+            : undefined
+        }
+        itemCode={
+          pendingDuplicatePrompt?.variant?.variant_code || pendingDuplicatePrompt?.item.item_code
+        }
         onConfirmNewRow={handleConfirmAddDuplicatePurchaseRow}
         onCancel={handleCancelDuplicatePurchasePrompt}
+      />
+
+      <VariantPickerModal
+        isOpen={Boolean(pendingVariantPicker)}
+        parentItem={pendingVariantPicker?.item || null}
+        variants={getActiveVariants(pendingVariantPicker?.item)}
+        mode="purchase"
+        onSelectVariant={(variant) => {
+          const pending = pendingVariantPicker;
+          setPendingVariantPicker(null);
+          if (!pending) return;
+          if (pending.fromTopSearch) {
+            handleSelectPurchaseSearchItem(pending.item, variant);
+          } else {
+            const targetIdx =
+              pending.targetRowIdx !== null
+                ? pending.targetRowIdx
+                : (() => {
+                    const emptyIdx = lines.findIndex((l) => !l.item_id || l.item_id === 0);
+                    return emptyIdx >= 0 ? emptyIdx : lines.length;
+                  })();
+            populatePurchaseRowWithItem(targetIdx, pending.item, pending.focusQty, variant);
+          }
+        }}
+        onClose={() => setPendingVariantPicker(null)}
       />
 
       <ItemLogModal

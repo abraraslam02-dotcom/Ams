@@ -38,6 +38,10 @@ export interface PurchaseLineItem {
   id?: number;
   purchase_id?: number;
   item_id: number;
+  variant_id?: number | null;
+  variant_code?: string;
+  variant_name?: string;
+  thumbnail_url?: string | null;
   inventory_id?: number;
   item_code: string;
   barcode?: string;
@@ -127,6 +131,9 @@ export interface PurchaseReturnLineItem {
   purchase_return_id?: number;
   original_purchase_item_id: number;
   item_id: number;
+  variant_id?: number | null;
+  variant_code?: string;
+  variant_name?: string;
   inventory_id?: number;
   item_code: string;
   company_name: string;
@@ -188,6 +195,10 @@ export interface PurchaseReturn {
 export interface BatchInventoryItem {
   id: number;
   item_id: number;
+  variant_id?: number | null;
+  variant_code?: string | null;
+  variant_name?: string | null;
+  effective_thumbnail_url?: string | null;
   item_code: string;
   item_name: string;
   company_name: string;

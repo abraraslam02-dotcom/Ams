@@ -2,6 +2,8 @@ export interface GroupedPurchaseLine {
   sNo: number;
   raw: Record<string, any>;
   itemName: string;
+  variantName?: string;
+  variantCode?: string;
   itemCode: string;
   companyName: string;
   packing: string;
@@ -165,6 +167,8 @@ export function buildCompanyGroupedPurchaseData(
       companyName,
       companyKey: companyName.toLowerCase(),
       itemName: String(item.item_name || '').trim() || 'Unnamed Item',
+      variantName: String(item.variant_name || '').trim(),
+      variantCode: String(item.variant_code || '').trim(),
       itemCode: String(item.item_code || '').trim(),
       packing: String(item.packing || '').trim(),
       quantity,
@@ -276,6 +280,8 @@ export function buildCompanyGroupedPurchaseData(
     bucket.rows.push({
       raw: r.raw,
       itemName: r.itemName,
+      variantName: r.variantName,
+      variantCode: r.variantCode,
       itemCode: r.itemCode,
       companyName: bucket.companyName,
       packing: r.packing,

@@ -133,8 +133,11 @@ export function executeLookupQuery(
       params.push(`%${itemName}%`);
     }
     if (barcode) {
-      whereClauses.push("COALESCE(i.barcode, '') LIKE ?");
-      params.push(`%${barcode}%`);
+      whereClauses.push(
+        "(COALESCE(i.barcode, '') LIKE ? OR COALESCE(iv.barcode, '') LIKE ? OR EXISTS (SELECT 1 FROM item_variant_barcodes ivb WHERE ivb.item_id = i.id AND (ivb.variant_id IS NULL OR ivb.variant_id = si.variant_id) AND ivb.barcode LIKE ?))"
+      );
+      const bTerm = `%${barcode}%`;
+      params.push(bTerm, bTerm, bTerm);
     }
     if (companyName) {
       whereClauses.push("COALESCE(NULLIF(TRIM(si.company_name), ''), i.company_name, '') LIKE ?");
@@ -183,6 +186,7 @@ export function executeLookupQuery(
         LEFT JOIN accounts a ON a.id = s.customer_account_id
         ${itemJoinType} sale_items si ON si.sale_id = s.id
         LEFT JOIN items i ON i.id = si.item_id
+        LEFT JOIN item_variants iv ON iv.id = si.variant_id
         WHERE ${whereClauses.join(' AND ')}
         GROUP BY s.id
         ORDER BY ${orderExpr}
@@ -203,9 +207,11 @@ export function executeLookupQuery(
             si.id,
             COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code,
             COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
+            COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, '') as variant_name,
             COALESCE(NULLIF(TRIM(si.company_name), ''), i.company_name, '') as company_name
           FROM sale_items si
           LEFT JOIN items i ON i.id = si.item_id
+          LEFT JOIN item_variants iv ON iv.id = si.variant_id
           WHERE si.id IN (${ph})
         `)
         .all(...firstLineIds) as Array<Record<string, unknown>>;
@@ -225,7 +231,9 @@ export function executeLookupQuery(
         party_name: String(row.party_name || ''),
         buyer_name: String(row.buyer_name || ''),
         item_code: String(rep?.item_code || ''),
-        item_name: String(rep?.item_name || ''),
+        item_name: rep?.variant_name
+          ? `${String(rep?.item_name || '')} (${String(rep.variant_name)})`
+          : String(rep?.item_name || ''),
         company_name: String(rep?.company_name || ''),
         quantity: round2(row.matched_quantity),
         invoice_total: round2(row.invoice_total),
@@ -281,8 +289,11 @@ export function executeLookupQuery(
       params.push(`%${itemName}%`);
     }
     if (barcode) {
-      whereClauses.push("COALESCE(i.barcode, '') LIKE ?");
-      params.push(`%${barcode}%`);
+      whereClauses.push(
+        "(COALESCE(i.barcode, '') LIKE ? OR COALESCE(iv.barcode, '') LIKE ? OR EXISTS (SELECT 1 FROM item_variant_barcodes ivb WHERE ivb.item_id = i.id AND (ivb.variant_id IS NULL OR ivb.variant_id = pi.variant_id) AND ivb.barcode LIKE ?))"
+      );
+      const bTerm = `%${barcode}%`;
+      params.push(bTerm, bTerm, bTerm);
     }
     if (companyName) {
       whereClauses.push("COALESCE(NULLIF(TRIM(pi.company_name), ''), i.company_name, '') LIKE ?");
@@ -331,6 +342,7 @@ export function executeLookupQuery(
         LEFT JOIN accounts a ON a.id = p.supplier_account_id
         ${itemJoinType} purchase_items pi ON pi.purchase_id = p.id
         LEFT JOIN items i ON i.id = pi.item_id
+        LEFT JOIN item_variants iv ON iv.id = pi.variant_id
         WHERE ${whereClauses.join(' AND ')}
         GROUP BY p.id
         ORDER BY ${orderExpr}
@@ -351,9 +363,11 @@ export function executeLookupQuery(
             pi.id,
             COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code,
             COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
+            COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, '') as variant_name,
             COALESCE(NULLIF(TRIM(pi.company_name), ''), i.company_name, '') as company_name
           FROM purchase_items pi
           LEFT JOIN items i ON i.id = pi.item_id
+          LEFT JOIN item_variants iv ON iv.id = pi.variant_id
           WHERE pi.id IN (${ph})
         `)
         .all(...firstLineIds) as Array<Record<string, unknown>>;
@@ -374,7 +388,9 @@ export function executeLookupQuery(
         buyer_name: '',
         supplier_invoice_number: String(row.supplier_invoice_number || ''),
         item_code: String(rep?.item_code || ''),
-        item_name: String(rep?.item_name || ''),
+        item_name: rep?.variant_name
+          ? `${String(rep?.item_name || '')} (${String(rep.variant_name)})`
+          : String(rep?.item_name || ''),
         company_name: String(rep?.company_name || ''),
         quantity: round2(row.matched_quantity),
         invoice_total: round2(row.invoice_total),

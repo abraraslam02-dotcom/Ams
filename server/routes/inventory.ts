@@ -230,6 +230,8 @@ inventoryRouter.get('/companies-items-meta', (_req: Request, res: Response) => {
           COALESCE(NULLIF(TRIM(i.company_name), ''), 'General') AS company_name,
           COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
           i.packing,
+          i.has_variants,
+          COALESCE(NULLIF(TRIM(i.thumbnail_url), ''), i.image_url, '') AS thumbnail_url,
           i.trade_price,
           i.purchase_price,
           i.retail_price,
@@ -252,6 +254,8 @@ inventoryRouter.get('/companies-items-meta', (_req: Request, res: Response) => {
         company_name: String(it.company_name || 'General'),
         item_group: String(it.item_group || 'General'),
         packing: String(it.packing || '1x1'),
+        has_variants: Number(it.has_variants || 0),
+        thumbnail_url: String(it.thumbnail_url || ''),
         units_per_pack: parsed.unitsPerPack,
         trade_price: round2(it.trade_price || it.purchase_price),
         purchase_price: round2(it.purchase_price),
@@ -433,9 +437,12 @@ inventoryRouter.get('/datasheet', (req: Request, res: Response) => {
         i.item_name LIKE ? OR
         i.company_name LIKE ? OR
         i.generic_name LIKE ? OR
-        inv.batch_number LIKE ?
+        inv.batch_number LIKE ? OR
+        COALESCE(iv.variant_code, '') LIKE ? OR
+        COALESCE(iv.variant_name, '') LIKE ? OR
+        COALESCE(iv.barcode, '') LIKE ?
       )`);
-      params.push(term, term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term);
     }
 
     if (itemCode && itemCode.trim()) {
@@ -444,8 +451,8 @@ inventoryRouter.get('/datasheet', (req: Request, res: Response) => {
     }
 
     if (barcode && barcode.trim()) {
-      conditions.push('i.barcode LIKE ?');
-      params.push(`%${barcode.trim()}%`);
+      conditions.push("(i.barcode LIKE ? OR COALESCE(iv.barcode, '') LIKE ?)");
+      params.push(`%${barcode.trim()}%`, `%${barcode.trim()}%`);
     }
 
     if (company && company.toUpperCase() !== 'ALL') {
@@ -549,6 +556,7 @@ inventoryRouter.get('/datasheet', (req: Request, res: Response) => {
         COALESCE(SUM(inv.current_pack_qty * inv.pack_retail), 0) as totalRetailValue
       FROM inventory inv
       JOIN items i ON inv.item_id = i.id
+      LEFT JOIN item_variants iv ON iv.id = inv.variant_id
       ${whereSql}
     `;
 
@@ -564,8 +572,13 @@ inventoryRouter.get('/datasheet', (req: Request, res: Response) => {
         inv.id as id,
         inv.id as inventory_id,
         inv.item_id,
+        inv.variant_id,
+        COALESCE(iv.variant_code, '') as variant_code,
+        COALESCE(iv.variant_name, '') as variant_name,
+        COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url,
+        i.has_variants,
         i.item_code,
-        COALESCE(i.barcode, '') as barcode,
+        COALESCE(NULLIF(TRIM(iv.barcode), ''), i.barcode, '') as barcode,
         i.company_name,
         i.item_name,
         COALESCE(i.generic_name, '') as generic_name,
@@ -605,6 +618,7 @@ inventoryRouter.get('/datasheet', (req: Request, res: Response) => {
         inv.updated_at
       FROM inventory inv
       JOIN items i ON inv.item_id = i.id
+      LEFT JOIN item_variants iv ON iv.id = inv.variant_id
       ${whereSql}
       ORDER BY ${sortCol} ${orderDirection}, inv.expiry_date ASC
       LIMIT ? OFFSET ?
@@ -3971,5 +3985,466 @@ inventoryRouter.put('/settings', (req: Request, res: Response) => {
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+// ============================================================================
+// 11. VARIANT-WISE STOCK & ANALYTICS REPORTS (CONSOLIDATED + BREAKDOWN)
+// ============================================================================
+
+/**
+ * 11a. GET /api/inventory/variant-reports/overview
+ * Consolidated Main Product stock (exact sum of variants without double-counting) + Variant breakdown
+ */
+inventoryRouter.get('/variant-reports/overview', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const itemIdFilter = req.query.itemId ? Number(req.query.itemId) : 0;
+
+    let itemSql = `
+      SELECT id, item_code, item_name, company_name, category, packing,
+             purchase_price, retail_price, minimum_stock, has_variants,
+             image_url, thumbnail_url, status
+      FROM items
+      WHERE COALESCE(has_variants, 0) = 1
+    `;
+    const itemParams: Array<string | number> = [];
+    if (itemIdFilter > 0) {
+      itemSql += ' AND id = ?';
+      itemParams.push(itemIdFilter);
+    }
+    itemSql += ' ORDER BY item_name ASC';
+
+    const parentItems = db.prepare(itemSql).all(...itemParams) as Array<Record<string, any>>;
+    const parentIds = parentItems.map((p) => Number(p.id));
+
+    const variantsByParent = new Map<number, Array<Record<string, any>>>();
+    if (parentIds.length > 0) {
+      const ph = parentIds.map(() => '?').join(',');
+      const variantRows = db
+        .prepare(`
+          SELECT
+            v.*,
+            COALESCE((SELECT SUM(inv.current_pack_qty) FROM inventory inv WHERE inv.variant_id = v.id), 0) AS inv_packs,
+            COALESCE((SELECT SUM(inv.total_stock_units) FROM inventory inv WHERE inv.variant_id = v.id), 0) AS inv_units,
+            COALESCE((SELECT SUM(inv.current_pack_qty * inv.pack_cost) FROM inventory inv WHERE inv.variant_id = v.id), 0) AS inv_cost_value,
+            COALESCE((SELECT SUM(inv.current_pack_qty * inv.pack_retail) FROM inventory inv WHERE inv.variant_id = v.id), 0) AS inv_retail_value,
+            (SELECT COUNT(*) FROM inventory inv WHERE inv.variant_id = v.id) AS inv_batch_count
+          FROM item_variants v
+          WHERE v.parent_item_id IN (${ph})
+          ORDER BY v.variant_code ASC, v.id ASC
+        `)
+        .all(...parentIds) as Array<Record<string, any>>;
+
+      for (const vr of variantRows) {
+        const pid = Number(vr.parent_item_id);
+        if (!variantsByParent.has(pid)) variantsByParent.set(pid, []);
+        variantsByParent.get(pid)!.push(vr);
+      }
+    }
+
+    const consolidatedProducts: Array<Record<string, any>> = [];
+    const flatVariants: Array<Record<string, any>> = [];
+
+    for (const p of parentItems) {
+      const pid = Number(p.id);
+      const rawVars = variantsByParent.get(pid) || [];
+
+      const enrichedVars = rawVars.map((v) => {
+        const useParent = Number(v.use_parent_pricing ?? 1) === 1;
+        const effPacking = String(v.packing || p.packing || '1x1');
+        const parsed = parsePacking(effPacking);
+        const effPurchase = round2(useParent ? p.purchase_price : v.purchase_price || p.purchase_price);
+        const effRetail = round2(useParent ? p.retail_price : v.retail_price || p.retail_price);
+        const hasBatches = Number(v.inv_batch_count || 0) > 0;
+        const stockPacks = hasBatches ? round2(v.inv_packs) : round2(v.opening_stock);
+        const stockUnits = hasBatches
+          ? round2(v.inv_units)
+          : round2(Number(v.opening_stock || 0) * parsed.unitsPerPack);
+        const costVal = hasBatches ? round2(v.inv_cost_value) : round2(stockPacks * effPurchase);
+        const retailVal = hasBatches ? round2(v.inv_retail_value) : round2(stockPacks * effRetail);
+        const minStock = Number(v.minimum_stock || 0) > 0 ? Number(v.minimum_stock) : Number(p.minimum_stock || 0);
+        const ownThumb = String(v.thumbnail_url || v.image_url || '').trim();
+        const parentThumb = String(p.thumbnail_url || p.image_url || '').trim();
+
+        const rowObj = {
+          variant_id: Number(v.id),
+          parent_item_id: pid,
+          parent_item_code: String(p.item_code),
+          parent_item_name: String(p.item_name),
+          company_name: String(p.company_name || ''),
+          category: String(p.category || ''),
+          variant_code: String(v.variant_code || ''),
+          variant_name: String(v.variant_name || ''),
+          colour: String(v.colour || ''),
+          flavour: String(v.flavour || ''),
+          variant_type: String(v.variant_type || ''),
+          barcode: String(v.barcode || ''),
+          packing: effPacking,
+          purchase_price: effPurchase,
+          retail_price: effRetail,
+          minimum_stock: minStock,
+          current_stock_packs: stockPacks,
+          current_stock_units: stockUnits,
+          cost_value: costVal,
+          retail_value: retailVal,
+          thumbnail_url: ownThumb || parentThumb,
+          status: String(v.status || 'Active'),
+          stock_health:
+            stockPacks <= 0 ? 'OUT_OF_STOCK' : minStock > 0 && stockPacks <= minStock ? 'LOW_STOCK' : 'HEALTHY',
+        };
+        return rowObj;
+      });
+
+      const matchesSearch =
+        !q ||
+        String(p.item_code || '').toLowerCase().includes(q) ||
+        String(p.item_name || '').toLowerCase().includes(q) ||
+        String(p.company_name || '').toLowerCase().includes(q) ||
+        enrichedVars.some(
+          (v) =>
+            v.variant_code.toLowerCase().includes(q) ||
+            v.variant_name.toLowerCase().includes(q) ||
+            v.colour.toLowerCase().includes(q) ||
+            v.flavour.toLowerCase().includes(q) ||
+            v.barcode.toLowerCase().includes(q)
+        );
+
+      if (!matchesSearch) continue;
+
+      const consolidatedPacks = round2(enrichedVars.reduce((s, v) => s + v.current_stock_packs, 0));
+      const consolidatedUnits = round2(enrichedVars.reduce((s, v) => s + v.current_stock_units, 0));
+      const consolidatedCostVal = round2(enrichedVars.reduce((s, v) => s + v.cost_value, 0));
+      const consolidatedRetailVal = round2(enrichedVars.reduce((s, v) => s + v.retail_value, 0));
+
+      consolidatedProducts.push({
+        item_id: pid,
+        item_code: String(p.item_code),
+        item_name: String(p.item_name),
+        company_name: String(p.company_name || ''),
+        category: String(p.category || ''),
+        packing: String(p.packing || '1x1'),
+        thumbnail_url: String(p.thumbnail_url || p.image_url || ''),
+        variant_count: enrichedVars.length,
+        active_variant_count: enrichedVars.filter((v) => v.status === 'Active').length,
+        consolidated_stock_packs: consolidatedPacks,
+        consolidated_stock_units: consolidatedUnits,
+        consolidated_cost_value: consolidatedCostVal,
+        consolidated_retail_value: consolidatedRetailVal,
+        variants: enrichedVars,
+      });
+
+      flatVariants.push(...enrichedVars);
+    }
+
+    res.json({
+      success: true,
+      summary: {
+        main_products_with_variants: consolidatedProducts.length,
+        total_variants: flatVariants.length,
+        active_variants: flatVariants.filter((v) => v.status === 'Active').length,
+        total_consolidated_packs: round2(consolidatedProducts.reduce((s, c) => s + c.consolidated_stock_packs, 0)),
+        total_cost_value: round2(consolidatedProducts.reduce((s, c) => s + c.consolidated_cost_value, 0)),
+        total_retail_value: round2(consolidatedProducts.reduce((s, c) => s + c.consolidated_retail_value, 0)),
+      },
+      products: consolidatedProducts,
+      variants: flatVariants,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * 11b. GET /api/inventory/variant-reports/history
+ * Variant-wise Purchase History and Sales History
+ */
+inventoryRouter.get('/variant-reports/history', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const itemId = req.query.itemId ? Number(req.query.itemId) : 0;
+    const variantId = req.query.variantId ? Number(req.query.variantId) : 0;
+    const startDate = String(req.query.startDate || '').trim();
+    const endDate = String(req.query.endDate || '').trim();
+
+    const sConds = ["LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')", 'si.variant_id IS NOT NULL'];
+    const sParams: Array<string | number> = [];
+    if (itemId > 0) {
+      sConds.push('si.item_id = ?');
+      sParams.push(itemId);
+    }
+    if (variantId > 0) {
+      sConds.push('si.variant_id = ?');
+      sParams.push(variantId);
+    }
+    if (startDate) {
+      sConds.push('DATE(s.invoice_date) >= DATE(?)');
+      sParams.push(startDate);
+    }
+    if (endDate) {
+      sConds.push('DATE(s.invoice_date) <= DATE(?)');
+      sParams.push(endDate);
+    }
+
+    const salesHistory = db
+      .prepare(`
+        SELECT
+          si.id,
+          s.invoice_number,
+          s.invoice_date,
+          COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, 'Walk-in Cash Customer') AS party_name,
+          si.item_id,
+          si.item_code,
+          si.item_name,
+          si.variant_id,
+          COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, '') AS variant_code,
+          COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, '') AS variant_name,
+          COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), i.thumbnail_url, '') AS thumbnail_url,
+          si.batch_number,
+          si.quantity,
+          si.bonus_quantity,
+          si.loose_quantity,
+          si.unit_price,
+          si.discount_amount,
+          si.line_total
+        FROM sale_items si
+        INNER JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN accounts a ON a.id = s.customer_account_id
+        LEFT JOIN items i ON i.id = si.item_id
+        LEFT JOIN item_variants iv ON iv.id = si.variant_id
+        WHERE ${sConds.join(' AND ')}
+        ORDER BY DATE(s.invoice_date) DESC, si.id DESC
+        LIMIT 300
+      `)
+      .all(...sParams);
+
+    const pConds = ["LOWER(TRIM(COALESCE(p.status, 'completed'))) IN ('completed', 'posted')", 'pi.variant_id IS NOT NULL'];
+    const pParams: Array<string | number> = [];
+    if (itemId > 0) {
+      pConds.push('pi.item_id = ?');
+      pParams.push(itemId);
+    }
+    if (variantId > 0) {
+      pConds.push('pi.variant_id = ?');
+      pParams.push(variantId);
+    }
+    if (startDate) {
+      pConds.push('DATE(p.bill_date) >= DATE(?)');
+      pParams.push(startDate);
+    }
+    if (endDate) {
+      pConds.push('DATE(p.bill_date) <= DATE(?)');
+      pParams.push(endDate);
+    }
+
+    const purchaseHistory = db
+      .prepare(`
+        SELECT
+          pi.id,
+          p.bill_number AS invoice_number,
+          p.bill_date AS invoice_date,
+          COALESCE(a.account_name, 'Supplier') AS party_name,
+          pi.item_id,
+          pi.item_code,
+          pi.item_name,
+          pi.variant_id,
+          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, '') AS variant_code,
+          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, '') AS variant_name,
+          COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), i.thumbnail_url, '') AS thumbnail_url,
+          pi.batch_number,
+          pi.quantity,
+          pi.bonus_quantity,
+          pi.loose_quantity,
+          pi.purchase_rate AS unit_price,
+          pi.discount_amount,
+          pi.line_total
+        FROM purchase_items pi
+        INNER JOIN purchases p ON p.id = pi.purchase_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN items i ON i.id = pi.item_id
+        LEFT JOIN item_variants iv ON iv.id = pi.variant_id
+        WHERE ${pConds.join(' AND ')}
+        ORDER BY DATE(p.bill_date) DESC, pi.id DESC
+        LIMIT 300
+      `)
+      .all(...pParams);
+
+    res.json({
+      success: true,
+      salesHistory,
+      purchaseHistory,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * 11c. GET /api/inventory/variant-reports/ledger
+ * Variant-wise Stock Ledger from batch_stock_movements
+ */
+inventoryRouter.get('/variant-reports/ledger', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const itemId = req.query.itemId ? Number(req.query.itemId) : 0;
+    const variantId = req.query.variantId ? Number(req.query.variantId) : 0;
+    const startDate = String(req.query.startDate || '').trim();
+    const endDate = String(req.query.endDate || '').trim();
+
+    const conds: string[] = ['bsm.variant_id IS NOT NULL'];
+    const params: Array<string | number> = [];
+
+    if (itemId > 0) {
+      conds.push('bsm.item_id = ?');
+      params.push(itemId);
+    }
+    if (variantId > 0) {
+      conds.push('bsm.variant_id = ?');
+      params.push(variantId);
+    }
+    if (startDate) {
+      conds.push('DATE(bsm.movement_date) >= DATE(?)');
+      params.push(startDate);
+    }
+    if (endDate) {
+      conds.push('DATE(bsm.movement_date) <= DATE(?)');
+      params.push(endDate);
+    }
+
+    const movements = db
+      .prepare(`
+        SELECT
+          bsm.*,
+          COALESCE(NULLIF(TRIM(bsm.variant_code), ''), iv.variant_code, '') AS resolved_variant_code,
+          COALESCE(NULLIF(TRIM(bsm.variant_name), ''), iv.variant_name, '') AS resolved_variant_name,
+          COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), i.thumbnail_url, '') AS thumbnail_url
+        FROM batch_stock_movements bsm
+        LEFT JOIN item_variants iv ON iv.id = bsm.variant_id
+        LEFT JOIN items i ON i.id = bsm.item_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY DATE(bsm.movement_date) DESC, bsm.id DESC
+        LIMIT 500
+      `)
+      .all(...params);
+
+    res.json({
+      success: true,
+      movements,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/**
+ * 11d. GET /api/inventory/variant-reports/demand-alerts
+ * Variant-wise Demand Report (Sales Velocity) & Low-Stock / Reorder Level Alerts
+ */
+inventoryRouter.get('/variant-reports/demand-alerts', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const days = Math.min(365, Math.max(7, Number(req.query.days || 30)));
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+    const rows = db
+      .prepare(`
+        SELECT
+          v.id AS variant_id,
+          v.parent_item_id,
+          i.item_code AS parent_item_code,
+          i.item_name AS parent_item_name,
+          i.company_name,
+          v.variant_code,
+          v.variant_name,
+          v.colour,
+          v.flavour,
+          v.variant_type,
+          v.status,
+          COALESCE(NULLIF(TRIM(v.packing), ''), i.packing, '1x1') AS effective_packing,
+          CASE WHEN COALESCE(v.minimum_stock, 0) > 0 THEN v.minimum_stock ELSE i.minimum_stock END AS reorder_level,
+          CASE WHEN COALESCE(v.use_parent_pricing, 1) = 0 AND v.purchase_price > 0 THEN v.purchase_price ELSE i.purchase_price END AS purchase_price,
+          COALESCE(NULLIF(TRIM(v.thumbnail_url), ''), NULLIF(TRIM(v.image_url), ''), i.thumbnail_url, i.image_url, '') AS thumbnail_url,
+          COALESCE((SELECT SUM(inv.current_pack_qty) FROM inventory inv WHERE inv.variant_id = v.id), NULL) AS inv_packs,
+          v.opening_stock,
+          COALESCE((
+            SELECT SUM(si.quantity + si.bonus_quantity)
+            FROM sale_items si
+            INNER JOIN sales s ON s.id = si.sale_id
+            WHERE si.variant_id = v.id
+              AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
+              AND DATE(s.invoice_date) >= DATE(?)
+          ), 0) AS sold_packs_period,
+          COALESCE((
+            SELECT SUM(si.line_total)
+            FROM sale_items si
+            INNER JOIN sales s ON s.id = si.sale_id
+            WHERE si.variant_id = v.id
+              AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
+              AND DATE(s.invoice_date) >= DATE(?)
+          ), 0) AS sales_value_period,
+          COALESCE((
+            SELECT SUM(pi.quantity + pi.bonus_quantity)
+            FROM purchase_items pi
+            INNER JOIN purchases p ON p.id = pi.purchase_id
+            WHERE pi.variant_id = v.id
+              AND LOWER(TRIM(COALESCE(p.status, 'completed'))) IN ('completed', 'posted')
+              AND DATE(p.bill_date) >= DATE(?)
+          ), 0) AS purchased_packs_period
+        FROM item_variants v
+        INNER JOIN items i ON i.id = v.parent_item_id
+        WHERE LOWER(COALESCE(v.status, 'Active')) = 'active'
+          AND LOWER(COALESCE(i.status, 'Active')) = 'active'
+        ORDER BY sold_packs_period DESC, i.item_name ASC, v.variant_code ASC
+      `)
+      .all(cutoffStr, cutoffStr, cutoffStr) as Array<Record<string, any>>;
+
+    const enriched = rows.map((r) => {
+      const currentPacks = r.inv_packs !== null && r.inv_packs !== undefined ? round2(r.inv_packs) : round2(r.opening_stock);
+      const reorderLevel = round2(r.reorder_level);
+      const soldPacks = round2(r.sold_packs_period);
+      const avgDailyDemand = round2(soldPacks / days);
+      const daysOfStockLeft = avgDailyDemand > 0 ? Math.round((currentPacks / avgDailyDemand) * 10) / 10 : null;
+      const isOutOfStock = currentPacks <= 0;
+      const isLowStock = !isOutOfStock && reorderLevel > 0 && currentPacks <= reorderLevel;
+      const suggestedReorderQty =
+        isOutOfStock || isLowStock
+          ? Math.max(round2(reorderLevel * 1.5 - currentPacks), Math.ceil(avgDailyDemand * 14), 1)
+          : 0;
+
+      return {
+        ...r,
+        current_stock_packs: currentPacks,
+        reorder_level: reorderLevel,
+        sold_packs_period: soldPacks,
+        purchased_packs_period: round2(r.purchased_packs_period),
+        sales_value_period: round2(r.sales_value_period),
+        avg_daily_demand: avgDailyDemand,
+        days_of_stock_left: daysOfStockLeft,
+        alert_status: isOutOfStock ? 'OUT_OF_STOCK' : isLowStock ? 'LOW_STOCK' : 'OK',
+        suggested_reorder_qty: suggestedReorderQty,
+        estimated_reorder_cost: round2(suggestedReorderQty * Number(r.purchase_price || 0)),
+      };
+    });
+
+    const lowStockAlerts = enriched.filter((r) => r.alert_status === 'OUT_OF_STOCK' || r.alert_status === 'LOW_STOCK');
+
+    res.json({
+      success: true,
+      periodDays: days,
+      cutoffDate: cutoffStr,
+      demandRows: enriched,
+      alerts: lowStockAlerts,
+      summary: {
+        active_variants: enriched.length,
+        out_of_stock_variants: enriched.filter((r) => r.alert_status === 'OUT_OF_STOCK').length,
+        low_stock_variants: enriched.filter((r) => r.alert_status === 'LOW_STOCK').length,
+        total_sold_packs: round2(enriched.reduce((s, r) => s + r.sold_packs_period, 0)),
+      },
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
   }
 });

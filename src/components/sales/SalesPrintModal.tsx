@@ -954,7 +954,14 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                           </td>
                         )}
                         <td className="py-2 px-1.5 border border-slate-200">
-                          <div className="font-bold text-[13.5px] text-slate-950">{line.item_name}</div>
+                          <div className="font-bold text-[13.5px] text-slate-950">
+                            {line.item_name}
+                            {line.variant_name ? (
+                              <span className="ml-1.5 text-[11.5px] font-semibold text-emerald-900">
+                                ({line.variant_name})
+                              </span>
+                            ) : null}
+                          </div>
                           {fields.showCompany && line.company_name && (
                             <div className="text-[11.5px] text-slate-600 mt-0.5">{line.company_name}</div>
                           )}
@@ -1470,6 +1477,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                               >
                                 {showItemCode && line.item_code ? `[${line.item_code}] ` : ''}
                                 {line.item_name}
+                                {line.variant_name ? ` - ${line.variant_name}` : ''}
                               </div>
                               {((showItemCompany && line.company_name) ||
                                 (showPacking && rawPacking) ||

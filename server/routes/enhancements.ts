@@ -841,6 +841,9 @@ enhancementsRouter.patch('/fifo/batches/:id/block', authenticateToken, (req, res
     recordBatchStockMovement({
       movementDate: getTodayDateString(),
       itemId: Number(batch.item_id),
+      variantId: batch.variant_id ? Number(batch.variant_id) : null,
+      variantCode: String(batch.variant_code || ''),
+      variantName: String(batch.variant_name || ''),
       itemCode: String(batch.item_code || ''),
       itemName: String(batch.item_name || ''),
       companyName: String(batch.company_name || ''),
@@ -938,6 +941,9 @@ enhancementsRouter.post('/fifo/batches/:id/adjust', authenticateToken, (req, res
     recordBatchStockMovement({
       movementDate: getTodayDateString(),
       itemId: Number(batch.item_id),
+      variantId: batch.variant_id ? Number(batch.variant_id) : null,
+      variantCode: String(batch.variant_code || ''),
+      variantName: String(batch.variant_name || ''),
       itemCode: String(batch.item_code || ''),
       itemName: String(batch.item_name || ''),
       companyName: String(batch.company_name || ''),
@@ -1161,16 +1167,24 @@ enhancementsRouter.post('/offers', authenticateToken, (req, res) => {
       ? 'company'
       : 'item';
 
+    const variantId = scopeType === 'item' && body.variant_id ? Number(body.variant_id) : null;
+    const variantRow = variantId
+      ? (db
+          .prepare('SELECT id, variant_code, variant_name FROM item_variants WHERE id = ?')
+          .get(variantId) as { id: number; variant_code: string; variant_name: string } | undefined)
+      : undefined;
+
     const ins = db
       .prepare(
         `INSERT INTO trade_offers (
           offer_code, offer_name, offer_type, scope_type,
           company_name, item_id, item_code, item_name,
+          variant_id, variant_code, variant_name,
           town_id, town_name, party_account_id, party_name, salesman_id, salesman_name,
           min_quantity, max_quantity, discount_percent, fixed_discount_amount,
           bonus_quantity, bonus_item_id, bonus_item_code, bonus_item_name,
           slabs_json, start_date, end_date, status, remarks, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         String(offerCode).trim(),
@@ -1181,6 +1195,9 @@ enhancementsRouter.post('/offers', authenticateToken, (req, res) => {
         itemId,
         String(body.item_code || itemRow?.item_code || ''),
         String(body.item_name || itemRow?.item_name || ''),
+        variantRow ? variantRow.id : null,
+        String(body.variant_code || variantRow?.variant_code || ''),
+        String(body.variant_name || variantRow?.variant_name || ''),
         townId,
         String(body.town_name || townRow?.town_name || ''),
         partyId,
@@ -1262,6 +1279,20 @@ enhancementsRouter.put('/offers/:id', authenticateToken, (req, res) => {
       ? 'company'
       : 'item';
 
+    const variantId =
+      scopeType === 'item'
+        ? body.variant_id !== undefined
+          ? body.variant_id
+            ? Number(body.variant_id)
+            : null
+          : (existing.variant_id as number | null)
+        : null;
+    const variantRow = variantId
+      ? (db
+          .prepare('SELECT id, variant_code, variant_name FROM item_variants WHERE id = ?')
+          .get(variantId) as { id: number; variant_code: string; variant_name: string } | undefined)
+      : undefined;
+
     db.prepare(
       `UPDATE trade_offers
        SET offer_name = ?,
@@ -1271,6 +1302,9 @@ enhancementsRouter.put('/offers/:id', authenticateToken, (req, res) => {
            item_id = ?,
            item_code = ?,
            item_name = ?,
+           variant_id = ?,
+           variant_code = ?,
+           variant_name = ?,
            town_id = ?,
            party_account_id = ?,
            salesman_id = ?,
@@ -1294,6 +1328,9 @@ enhancementsRouter.put('/offers/:id', authenticateToken, (req, res) => {
       itemId,
       String(itemRow?.item_code ?? existing.item_code ?? ''),
       String(itemRow?.item_name ?? existing.item_name ?? ''),
+      variantRow ? variantRow.id : null,
+      String(variantRow?.variant_code ?? (variantId ? existing.variant_code : '') ?? ''),
+      String(variantRow?.variant_name ?? (variantId ? existing.variant_name : '') ?? ''),
       body.town_id !== undefined ? (body.town_id ? Number(body.town_id) : null) : existing.town_id,
       body.party_account_id !== undefined ? (body.party_account_id ? Number(body.party_account_id) : null) : existing.party_account_id,
       body.salesman_id !== undefined ? (body.salesman_id ? Number(body.salesman_id) : null) : existing.salesman_id,
@@ -1443,14 +1480,22 @@ enhancementsRouter.post('/party-discounts', authenticateToken, (req, res) => {
     const discountCode =
       body.discount_code || `PD-${new Date().getFullYear()}-${String((countRow?.cnt || 0) + 1).padStart(4, '0')}`;
 
+    const variantId = scopeType === 'item' && body.variant_id ? Number(body.variant_id) : null;
+    const variantRow = variantId
+      ? (db
+          .prepare('SELECT id, variant_code, variant_name FROM item_variants WHERE id = ?')
+          .get(variantId) as { id: number; variant_code: string; variant_name: string } | undefined)
+      : undefined;
+
     const ins = db
       .prepare(
         `INSERT INTO party_discounts (
           discount_code, party_account_id, party_name, scope_type,
           company_name, item_id, item_code, item_name,
+          variant_id, variant_code, variant_name,
           discount_percent, fixed_discount_amount,
           start_date, end_date, status, remarks, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         String(discountCode),
@@ -1461,6 +1506,9 @@ enhancementsRouter.post('/party-discounts', authenticateToken, (req, res) => {
         itemId,
         String(body.item_code || itemRow?.item_code || ''),
         String(body.item_name || itemRow?.item_name || ''),
+        variantRow ? variantRow.id : null,
+        String(body.variant_code || variantRow?.variant_code || ''),
+        String(body.variant_name || variantRow?.variant_name || ''),
         round2(Number(body.discount_percent || 0)),
         round2(Number(body.fixed_discount_amount || 0)),
         body.start_date ? String(body.start_date).slice(0, 10) : '',
@@ -1536,6 +1584,20 @@ enhancementsRouter.put('/party-discounts/:id', authenticateToken, (req, res) => 
 
     const newPct = round2(Number(body.discount_percent ?? existing.discount_percent ?? 0));
 
+    const variantId =
+      scopeType === 'item'
+        ? body.variant_id !== undefined
+          ? body.variant_id
+            ? Number(body.variant_id)
+            : null
+          : (existing.variant_id as number | null)
+        : null;
+    const variantRow = variantId
+      ? (db
+          .prepare('SELECT id, variant_code, variant_name FROM item_variants WHERE id = ?')
+          .get(variantId) as { id: number; variant_code: string; variant_name: string } | undefined)
+      : undefined;
+
     db.prepare(
       `UPDATE party_discounts
        SET party_account_id = ?,
@@ -1545,6 +1607,9 @@ enhancementsRouter.put('/party-discounts/:id', authenticateToken, (req, res) => 
            item_id = ?,
            item_code = ?,
            item_name = ?,
+           variant_id = ?,
+           variant_code = ?,
+           variant_name = ?,
            discount_percent = ?,
            fixed_discount_amount = ?,
            start_date = ?,
@@ -1561,6 +1626,9 @@ enhancementsRouter.put('/party-discounts/:id', authenticateToken, (req, res) => 
       itemId,
       String(itemRow?.item_code ?? existing.item_code ?? ''),
       String(itemRow?.item_name ?? existing.item_name ?? ''),
+      variantRow ? variantRow.id : null,
+      String(variantRow?.variant_code ?? (variantId ? existing.variant_code : '') ?? ''),
+      String(variantRow?.variant_name ?? (variantId ? existing.variant_name : '') ?? ''),
       newPct,
       round2(Number(body.fixed_discount_amount ?? existing.fixed_discount_amount ?? 0)),
       body.start_date !== undefined ? String(body.start_date || '') : String(existing.start_date || ''),
@@ -1701,6 +1769,7 @@ enhancementsRouter.post('/calculate-line', (req, res) => {
 
     const evaluation = evaluateLineOfferAndPartyDiscount({
       itemId,
+      variantId: body.variant_id ? Number(body.variant_id) : null,
       quantity: Number(body.sale_qty ?? body.quantity ?? 1),
       tradePrice: body.trade_price !== undefined ? Number(body.trade_price) : 0,
       partyAccountId: body.party_id || body.party_account_id ? Number(body.party_id || body.party_account_id) : null,

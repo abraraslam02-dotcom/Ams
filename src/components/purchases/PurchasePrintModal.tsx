@@ -752,7 +752,10 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                                 {line.sNo}
                               </td>
                               <td className="py-1.5 px-1.5 text-left border-r border-slate-200 align-top break-words">
-                                <div className="font-bold text-slate-900">{line.itemName}</div>
+                                <div className="font-bold text-slate-900">
+                                  {line.itemName}
+                                  {line.variantName ? ` — ${line.variantName}` : ''}
+                                </div>
                                 {line.packing ? (
                                   <div className="text-[8.5px] text-slate-500">{line.packing}</div>
                                 ) : null}
@@ -888,7 +891,10 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                           </td>
                         )}
                         <td className="py-1.5 px-2">
-                          <div className="font-bold text-slate-900">{item.item_name}</div>
+                          <div className="font-bold text-slate-900">
+                            {item.item_name}
+                            {item.variant_name ? ` — ${item.variant_name}` : ''}
+                          </div>
                           {fields.showCompany && (
                             <div className="text-[10px] text-slate-500">{item.company_name}</div>
                           )}

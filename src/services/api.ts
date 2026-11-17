@@ -1428,6 +1428,10 @@ export const api = {
       opening_stock: Number(item.opening_stock || 0),
       rack_number: item.rack_number || item.rack_location || '',
       rack_location: item.rack_location || item.rack_number || '',
+      has_variants: item.has_variants ? 1 : 0,
+      image_id: item.image_id || null,
+      image_url: item.image_url || '',
+      thumbnail_url: item.thumbnail_url || '',
       status: item.status || 'Active',
       sync_status: 'pending',
       local_modified: true,
@@ -5987,11 +5991,12 @@ export const api = {
     itemCodeOrId: string | number,
     customerId?: number | null,
     itemCodeOverride?: string,
-    options?: { salesOnly?: boolean }
+    options?: { salesOnly?: boolean; variantId?: number | null }
   ) {
     const cleanCode = String(itemCodeOverride || itemCodeOrId || '').trim();
     const numericId = typeof itemCodeOrId === 'number' && itemCodeOrId > 0 ? itemCodeOrId : 0;
     const salesOnly = Boolean(options?.salesOnly);
+    const variantId = options?.variantId ? Number(options.variantId) : 0;
 
     const query = new URLSearchParams();
     if (cleanCode) {
@@ -5999,6 +6004,9 @@ export const api = {
     }
     if (numericId > 0) {
       query.append('itemId', String(numericId));
+    }
+    if (variantId > 0) {
+      query.append('variantId', String(variantId));
     }
     if (customerId && customerId > 0) {
       query.append('customerId', String(customerId));
@@ -8170,6 +8178,229 @@ export const api = {
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Failed to delete Excel export template.');
     }
+    return data;
+  },
+
+  // ============================================================================
+  // PRODUCT & VARIANT PICTURES, VARIANT MANAGEMENT & BARCODES
+  // ============================================================================
+
+  async uploadProductImage(payload: {
+    dataUrl: string;
+    thumbnailDataUrl?: string;
+    mimeType?: string;
+    fileName?: string;
+  }): Promise<{
+    success: boolean;
+    image: { id: number; image_key: string; image_url: string; thumbnail_url: string };
+  }> {
+    const res = await authFetch('/api/items/images', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to upload product picture.');
+    }
+    return data;
+  },
+
+  async lookupBarcodeExact(code: string): Promise<{
+    success: boolean;
+    matched: boolean;
+    matchType: 'variant' | 'item' | null;
+    item: any | null;
+    variant: any | null;
+  }> {
+    const res = await authFetch(`/api/items/lookup-barcode/${encodeURIComponent(code)}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Barcode lookup failed.');
+    }
+    return data;
+  },
+
+  async generateUniqueBarcode(variantCode?: string): Promise<{ success: boolean; barcode: string }> {
+    const qs = variantCode ? `?variant_code=${encodeURIComponent(variantCode)}` : '';
+    const res = await authFetch(`/api/items/generate-barcode${qs}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to generate barcode.');
+    }
+    return data;
+  },
+
+  async getAllVariants(params?: {
+    parent_item_id?: number;
+    include_inactive?: boolean;
+    q?: string;
+  }): Promise<{ success: boolean; variants: any[]; count: number }> {
+    const qs = new URLSearchParams();
+    if (params?.parent_item_id) qs.set('parent_item_id', String(params.parent_item_id));
+    if (params?.include_inactive !== undefined) qs.set('include_inactive', String(params.include_inactive));
+    if (params?.q) qs.set('q', params.q);
+    const query = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await authFetch(`/api/items/variants${query}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load variants.');
+    }
+    return data;
+  },
+
+  async getItemVariants(itemId: number, includeInactive = true): Promise<{
+    success: boolean;
+    parent: any;
+    variants: any[];
+    nextVariantCode: string;
+  }> {
+    const res = await authFetch(`/api/items/${itemId}/variants?include_inactive=${includeInactive}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load product variants.');
+    }
+    return data;
+  },
+
+  async getNextVariantCode(itemId: number): Promise<{ success: boolean; next_variant_code: string }> {
+    const res = await authFetch(`/api/items/${itemId}/variants/next-code`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to generate next variant code.');
+    }
+    return data;
+  },
+
+  async createItemVariant(itemId: number, payload: Record<string, any>): Promise<{
+    success: boolean;
+    variant: any;
+    message?: string;
+  }> {
+    const res = await authFetch(`/api/items/${itemId}/variants`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to create variant.');
+    }
+    return data;
+  },
+
+  async updateItemVariant(variantId: number, payload: Record<string, any>): Promise<{
+    success: boolean;
+    variant: any;
+    message?: string;
+  }> {
+    const res = await authFetch(`/api/items/variants/${variantId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update variant.');
+    }
+    return data;
+  },
+
+  async toggleVariantStatus(variantId: number, status?: 'Active' | 'Inactive'): Promise<{
+    success: boolean;
+    variant: any;
+    message?: string;
+  }> {
+    const res = await authFetch(`/api/items/variants/${variantId}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(status ? { status } : {}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update variant status.');
+    }
+    return data;
+  },
+
+  async addVariantBarcode(
+    variantId: number,
+    payload: { barcode?: string; barcode_type?: 'manufacturer' | 'generated'; is_primary?: boolean; auto_generate?: boolean }
+  ): Promise<{ success: boolean; variant: any; addedBarcode: string }> {
+    const res = await authFetch(`/api/items/variants/${variantId}/barcodes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to add barcode.');
+    }
+    return data;
+  },
+
+  async deleteVariantBarcode(variantId: number, barcodeId: number): Promise<{ success: boolean; variant: any }> {
+    const res = await authFetch(`/api/items/variants/${variantId}/barcodes/${barcodeId}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to remove barcode.');
+    }
+    return data;
+  },
+
+  async getVariantReportOverview(params?: { q?: string; itemId?: number }): Promise<any> {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.itemId) qs.set('itemId', String(params.itemId));
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await authFetch(`/api/inventory/variant-reports/overview${q}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load variant overview report.');
+    return data;
+  },
+
+  async getVariantReportHistory(params?: {
+    itemId?: number;
+    variantId?: number;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<any> {
+    const qs = new URLSearchParams();
+    if (params?.itemId) qs.set('itemId', String(params.itemId));
+    if (params?.variantId) qs.set('variantId', String(params.variantId));
+    if (params?.startDate) qs.set('startDate', params.startDate);
+    if (params?.endDate) qs.set('endDate', params.endDate);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await authFetch(`/api/inventory/variant-reports/history${q}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load variant transaction history.');
+    return data;
+  },
+
+  async getVariantReportLedger(params?: {
+    itemId?: number;
+    variantId?: number;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<any> {
+    const qs = new URLSearchParams();
+    if (params?.itemId) qs.set('itemId', String(params.itemId));
+    if (params?.variantId) qs.set('variantId', String(params.variantId));
+    if (params?.startDate) qs.set('startDate', params.startDate);
+    if (params?.endDate) qs.set('endDate', params.endDate);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await authFetch(`/api/inventory/variant-reports/ledger${q}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load variant stock ledger.');
+    return data;
+  },
+
+  async getVariantDemandAlerts(days: number = 30): Promise<any> {
+    const res = await authFetch(`/api/inventory/variant-reports/demand-alerts?days=${days}`);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load variant demand & alerts report.');
     return data;
   },
 };

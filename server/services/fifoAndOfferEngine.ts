@@ -109,6 +109,9 @@ export function writeProtectedAuditLog(params: ProtectedAuditParams): void {
 export interface FIFOBatchRecord {
   id: number;
   item_id: number;
+  variant_id: number | null;
+  variant_code: string;
+  variant_name: string;
   item_code: string;
   item_name: string;
   company_name: string;
@@ -179,9 +182,9 @@ export interface FIFOAllocationPreviewResult {
 }
 
 /**
- * Inspects all batches for an item (or all items) and computes their FIFO eligibility & status.
+ * Inspects all batches for an item (or item+variant) and computes their FIFO eligibility & status.
  */
-export function getItemBatchesWithFIFOStatus(itemId?: number): FIFOBatchRecord[] {
+export function getItemBatchesWithFIFOStatus(itemId?: number, variantId?: number | null): FIFOBatchRecord[] {
   const db = getDatabase();
   const settings = db
     .prepare('SELECT near_expiry_days FROM company_settings LIMIT 1')
@@ -190,8 +193,19 @@ export function getItemBatchesWithFIFOStatus(itemId?: number): FIFOBatchRecord[]
   const todayStr = new Date().toISOString().slice(0, 10);
   const todayDate = new Date(`${todayStr}T00:00:00`);
 
-  const whereClause = itemId ? 'WHERE inv.item_id = ?' : '';
-  const params = itemId ? [itemId] : [];
+  const conds: string[] = [];
+  const params: Array<number> = [];
+  if (itemId) {
+    conds.push('inv.item_id = ?');
+    params.push(itemId);
+  }
+  if (variantId !== undefined && variantId !== null && Number(variantId) > 0) {
+    conds.push('inv.variant_id = ?');
+    params.push(Number(variantId));
+  } else if (variantId === 0) {
+    conds.push('COALESCE(inv.variant_key, 0) = 0');
+  }
+  const whereClause = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
 
   const rows = db
     .prepare(`
@@ -205,11 +219,14 @@ export function getItemBatchesWithFIFOStatus(itemId?: number): FIFOBatchRecord[]
         i.trade_price as item_trade_price,
         i.wholesale_price as item_wholesale_price,
         i.retail_price as item_retail_price,
+        iv.variant_code as v_code,
+        iv.variant_name as v_name,
         p.bill_date as linked_bill_date,
         p.bill_number as linked_bill_number,
         a.account_name as linked_supplier_name
       FROM inventory inv
       INNER JOIN items i ON i.id = inv.item_id
+      LEFT JOIN item_variants iv ON iv.id = inv.variant_id
       LEFT JOIN purchases p ON p.id = inv.last_purchase_id
       LEFT JOIN accounts a ON a.id = inv.last_supplier_id
       ${whereClause}
@@ -266,6 +283,9 @@ export function getItemBatchesWithFIFOStatus(itemId?: number): FIFOBatchRecord[]
     return {
       id: Number(r.id),
       item_id: Number(r.item_id),
+      variant_id: r.variant_id ? Number(r.variant_id) : null,
+      variant_code: String(r.v_code || ''),
+      variant_name: String(r.v_name || ''),
       item_code: String(r.item_code || ''),
       item_name: String(r.item_name || ''),
       company_name: String(r.company_name || ''),
@@ -302,6 +322,7 @@ export function getItemBatchesWithFIFOStatus(itemId?: number): FIFOBatchRecord[]
  */
 export function previewFIFOAllocation(params: {
   itemId: number;
+  variantId?: number | null;
   saleQtyPacks: number;
   bonusQtyPacks?: number;
   preferredInventoryId?: number | null;
@@ -322,7 +343,7 @@ export function previewFIFOAllocation(params: {
   const reqBonus = round2(Math.max(0, Number(params.bonusQtyPacks || 0)));
   const reqTotal = round2(reqSale + reqBonus);
 
-  const allBatches = getItemBatchesWithFIFOStatus(params.itemId);
+  const allBatches = getItemBatchesWithFIFOStatus(params.itemId, params.variantId);
   const skipped: FIFOAllocationPreviewResult['blocked_or_expired_batches_skipped'] = [];
   const eligible: FIFOBatchRecord[] = [];
 
@@ -455,6 +476,12 @@ export function recordBatchStockMovement(params: {
   movement_date?: string;
   itemId?: number;
   item_id?: number;
+  variantId?: number | null;
+  variant_id?: number | null;
+  variantCode?: string;
+  variant_code?: string;
+  variantName?: string;
+  variant_name?: string;
   itemCode?: string;
   item_code?: string;
   itemName?: string;
@@ -529,16 +556,19 @@ export function recordBatchStockMovement(params: {
   const qtyPacks = Number(params.quantityPacks ?? params.quantity_packs ?? 0);
   db.prepare(`
     INSERT INTO batch_stock_movements (
-      movement_date, item_id, item_code, item_name, company_name,
+      movement_date, item_id, variant_id, variant_code, variant_name, item_code, item_name, company_name,
       inventory_id, batch_number, expiry_date, purchase_date,
       movement_type, reference_type, reference_id, reference_number,
       party_account_id, party_name, salesman_id, salesman_name, town_name,
       quantity_packs, bonus_packs, total_units, purchase_rate, trade_price,
       balance_after_packs, remarks, performed_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.movementDate || params.movement_date || new Date().toISOString().slice(0, 10),
     Number(params.itemId ?? params.item_id ?? 0),
+    params.variantId ?? params.variant_id ?? null,
+    params.variantCode || params.variant_code || '',
+    params.variantName || params.variant_name || '',
     params.itemCode || params.item_code || '',
     params.itemName || params.item_name || '',
     params.companyName || params.company_name || '',
@@ -582,6 +612,9 @@ export interface OfferSlab {
 
 export interface LineOfferEvaluationInput {
   itemId: number;
+  variantId?: number | null;
+  variantCode?: string;
+  variantName?: string;
   itemCode?: string;
   itemName?: string;
   companyName?: string;
@@ -670,7 +703,8 @@ export function evaluateLineOfferAndPartyDiscount(
     .get() as { discount_stacking_rule?: string } | undefined;
   const stackingRule = String(settings?.discount_stacking_rule || 'higher_only');
 
-  // 1. Evaluate Active Trade Offers matching Date, Item/Company/All, Town, Party, Salesman, and Quantity
+  // 1. Evaluate Active Trade Offers matching Date, Variant/Item/Company/All, Town, Party, Salesman, and Quantity
+  const variantId = input.variantId ? Number(input.variantId) : 0;
   const activeOffers = db
     .prepare(`
       SELECT *
@@ -680,15 +714,16 @@ export function evaluateLineOfferAndPartyDiscount(
         AND date(end_date) >= date(?)
       ORDER BY
         CASE
-          WHEN scope_type = 'item' AND item_id = ? THEN 0
-          WHEN scope_type = 'company' AND LOWER(company_name) = LOWER(?) THEN 1
-          WHEN scope_type = 'all_items' THEN 2
-          ELSE 3
+          WHEN scope_type = 'item' AND item_id = ? AND variant_id IS NOT NULL AND variant_id = ? THEN 0
+          WHEN scope_type = 'item' AND item_id = ? AND (variant_id IS NULL OR variant_id = 0) THEN 1
+          WHEN scope_type = 'company' AND LOWER(company_name) = LOWER(?) THEN 2
+          WHEN scope_type = 'all_items' THEN 3
+          ELSE 4
         END ASC,
         min_quantity DESC,
         id DESC
     `)
-    .all(invoiceDate, invoiceDate, itemId, companyName) as Array<Record<string, any>>;
+    .all(invoiceDate, invoiceDate, itemId, variantId, itemId, companyName) as Array<Record<string, any>>;
 
   let matchedOffer: Record<string, any> | null = null;
   let offerDiscPct = 0;
@@ -703,6 +738,9 @@ export function evaluateLineOfferAndPartyDiscount(
       // Scope check
       const scope = String(offer.scope_type || 'item');
       if (scope === 'item' && Number(offer.item_id) !== itemId && String(offer.item_code || '').toLowerCase() !== itemCode.toLowerCase()) {
+        continue;
+      }
+      if (scope === 'item' && offer.variant_id && Number(offer.variant_id) > 0 && Number(offer.variant_id) !== variantId) {
         continue;
       }
       if (scope === 'company' && String(offer.company_name || '').toLowerCase() !== companyName.toLowerCase()) {
@@ -800,18 +838,22 @@ export function evaluateLineOfferAndPartyDiscount(
           AND (end_date IS NULL OR end_date = '' OR date(end_date) >= date(?))
         ORDER BY
           CASE
-            WHEN scope_type = 'item' AND item_id = ? THEN 0
-            WHEN scope_type = 'company' AND LOWER(company_name) = LOWER(?) THEN 1
-            WHEN scope_type = 'all_items' THEN 2
-            ELSE 3
+            WHEN scope_type = 'item' AND item_id = ? AND variant_id IS NOT NULL AND variant_id = ? THEN 0
+            WHEN scope_type = 'item' AND item_id = ? AND (variant_id IS NULL OR variant_id = 0) THEN 1
+            WHEN scope_type = 'company' AND LOWER(company_name) = LOWER(?) THEN 2
+            WHEN scope_type = 'all_items' THEN 3
+            ELSE 4
           END ASC,
           id DESC
       `)
-      .all(Number(input.partyAccountId), invoiceDate, invoiceDate, itemId, companyName) as Array<Record<string, any>>;
+      .all(Number(input.partyAccountId), invoiceDate, invoiceDate, itemId, variantId, itemId, companyName) as Array<Record<string, any>>;
 
     for (const pd of partyDiscounts) {
       const scope = String(pd.scope_type || 'item');
       if (scope === 'item' && Number(pd.item_id) !== itemId && String(pd.item_code || '').toLowerCase() !== itemCode.toLowerCase()) {
+        continue;
+      }
+      if (scope === 'item' && pd.variant_id && Number(pd.variant_id) > 0 && Number(pd.variant_id) !== variantId) {
         continue;
       }
       if (scope === 'company' && String(pd.company_name || '').toLowerCase() !== companyName.toLowerCase()) {
@@ -909,6 +951,7 @@ export function evaluateLineOfferAndPartyDiscount(
   const sameItemBonus = !bonusItemId || bonusItemId === itemId ? bonusQty : 0;
   const fifoAllocation = previewFIFOAllocation({
     itemId,
+    variantId: input.variantId,
     saleQtyPacks: saleQty,
     bonusQtyPacks: sameItemBonus,
     preferredInventoryId: input.preferredInventoryId,

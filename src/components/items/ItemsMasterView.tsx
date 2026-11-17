@@ -30,13 +30,16 @@ import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { ProductThumb } from '../common/ProductThumb';
 
 interface ItemsMasterViewProps {
   initialOpenImport?: boolean;
+  onOpenVariants?: (item: Item) => void;
 }
 
 export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
   initialOpenImport = false,
+  onOpenVariants,
 }) => {
   const [items, setItems] = useState<Item[]>([]);
   const [stats, setStats] = useState<ItemStats>({
@@ -462,6 +465,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
           <table className="w-full text-left text-xs border-collapse">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500 font-bold uppercase tracking-wider select-none">
+                <th className="py-2.5 px-2.5 w-10 text-center">Pic</th>
                 <th
                   onClick={() => handleSort('item_code')}
                   className="py-2.5 px-3 cursor-pointer hover:text-emerald-700"
@@ -544,14 +548,14 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
             <tbody className="divide-y divide-slate-100">
               {loading && items.length === 0 ? (
                 <tr>
-                  <td colSpan={17} className="py-12 text-center text-slate-500">
+                  <td colSpan={18} className="py-12 text-center text-slate-500">
                     <RefreshCw className="w-5 h-5 animate-spin mx-auto text-emerald-600 mb-2" />
                     <span>Loading items from database...</span>
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={17} className="py-12 text-center text-slate-500">
+                  <td colSpan={18} className="py-12 text-center text-slate-500">
                     <div className="max-w-md mx-auto space-y-3">
                       <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 mx-auto flex items-center justify-center">
                         <Package className="w-6 h-6" />
@@ -576,7 +580,12 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                 </tr>
               ) : (
                 items.map((item) => {
-                  const isLow = item.opening_stock <= item.minimum_stock;
+                  const hasVariants = Number(item.has_variants) === 1;
+                  const displayStock =
+                    item.consolidated_stock_packs !== undefined
+                      ? Number(item.consolidated_stock_packs)
+                      : Number(item.opening_stock || 0);
+                  const isLow = displayStock <= item.minimum_stock;
                   const loosePrice = getLoosePrice(item.retail_price, item.packing, item.loose_rate);
                   const inlineVal =
                     inlineLooseRates[item.id] !== undefined
@@ -592,6 +601,18 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                         !isLow ? '' : 'bg-amber-50/20'
                       }`}
                     >
+                      {/* Thumbnail */}
+                      <td className="py-1.5 px-2.5 text-center">
+                        <ProductThumb
+                          src={item.thumbnail_url || item.image_url}
+                          fullSrc={item.image_url}
+                          alt={item.item_name}
+                          size="sm"
+                          enableZoom
+                          className="mx-auto"
+                        />
+                      </td>
+
                       {/* Item Code */}
                       <td className="py-2 px-3 font-mono font-bold text-slate-900 whitespace-nowrap">
                         <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-800">
@@ -601,8 +622,21 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
 
                       {/* Item Name & Generic */}
                       <td className="py-2 px-3 max-w-xs">
-                        <div className="font-bold text-slate-900 truncate" title={item.item_name}>
-                          {item.item_name}
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-slate-900 truncate" title={item.item_name}>
+                            {item.item_name}
+                          </span>
+                          {hasVariants && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenVariants?.(item)}
+                              className="shrink-0 px-1.5 py-0.5 rounded bg-sky-100 hover:bg-sky-200 text-sky-800 text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
+                              title="Manage product variants"
+                            >
+                              <Layers className="w-2.5 h-2.5" />
+                              <span>{Number(item.active_variant_count ?? item.variant_count ?? 0)}V</span>
+                            </button>
+                          )}
                         </div>
                         {item.generic_name && (
                           <div className="text-[11px] text-slate-500 truncate" title={item.generic_name}>
@@ -696,7 +730,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                         {item.discount_percent === 0 && item.tax_percent === 0 && <span className="text-slate-300">0%</span>}
                       </td>
 
-                      {/* Opening Stock */}
+                      {/* Opening / Consolidated Stock */}
                       <td className="py-2 px-3 text-center whitespace-nowrap">
                         <span
                           className={`font-mono font-bold px-2 py-0.5 rounded ${
@@ -704,9 +738,15 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                               ? 'bg-amber-100 text-amber-900 border border-amber-300'
                               : 'text-slate-900'
                           }`}
-                          title={isLow ? `Low Stock Alert (<= ${item.minimum_stock})` : 'Normal Stock'}
+                          title={
+                            hasVariants
+                              ? `Consolidated sum across all variants (${displayStock} Packs)`
+                              : isLow
+                              ? `Low Stock Alert (<= ${item.minimum_stock})`
+                              : 'Normal Stock'
+                          }
                         >
-                          {item.opening_stock}
+                          {displayStock}
                         </span>
                       </td>
 
@@ -748,6 +788,19 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                       {/* Actions */}
                       <td className="py-2 px-3 text-right whitespace-nowrap sticky right-0 bg-white/95 group-hover:bg-slate-50/95 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.05)] print:hidden">
                         <div className="flex items-center justify-end gap-1">
+                          {onOpenVariants && (
+                            <button
+                              onClick={() => onOpenVariants(item)}
+                              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                                hasVariants
+                                  ? 'text-sky-600 hover:bg-sky-50'
+                                  : 'text-slate-400 hover:text-sky-700 hover:bg-sky-50'
+                              }`}
+                              title="Manage Item Variants"
+                            >
+                              <Layers className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <button
                             onClick={() => handleOpenEdit(item)}
                             className="p-1.5 rounded-md text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors cursor-pointer"
@@ -790,6 +843,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
         isOpen={isFormModalOpen}
         onClose={() => setIsFormModalOpen(false)}
         editingItem={editingItem}
+        onManageVariants={onOpenVariants}
         onCompanyCreated={(updatedCompanies) => setCompanies(updatedCompanies)}
         onSaved={(savedItem) => {
           setSuccessNotice(

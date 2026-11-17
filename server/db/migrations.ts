@@ -62,6 +62,7 @@ export function runMigrations(): MigrationResult {
   const migrationName28 = '028_automatic_item_code_sequence_and_cities_master';
   const migrationName29 = '029_item_companies_master';
   const migrationName30 = '030_buyer_field_and_lookup_indexes';
+  const migrationName31 = '031_item_variant_management_and_product_pictures';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -4062,10 +4063,216 @@ export function runMigrations(): MigrationResult {
     if (!applied30) {
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName30, 30);
     }
+
+    // ------------------------------------------------------------------------
+    // MIGRATION 31: Optional Item Variant Management & Product Pictures
+    // ------------------------------------------------------------------------
+    const applied31 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName31);
+
+    // 1. Add optional variant flag & picture references to items master
+    ensureCol('items', 'has_variants', 'INTEGER NOT NULL DEFAULT 0');
+    ensureCol('items', 'image_id', 'INTEGER DEFAULT NULL');
+    ensureCol('items', 'image_url', "TEXT NOT NULL DEFAULT ''");
+    ensureCol('items', 'thumbnail_url', "TEXT NOT NULL DEFAULT ''");
+
+    // 2. Persistent Product & Variant Images store
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS product_images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_key TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        original_filename TEXT NOT NULL DEFAULT '',
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        width INTEGER NOT NULL DEFAULT 0,
+        height INTEGER NOT NULL DEFAULT 0,
+        image_data_url TEXT NOT NULL,
+        thumbnail_data_url TEXT NOT NULL,
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_product_images_key ON product_images(image_key);
+
+      CREATE TABLE IF NOT EXISTS item_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        parent_item_id INTEGER NOT NULL,
+        variant_code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        variant_name TEXT NOT NULL,
+        colour TEXT NOT NULL DEFAULT '',
+        flavour TEXT NOT NULL DEFAULT '',
+        variant_type TEXT NOT NULL DEFAULT '',
+        other_attributes TEXT NOT NULL DEFAULT '',
+        barcode TEXT NOT NULL DEFAULT '',
+        packing TEXT NOT NULL DEFAULT '',
+        use_parent_pricing INTEGER NOT NULL DEFAULT 1,
+        purchase_price REAL NOT NULL DEFAULT 0.0,
+        trade_price REAL NOT NULL DEFAULT 0.0,
+        wholesale_price REAL NOT NULL DEFAULT 0.0,
+        retail_price REAL NOT NULL DEFAULT 0.0,
+        loose_rate REAL NOT NULL DEFAULT 0.0,
+        discount_percent REAL NOT NULL DEFAULT 0.0,
+        tax_percent REAL NOT NULL DEFAULT 0.0,
+        opening_stock REAL NOT NULL DEFAULT 0.0,
+        minimum_stock REAL NOT NULL DEFAULT 0.0,
+        rack_number TEXT NOT NULL DEFAULT '',
+        image_id INTEGER DEFAULT NULL,
+        image_url TEXT NOT NULL DEFAULT '',
+        thumbnail_url TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Inactive')),
+        created_by TEXT DEFAULT 'Super Admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (parent_item_id) REFERENCES items (id) ON DELETE RESTRICT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_item_variants_parent ON item_variants(parent_item_id);
+      CREATE INDEX IF NOT EXISTS idx_item_variants_code ON item_variants(variant_code COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_item_variants_barcode ON item_variants(barcode COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_item_variants_status ON item_variants(status);
+
+      CREATE TABLE IF NOT EXISTS item_variant_barcodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL,
+        variant_id INTEGER DEFAULT NULL,
+        barcode TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        barcode_type TEXT NOT NULL DEFAULT 'manufacturer' CHECK(barcode_type IN ('manufacturer', 'generated')),
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE,
+        FOREIGN KEY (variant_id) REFERENCES item_variants (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_variant_barcodes_barcode ON item_variant_barcodes(barcode COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_variant_barcodes_variant ON item_variant_barcodes(variant_id);
+      CREATE INDEX IF NOT EXISTS idx_variant_barcodes_item ON item_variant_barcodes(item_id);
+    `);
+
+    // 3. Add nullable variant columns across transactional & operational tables (zero data loss)
+    const variantAwareTables = [
+      'purchase_items',
+      'sale_items',
+      'purchase_return_items',
+      'sale_return_items',
+      'batch_stock_movements',
+      'stock_adjustment_items',
+      'stock_transfer_items',
+      'physical_verification_items',
+      'trade_offers',
+      'party_discounts',
+      'supply_booking_items',
+      'party_supply_items',
+      'supply_return_items',
+    ];
+    for (const tbl of variantAwareTables) {
+      ensureCol(tbl, 'variant_id', 'INTEGER DEFAULT NULL');
+      ensureCol(tbl, 'variant_code', "TEXT NOT NULL DEFAULT ''");
+      ensureCol(tbl, 'variant_name', "TEXT NOT NULL DEFAULT ''");
+    }
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_purchase_items_variant ON purchase_items(variant_id);
+      CREATE INDEX IF NOT EXISTS idx_sale_items_variant ON sale_items(variant_id);
+      CREATE INDEX IF NOT EXISTS idx_batch_movements_variant ON batch_stock_movements(variant_id);
+    `);
+
+    if (!applied31) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName31, 31);
+    }
   });
 
   try {
     executeMigration();
+
+    // Non-destructive upgrade of inventory table outside outer transaction so PRAGMA foreign_keys = OFF applies cleanly
+    const invColsInfo = db.prepare('PRAGMA table_info("inventory")').all() as Array<{ name: string; type: string; notnull: number; dflt_value: string | null }>;
+    const invColNames = invColsInfo.map((c) => c.name);
+    if (invColNames.length > 0 && (!invColNames.includes('variant_id') || !invColNames.includes('variant_key'))) {
+      db.pragma('foreign_keys = OFF');
+      try {
+        const upgradeInventoryTx = db.transaction(() => {
+          const preCount = Number((db.prepare('SELECT COUNT(*) as c FROM inventory').get() as { c: number })?.c || 0);
+          db.exec('DROP TABLE IF EXISTS inventory_variant_upgrade;');
+          db.exec(`
+            CREATE TABLE inventory_variant_upgrade (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              item_id INTEGER NOT NULL,
+              variant_id INTEGER DEFAULT NULL,
+              variant_key INTEGER NOT NULL DEFAULT 0,
+              batch_number TEXT NOT NULL,
+              manufacturing_date TEXT,
+              expiry_date TEXT NOT NULL,
+              packing TEXT NOT NULL DEFAULT '1x1',
+              strips_per_box INTEGER NOT NULL DEFAULT 1,
+              units_per_strip INTEGER NOT NULL DEFAULT 1,
+              units_per_pack INTEGER NOT NULL DEFAULT 1,
+              cost_price REAL NOT NULL DEFAULT 0.0,
+              trade_price REAL NOT NULL DEFAULT 0.0,
+              wholesale_price REAL NOT NULL DEFAULT 0.0,
+              retail_price REAL NOT NULL DEFAULT 0.0,
+              pack_cost REAL NOT NULL DEFAULT 0.0,
+              pack_retail REAL NOT NULL DEFAULT 0.0,
+              purchased_qty REAL NOT NULL DEFAULT 0.0,
+              bonus_qty REAL NOT NULL DEFAULT 0.0,
+              returned_qty REAL NOT NULL DEFAULT 0.0,
+              sold_qty REAL NOT NULL DEFAULT 0.0,
+              current_pack_qty REAL NOT NULL DEFAULT 0.0,
+              current_strip_qty REAL NOT NULL DEFAULT 0.0,
+              current_loose_qty REAL NOT NULL DEFAULT 0.0,
+              total_stock_units REAL NOT NULL DEFAULT 0.0,
+              rack_shelf TEXT,
+              last_purchase_id INTEGER,
+              last_supplier_id INTEGER,
+              status TEXT NOT NULL DEFAULT 'in_stock' CHECK(status IN ('in_stock', 'low_stock', 'out_of_stock', 'expired')),
+              purchase_date TEXT DEFAULT '',
+              purchase_invoice_number TEXT DEFAULT '',
+              supplier_name TEXT DEFAULT '',
+              dispatched_pack_qty REAL NOT NULL DEFAULT 0.0,
+              reserved_pack_qty REAL NOT NULL DEFAULT 0.0,
+              damaged_pack_qty REAL NOT NULL DEFAULT 0.0,
+              is_blocked INTEGER NOT NULL DEFAULT 0,
+              blocked_reason TEXT DEFAULT '',
+              blocked_by TEXT DEFAULT '',
+              blocked_at DATETIME DEFAULT NULL,
+              batch_status TEXT NOT NULL DEFAULT 'Active',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE RESTRICT,
+              UNIQUE(item_id, variant_key, batch_number)
+            );
+          `);
+
+          const upgradeCols = (db.prepare('PRAGMA table_info("inventory_variant_upgrade")').all() as Array<{ name: string }>).map((c) => c.name);
+          const sharedCols = invColNames.filter((c) => upgradeCols.includes(c) && c !== 'variant_id' && c !== 'variant_key');
+          const quotedShared = sharedCols.map((c) => `"${c}"`).join(', ');
+          if (sharedCols.length > 0) {
+            db.exec(`
+              INSERT INTO inventory_variant_upgrade (${quotedShared}, variant_id, variant_key)
+              SELECT ${quotedShared}, ${invColNames.includes('variant_id') ? 'variant_id' : 'NULL'}, ${invColNames.includes('variant_id') ? 'COALESCE(variant_id, 0)' : '0'}
+              FROM inventory;
+            `);
+          }
+
+          const postCount = Number((db.prepare('SELECT COUNT(*) as c FROM inventory_variant_upgrade').get() as { c: number })?.c || 0);
+          if (postCount !== preCount) {
+            throw new Error(`Inventory variant upgrade row count mismatch (${postCount} vs ${preCount}).`);
+          }
+
+          db.exec('DROP TABLE inventory;');
+          db.exec('ALTER TABLE inventory_variant_upgrade RENAME TO inventory;');
+        });
+        upgradeInventoryTx();
+      } finally {
+        db.pragma('foreign_keys = ON');
+      }
+    }
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_inventory_item_variant ON inventory(item_id, variant_key);
+      CREATE INDEX IF NOT EXISTS idx_inventory_variant_id ON inventory(variant_id);
+    `);
 
     const tables = db
       .prepare(
@@ -4080,7 +4287,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

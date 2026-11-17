@@ -32,6 +32,7 @@ import {
   runPreDeploymentSafetyChecks,
   startCloudPersistenceBackgroundLoop,
 } from './server/services/cloudPersistenceService.ts';
+import { handleServeProductImage } from './server/services/productMediaService.ts';
 
 async function startServer() {
   const app = express();
@@ -68,6 +69,9 @@ async function startServer() {
 
   // Synchronize all API operations with permanent Cloud SQL database across Dev, Published, Computer & Mobile
   app.use('/api', cloudPersistenceMiddleware);
+
+  // Serve uploaded Product & Variant pictures cleanly for <img> tags & print previews
+  app.get('/api/product-images/:imageKey', handleServeProductImage);
 
   // Mount API routes with server-side authentication and module RBAC enforcement
   app.use('/api/auth', authRouter);

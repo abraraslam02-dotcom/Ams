@@ -6,11 +6,15 @@ import {
   ItemPurchaseHistoryEntry,
 } from '../../types/sales';
 
+import { ProductThumb } from './ProductThumb';
+
 export interface CompactItemHistoryPopupProps {
   isOpen: boolean;
   mode: 'sales' | 'purchase';
   itemCode: string;
   itemName: string;
+  variantName?: string | null;
+  thumbnailUrl?: string | null;
   packing?: string;
   selectedCustomerId?: number | null;
   selectedCustomerName?: string;
@@ -82,6 +86,8 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
   mode,
   itemCode,
   itemName,
+  variantName,
+  thumbnailUrl,
   packing,
   selectedCustomerId,
   selectedCustomerName,
@@ -142,7 +148,11 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
       {/* Compact Header Bar */}
       <div className="bg-slate-900 text-white px-2.5 py-1 flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 text-[11px]">
         <div className="flex items-center gap-1.5 min-w-0">
-          <History className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          {thumbnailUrl ? (
+            <ProductThumb src={thumbnailUrl} alt={itemName} size="xs" className="border-slate-700 bg-slate-800" />
+          ) : (
+            <History className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          )}
           <span className="font-bold uppercase tracking-wider text-emerald-300 text-[10px]">
             {mode === 'sales' ? 'Customer Sales Item History' : 'Item History'}
           </span>
@@ -155,6 +165,11 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
           <span className="font-bold text-white truncate max-w-[260px]" title={itemName}>
             {itemName}
           </span>
+          {variantName && (
+            <span className="px-1.5 py-0 rounded bg-amber-600/90 text-white font-bold text-[9.5px] shrink-0">
+              {variantName}
+            </span>
+          )}
           {packing && (
             <span className="text-slate-300 font-mono text-[10px]">({packing})</span>
           )}

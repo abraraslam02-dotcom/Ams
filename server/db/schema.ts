@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS items (
     opening_stock REAL NOT NULL DEFAULT 0.0,
     minimum_stock REAL NOT NULL DEFAULT 0.0,
     rack_number TEXT,
+    has_variants INTEGER NOT NULL DEFAULT 0,
+    image_id INTEGER,
+    image_url TEXT,
+    thumbnail_url TEXT,
     status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Inactive')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -183,6 +187,8 @@ CREATE INDEX IF NOT EXISTS idx_account_code_history_prefix ON account_code_histo
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id INTEGER NOT NULL,
+    variant_id INTEGER,
+    variant_key INTEGER NOT NULL DEFAULT 0,
     batch_number TEXT NOT NULL,
     manufacturing_date TEXT,
     expiry_date TEXT NOT NULL,
@@ -211,7 +217,7 @@ CREATE TABLE IF NOT EXISTS inventory (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE RESTRICT,
-    UNIQUE(item_id, batch_number)
+    UNIQUE(item_id, variant_key, batch_number)
 );
 
 -- 6. Sales (Professional Pharmacy POS & Wholesale Invoice Headers)
@@ -269,6 +275,9 @@ CREATE TABLE IF NOT EXISTS sale_items (
     sale_id INTEGER NOT NULL,
     item_id INTEGER NOT NULL,
     inventory_id INTEGER,
+    variant_id INTEGER,
+    variant_code TEXT,
+    variant_name TEXT,
     item_code TEXT NOT NULL,
     company_name TEXT NOT NULL DEFAULT '',
     item_name TEXT NOT NULL,

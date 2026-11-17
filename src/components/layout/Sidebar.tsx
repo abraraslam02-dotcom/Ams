@@ -7,6 +7,7 @@ export type NavTabId =
   // A. ITEM MANAGEMENT
   | 'items-master'
   | 'items'
+  | 'item-variants'
   | 'item-categories'
   | 'item-groups'
   | 'item-search'
@@ -136,6 +137,7 @@ export type NavTabId =
   | 'inv-transfer'
   | 'inv-ledger'
   | 'inv-verification'
+  | 'inv-variant-reports'
   // G. REPORTS & ANALYTICS
   | 'top-performance-reports'
   | 'report-item-reports'
@@ -327,6 +329,7 @@ const FALLBACK_ACCENT: Accent = ACCENTS['group-sales-management'];
 /* One small icon per page, so every menu row is recognisable at a glance. */
 const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'items-master': 'box',
+  'item-variants': 'layers',
   'item-categories': 'tag',
   'item-groups': 'layers',
   'item-search': 'search',
@@ -418,6 +421,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'near-expiry': 'alert',
   'expired-items': 'ban',
   'physical-verification': 'checkClipboard',
+  'inv-variant-reports': 'layers',
   'top-performance-reports': 'trendUp',
   'report-item-reports': 'box',
   'detailed-stock-report': 'clipboard',
@@ -482,6 +486,7 @@ const MENU: MenuNode[] = [
     icon: 'box',
     children: [
       { id: 'items-master', label: 'Item Master', canSee: (p) => p.items?.view !== false },
+      { id: 'item-variants', label: 'Variant Management', badge: 'VAR', canSee: (p) => p.items?.view !== false },
       { id: 'item-categories', label: 'Item Categories', canSee: (p) => p.items?.view !== false },
       { id: 'item-groups', label: 'Item Groups', canSee: (p) => p.items?.view !== false },
       { id: 'item-search', label: 'Item Search', canSee: (p) => p.items?.view !== false },
@@ -624,6 +629,7 @@ const MENU: MenuNode[] = [
       { id: 'near-expiry', label: 'Near Expiry (30/60/90d)' },
       { id: 'expired-items', label: 'Expired Items' },
       { id: 'physical-verification', label: 'Physical Verification' },
+      { id: 'inv-variant-reports', label: 'Variant Stock & Reports', badge: 'VAR' },
     ],
   },
   {

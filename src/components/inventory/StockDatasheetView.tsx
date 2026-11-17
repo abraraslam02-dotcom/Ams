@@ -25,6 +25,7 @@ import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { ProductThumb } from '../common/ProductThumb';
 
 interface StockDatasheetViewProps {
   initialExpiryFilter?: string;
@@ -617,11 +618,32 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
 
                       {/* 3. Item Name */}
                       <td className="px-3 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-sans">
-                        <div className="font-semibold text-white truncate max-w-[200px]">
-                          {item.item_name}
-                        </div>
-                        <div className="text-[10px] text-slate-400 truncate max-w-[200px]">
-                          {item.generic_name || item.category}
+                        <div className="flex items-center gap-2">
+                          {((item as any).thumbnail_url || (item as any).image_url) && (
+                            <ProductThumb
+                              src={(item as any).thumbnail_url || (item as any).image_url}
+                              fullSrc={(item as any).image_url}
+                              alt={item.item_name}
+                              size="xs"
+                              enableZoom
+                              className="border-slate-700 bg-slate-800"
+                            />
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-semibold text-white truncate max-w-[200px] flex items-center gap-1.5">
+                              <span className="truncate">{item.item_name}</span>
+                              {(item as any).variant_name && (
+                                <span className="px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-300 text-[9px] font-bold shrink-0">
+                                  {(item as any).variant_name}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-400 truncate max-w-[200px]">
+                              {(item as any).variant_code
+                                ? `${(item as any).variant_code} • ${item.generic_name || item.category}`
+                                : item.generic_name || item.category}
+                            </div>
+                          </div>
                         </div>
                       </td>
 

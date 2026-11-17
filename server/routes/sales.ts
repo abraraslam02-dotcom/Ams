@@ -16,6 +16,7 @@ import {
   evaluateLineOfferAndPartyDiscount,
   recordBatchStockMovement,
 } from '../services/fifoAndOfferEngine.ts';
+import { getEnrichedVariants, type EnrichedVariantRecord } from '../services/itemVariantService.ts';
 import { assertPeriodOpen } from '../utils/periodLock.ts';
 
 export const salesRouter = Router();
@@ -251,9 +252,17 @@ function revertCompletedSaleEffects(saleId: number) {
     const parsed = parsePacking(String(line.packing || '1x1'));
     const packSoldEquivalent = round2(totalUnitsSold / parsed.unitsPerPack);
 
-    const inv = db
-      .prepare('SELECT * FROM inventory WHERE item_id = ? AND batch_number = ?')
-      .get(itemId, batchNumber) as Record<string, unknown> | undefined;
+    const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
+    let inv = line.inventory_id
+      ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(Number(line.inventory_id)) as
+          | Record<string, unknown>
+          | undefined)
+      : undefined;
+    if (!inv) {
+      inv = db
+        .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
+        .get(itemId, lineVariantKey, batchNumber) as Record<string, unknown> | undefined;
+    }
 
     if (inv) {
       const newSoldQty = round2(Math.max(0, Number(inv.sold_qty || 0) - packSoldEquivalent));
@@ -368,9 +377,29 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
             OR generic_name LIKE ?
             OR category LIKE ?
             OR packing LIKE ?
+            OR id IN (
+              SELECT parent_item_id FROM item_variants
+              WHERE LOWER(COALESCE(status, 'Active')) = 'active'
+                AND (
+                  variant_code LIKE ?
+                  OR variant_name LIKE ?
+                  OR colour LIKE ?
+                  OR flavour LIKE ?
+                  OR variant_type LIKE ?
+                  OR barcode LIKE ?
+                )
+            )
+            OR id IN (
+              SELECT item_id FROM item_variant_barcodes
+              WHERE barcode LIKE ?
+            )
           )
         `;
-        params.push(likeTok, likeTok, likeTok, likeTok, likeTok, likeTok, likeTok);
+        params.push(
+          likeTok, likeTok, likeTok, likeTok, likeTok, likeTok, likeTok,
+          likeTok, likeTok, likeTok, likeTok, likeTok, likeTok,
+          likeTok
+        );
       }
 
       const exactTerm = q;
@@ -380,6 +409,8 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
           CASE
             WHEN LOWER(item_code) = LOWER(?) THEN 0
             WHEN LOWER(barcode) = LOWER(?) THEN 1
+            WHEN id IN (SELECT parent_item_id FROM item_variants WHERE LOWER(barcode) = LOWER(?) OR LOWER(variant_code) = LOWER(?)) THEN 1
+            WHEN id IN (SELECT item_id FROM item_variant_barcodes WHERE LOWER(barcode) = LOWER(?)) THEN 1
             WHEN LOWER(item_name) = LOWER(?) THEN 2
             WHEN LOWER(item_code) LIKE LOWER(?) THEN 3
             WHEN LOWER(item_name) LIKE LOWER(?) THEN 4
@@ -388,7 +419,7 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
           item_name ASC
         LIMIT ?
       `;
-      params.push(exactTerm, exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
+      params.push(exactTerm, exactTerm, exactTerm, exactTerm, exactTerm, exactTerm, prefixTerm, prefixTerm, limit);
     } else {
       sql += ` ORDER BY item_name ASC LIMIT ?`;
       params.push(limit);
@@ -396,9 +427,11 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
 
     const items = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
 
-    // Fetch all batches for the matched items in one query
+    // Fetch all batches and active variants for matched items
     const itemIds = items.map((i) => Number(i.id));
     const batchesByItem = new Map<number, Array<Record<string, unknown>>>();
+    const batchesByVariantKey = new Map<string, Array<Record<string, unknown>>>();
+    const variantsByParent = new Map<number, EnrichedVariantRecord[]>();
 
     if (itemIds.length > 0) {
       const placeholders = itemIds.map(() => '?').join(',');
@@ -416,30 +449,103 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
 
       for (const b of batchRows) {
         const iId = Number(b.item_id);
+        const vKey = Number(b.variant_id || 0);
         if (!batchesByItem.has(iId)) batchesByItem.set(iId, []);
         batchesByItem.get(iId)!.push(b);
+
+        const vk = `${iId}:${vKey}`;
+        if (!batchesByVariantKey.has(vk)) batchesByVariantKey.set(vk, []);
+        batchesByVariantKey.get(vk)!.push(b);
+      }
+
+      const activeVariants = getEnrichedVariants({ parentItemIds: itemIds, includeInactive: false });
+      for (const v of activeVariants) {
+        const pid = Number(v.parent_item_id);
+        if (!variantsByParent.has(pid)) variantsByParent.set(pid, []);
+        variantsByParent.get(pid)!.push(v);
       }
     }
+
+    const mapBatchRow = (b: Record<string, unknown>, unitsPerPack: number, retailFallback: number, purchaseFallback: number) => ({
+      id: Number(b.id),
+      variant_id: b.variant_id ? Number(b.variant_id) : null,
+      batch_number: String(b.batch_number),
+      manufacturing_date: String(b.manufacturing_date || ''),
+      expiry_date: String(b.expiry_date || ''),
+      current_pack_qty: round2(b.current_pack_qty),
+      current_strip_qty: round2(b.current_strip_qty),
+      current_loose_qty: round2(b.current_loose_qty),
+      total_stock_units: round2(b.total_stock_units),
+      units_per_pack: Number(b.units_per_pack || unitsPerPack),
+      mrp_per_pack: round2(b.pack_retail || b.retail_price || retailFallback),
+      purchase_price_per_pack: round2(b.pack_cost || purchaseFallback),
+      status: String(b.status || 'in_stock'),
+    });
 
     const enriched = items.map((item) => {
       const itemId = Number(item.id);
       const parsed = parsePacking(String(item.packing || '1x1'));
-      const batches = batchesByItem.get(itemId) || [];
+      const itemVars = variantsByParent.get(itemId) || [];
+      const hasVariants = Number(item.has_variants || 0) === 1;
+      const itemLevelBatches = batchesByVariantKey.get(`${itemId}:0`) || [];
+      const allItemBatches = batchesByItem.get(itemId) || [];
 
-      const totalStockUnits = batches.reduce(
-        (sum, b) => sum + Number(b.total_stock_units || 0),
-        0
-      );
+      const totalStockUnits = hasVariants && itemVars.length > 0
+        ? itemVars.reduce((sum, v) => {
+            const vb = batchesByVariantKey.get(`${itemId}:${v.id}`) || [];
+            return sum + vb.reduce((s2, b) => s2 + Number(b.total_stock_units || 0), 0);
+          }, 0)
+        : allItemBatches.reduce((sum, b) => sum + Number(b.total_stock_units || 0), 0);
+
       const totalStockPacks = round2(totalStockUnits / parsed.unitsPerPack);
       const retailPrice = round2(item.retail_price);
       const wholesalePrice = round2(Number(item.wholesale_price || item.trade_price || item.retail_price));
       const purchasePrice = round2(item.purchase_price);
       const itemMasterLooseRate = round2(retailPrice / parsed.unitsPerPack);
 
-      const defaultBatch = batches[0] || null;
+      const defaultSourceBatches = hasVariants ? allItemBatches : itemLevelBatches.length > 0 ? itemLevelBatches : allItemBatches;
+      const defaultBatch = defaultSourceBatches[0] || null;
+
+      const enrichedVariants = itemVars.map((v) => {
+        const vParsed = parsePacking(String(v.effective_packing || item.packing || '1x1'));
+        const vBatches = batchesByVariantKey.get(`${itemId}:${v.id}`) || [];
+        const vTotalUnits = vBatches.reduce((sum, b) => sum + Number(b.total_stock_units || 0), 0);
+        const vTotalPacks = round2(vTotalUnits / vParsed.unitsPerPack);
+        const vDef = vBatches[0] || null;
+
+        return {
+          ...v,
+          strips_per_box: vParsed.stripsPerBox,
+          units_per_strip: vParsed.unitsPerStrip,
+          units_per_pack: vParsed.unitsPerPack,
+          total_available_units: round2(vTotalUnits),
+          total_available_packs: vTotalPacks,
+          default_batch: vDef
+            ? {
+                inventory_id: Number(vDef.id),
+                batch_number: String(vDef.batch_number),
+                expiry_date: String(vDef.expiry_date),
+                available_packs: round2(vDef.current_pack_qty),
+                available_units: round2(vDef.total_stock_units),
+              }
+            : {
+                inventory_id: null,
+                batch_number: `BATCH-${String(v.variant_code || itemId)}-01`,
+                expiry_date: '2028-12-31',
+                available_packs: 0,
+                available_units: 0,
+              },
+          batches: vBatches.map((b) =>
+            mapBatchRow(b, vParsed.unitsPerPack, v.effective_retail_price, v.effective_purchase_price)
+          ),
+        };
+      });
 
       return {
         ...item,
+        has_variants: hasVariants ? 1 : 0,
+        active_variant_count: enrichedVariants.length,
+        variants: enrichedVariants,
         strips_per_box: parsed.stripsPerBox,
         units_per_strip: parsed.unitsPerStrip,
         units_per_pack: parsed.unitsPerPack,
@@ -464,20 +570,7 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
               available_packs: 0,
               available_units: 0,
             },
-        batches: batches.map((b) => ({
-          id: Number(b.id),
-          batch_number: String(b.batch_number),
-          manufacturing_date: String(b.manufacturing_date || ''),
-          expiry_date: String(b.expiry_date || ''),
-          current_pack_qty: round2(b.current_pack_qty),
-          current_strip_qty: round2(b.current_strip_qty),
-          current_loose_qty: round2(b.current_loose_qty),
-          total_stock_units: round2(b.total_stock_units),
-          units_per_pack: Number(b.units_per_pack || parsed.unitsPerPack),
-          mrp_per_pack: round2(b.pack_retail || b.retail_price || retailPrice),
-          purchase_price_per_pack: round2(b.pack_cost || purchasePrice),
-          status: String(b.status || 'in_stock'),
-        })),
+        batches: defaultSourceBatches.map((b) => mapBatchRow(b, parsed.unitsPerPack, retailPrice, purchasePrice)),
       };
     });
 
@@ -702,6 +795,7 @@ const handleGetItemHistory = (req: Request, res: Response) => {
     const rawParam = String(req.params.itemId || '').trim();
     const rawQueryCode = String(req.query.itemCode || '').trim();
     const rawQueryItemId = Number(req.query.itemId || 0);
+    const variantIdParam = Number(req.query.variantId || 0);
     const customerId = Number(req.query.customerId || 0);
     const salesOnly =
       String(req.query.salesOnly || '').trim().toLowerCase() === 'true' ||
@@ -778,6 +872,9 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         si.id as sale_item_id,
         si.sale_id,
         COALESCE(si.item_id, i.id, ?) as item_id,
+        si.variant_id,
+        COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, '') as variant_code,
+        COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, '') as variant_name,
         COALESCE(NULLIF(TRIM(i.item_code), ''), NULLIF(TRIM(si.item_code), ''), ?) as item_code,
         COALESCE(NULLIF(TRIM(i.item_name), ''), NULLIF(TRIM(si.item_name), ''), '') as item_name,
         COALESCE(si.packing, i.packing, '') as packing,
@@ -805,8 +902,12 @@ const handleGetItemHistory = (req: Request, res: Response) => {
       FROM sale_items si
       INNER JOIN sales s ON s.id = si.sale_id
       LEFT JOIN items i ON i.id = si.item_id
+      LEFT JOIN item_variants iv ON iv.id = si.variant_id
       LEFT JOIN accounts a ON a.id = s.customer_account_id
     `;
+
+    const variantFilterSaleSql = variantIdParam > 0 ? ' AND si.variant_id = ? ' : '';
+    const variantFilterSaleParams = variantIdParam > 0 ? [variantIdParam] : [];
 
     // 1. Customer-Specific Confirmed Sales History (strictly filtered by AccountID AND ItemCode/ItemID)
     let customerSalesHistory: Array<Record<string, unknown>> = [];
@@ -819,11 +920,12 @@ const handleGetItemHistory = (req: Request, res: Response) => {
             OR si.item_id = ?
           )
             AND s.customer_account_id = ?
+            ${variantFilterSaleSql}
             AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
           ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
           LIMIT 25
         `)
-        .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, customerId) as Array<Record<string, unknown>>;
+        .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, customerId, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
     }
 
     const lastCustomerSale = customerSalesHistory.length > 0 ? customerSalesHistory[0] : null;
@@ -853,19 +955,25 @@ const handleGetItemHistory = (req: Request, res: Response) => {
           LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
           OR si.item_id = ?
         )
+          ${variantFilterSaleSql}
           AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
         ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
         LIMIT 10
       `)
-      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId) as Array<Record<string, unknown>>;
+      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
 
     // 3. Latest 10 Confirmed Purchase Transactions for this ItemCode (used by Purchase Item History view)
+    const variantFilterPurSql = variantIdParam > 0 ? ' AND pi.variant_id = ? ' : '';
+    const variantFilterPurParams = variantIdParam > 0 ? [variantIdParam] : [];
     const purchaseHistory = db
       .prepare(`
         SELECT
           pi.id as purchase_item_id,
           pi.purchase_id,
           COALESCE(pi.item_id, it.id, ?) as item_id,
+          pi.variant_id,
+          COALESCE(NULLIF(TRIM(pi.variant_code), ''), iv.variant_code, '') as variant_code,
+          COALESCE(NULLIF(TRIM(pi.variant_name), ''), iv.variant_name, '') as variant_name,
           COALESCE(NULLIF(TRIM(it.item_code), ''), NULLIF(TRIM(pi.item_code), ''), ?) as item_code,
           COALESCE(NULLIF(TRIM(it.item_name), ''), NULLIF(TRIM(pi.item_name), ''), '') as item_name,
           COALESCE(pi.batch_number, '') as batch_number,
@@ -900,16 +1008,18 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         INNER JOIN purchases p ON p.id = pi.purchase_id
         LEFT JOIN accounts a ON a.id = p.supplier_account_id
         LEFT JOIN items it ON it.id = pi.item_id
+        LEFT JOIN item_variants iv ON iv.id = pi.variant_id
         LEFT JOIN inventory inv ON inv.id = pi.inventory_id
         WHERE (
           LOWER(TRIM(COALESCE(NULLIF(TRIM(pi.item_code), ''), it.item_code, ''))) IN (${codePlaceholders})
           OR pi.item_id = ?
         )
+          ${variantFilterPurSql}
           AND LOWER(TRIM(COALESCE(p.status, 'completed'))) IN ('completed', 'posted')
         ORDER BY DATE(p.bill_date) DESC, p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
         LIMIT 10
       `)
-      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId) as Array<Record<string, unknown>>;
+      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, ...variantFilterPurParams) as Array<Record<string, unknown>>;
 
     const lastPurchase = purchaseHistory.length > 0 ? purchaseHistory[0] : null;
 
@@ -1257,9 +1367,13 @@ salesRouter.get('/:id', (req: Request, res: Response, next) => {
         SELECT
           si.*,
           COALESCE(NULLIF(TRIM(si.company_name), ''), i.company_name, '') as company_name,
+          COALESCE(NULLIF(TRIM(si.variant_code), ''), iv.variant_code, '') as variant_code,
+          COALESCE(NULLIF(TRIM(si.variant_name), ''), iv.variant_name, '') as variant_name,
+          COALESCE(NULLIF(TRIM(iv.thumbnail_url), ''), NULLIF(TRIM(iv.image_url), ''), i.thumbnail_url, i.image_url, '') as thumbnail_url,
           (si.total_units - si.returned_total_units) as eligible_return_units
         FROM sale_items si
         LEFT JOIN items i ON si.item_id = i.id
+        LEFT JOIN item_variants iv ON iv.id = si.variant_id
         WHERE si.sale_id = ?
         ORDER BY si.id ASC
       `)
@@ -1474,6 +1588,10 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
     interface ProcessedSaleLine {
       itemId: number;
+      variantId: number | null;
+      variantKey: number;
+      variantCode: string;
+      variantName: string;
       inventoryId: number | null;
       itemCode: string;
       companyName: string;
@@ -1525,14 +1643,36 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         throw new Error(`Row #${idx + 1}: Item ID ${itemId} does not exist in Items Master.`);
       }
 
-      const parsed = parsePacking(String(line.packing || itemRow.packing || '1x1'));
+      const variantId = line.variant_id ? Number(line.variant_id) : null;
+      let variantRow: Record<string, unknown> | undefined;
+      if (variantId) {
+        variantRow = db
+          .prepare('SELECT * FROM item_variants WHERE id = ? AND parent_item_id = ?')
+          .get(variantId, itemId) as Record<string, unknown> | undefined;
+        if (!variantRow) {
+          throw new Error(`Row #${idx + 1}: Selected Variant ID ${variantId} does not belong to "${itemRow.item_name}".`);
+        }
+      }
+      const variantKey = variantRow ? Number(variantRow.id) : 0;
+      const variantCode = variantRow ? String(variantRow.variant_code || '') : '';
+      const variantName = variantRow ? String(variantRow.variant_name || '') : '';
+      const useVarCustom = Boolean(variantRow && Number(variantRow.use_parent_pricing ?? 1) === 0);
+
+      const parsed = parsePacking(String(line.packing || variantRow?.packing || itemRow.packing || '1x1'));
       const quantity = round2(Math.max(0, Number(line.quantity ?? line.packs_quantity ?? 0)));
       const looseQuantity = round2(Math.max(0, Number(line.loose_quantity || 0)));
 
+      const baseWholesale = useVarCustom
+        ? Number(variantRow?.wholesale_price || variantRow?.trade_price || variantRow?.retail_price || itemRow.wholesale_price || itemRow.trade_price || itemRow.retail_price)
+        : Number(itemRow.wholesale_price || itemRow.trade_price || itemRow.retail_price);
+      const baseRetail = useVarCustom
+        ? Number(variantRow?.retail_price || itemRow.retail_price)
+        : Number(itemRow.retail_price);
+
       const defaultBoxPrice =
         invoiceType === 'Wholesale'
-          ? round2(Number(itemRow.wholesale_price || itemRow.trade_price || itemRow.retail_price))
-          : round2(Number(itemRow.retail_price));
+          ? round2(baseWholesale)
+          : round2(baseRetail);
 
       const rawPriceVal =
         line.unit_price !== undefined && line.unit_price !== '' ? line.unit_price : line.unit_rate;
@@ -1541,9 +1681,10 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
           ? round2(Math.max(0, Number(rawPriceVal)))
           : defaultBoxPrice;
 
-      // Evaluate Trade Deals & Party Discounts automatically
+      // Evaluate Trade Deals & Party Discounts automatically (variant-aware)
       const evalOffer = evaluateLineOfferAndPartyDiscount({
         itemId,
+        variantId,
         quantity,
         tradePrice: unitPrice,
         partyAccountId: customerAccountId,
@@ -1598,23 +1739,26 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       }
 
       const taxableAmount = round2(Math.max(0, grossAmount - discountAmount));
-      const taxPercent = round2(Math.max(0, Number(line.tax_percent ?? itemRow.tax_percent ?? 0)));
+      const baseTaxPct = useVarCustom
+        ? Number(variantRow?.tax_percent ?? itemRow.tax_percent ?? 0)
+        : Number(itemRow.tax_percent ?? 0);
+      const taxPercent = round2(Math.max(0, Number(line.tax_percent ?? baseTaxPct)));
       const taxAmount = round2((taxableAmount * taxPercent) / 100);
       const lineTotal = round2(taxableAmount + taxAmount);
 
-      // Resolve batch in inventory with strict FIFO & Expiry / Block validation
+      // Resolve batch in inventory with strict variant_key isolation, FIFO & Expiry / Block validation
       const todayIso = new Date().toISOString().slice(0, 10);
       let batchRow: Record<string, unknown> | undefined;
       if (batchWiseSales) {
         if (line.inventory_id) {
           batchRow = db
-            .prepare('SELECT * FROM inventory WHERE id = ? AND item_id = ?')
-            .get(Number(line.inventory_id), itemId) as Record<string, unknown> | undefined;
+            .prepare('SELECT * FROM inventory WHERE id = ? AND item_id = ? AND COALESCE(variant_key, 0) = ?')
+            .get(Number(line.inventory_id), itemId, variantKey) as Record<string, unknown> | undefined;
         }
         if (!batchRow && line.batch_number) {
           batchRow = db
-            .prepare('SELECT * FROM inventory WHERE item_id = ? AND batch_number = ?')
-            .get(itemId, String(line.batch_number).trim()) as Record<string, unknown> | undefined;
+            .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
+            .get(itemId, variantKey, String(line.batch_number).trim()) as Record<string, unknown> | undefined;
         }
         // If explicitly selected batch is blocked or expired, reject or fallback if auto
         if (batchRow && (line.inventory_id || line.batch_number)) {
@@ -1632,11 +1776,12 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         }
       }
       if (!batchRow) {
-        // Strict FIFO order: oldest purchase_date first, then earliest non-expired expiry_date, then id ASC
+        // Strict FIFO order within the item/variant scope
         batchRow = db
           .prepare(`
             SELECT * FROM inventory
             WHERE item_id = ?
+              AND COALESCE(variant_key, 0) = ?
               AND COALESCE(is_blocked, 0) = 0
               AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
             ORDER BY
@@ -1646,10 +1791,10 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
               id ASC
             LIMIT 1
           `)
-          .get(itemId, todayIso) as Record<string, unknown> | undefined;
+          .get(itemId, variantKey, todayIso) as Record<string, unknown> | undefined;
       }
 
-      // Compute total eligible FIFO stock across all non-blocked, non-expired batches of this item
+      // Compute total eligible FIFO stock across all non-blocked, non-expired batches of this item/variant
       const itemTotalEligibleRow = db
         .prepare(`
           SELECT
@@ -1657,15 +1802,17 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
             COALESCE(SUM(current_pack_qty), 0) AS total_packs
           FROM inventory
           WHERE item_id = ?
+            AND COALESCE(variant_key, 0) = ?
             AND COALESCE(is_blocked, 0) = 0
             AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
         `)
-        .get(itemId, todayIso) as { total_units: number; total_packs: number } | undefined;
+        .get(itemId, variantKey, todayIso) as { total_units: number; total_packs: number } | undefined;
 
       const availableUnits = round2(Number(itemTotalEligibleRow?.total_units || 0));
       const availablePacks = round2(Number(itemTotalEligibleRow?.total_packs || 0));
+      const batchCodePrefix = variantCode || String(itemRow.item_code);
       const batchNumber = String(
-        batchRow?.batch_number || (batchWiseSales && line.batch_number) || `BATCH-${String(itemRow.item_code)}-01`
+        batchRow?.batch_number || (batchWiseSales && line.batch_number) || `BATCH-${batchCodePrefix}-01`
       ).trim();
       const expiryDate = String(
         batchRow?.expiry_date || (batchWiseSales && line.expiry_date) || '2028-12-31'
@@ -1673,12 +1820,15 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
       if (status === 'completed' && !allowNegativeStock && totalUnits > availableUnits) {
         throw new Error(
-          `Insufficient eligible FIFO stock for "${itemRow.item_name}". Available Eligible: ${availablePacks} Packs (${availableUnits} Units), Requested: ${quantity} Sale + ${bonusQuantity} Bonus (${totalUnits} Units).`
+          `Insufficient eligible FIFO stock for "${itemRow.item_name}${variantName ? ` (${variantName})` : ''}". Available Eligible: ${availablePacks} Packs (${availableUnits} Units), Requested: ${quantity} Sale + ${bonusQuantity} Bonus (${totalUnits} Units).`
         );
       }
 
+      const defaultPurchaseCost = useVarCustom
+        ? Number(variantRow?.purchase_price || itemRow.purchase_price || 0)
+        : Number(itemRow.purchase_price || 0);
       const purchasePricePerPack = round2(
-        Number(batchRow?.pack_cost || itemRow.purchase_price || 0)
+        Number(batchRow?.pack_cost || defaultPurchaseCost)
       );
       const costPricePerUnit = round2(purchasePricePerPack / parsed.unitsPerPack);
 
@@ -1688,6 +1838,10 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
       processedLines.push({
         itemId,
+        variantId,
+        variantKey,
+        variantCode,
+        variantName,
         inventoryId: batchRow ? Number(batchRow.id) : null,
         itemCode: String(itemRow.item_code),
         companyName: String(itemRow.company_name || ''),
@@ -2050,7 +2204,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
     const insertLineStmt = db.prepare(`
       INSERT INTO sale_items (
-        sale_id, item_id, inventory_id, item_code, company_name, item_name,
+        sale_id, item_id, inventory_id,
+        variant_id, variant_code, variant_name,
+        item_code, company_name, item_name,
         packing, units_per_pack, batch_number, expiry_date,
         available_stock_packs, available_stock_units,
         quantity, bonus_quantity, unit_price, discount_percent, discount_amount,
@@ -2059,7 +2215,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         offer_id, offer_name, offer_discount_percent, offer_discount_amount,
         party_discount_id, party_discount_percent, party_discount_amount,
         manual_override_reason, fifo_batches_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const todayIso = new Date().toISOString().slice(0, 10);
@@ -2071,11 +2227,12 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const fifoDedicatedSlices: Array<Record<string, unknown>> = [];
 
       if (status === 'completed') {
-        // Fetch all FIFO-eligible batches for this item (putting preferred invId first if eligible)
+        // Fetch all FIFO-eligible batches for this item/variant (putting preferred invId first if eligible)
         const allEligibleBatches = db
           .prepare(`
             SELECT * FROM inventory
             WHERE item_id = ?
+              AND COALESCE(variant_key, 0) = ?
               AND COALESCE(is_blocked, 0) = 0
               AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
             ORDER BY
@@ -2085,7 +2242,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
               CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
               id ASC
           `)
-          .all(pLine.itemId, todayIso, invId || -1) as Array<Record<string, unknown>>;
+          .all(pLine.itemId, pLine.variantKey, todayIso, invId || -1) as Array<Record<string, unknown>>;
 
         if (allEligibleBatches.length > 0) {
           const itemMinRow = db
@@ -2170,6 +2327,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
               recordBatchStockMovement({
                 movementDate: invoiceDate,
                 itemId: pLine.itemId,
+                variantId: pLine.variantId,
+                variantCode: pLine.variantCode,
+                variantName: pLine.variantName,
                 itemCode: pLine.itemCode,
                 itemName: pLine.itemName,
                 companyName: pLine.companyName,
@@ -2192,7 +2352,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
                 purchaseRate: Number(bRow.pack_cost || bRow.cost_price || 0),
                 tradePrice: pLine.unitPrice,
                 balanceAfterPacks: newPackQty,
-                remarks: `Sales Invoice ${invoiceNumber}`,
+                remarks: `Sales Invoice ${invoiceNumber}${pLine.variantName ? ` (${pLine.variantName})` : ''}`,
                 performedBy: String(body.created_by || 'Super Admin'),
               });
             }
@@ -2214,15 +2374,17 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
           const newInv = db.prepare(`
             INSERT INTO inventory (
-              item_id, batch_number, manufacturing_date, expiry_date,
+              item_id, variant_id, variant_key, batch_number, manufacturing_date, expiry_date,
               packing, strips_per_box, units_per_strip, units_per_pack,
               cost_price, trade_price, wholesale_price, retail_price,
               pack_cost, pack_retail, purchased_qty, bonus_qty, returned_qty, sold_qty,
               current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
               status
-            ) VALUES (?, ?, '2025-06-01', ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'out_of_stock')
+            ) VALUES (?, ?, ?, ?, '2025-06-01', ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'out_of_stock')
           `).run(
             pLine.itemId,
+            pLine.variantId,
+            pLine.variantKey,
             pLine.batchNumber,
             pLine.expiryDate,
             pLine.packing,
@@ -2247,6 +2409,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         finalSaleId,
         pLine.itemId,
         invId,
+        pLine.variantId || null,
+        pLine.variantCode || null,
+        pLine.variantName || null,
         pLine.itemCode,
         pLine.companyName,
         pLine.itemName,
@@ -2896,6 +3061,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
       interface ProcessedReturnItem {
         originalSaleItemId: number;
         itemId: number;
+        variantId: number | null;
+        variantCode: string;
+        variantName: string;
         inventoryId: number | null;
         itemCode: string;
         companyName: string;
@@ -2973,6 +3141,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
         processedItems.push({
           originalSaleItemId: origItemId,
           itemId: Number(origLine.item_id),
+          variantId: origLine.variant_id ? Number(origLine.variant_id) : null,
+          variantCode: String(origLine.variant_code || ''),
+          variantName: String(origLine.variant_name || ''),
           inventoryId: origLine.inventory_id ? Number(origLine.inventory_id) : null,
           itemCode: String(origLine.item_code),
           companyName: String(origLine.company_name || ''),
@@ -3059,12 +3230,13 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
       const insertReturnItemStmt = db.prepare(`
         INSERT INTO sale_return_items (
           sale_return_id, original_sale_item_id, item_id, inventory_id,
+          variant_id, variant_code, variant_name,
           item_code, company_name, item_name, packing, units_per_pack,
           batch_number, expiry_date, sold_pack_qty, sold_bonus_qty, sold_loose_qty, sold_total_units,
           return_pack_qty, return_bonus_qty, return_loose_qty, returned_units,
           return_rate, loose_return_rate, discount_percent, discount_amount,
           tax_percent, tax_amount, line_total, return_reason, restock_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'restocked')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'restocked')
       `);
 
       for (const pItem of processedItems) {
@@ -3073,6 +3245,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
           pItem.originalSaleItemId,
           pItem.itemId,
           pItem.inventoryId,
+          pItem.variantId || null,
+          pItem.variantCode || null,
+          pItem.variantName || null,
           pItem.itemCode,
           pItem.companyName,
           pItem.itemName,
@@ -3107,14 +3282,14 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
           WHERE id = ?
         `).run(pItem.returnPackQty, pItem.returnLooseQty, pItem.returnedUnits, pItem.originalSaleItemId);
 
-        // Restore stock to the original batch in inventory
+        // Restore stock to the original batch in inventory (variant-isolated)
         let invRow = pItem.inventoryId
           ? (db.prepare('SELECT * FROM inventory WHERE id = ?').get(pItem.inventoryId) as Record<string, unknown> | undefined)
           : undefined;
         if (!invRow) {
           invRow = db
-            .prepare('SELECT * FROM inventory WHERE item_id = ? AND batch_number = ?')
-            .get(pItem.itemId, pItem.batchNumber) as Record<string, unknown> | undefined;
+            .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
+            .get(pItem.itemId, pItem.variantId || 0, pItem.batchNumber) as Record<string, unknown> | undefined;
         }
 
         if (invRow) {
@@ -3153,6 +3328,32 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
             batchStatus,
             Number(invRow.id)
           );
+
+          recordBatchStockMovement({
+            movementDate: returnDate,
+            itemId: pItem.itemId,
+            variantId: pItem.variantId,
+            variantCode: pItem.variantCode,
+            variantName: pItem.variantName,
+            itemCode: pItem.itemCode,
+            itemName: pItem.itemName,
+            companyName: pItem.companyName,
+            inventoryId: Number(invRow.id),
+            batchNumber: pItem.batchNumber,
+            expiryDate: pItem.expiryDate,
+            purchaseDate: String(invRow.purchase_date || ''),
+            movementType: 'RETURN_IN_SALEABLE',
+            referenceType: 'SALE_RETURN',
+            referenceId: saleReturnId,
+            referenceNumber: returnNumber,
+            partyAccountId: customerAccountId,
+            partyName: String(sale.customer_name || 'Walk-in Cash Customer'),
+            quantityPacks: packRestored,
+            bonusPacks: pItem.returnBonusQty,
+            totalUnits: pItem.returnedUnits,
+            balanceAfterPacks: newPackQty,
+            remarks: `Sales Return ${returnNumber}`,
+          });
         }
       }
 

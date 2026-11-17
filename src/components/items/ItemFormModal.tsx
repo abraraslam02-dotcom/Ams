@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save, AlertCircle, CheckCircle2, Calculator, Info } from 'lucide-react';
+import { X, Save, AlertCircle, CheckCircle2, Calculator, Info, Layers } from 'lucide-react';
 import { Item, ItemFormData } from '../../types/item';
 import { api } from '../../services/api';
 import { NumericInput } from '../common/NumericInput';
 import { ItemCompanySelect } from './ItemCompanySelect';
+import { ProductImageUploader } from '../common/ProductImageUploader';
 import {
   calculateItemPricingFromPurchase,
   calculateLooseRateFromRetail,
@@ -15,6 +16,7 @@ interface ItemFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSaved: (item: Item) => void;
+  onManageVariants?: (item: Item) => void;
   onCompanyCreated?: (companies: string[]) => void;
   editingItem?: Item | null;
 }
@@ -37,6 +39,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   isOpen,
   onClose,
   onSaved,
+  onManageVariants,
   onCompanyCreated,
   editingItem,
 }) => {
@@ -60,6 +63,10 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     opening_stock: 0,
     minimum_stock: 0,
     rack_number: '',
+    has_variants: 0,
+    image_id: null,
+    image_url: '',
+    thumbnail_url: '',
     status: 'Active',
   };
 
@@ -100,6 +107,10 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         opening_stock: editingItem.opening_stock,
         minimum_stock: editingItem.minimum_stock,
         rack_number: editingItem.rack_number || '',
+        has_variants: Number(editingItem.has_variants) === 1 ? 1 : 0,
+        image_id: editingItem.image_id ?? null,
+        image_url: editingItem.image_url || '',
+        thumbnail_url: editingItem.thumbnail_url || '',
         status: editingItem.status,
       });
       setTradeTouched(true);
@@ -173,8 +184,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     ? Number(formData.loose_rate)
     : calculatedLooseRetailPrice;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitItem = async (openVariantsAfterSave = false) => {
     setFormError(null);
 
     if (!formData.item_code.trim()) {
@@ -201,20 +211,30 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
     try {
       setSaving(true);
-      if (isEditing && editingItem) {
-        const res = await api.updateItem(editingItem.id, formData);
-        onSaved(res.item);
-      } else {
-        const res = await api.createItem(formData);
-        onSaved(res.item);
-      }
+      const payload = {
+        ...formData,
+        has_variants: Number(formData.has_variants) === 1 ? 1 : 0,
+      };
+      const res =
+        isEditing && editingItem
+          ? await api.updateItem(editingItem.id, payload)
+          : await api.createItem(payload);
+      onSaved(res.item);
       onClose();
+      if (openVariantsAfterSave && onManageVariants && res.item) {
+        onManageVariants(res.item);
+      }
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       setFormError(errorMsg);
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitItem(false);
   };
 
   return (
@@ -242,13 +262,91 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         </div>
 
         {/* Modal Form */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+        <form onSubmit={handleSubmit} className="p-6 space-y-5 max-h-[84vh] overflow-y-auto">
           {formError && (
             <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2.5">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
               <span className="font-medium">{formError}</span>
             </div>
           )}
+
+          {/* Product Picture & Optional Variant Mode */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+            <div className="lg:col-span-7">
+              <ProductImageUploader
+                label="Main Product Picture"
+                imageUrl={formData.image_url || null}
+                thumbnailUrl={formData.thumbnail_url || null}
+                onImageUploaded={(img) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    image_id: img.image_id,
+                    image_url: img.image_url,
+                    thumbnail_url: img.thumbnail_url,
+                  }))
+                }
+                onRemoveImage={() =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    image_id: null,
+                    image_url: '',
+                    thumbnail_url: '',
+                  }))
+                }
+              />
+            </div>
+
+            <div className="lg:col-span-5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-2">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-sky-600" />
+                    <span>Has Variants?</span>
+                  </span>
+                  <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setFormData((p) => ({ ...p, has_variants: 0 }))}
+                      className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                        Number(formData.has_variants) !== 1
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      No (Standard)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData((p) => ({ ...p, has_variants: 1 }))}
+                      className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                        Number(formData.has_variants) === 1
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Yes (Variants)
+                    </button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-snug">
+                  {Number(formData.has_variants) === 1
+                    ? 'Enabled: Add colours, flavours, or types (e.g. Black, Blue, Green) in Variant Management while keeping each size as a separate Main Product.'
+                    : 'Standard mode: Item works directly in Purchases & Sales without extra variant selection.'}
+                </p>
+              </div>
+              {Number(formData.has_variants) === 1 && isEditing && editingItem && onManageVariants && (
+                <button
+                  type="button"
+                  onClick={() => submitItem(true)}
+                  disabled={saving || Boolean(codeError)}
+                  className="w-full py-1.5 px-3 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Save & Open Variant Management</span>
+                </button>
+              )}
+            </div>
+          </div>
 
           {/* Section 1: Basic Identifiers */}
           <div className="space-y-2">
@@ -674,6 +772,17 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
               >
                 Cancel
               </button>
+              {Number(formData.has_variants) === 1 && !isEditing && onManageVariants && (
+                <button
+                  type="button"
+                  disabled={saving || Boolean(codeError)}
+                  onClick={() => submitItem(true)}
+                  className="px-4 py-2 text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white rounded-lg shadow-sm transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>{saving ? 'Saving...' : 'Save & Add Variants'}</span>
+                </button>
+              )}
               <button
                 type="submit"
                 disabled={saving || Boolean(codeError)}

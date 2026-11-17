@@ -7,6 +7,7 @@ import {
   searchItems,
 } from '../../utils/itemSearch';
 import { formatPKR } from '../../utils/formatters';
+import { ProductThumb } from './ProductThumb';
 
 export interface ItemListSelectionModalProps<T extends BaseSearchableItem> {
   isOpen: boolean;
@@ -181,7 +182,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
               setQuery(e.target.value);
               setHighlightIdx(0);
             }}
-            placeholder="Filter Item List by Item Code, Item Name, Company, or Barcode... (↑/↓ Navigate, Enter Select, Esc Close)"
+            placeholder="Filter Item List by Item Code, Item Name, Company, Variant, or Barcode... (↑/↓ Navigate, Enter Select, Esc Close)"
             className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-600"
           />
         </div>
@@ -193,6 +194,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
           <table className="w-full text-left border-collapse text-[11px]">
             <thead className="bg-slate-900 text-white sticky top-0 z-10">
               <tr>
+                <th className="px-2.5 py-2 w-9 text-center">Pic</th>
                 <th className="px-3 py-2">Code</th>
                 <th className="px-3 py-2">Item Name</th>
                 <th className="px-3 py-2">Company</th>
@@ -205,7 +207,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
             <tbody className="divide-y divide-slate-100">
               {results.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-500 font-semibold">
+                  <td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-semibold">
                     No matching items found.
                   </td>
                 </tr>
@@ -214,8 +216,12 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                   const rate = getItemRate(it);
                   const stockPacks = getItemStock
                     ? getItemStock(it)
-                    : Number(it.total_available_packs ?? it.default_batch?.available_packs ?? 0);
+                    : Number(it.total_available_packs ?? it.consolidated_stock_packs ?? it.default_batch?.available_packs ?? 0);
                   const isHighlighted = idx === highlightIdx;
+                  const activeVariantsCount = Array.isArray(it.variants)
+                    ? it.variants.filter((v: any) => String(v?.status || 'Active') !== 'Inactive').length
+                    : Number(it.active_variant_count || it.variant_count || 0);
+                  const hasVariants = Number(it.has_variants) === 1 && activeVariantsCount > 0;
                   return (
                     <tr
                       key={it.id}
@@ -226,10 +232,28 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                         isHighlighted ? 'bg-emerald-100 font-semibold' : 'hover:bg-emerald-50/60'
                       }`}
                     >
+                      <td className="px-2.5 py-1.5 text-center">
+                        <ProductThumb
+                          src={it.thumbnail_url || it.image_url}
+                          fullSrc={it.image_url}
+                          alt={it.item_name}
+                          size="xs"
+                          className="mx-auto"
+                        />
+                      </td>
                       <td className="px-3 py-2 font-mono font-bold text-emerald-700">
                         {it.item_code}
                       </td>
-                      <td className="px-3 py-2 font-semibold text-slate-900">{it.item_name}</td>
+                      <td className="px-3 py-2 font-semibold text-slate-900">
+                        <div className="flex items-center gap-1.5">
+                          <span>{it.item_name}</span>
+                          {hasVariants && (
+                            <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[9px] font-bold">
+                              {activeVariantsCount} Variants
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2 text-slate-600">{it.company_name || '—'}</td>
                       <td className="px-3 py-2 text-slate-500">{it.packing || '1x1'}</td>
                       <td className="px-3 py-2 text-right font-mono">{stockPacks}P</td>

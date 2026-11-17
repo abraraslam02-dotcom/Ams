@@ -84,6 +84,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
     scope_type: 'selected_items' as 'all_items' | 'selected_items' | 'company',
     company_name: '',
     item_id: 0,
+    variant_id: 0,
     town_name: '',
     party_account_id: 0,
     salesman_id: 0,
@@ -111,6 +112,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
     party_account_id: 0,
     scope_type: 'item' as 'item' | 'company' | 'all_items',
     item_id: 0,
+    variant_id: 0,
     company_name: '',
     discount_percent: 2,
     fixed_discount_amount: 0,
@@ -286,6 +288,10 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
       return;
     }
     const chosenItem = itemsList.find((i) => Number(i.id) === Number(offerForm.item_id));
+    const chosenVariant =
+      Array.isArray(chosenItem?.variants) && offerForm.variant_id
+        ? chosenItem.variants.find((v: any) => Number(v.id) === Number(offerForm.variant_id))
+        : null;
     const chosenParty = partiesList.find((p) => Number(p.id) === Number(offerForm.party_account_id));
     const chosenSalesman = salesmenList.find((s) => Number(s.id) === Number(offerForm.salesman_id));
 
@@ -294,6 +300,12 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
       item_id: offerForm.scope_type === 'selected_items' && offerForm.item_id ? Number(offerForm.item_id) : null,
       item_code: chosenItem?.item_code || '',
       item_name: chosenItem?.item_name || '',
+      variant_id:
+        offerForm.scope_type === 'selected_items' && offerForm.variant_id
+          ? Number(offerForm.variant_id)
+          : null,
+      variant_code: chosenVariant?.variant_code || '',
+      variant_name: chosenVariant?.variant_name || '',
       company_name:
         offerForm.scope_type === 'company'
           ? offerForm.company_name
@@ -350,6 +362,10 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
     }
     const chosenParty = partiesList.find((p) => Number(p.id) === Number(partyDiscForm.party_account_id));
     const chosenItem = itemsList.find((i) => Number(i.id) === Number(partyDiscForm.item_id));
+    const chosenVariant =
+      Array.isArray(chosenItem?.variants) && partyDiscForm.variant_id
+        ? chosenItem.variants.find((v: any) => Number(v.id) === Number(partyDiscForm.variant_id))
+        : null;
 
     const payload = {
       ...partyDiscForm,
@@ -358,6 +374,12 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
       item_id: partyDiscForm.scope_type === 'item' && partyDiscForm.item_id ? Number(partyDiscForm.item_id) : null,
       item_code: chosenItem?.item_code || '',
       item_name: chosenItem?.item_name || '',
+      variant_id:
+        partyDiscForm.scope_type === 'item' && partyDiscForm.variant_id
+          ? Number(partyDiscForm.variant_id)
+          : null,
+      variant_code: chosenVariant?.variant_code || '',
+      variant_name: chosenVariant?.variant_name || '',
       company_name:
         partyDiscForm.scope_type === 'company'
           ? partyDiscForm.company_name
@@ -674,25 +696,57 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
               </div>
 
               {offerForm.scope_type === 'selected_items' && (
-                <div className="sm:col-span-2">
-                  <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-                    Select Medicine / Item *
-                  </label>
-                  <select
-                    value={offerForm.item_id}
-                    onChange={(e) =>
-                      setOfferForm((p) => ({ ...p, item_id: Number(e.target.value) }))
-                    }
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
-                  >
-                    <option value={0}>-- Choose Item --</option>
-                    {itemsList.map((it) => (
-                      <option key={it.id} value={it.id}>
-                        {it.item_code} — {it.item_name} ({it.company_name || 'General'})
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <>
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                      Select Medicine / Item *
+                    </label>
+                    <select
+                      value={offerForm.item_id}
+                      onChange={(e) =>
+                        setOfferForm((p) => ({
+                          ...p,
+                          item_id: Number(e.target.value),
+                          variant_id: 0,
+                        }))
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
+                    >
+                      <option value={0}>-- Choose Item --</option>
+                      {itemsList.map((it) => (
+                        <option key={it.id} value={it.id}>
+                          {it.item_code} — {it.item_name} ({it.company_name || 'General'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {(() => {
+                    const selItem = itemsList.find((i) => Number(i.id) === Number(offerForm.item_id));
+                    const vars = Array.isArray(selItem?.variants) ? selItem.variants : [];
+                    if (!selItem || Number(selItem.has_variants) !== 1 || vars.length === 0) return null;
+                    return (
+                      <div className="sm:col-span-2">
+                        <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                          Optional Variant (Leave "All Variants" to apply to every variant)
+                        </label>
+                        <select
+                          value={offerForm.variant_id}
+                          onChange={(e) =>
+                            setOfferForm((p) => ({ ...p, variant_id: Number(e.target.value) }))
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
+                        >
+                          <option value={0}>All Variants of {selItem.item_name}</option>
+                          {vars.map((v: any) => (
+                            <option key={v.id} value={v.id}>
+                              [{v.variant_code}] {v.variant_name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })()}
+                </>
               )}
 
               {offerForm.scope_type === 'company' && (
@@ -985,7 +1039,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                           <div className="font-semibold text-slate-700">{o.offer_type}</div>
                           <div className="text-[11px] text-slate-500">
                             {o.scope_type === 'selected_items'
-                              ? `Item: ${o.item_name || o.item_code}`
+                              ? `Item: ${o.item_name || o.item_code}${o.variant_name ? ` — ${o.variant_name}` : ''}`
                               : o.scope_type === 'company'
                               ? `Company: ${o.company_name}`
                               : 'All Items'}
@@ -1024,6 +1078,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                                 scope_type: o.scope_type || 'selected_items',
                                 company_name: o.company_name || '',
                                 item_id: Number(o.item_id || 0),
+                                variant_id: Number(o.variant_id || 0),
                                 town_name: o.town_name || '',
                                 party_account_id: Number(o.party_account_id || 0),
                                 salesman_id: Number(o.salesman_id || 0),
@@ -1121,25 +1176,57 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
               </div>
 
               {partyDiscForm.scope_type === 'item' && (
-                <div>
-                  <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
-                    Select Item *
-                  </label>
-                  <select
-                    value={partyDiscForm.item_id}
-                    onChange={(e) =>
-                      setPartyDiscForm((p) => ({ ...p, item_id: Number(e.target.value) }))
-                    }
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
-                  >
-                    <option value={0}>-- Choose Medicine / Item --</option>
-                    {itemsList.map((it) => (
-                      <option key={it.id} value={it.id}>
-                        {it.item_code} — {it.item_name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                      Select Item *
+                    </label>
+                    <select
+                      value={partyDiscForm.item_id}
+                      onChange={(e) =>
+                        setPartyDiscForm((p) => ({
+                          ...p,
+                          item_id: Number(e.target.value),
+                          variant_id: 0,
+                        }))
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
+                    >
+                      <option value={0}>-- Choose Medicine / Item --</option>
+                      {itemsList.map((it) => (
+                        <option key={it.id} value={it.id}>
+                          {it.item_code} — {it.item_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {(() => {
+                    const selItem = itemsList.find((i) => Number(i.id) === Number(partyDiscForm.item_id));
+                    const vars = Array.isArray(selItem?.variants) ? selItem.variants : [];
+                    if (Number(selItem?.has_variants) !== 1 || vars.length === 0) return null;
+                    return (
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase text-slate-600 mb-1">
+                          Optional Variant
+                        </label>
+                        <select
+                          value={partyDiscForm.variant_id}
+                          onChange={(e) =>
+                            setPartyDiscForm((p) => ({ ...p, variant_id: Number(e.target.value) }))
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
+                        >
+                          <option value={0}>All Variants</option>
+                          {vars.map((v: any) => (
+                            <option key={v.id} value={v.id}>
+                              [{v.variant_code}] {v.variant_name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })()}
+                </>
               )}
 
               {partyDiscForm.scope_type === 'company' && (
@@ -1276,7 +1363,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                           </td>
                           <td className="py-2.5 px-3 text-slate-700">
                             {pd.scope_type === 'item'
-                              ? `${pd.item_name || ''} (${pd.item_code || ''})`
+                              ? `${pd.item_name || ''}${pd.variant_name ? ` — ${pd.variant_name}` : ''} (${pd.variant_code || pd.item_code || ''})`
                               : pd.scope_type === 'company'
                               ? pd.company_name
                               : 'All Store Items'}
@@ -1301,6 +1388,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                                   party_account_id: Number(pd.party_account_id),
                                   scope_type: pd.scope_type || 'item',
                                   item_id: Number(pd.item_id || 0),
+                                  variant_id: Number(pd.variant_id || 0),
                                   company_name: pd.company_name || '',
                                   discount_percent: Number(pd.discount_percent || 0),
                                   fixed_discount_amount: Number(pd.fixed_discount_amount || 0),

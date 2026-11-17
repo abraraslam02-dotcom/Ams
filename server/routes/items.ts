@@ -7,6 +7,14 @@ import {
   allocateNextItemCode,
   ensureItemCodeSequenceTable,
 } from '../utils/itemCodeGenerator.ts';
+import { saveProductImage, deleteUnusedProductImage } from '../services/productMediaService.ts';
+import {
+  getNextVariantCodeForItem,
+  generateUniqueVariantBarcode,
+  findBarcodeConflict,
+  getEnrichedVariants,
+  lookupItemByBarcodeExact,
+} from '../services/itemVariantService.ts';
 
 export const itemsRouter = Router();
 
@@ -29,6 +37,10 @@ export interface ItemRow {
   opening_stock: number;
   minimum_stock: number;
   rack_number: string | null;
+  has_variants?: number;
+  image_id?: number | null;
+  image_url?: string;
+  thumbnail_url?: string;
   status: 'Active' | 'Inactive';
   created_at: string;
   updated_at: string;
@@ -86,13 +98,20 @@ itemsRouter.get('/', (req: Request, res: Response) => {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
-    // Fast search across Item Code, Barcode, Item Name, and Company Name
+    // Fast search across Item Code, Barcode, Item Name, Company Name, plus Variant Codes/Names/Attributes/Barcodes
     if (q && typeof q === 'string' && q.trim().length > 0) {
       const term = `%${q.trim()}%`;
       conditions.push(
-        '(item_code LIKE ? OR barcode LIKE ? OR item_name LIKE ? OR company_name LIKE ? OR generic_name LIKE ?)'
+        `(item_code LIKE ? OR barcode LIKE ? OR item_name LIKE ? OR company_name LIKE ? OR generic_name LIKE ? OR EXISTS (
+          SELECT 1 FROM item_variants iv
+          WHERE iv.parent_item_id = items.id
+            AND (iv.variant_code LIKE ? OR iv.variant_name LIKE ? OR iv.colour LIKE ? OR iv.flavour LIKE ? OR iv.variant_type LIKE ? OR iv.barcode LIKE ?)
+        ) OR EXISTS (
+          SELECT 1 FROM item_variant_barcodes ib
+          WHERE ib.item_id = items.id AND ib.barcode LIKE ?
+        ))`
       );
-      params.push(term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term, term, term, term);
     }
 
     if (category && typeof category === 'string' && category !== 'all') {
@@ -139,7 +158,68 @@ itemsRouter.get('/', (req: Request, res: Response) => {
       ORDER BY ${sortCol} ${sortDir}
     `;
 
-    const items = db.prepare(sql).all(...params) as ItemRow[];
+    const rawItems = db.prepare(sql).all(...params) as ItemRow[];
+
+    // Attach variants & consolidated non-double-counted inventory stock in batch
+    const itemIds = rawItems.map((it) => Number(it.id));
+    const variantsByItem = new Map<number, ReturnType<typeof getEnrichedVariants>>();
+    const nonVariantStockByItem = new Map<number, { packs: number; hasBatches: boolean }>();
+
+    if (itemIds.length > 0) {
+      const allVariants = getEnrichedVariants({ parentItemIds: itemIds, includeInactive: true });
+      for (const v of allVariants) {
+        if (!variantsByItem.has(v.parent_item_id)) {
+          variantsByItem.set(v.parent_item_id, []);
+        }
+        variantsByItem.get(v.parent_item_id)!.push(v);
+      }
+
+      const ph = itemIds.map(() => '?').join(',');
+      const invSums = db
+        .prepare(
+          `SELECT item_id, COALESCE(SUM(current_pack_qty), 0) AS packs, COUNT(*) AS batch_count
+           FROM inventory
+           WHERE item_id IN (${ph}) AND COALESCE(variant_key, 0) = 0
+           GROUP BY item_id`
+        )
+        .all(...itemIds) as Array<{ item_id: number; packs: number; batch_count: number }>;
+
+      for (const row of invSums) {
+        nonVariantStockByItem.set(Number(row.item_id), {
+          packs: round2(Number(row.packs || 0)),
+          hasBatches: Number(row.batch_count || 0) > 0,
+        });
+      }
+    }
+
+    const items = rawItems.map((it) => {
+      const itemId = Number(it.id);
+      const itemVariants = variantsByItem.get(itemId) || [];
+      const hasVariants = Number(it.has_variants || 0) === 1;
+      const activeVariants = itemVariants.filter((v) => v.status === 'Active');
+
+      let consolidatedStockPacks = 0;
+      if (hasVariants) {
+        // Consolidated stock = sum of variant stocks only (never double-counts parent opening_stock)
+        consolidatedStockPacks = round2(
+          itemVariants.reduce((sum, v) => sum + Number(v.current_stock_packs || 0), 0)
+        );
+      } else {
+        const invInfo = nonVariantStockByItem.get(itemId);
+        consolidatedStockPacks = invInfo?.hasBatches ? invInfo.packs : round2(Number(it.opening_stock || 0));
+      }
+
+      return {
+        ...it,
+        has_variants: hasVariants ? 1 : 0,
+        image_url: String(it.image_url || ''),
+        thumbnail_url: String(it.thumbnail_url || it.image_url || ''),
+        variant_count: itemVariants.length,
+        active_variant_count: activeVariants.length,
+        consolidated_stock_packs: consolidatedStockPacks,
+        variants: itemVariants,
+      };
+    });
 
     // Calculate store summary statistics
     const statsSql = `
@@ -394,6 +474,607 @@ itemsRouter.post('/companies', (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/items/images
+ * Upload & persist compressed Product / Variant image (JPG, JPEG, PNG, WebP)
+ */
+itemsRouter.post('/images', (req: Request, res: Response) => {
+  try {
+    const { image_data_url, thumbnail_data_url, original_filename, width, height } = req.body || {};
+    if (!image_data_url) {
+      return res.status(400).json({ success: false, error: 'Image payload is required.' });
+    }
+    const stored = saveProductImage({
+      imageDataUrl: String(image_data_url),
+      thumbnailDataUrl: thumbnail_data_url ? String(thumbnail_data_url) : undefined,
+      originalFilename: original_filename ? String(original_filename) : undefined,
+      width: width ? Number(width) : 0,
+      height: height ? Number(height) : 0,
+      createdBy: req.user?.username || 'Super Admin',
+    });
+    return res.status(201).json({ success: true, image: stored });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(400).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * GET /api/items/lookup-barcode/:code
+ * Resolves any scanned barcode to the exact Main Product or specific Variant
+ */
+itemsRouter.get('/lookup-barcode/:code', (req: Request, res: Response) => {
+  try {
+    const rawCode = decodeURIComponent(String(req.params.code || '')).trim();
+    if (!rawCode) {
+      return res.status(400).json({ success: false, error: 'Barcode is required.' });
+    }
+    const match = lookupItemByBarcodeExact(rawCode);
+    return res.json({ success: true, ...match });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * GET /api/items/generate-barcode
+ * Generates a unique EAN-13 internal barcode when manufacturer barcode is missing
+ */
+itemsRouter.get('/generate-barcode', (req: Request, res: Response) => {
+  try {
+    const variantCode = req.query.variantCode ? String(req.query.variantCode) : '';
+    const barcode = generateUniqueVariantBarcode(variantCode);
+    return res.json({ success: true, barcode });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * GET /api/items/variants
+ * List all variants across Main Products with search/filter
+ */
+itemsRouter.get('/variants', (req: Request, res: Response) => {
+  try {
+    const parentItemId = req.query.parentItemId ? parseInt(String(req.query.parentItemId), 10) : null;
+    const includeInactive = req.query.includeInactive !== 'false';
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const statusFilter = String(req.query.status || 'all').toLowerCase();
+
+    let variants = getEnrichedVariants({
+      parentItemId: parentItemId && parentItemId > 0 ? parentItemId : null,
+      includeInactive,
+    });
+
+    if (statusFilter === 'active') {
+      variants = variants.filter((v) => v.status === 'Active');
+    } else if (statusFilter === 'inactive') {
+      variants = variants.filter((v) => v.status === 'Inactive');
+    }
+
+    if (q) {
+      const tokens = q.split(/\s+/).filter(Boolean);
+      variants = variants.filter((v) => {
+        const hay = `${v.variant_code} ${v.variant_name} ${v.parent_item_code} ${v.parent_item_name} ${v.company_name} ${v.colour} ${v.flavour} ${v.variant_type} ${v.other_attributes} ${v.barcode} ${v.barcodes.map((b) => b.barcode).join(' ')}`.toLowerCase();
+        return tokens.every((t) => hay.includes(t));
+      });
+    }
+
+    return res.json({ success: true, variants, count: variants.length });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * GET /api/items/:id/variants/next-code
+ */
+itemsRouter.get('/:id/variants/next-code', (req: Request, res: Response) => {
+  try {
+    const parentItemId = parseInt(req.params.id, 10);
+    const nextVariantCode = getNextVariantCodeForItem(parentItemId);
+    return res.json({ success: true, next_variant_code: nextVariantCode });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(400).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * GET /api/items/:id/variants
+ */
+itemsRouter.get('/:id/variants', (req: Request, res: Response) => {
+  try {
+    const parentItemId = parseInt(req.params.id, 10);
+    const includeInactive = req.query.includeInactive !== 'false';
+    const variants = getEnrichedVariants({ parentItemId, includeInactive });
+    return res.json({ success: true, variants, count: variants.length });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * POST /api/items/:id/variants
+ * Create a new variant under Main Product
+ */
+itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const parentItemId = parseInt(req.params.id, 10);
+    const parentItem = db.prepare('SELECT * FROM items WHERE id = ?').get(parentItemId) as ItemRow | undefined;
+    if (!parentItem) {
+      return res.status(404).json({ success: false, error: 'Main Product not found.' });
+    }
+
+    const body = req.body || {};
+    const variantName = String(body.variant_name || '').trim();
+    if (!variantName) {
+      return res.status(400).json({ success: false, error: 'Variant Name is required.' });
+    }
+
+    const createVariantTx = db.transaction(() => {
+      let variantCode = String(body.variant_code || '').trim();
+      if (!variantCode) {
+        variantCode = getNextVariantCodeForItem(parentItemId);
+      } else {
+        const dupV = db
+          .prepare('SELECT id FROM item_variants WHERE UPPER(TRIM(variant_code)) = UPPER(TRIM(?))')
+          .get(variantCode);
+        const dupI = db
+          .prepare('SELECT id FROM items WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))')
+          .get(variantCode);
+        if (dupV || dupI) {
+          throw new Error(`Variant Code "${variantCode}" already exists. Duplicate codes are not allowed.`);
+        }
+      }
+
+      const rawBarcode = String(body.barcode || '').trim();
+      const extraBarcodesInput: Array<{ barcode: string; barcode_type?: string }> = Array.isArray(body.barcodes)
+        ? body.barcodes
+        : [];
+      const allSubmittedBarcodes = [
+        ...(rawBarcode ? [{ barcode: rawBarcode, barcode_type: String(body.barcode_type || 'manufacturer'), is_primary: 1 }] : []),
+        ...extraBarcodesInput
+          .filter((b) => b && String(b.barcode || '').trim())
+          .map((b) => ({
+            barcode: String(b.barcode).trim(),
+            barcode_type: b.barcode_type === 'generated' ? 'generated' : 'manufacturer',
+            is_primary: rawBarcode ? 0 : 1,
+          })),
+      ];
+
+      // Deduplicate & validate against entire catalog
+      const seenLocal = new Set<string>();
+      const cleanBarcodes: Array<{ barcode: string; barcode_type: 'manufacturer' | 'generated'; is_primary: number }> = [];
+      for (const entry of allSubmittedBarcodes) {
+        const lower = entry.barcode.toLowerCase();
+        if (seenLocal.has(lower)) continue;
+        seenLocal.add(lower);
+        const conflict = findBarcodeConflict(entry.barcode);
+        if (conflict) {
+          throw new Error(`Barcode "${entry.barcode}" is already assigned to ${conflict.ownerLabel}. Duplicate barcodes are not allowed.`);
+        }
+        cleanBarcodes.push({
+          barcode: entry.barcode,
+          barcode_type: entry.barcode_type === 'generated' ? 'generated' : 'manufacturer',
+          is_primary: cleanBarcodes.length === 0 ? 1 : 0,
+        });
+      }
+
+      const primaryBarcode = cleanBarcodes[0]?.barcode || '';
+      const useParentPricing = body.use_parent_pricing === false || body.use_parent_pricing === 0 ? 0 : 1;
+      const pPrice = round2(parseFloat(body.purchase_price ?? parentItem.purchase_price) || 0);
+      const tPrice = round2(parseFloat(body.trade_price ?? parentItem.trade_price) || 0);
+      const wPrice = round2(parseFloat(body.wholesale_price ?? parentItem.wholesale_price) || 0);
+      const rPrice = round2(parseFloat(body.retail_price ?? parentItem.retail_price) || 0);
+      const effectivePacking = String(body.packing || parentItem.packing || '1x1').trim();
+      const units = parseUnitsFromPacking(effectivePacking);
+      const lRate =
+        body.loose_rate !== undefined && body.loose_rate !== ''
+          ? round2(parseFloat(body.loose_rate) || 0)
+          : round2(rPrice / Math.max(1, units));
+      const dPct = round2(parseFloat(body.discount_percent ?? parentItem.discount_percent) || 0);
+      const taxPct = round2(parseFloat(body.tax_percent ?? parentItem.tax_percent) || 0);
+      const oStock = round2(parseFloat(body.opening_stock ?? 0) || 0);
+      const mStock = round2(parseFloat(body.minimum_stock ?? parentItem.minimum_stock) || 0);
+      const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
+
+      // Ensure parent has_variants = 1 when variants are added
+      if (Number(parentItem.has_variants || 0) !== 1) {
+        db.prepare('UPDATE items SET has_variants = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(parentItemId);
+      }
+
+      const ins = db
+        .prepare(
+          `INSERT INTO item_variants (
+            parent_item_id, variant_code, variant_name, colour, flavour, variant_type, other_attributes,
+            barcode, packing, use_parent_pricing,
+            purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+            opening_stock, minimum_stock, rack_number,
+            image_id, image_url, thumbnail_url, status, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parentItemId,
+          variantCode,
+          variantName,
+          String(body.colour || '').trim(),
+          String(body.flavour || '').trim(),
+          String(body.variant_type || '').trim(),
+          String(body.other_attributes || '').trim(),
+          primaryBarcode,
+          String(body.packing || '').trim(),
+          useParentPricing,
+          pPrice,
+          tPrice,
+          wPrice,
+          rPrice,
+          lRate,
+          dPct,
+          taxPct,
+          oStock,
+          mStock,
+          String(body.rack_number || '').trim(),
+          body.image_id ? Number(body.image_id) : null,
+          String(body.image_url || '').trim(),
+          String(body.thumbnail_url || body.image_url || '').trim(),
+          status,
+          req.user?.username || 'Super Admin'
+        );
+
+      const variantId = Number(ins.lastInsertRowid);
+      const insertBc = db.prepare(
+        `INSERT INTO item_variant_barcodes (item_id, variant_id, barcode, barcode_type, is_primary)
+         VALUES (?, ?, ?, ?, ?)`
+      );
+      for (const bc of cleanBarcodes) {
+        insertBc.run(parentItemId, variantId, bc.barcode, bc.barcode_type, bc.is_primary);
+      }
+
+      return variantId;
+    });
+
+    const newVariantId = createVariantTx();
+    const enriched = getEnrichedVariants({ parentItemId, includeInactive: true }).find((v) => v.id === newVariantId);
+
+    return res.status(201).json({
+      success: true,
+      message: `Variant "${variantName}" created successfully.`,
+      variant: enriched,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(400).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * PUT /api/items/variants/:variantId
+ * Update a variant (image, prices, attributes, primary barcode) without modifying Main Product image
+ */
+itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const variantId = parseInt(req.params.variantId, 10);
+    const existing = db.prepare('SELECT * FROM item_variants WHERE id = ?').get(variantId) as Record<string, any> | undefined;
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Variant not found.' });
+    }
+
+    const parentItem = db.prepare('SELECT * FROM items WHERE id = ?').get(existing.parent_item_id) as ItemRow;
+    const body = req.body || {};
+
+    const updateTx = db.transaction(() => {
+      const nextCode = body.variant_code !== undefined ? String(body.variant_code).trim() : String(existing.variant_code);
+      if (!nextCode) throw new Error('Variant Code cannot be empty.');
+
+      const dupV = db
+        .prepare('SELECT id FROM item_variants WHERE UPPER(TRIM(variant_code)) = UPPER(TRIM(?)) AND id != ?')
+        .get(nextCode, variantId);
+      const dupI = db
+        .prepare('SELECT id FROM items WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))')
+        .get(nextCode);
+      if (dupV || dupI) {
+        throw new Error(`Variant Code "${nextCode}" is already in use.`);
+      }
+
+      const nextName = body.variant_name !== undefined ? String(body.variant_name).trim() : String(existing.variant_name);
+      if (!nextName) throw new Error('Variant Name cannot be empty.');
+
+      let nextBarcode = body.barcode !== undefined ? String(body.barcode).trim() : String(existing.barcode || '');
+      if (nextBarcode) {
+        const conflict = findBarcodeConflict(nextBarcode, { excludeVariantId: variantId });
+        if (conflict) {
+          throw new Error(`Barcode "${nextBarcode}" is already assigned to ${conflict.ownerLabel}.`);
+        }
+      }
+
+      const useParentPricing =
+        body.use_parent_pricing !== undefined
+          ? body.use_parent_pricing === false || body.use_parent_pricing === 0
+            ? 0
+            : 1
+          : Number(existing.use_parent_pricing ?? 1);
+
+      const pPrice = body.purchase_price !== undefined ? round2(body.purchase_price) : round2(existing.purchase_price);
+      const tPrice = body.trade_price !== undefined ? round2(body.trade_price) : round2(existing.trade_price);
+      const wPrice = body.wholesale_price !== undefined ? round2(body.wholesale_price) : round2(existing.wholesale_price);
+      const rPrice = body.retail_price !== undefined ? round2(body.retail_price) : round2(existing.retail_price);
+      const packing = body.packing !== undefined ? String(body.packing).trim() : String(existing.packing || '');
+      const units = parseUnitsFromPacking(packing || parentItem?.packing || '1x1');
+      const lRate =
+        body.loose_rate !== undefined && body.loose_rate !== ''
+          ? round2(body.loose_rate)
+          : round2(existing.loose_rate || rPrice / Math.max(1, units));
+      const dPct = body.discount_percent !== undefined ? round2(body.discount_percent) : round2(existing.discount_percent);
+      const taxPct = body.tax_percent !== undefined ? round2(body.tax_percent) : round2(existing.tax_percent);
+      const oStock = body.opening_stock !== undefined ? round2(body.opening_stock) : round2(existing.opening_stock);
+      const mStock = body.minimum_stock !== undefined ? round2(body.minimum_stock) : round2(existing.minimum_stock);
+      const rack = body.rack_number !== undefined ? String(body.rack_number).trim() : String(existing.rack_number || '');
+      const status = body.status !== undefined ? (body.status === 'Inactive' ? 'Inactive' : 'Active') : existing.status;
+
+      const nextImgId = body.image_id !== undefined ? (body.image_id ? Number(body.image_id) : null) : existing.image_id;
+      const nextImgUrl = body.image_url !== undefined ? String(body.image_url || '').trim() : String(existing.image_url || '');
+      const nextThumbUrl =
+        body.thumbnail_url !== undefined
+          ? String(body.thumbnail_url || '').trim()
+          : body.image_url !== undefined
+          ? nextImgUrl
+          : String(existing.thumbnail_url || '');
+
+      const oldImgId = existing.image_id ? Number(existing.image_id) : null;
+      const oldImgUrl = String(existing.image_url || '');
+
+      db.prepare(
+        `UPDATE item_variants SET
+          variant_code = ?, variant_name = ?, colour = ?, flavour = ?, variant_type = ?, other_attributes = ?,
+          barcode = ?, packing = ?, use_parent_pricing = ?,
+          purchase_price = ?, trade_price = ?, wholesale_price = ?, retail_price = ?, loose_rate = ?,
+          discount_percent = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
+          image_id = ?, image_url = ?, thumbnail_url = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`
+      ).run(
+        nextCode,
+        nextName,
+        body.colour !== undefined ? String(body.colour).trim() : String(existing.colour || ''),
+        body.flavour !== undefined ? String(body.flavour).trim() : String(existing.flavour || ''),
+        body.variant_type !== undefined ? String(body.variant_type).trim() : String(existing.variant_type || ''),
+        body.other_attributes !== undefined ? String(body.other_attributes).trim() : String(existing.other_attributes || ''),
+        nextBarcode,
+        packing,
+        useParentPricing,
+        pPrice,
+        tPrice,
+        wPrice,
+        rPrice,
+        lRate,
+        dPct,
+        taxPct,
+        oStock,
+        mStock,
+        rack,
+        nextImgId,
+        nextImgUrl,
+        nextThumbUrl,
+        status,
+        variantId
+      );
+
+      // Sync primary barcode record in item_variant_barcodes
+      if (body.barcode !== undefined) {
+        if (nextBarcode) {
+          const existsInMulti = db
+            .prepare('SELECT id FROM item_variant_barcodes WHERE variant_id = ? AND LOWER(TRIM(barcode)) = LOWER(TRIM(?))')
+            .get(variantId, nextBarcode) as { id: number } | undefined;
+          db.prepare('UPDATE item_variant_barcodes SET is_primary = 0 WHERE variant_id = ?').run(variantId);
+          if (existsInMulti) {
+            db.prepare('UPDATE item_variant_barcodes SET is_primary = 1 WHERE id = ?').run(existsInMulti.id);
+          } else {
+            db.prepare(
+              `INSERT INTO item_variant_barcodes (item_id, variant_id, barcode, barcode_type, is_primary)
+               VALUES (?, ?, ?, ?, 1)`
+            ).run(existing.parent_item_id, variantId, nextBarcode, body.barcode_type === 'generated' ? 'generated' : 'manufacturer');
+          }
+        }
+      }
+
+      if (oldImgId && oldImgId !== nextImgId) {
+        deleteUnusedProductImage(oldImgId, oldImgUrl);
+      }
+    });
+
+    updateTx();
+    const enriched = getEnrichedVariants({ parentItemId: Number(existing.parent_item_id), includeInactive: true }).find(
+      (v) => v.id === variantId
+    );
+
+    return res.json({
+      success: true,
+      message: `Variant updated successfully.`,
+      variant: enriched,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(400).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * PATCH /api/items/variants/:variantId/status
+ */
+itemsRouter.patch('/variants/:variantId/status', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const variantId = parseInt(req.params.variantId, 10);
+    const existing = db.prepare('SELECT id, parent_item_id, variant_name, status FROM item_variants WHERE id = ?').get(variantId) as
+      | { id: number; parent_item_id: number; variant_name: string; status: string }
+      | undefined;
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Variant not found.' });
+    }
+
+    const nextStatus = req.body?.status === 'Active' ? 'Active' : req.body?.status === 'Inactive' ? 'Inactive' : existing.status === 'Active' ? 'Inactive' : 'Active';
+    db.prepare('UPDATE item_variants SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(nextStatus, variantId);
+
+    const enriched = getEnrichedVariants({ parentItemId: existing.parent_item_id, includeInactive: true }).find((v) => v.id === variantId);
+    return res.json({
+      success: true,
+      message: `Variant "${existing.variant_name}" marked ${nextStatus}. Historical invoices remain preserved.`,
+      variant: enriched,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * POST /api/items/variants/:variantId/barcodes
+ * Add a manufacturer or software-generated barcode to a variant
+ */
+itemsRouter.post('/variants/:variantId/barcodes', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const variantId = parseInt(req.params.variantId, 10);
+    const variant = db.prepare('SELECT * FROM item_variants WHERE id = ?').get(variantId) as Record<string, any> | undefined;
+    if (!variant) {
+      return res.status(404).json({ success: false, error: 'Variant not found.' });
+    }
+
+    const generate = Boolean(req.body?.generate);
+    const rawCode = generate
+      ? generateUniqueVariantBarcode(String(variant.variant_code))
+      : String(req.body?.barcode || '').trim();
+
+    if (!rawCode) {
+      return res.status(400).json({ success: false, error: 'Barcode is required.' });
+    }
+
+    const conflict = findBarcodeConflict(rawCode);
+    if (conflict) {
+      return res.status(400).json({
+        success: false,
+        error: `Duplicate Barcode rejected: "${rawCode}" is already assigned to ${conflict.ownerLabel}.`,
+      });
+    }
+
+    const barcodeType = generate || req.body?.barcode_type === 'generated' ? 'generated' : 'manufacturer';
+    const makePrimary = Boolean(req.body?.is_primary) || !String(variant.barcode || '').trim();
+
+    db.transaction(() => {
+      if (makePrimary) {
+        db.prepare('UPDATE item_variant_barcodes SET is_primary = 0 WHERE variant_id = ?').run(variantId);
+        db.prepare('UPDATE item_variants SET barcode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(rawCode, variantId);
+      }
+      db.prepare(
+        `INSERT INTO item_variant_barcodes (item_id, variant_id, barcode, barcode_type, is_primary)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(variant.parent_item_id, variantId, rawCode, barcodeType, makePrimary ? 1 : 0);
+    })();
+
+    const enriched = getEnrichedVariants({ parentItemId: Number(variant.parent_item_id), includeInactive: true }).find(
+      (v) => v.id === variantId
+    );
+    return res.status(201).json({
+      success: true,
+      barcode: rawCode,
+      variant: enriched,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(400).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * DELETE /api/items/variants/:variantId/barcodes/:barcodeId
+ */
+itemsRouter.delete('/variants/:variantId/barcodes/:barcodeId', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const variantId = parseInt(req.params.variantId, 10);
+    const barcodeId = parseInt(req.params.barcodeId, 10);
+
+    const row = db
+      .prepare('SELECT * FROM item_variant_barcodes WHERE id = ? AND variant_id = ?')
+      .get(barcodeId, variantId) as { id: number; item_id: number; barcode: string; is_primary: number } | undefined;
+
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Barcode record not found.' });
+    }
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM item_variant_barcodes WHERE id = ?').run(barcodeId);
+      const remaining = db
+        .prepare('SELECT * FROM item_variant_barcodes WHERE variant_id = ? ORDER BY is_primary DESC, id ASC')
+        .all(variantId) as Array<{ id: number; barcode: string; is_primary: number }>;
+
+      const nextPrimary = remaining[0];
+      if (nextPrimary) {
+        if (Number(nextPrimary.is_primary) !== 1) {
+          db.prepare('UPDATE item_variant_barcodes SET is_primary = 1 WHERE id = ?').run(nextPrimary.id);
+        }
+        db.prepare('UPDATE item_variants SET barcode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
+          nextPrimary.barcode,
+          variantId
+        );
+      } else {
+        db.prepare("UPDATE item_variants SET barcode = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(variantId);
+      }
+    })();
+
+    const variantRow = db.prepare('SELECT parent_item_id FROM item_variants WHERE id = ?').get(variantId) as { parent_item_id: number };
+    const enriched = getEnrichedVariants({ parentItemId: variantRow.parent_item_id, includeInactive: true }).find(
+      (v) => v.id === variantId
+    );
+    return res.json({ success: true, variant: enriched });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
+ * DELETE /api/items/variants/:variantId
+ */
+itemsRouter.delete('/variants/:variantId', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const variantId = parseInt(req.params.variantId, 10);
+    const existing = db.prepare('SELECT * FROM item_variants WHERE id = ?').get(variantId) as Record<string, any> | undefined;
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Variant not found.' });
+    }
+
+    const salesCnt = (db.prepare('SELECT COUNT(*) as c FROM sale_items WHERE variant_id = ?').get(variantId) as { c: number }).c;
+    const purCnt = (db.prepare('SELECT COUNT(*) as c FROM purchase_items WHERE variant_id = ?').get(variantId) as { c: number }).c;
+    const invCnt = (db.prepare('SELECT COUNT(*) as c FROM inventory WHERE variant_id = ?').get(variantId) as { c: number }).c;
+
+    if (salesCnt > 0 || purCnt > 0 || invCnt > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot permanently delete variant "${existing.variant_name}" because it has stock/invoice history. Deactivate it instead so historical invoices stay intact.`,
+      });
+    }
+
+    db.prepare('DELETE FROM item_variants WHERE id = ?').run(variantId);
+    if (existing.image_id) {
+      deleteUnusedProductImage(Number(existing.image_id), String(existing.image_url || ''));
+    }
+
+    return res.json({ success: true, message: `Variant "${existing.variant_name}" deleted.` });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: errorMsg });
+  }
+});
+
+/**
  * GET /api/items/:id
  */
 itemsRouter.get('/:id', (req: Request, res: Response) => {
@@ -406,7 +1087,42 @@ itemsRouter.get('/:id', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Item not found' });
     }
 
-    return res.json({ success: true, item });
+    const variants = getEnrichedVariants({ parentItemId: id, includeInactive: true });
+    const hasVariants = Number(item.has_variants || 0) === 1;
+    const activeVariants = variants.filter((v) => v.status === 'Active');
+
+    let consolidatedStockPacks = 0;
+    if (hasVariants) {
+      consolidatedStockPacks = round2(
+        variants.reduce((sum, v) => sum + Number(v.current_stock_packs || 0), 0)
+      );
+    } else {
+      const invInfo = db
+        .prepare(
+          `SELECT COALESCE(SUM(current_pack_qty), 0) AS packs, COUNT(*) AS batch_count
+           FROM inventory
+           WHERE item_id = ? AND COALESCE(variant_key, 0) = 0`
+        )
+        .get(id) as { packs: number; batch_count: number } | undefined;
+      consolidatedStockPacks =
+        invInfo && Number(invInfo.batch_count || 0) > 0
+          ? round2(Number(invInfo.packs || 0))
+          : round2(Number(item.opening_stock || 0));
+    }
+
+    return res.json({
+      success: true,
+      item: {
+        ...item,
+        has_variants: hasVariants ? 1 : 0,
+        image_url: String(item.image_url || ''),
+        thumbnail_url: String(item.thumbnail_url || item.image_url || ''),
+        variant_count: variants.length,
+        active_variant_count: activeVariants.length,
+        consolidated_stock_packs: consolidatedStockPacks,
+        variants,
+      },
+    });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ success: false, error: errorMsg });
@@ -438,6 +1154,10 @@ itemsRouter.post('/', (req: Request, res: Response) => {
       opening_stock = 0,
       minimum_stock = 0,
       rack_number = '',
+      has_variants = 0,
+      image_id = null,
+      image_url = '',
+      thumbnail_url = '',
       status = 'Active',
     } = req.body;
 
@@ -453,6 +1173,17 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     }
     if (!packing || String(packing).trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Packing is required.' });
+    }
+
+    const cleanBarcode = barcode ? String(barcode).trim() : '';
+    if (cleanBarcode) {
+      const bcConflict = findBarcodeConflict(cleanBarcode);
+      if (bcConflict) {
+        return res.status(400).json({
+          success: false,
+          error: `Barcode "${cleanBarcode}" is already assigned to ${bcConflict.ownerLabel}. Duplicate barcodes are not allowed.`,
+        });
+      }
     }
 
     // Decimal numbers parsing
@@ -471,6 +1202,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     const tPercent = Math.round((parseFloat(tax_percent) || 0.0) * 100) / 100;
     const oStock = Math.round((parseFloat(opening_stock) || 0.0) * 100) / 100;
     const mStock = Math.round((parseFloat(minimum_stock) || 0.0) * 100) / 100;
+    const itemHasVariants = has_variants === true || has_variants === 1 || has_variants === '1' ? 1 : 0;
     const itemStatus = status === 'Inactive' ? 'Inactive' : 'Active';
 
     const createItemTx = db.transaction(() => {
@@ -485,8 +1217,8 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         INSERT INTO items (
           item_code, company_name, item_name, generic_name, category, packing, barcode,
           purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
-          opening_stock, minimum_stock, rack_number, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          opening_stock, minimum_stock, rack_number, has_variants, image_id, image_url, thumbnail_url, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
       const result = db.prepare(insertSql).run(
@@ -496,7 +1228,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         generic_name ? String(generic_name).trim() : null,
         String(category).trim(),
         String(packing).trim(),
-        barcode ? String(barcode).trim() : null,
+        cleanBarcode || null,
         pPrice,
         tPrice,
         wPrice,
@@ -507,6 +1239,10 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         oStock,
         mStock,
         rack_number ? String(rack_number).trim() : null,
+        itemHasVariants,
+        image_id ? Number(image_id) : null,
+        String(image_url || '').trim(),
+        String(thumbnail_url || image_url || '').trim(),
         itemStatus
       );
 
@@ -524,7 +1260,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     return res.status(201).json({
       success: true,
       message: `Item "${newItem.item_name}" (${newItem.item_code}) created successfully.`,
-      item: newItem,
+      item: { ...newItem, variants: [] },
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -564,6 +1300,10 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       opening_stock,
       minimum_stock,
       rack_number,
+      has_variants,
+      image_id,
+      image_url,
+      thumbnail_url,
       status,
       expected_updated_at,
       force_overwrite,
@@ -599,6 +1339,17 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       });
     }
 
+    const nextBarcode = barcode !== undefined ? (barcode ? String(barcode).trim() : null) : existingItem.barcode;
+    if (nextBarcode) {
+      const bcConflict = findBarcodeConflict(nextBarcode, { excludeItemId: id });
+      if (bcConflict) {
+        return res.status(400).json({
+          success: false,
+          error: `Barcode "${nextBarcode}" is already assigned to ${bcConflict.ownerLabel}. Duplicate barcodes are not allowed.`,
+        });
+      }
+    }
+
     const pPrice = purchase_price !== undefined ? Math.round((parseFloat(purchase_price) || 0.0) * 100) / 100 : existingItem.purchase_price;
     const tPrice = trade_price !== undefined ? Math.round((parseFloat(trade_price) || 0.0) * 100) / 100 : existingItem.trade_price;
     const wPrice = wholesale_price !== undefined ? Math.round((parseFloat(wholesale_price) || 0.0) * 100) / 100 : existingItem.wholesale_price;
@@ -616,7 +1367,24 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
     const tPercent = tax_percent !== undefined ? Math.round((parseFloat(tax_percent) || 0.0) * 100) / 100 : existingItem.tax_percent;
     const oStock = opening_stock !== undefined ? Math.round((parseFloat(opening_stock) || 0.0) * 100) / 100 : existingItem.opening_stock;
     const mStock = minimum_stock !== undefined ? Math.round((parseFloat(minimum_stock) || 0.0) * 100) / 100 : existingItem.minimum_stock;
+    const itemHasVariants =
+      has_variants !== undefined
+        ? has_variants === true || has_variants === 1 || has_variants === '1'
+          ? 1
+          : 0
+        : Number(existingItem.has_variants || 0);
+    const nextImageId = image_id !== undefined ? (image_id ? Number(image_id) : null) : existingItem.image_id ?? null;
+    const nextImageUrl = image_url !== undefined ? String(image_url || '').trim() : String(existingItem.image_url || '');
+    const nextThumbUrl =
+      thumbnail_url !== undefined
+        ? String(thumbnail_url || '').trim()
+        : image_url !== undefined
+        ? nextImageUrl
+        : String(existingItem.thumbnail_url || '');
     const itemStatus = status !== undefined ? (status === 'Inactive' ? 'Inactive' : 'Active') : existingItem.status;
+
+    const oldImgId = existingItem.image_id ? Number(existingItem.image_id) : null;
+    const oldImgUrl = String(existingItem.image_url || '');
 
     const updateSql = `
       UPDATE items SET
@@ -637,6 +1405,10 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
         opening_stock = ?,
         minimum_stock = ?,
         rack_number = ?,
+        has_variants = ?,
+        image_id = ?,
+        image_url = ?,
+        thumbnail_url = ?,
         status = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
@@ -654,7 +1426,7 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       generic_name !== undefined ? (generic_name ? String(generic_name).trim() : null) : existingItem.generic_name,
       category !== undefined ? String(category).trim() : existingItem.category,
       finalPacking,
-      barcode !== undefined ? (barcode ? String(barcode).trim() : null) : existingItem.barcode,
+      nextBarcode,
       pPrice,
       tPrice,
       wPrice,
@@ -665,16 +1437,26 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       oStock,
       mStock,
       rack_number !== undefined ? (rack_number ? String(rack_number).trim() : null) : existingItem.rack_number,
+      itemHasVariants,
+      nextImageId,
+      nextImageUrl,
+      nextThumbUrl,
       itemStatus,
       id
     );
 
+    // Changing Main Product picture never overwrites custom variant pictures; clean up unused old image only if unreferenced
+    if (oldImgId && oldImgId !== nextImageId) {
+      deleteUnusedProductImage(oldImgId, oldImgUrl);
+    }
+
     const updatedItem = db.prepare('SELECT * FROM items WHERE id = ?').get(id) as ItemRow;
+    const variants = getEnrichedVariants({ parentItemId: id, includeInactive: true });
 
     return res.json({
       success: true,
       message: `Item "${updatedItem.item_name}" updated successfully.`,
-      item: updatedItem,
+      item: { ...updatedItem, variants },
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);

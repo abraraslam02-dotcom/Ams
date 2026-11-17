@@ -1,9 +1,12 @@
+import { ItemVariant } from './item';
+
 export type SalesInvoiceType = 'Retail' | 'Wholesale';
 export type SalesPaymentMode = 'Cash' | 'Credit' | 'Partial' | 'Bank';
 export type SalesStatus = 'draft' | 'held' | 'completed' | 'cancelled';
 
 export interface FastSearchBatch {
   id: number;
+  variant_id?: number | null;
   batch_number: string;
   manufacturing_date: string;
   expiry_date: string;
@@ -53,11 +56,21 @@ export interface FastSearchItem {
     available_units: number;
   };
   batches: FastSearchBatch[];
+  has_variants?: number | boolean;
+  active_variant_count?: number;
+  consolidated_stock_packs?: number;
+  variants?: ItemVariant[];
+  image_url?: string | null;
+  thumbnail_url?: string | null;
 }
 
 export interface DatasheetRow {
   row_id: string;
   item_id: number | null;
+  variant_id?: number | null;
+  variant_code?: string;
+  variant_name?: string;
+  variant_thumbnail_url?: string | null;
   inventory_id: number | null;
   item_code: string;
   barcode?: string;
@@ -174,6 +187,9 @@ export interface CustomerSaleHistoryEntry {
   sale_item_id: number;
   sale_id: number;
   item_id: number;
+  variant_id?: number | null;
+  variant_code?: string;
+  variant_name?: string;
   item_code: string;
   item_name: string;
   packing: string;
@@ -204,6 +220,9 @@ export interface ItemPurchaseHistoryEntry {
   purchase_item_id: number;
   purchase_id: number;
   item_id: number;
+  variant_id?: number | null;
+  variant_code?: string;
+  variant_name?: string;
   item_code?: string;
   item_name?: string;
   batch_number: string;

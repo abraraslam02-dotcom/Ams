@@ -70,7 +70,31 @@ export function prepareItemIndex<T extends BaseSearchableItem>(items: T[]): Inde
     const cleanPacking = String(it.packing || '').toLowerCase().trim();
     const cleanCategory = String(it.category || '').toLowerCase().trim();
 
-    const searchHay = `${cleanName} ${cleanCompany} ${cleanCode} ${cleanBarcode} ${cleanGeneric} ${cleanPacking} ${cleanCategory}`;
+    let variantTokens = '';
+    if (Array.isArray(it.variants) && it.variants.length > 0) {
+      variantTokens = it.variants
+        .map((v: any) => {
+          const extraCodes = Array.isArray(v?.barcodes)
+            ? v.barcodes.map((b: any) => String(b?.barcode || '').toLowerCase().trim()).join(' ')
+            : '';
+          return [
+            v?.variant_code,
+            v?.variant_name,
+            v?.colour,
+            v?.flavour,
+            v?.variant_type,
+            v?.other_attributes,
+            v?.barcode,
+            extraCodes,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+        })
+        .join(' ');
+    }
+
+    const searchHay = `${cleanName} ${cleanCompany} ${cleanCode} ${cleanBarcode} ${cleanGeneric} ${cleanPacking} ${cleanCategory} ${variantTokens}`;
     const nameWords = cleanName.split(/[\s\-()/]+/).filter(Boolean);
 
     indexed.push({
@@ -88,6 +112,50 @@ export function prepareItemIndex<T extends BaseSearchableItem>(items: T[]): Inde
   }
 
   return indexed;
+}
+
+/**
+ * Resolves an exact barcode or code scan against loaded items & their active variants.
+ */
+export function findExactBarcodeOrCodeMatch<T extends BaseSearchableItem>(
+  items: T[],
+  rawQuery: string
+): { item: T; variant: any | null; matchType: 'variant' | 'item' } | null {
+  const q = String(rawQuery || '').trim().toLowerCase();
+  if (!q || !Array.isArray(items) || items.length === 0) return null;
+
+  // 1. Check variant barcodes / variant codes first for direct variant selection
+  for (const item of items) {
+    const vars = Array.isArray(item.variants) ? item.variants : [];
+    for (const v of vars) {
+      if (String(v?.status || 'Active').toLowerCase() === 'inactive') continue;
+      if (
+        (v?.barcode && String(v.barcode).trim().toLowerCase() === q) ||
+        (v?.variant_code && String(v.variant_code).trim().toLowerCase() === q)
+      ) {
+        return { item, variant: v, matchType: 'variant' };
+      }
+      if (Array.isArray(v?.barcodes)) {
+        for (const b of v.barcodes) {
+          if (b?.barcode && String(b.barcode).trim().toLowerCase() === q) {
+            return { item, variant: v, matchType: 'variant' };
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Check main product barcode / item_code
+  for (const item of items) {
+    if (
+      (item.barcode && String(item.barcode).trim().toLowerCase() === q) ||
+      (item.item_code && String(item.item_code).trim().toLowerCase() === q)
+    ) {
+      return { item, variant: null, matchType: 'item' };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -125,8 +193,24 @@ export function searchItems<T extends BaseSearchableItem>(
 
     let score = 0;
 
+    // Check exact variant code / barcode match
+    let exactVariantMatch = false;
+    if (Array.isArray(x.item.variants)) {
+      for (const v of x.item.variants) {
+        if (
+          String(v?.barcode || '').trim().toLowerCase() === q ||
+          String(v?.variant_code || '').trim().toLowerCase() === q ||
+          (Array.isArray(v?.barcodes) &&
+            v.barcodes.some((b: any) => String(b?.barcode || '').trim().toLowerCase() === q))
+        ) {
+          exactVariantMatch = true;
+          break;
+        }
+      }
+    }
+
     // 1. EXACT MATCHES (Top Priority)
-    if (x.cleanBarcode && x.cleanBarcode === q) {
+    if (exactVariantMatch || (x.cleanBarcode && x.cleanBarcode === q)) {
       score += 1_000_000;
     } else if (x.cleanCode === q) {
       score += 600_000;
@@ -176,7 +260,7 @@ export function searchItems<T extends BaseSearchableItem>(
     }
 
     // Availability bonus (available stock ranks higher among identical scores)
-    const stockPacks = Number(x.item.total_available_packs || x.item.opening_stock || 0);
+    const stockPacks = Number(x.item.total_available_packs || x.item.consolidated_stock_packs || x.item.opening_stock || 0);
     if (stockPacks > 0) {
       score += 100;
     }

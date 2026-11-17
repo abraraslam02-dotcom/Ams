@@ -3,6 +3,7 @@ import { Sidebar, NavTabId } from './components/layout/Sidebar';
 import { TopHeader } from './components/layout/TopHeader';
 import { DashboardView } from './components/views/DashboardView';
 import { ItemsMasterView } from './components/items/ItemsMasterView';
+import { VariantManagementView } from './components/items/VariantManagementView';
 import { AccountsMasterView } from './components/accounts/AccountsMasterView';
 import { PurchasesWorkspaceView } from './components/purchases/PurchasesWorkspaceView';
 import { AdvanceTaxSettingsPanel } from './components/purchases/AdvanceTaxSettingsPanel';
@@ -85,6 +86,7 @@ function AppContent() {
   const [hasVisitedPurchases, setHasVisitedPurchases] = useState<boolean>(false);
   const [resumeInvoiceId, setResumeInvoiceId] = useState<number | null>(null);
   const [resumePurchaseId, setResumePurchaseId] = useState<number | null>(null);
+  const [variantManagerItemId, setVariantManagerItemId] = useState<number | null>(null);
   const [hasUnsavedInvoiceItems, setHasUnsavedInvoiceItems] = useState<boolean>(false);
   const [quickShortcut, setQuickShortcut] = useState<QuickShortcutAction | null>(null);
 
@@ -148,6 +150,7 @@ function AppContent() {
       if (
         tab === 'items' ||
         tab === 'items-master' ||
+        tab === 'item-variants' ||
         tab === 'item-categories' ||
         tab === 'item-groups' ||
         tab === 'item-search' ||
@@ -353,6 +356,8 @@ function AppContent() {
       case 'items':
       case 'items-master':
         return { title: 'Item Master — Medicine Catalog & Valuation', crumbs: ['Item Management', 'Item Master'] };
+      case 'item-variants':
+        return { title: 'Item Variant Management — Parent-Child Catalog, Barcodes & Pictures', crumbs: ['Item Management', 'Variant Management'] };
       case 'item-categories':
         return { title: 'Item Categories — Therapeutic & Product Classification', crumbs: ['Item Management', 'Item Categories'] };
       case 'item-groups':
@@ -557,6 +562,8 @@ function AppContent() {
       case 'physical-verification':
       case 'inv-verification':
         return { title: 'Physical Stock Verification — Count Sheets & Reconciliation', crumbs: ['Inventory & Warehouse', 'Physical Verification'] };
+      case 'inv-variant-reports':
+        return { title: 'Variant Stock & Movement Reports — Consolidated Breakdown & Demand Alerts', crumbs: ['Inventory & Warehouse', 'Variant Stock & Reports'] };
 
       // G. REPORTS & ANALYTICS
       case 'report-item-reports':
@@ -752,6 +759,7 @@ function AppContent() {
     'stock-movement': 'inv-ledger',
     'physical-verification': 'inv-verification',
     'inv-verification': 'inv-verification',
+    'inv-variant-reports': 'inv-variant-reports',
   };
   const mappedInventorySubTab = inventorySubTabMap[activeTab];
 
@@ -1128,10 +1136,31 @@ function AppContent() {
                 activeTab === 'items-master' ||
                 activeTab === 'item-categories' ||
                 activeTab === 'item-groups' ||
-                activeTab === 'item-search') && <ItemsMasterView initialOpenImport={false} />}
+                activeTab === 'item-search') && (
+                <ItemsMasterView
+                  initialOpenImport={false}
+                  onOpenVariants={(it) => {
+                    setVariantManagerItemId(it.id);
+                    handleSelectTab('item-variants');
+                  }}
+                />
+              )}
+
+              {activeTab === 'item-variants' && (
+                <VariantManagementView
+                  initialParentItemId={variantManagerItemId}
+                  onNavigateToItemsMaster={() => handleSelectTab('items-master')}
+                />
+              )}
 
               {(activeTab === 'item-import-export' || activeTab === 'data-import-export') && (
-                <ItemsMasterView initialOpenImport={true} />
+                <ItemsMasterView
+                  initialOpenImport={true}
+                  onOpenVariants={(it) => {
+                    setVariantManagerItemId(it.id);
+                    handleSelectTab('item-variants');
+                  }}
+                />
               )}
 
               {/* TRADE DEALS, PARTY DISCOUNTS, FIFO BATCHES & OFFER REPORTS */}
