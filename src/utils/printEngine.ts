@@ -213,6 +213,73 @@ function getFontZoomPercent(scale: FontSizeScaleOption = 'normal'): string {
   }
 }
 
+const PDF_TITLE_MONTHS = [
+  'jan',
+  'feb',
+  'mar',
+  'apr',
+  'may',
+  'jun',
+  'jul',
+  'aug',
+  'sep',
+  'oct',
+  'nov',
+  'dec',
+];
+
+/**
+ * Formats an invoice date as DD-mmm-YYYY in lowercase (e.g. "2026-11-18" -> "18-nov-2026").
+ */
+export function formatDateDMYForPdf(raw?: unknown): string {
+  const str = String(raw ?? '').trim();
+  const now = new Date();
+  if (!str) {
+    return `${String(now.getDate()).padStart(2, '0')}-${PDF_TITLE_MONTHS[now.getMonth()]}-${now.getFullYear()}`;
+  }
+  const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    const day = isoMatch[3];
+    const mon = PDF_TITLE_MONTHS[Number(isoMatch[2]) - 1] || isoMatch[2];
+    const yr = isoMatch[1];
+    return `${day}-${mon}-${yr}`;
+  }
+  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (dmyMatch) {
+    const day = String(dmyMatch[1]).padStart(2, '0');
+    const mon = PDF_TITLE_MONTHS[Number(dmyMatch[2]) - 1] || dmyMatch[2];
+    const yr = dmyMatch[3];
+    return `${day}-${mon}-${yr}`;
+  }
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime())) {
+    return `${String(parsed.getDate()).padStart(2, '0')}-${PDF_TITLE_MONTHS[parsed.getMonth()]}-${parsed.getFullYear()}`;
+  }
+  return str.toLowerCase().replace(/\s+/g, '-');
+}
+
+/**
+ * Builds the standardized Save-to-PDF document title / filename for Sales and Purchase invoices:
+ * Format: `<customer_or_supplier_name>_invno:<invoiceNo>_<DD-mmm-YYYY>`
+ * Example: `abrar_invno:123_18-nov-2026`
+ */
+export function buildInvoicePdfTitle(
+  partyName?: unknown,
+  invoiceNumber?: unknown,
+  invoiceDate?: unknown
+): string {
+  const cleanParty = String(partyName || 'customer')
+    .trim()
+    .toLowerCase()
+    .replace(/[\\/:*?"<>|\u0000-\u001F]+/g, '')
+    .replace(/\s+/g, '_');
+  const cleanInvNo = String(invoiceNumber || '0')
+    .trim()
+    .replace(/\s+/g, '');
+  const cleanDate = formatDateDMYForPdf(invoiceDate);
+  return `${cleanParty || 'customer'}_invno:${cleanInvNo || '0'}_${cleanDate}`;
+}
+
 /**
  * Prints an HTML element cleanly using an isolated hidden iframe so:
  * - No popup windows (window.open) are required
@@ -222,7 +289,12 @@ function getFontZoomPercent(scale: FontSizeScaleOption = 'normal'): string {
  */
 export function executePrintElement(element: HTMLElement | null, config: PrintJobConfig): void {
   if (!element) {
+    const prevTitle = document.title;
+    if (config.title) document.title = config.title;
     window.print();
+    setTimeout(() => {
+      document.title = prevTitle;
+    }, 1000);
     return;
   }
 
@@ -483,12 +555,23 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
   doc.close();
 
   const triggerPrint = () => {
+    const previousTitle = document.title;
+    if (config.title) {
+      document.title = config.title;
+    }
+    const restoreTitle = () => {
+      document.title = previousTitle;
+    };
     try {
+      if (iframe.contentWindow) {
+        iframe.contentWindow.onafterprint = restoreTitle;
+      }
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
     } catch {
       window.print();
     }
+    setTimeout(restoreTitle, 3000);
   };
 
   // Check if there are any images in the iframe document that need to load first

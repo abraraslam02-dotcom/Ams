@@ -175,8 +175,11 @@ function generateTextDocumentPdf(payload: WhatsAppDocumentPayload): {
   filename: string;
 } {
   const storeName = (payload.storeName || 'ABRAR MEDICAL STORE').toUpperCase();
-  const safeDocNo = String(payload.documentNumber || 'DOC').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const filename = `${safeDocNo}.pdf`;
+  const filename = buildInvoicePdfFilename(
+    payload.customerName,
+    payload.documentNumber,
+    payload.documentDate
+  );
 
   const RULE = '------------------------------------------------------------------------';
   const TABLE_HEAD = ' #  Item Description                  Qty        Rate        Total (PKR)';
@@ -333,15 +336,23 @@ function formatDateDMY(raw?: string | null): string {
   return str;
 }
 
-// "Abrar" + "123"  ->  "Abrar Invoice No 123.pdf"
-function buildInvoicePdfFilename(customerName: string, documentNumber: string): string {
-  const base = `${customerName || 'Walk-in Cash Customer'} Invoice No ${documentNumber || ''}`
-    .replace(/[\\/:*?"<>|\u0000-\u001F]/g, ' ')
-    .replace(/\s+/g, ' ')
+// "Abrar" + "123" + "2026-11-18"  ->  "abrar_invno:123_18-nov-2026.pdf"
+export function buildInvoicePdfFilename(
+  customerName: string,
+  documentNumber: string,
+  documentDate?: string | null
+): string {
+  const cleanCustomer = String(customerName || 'customer')
     .trim()
-    .slice(0, 90)
-    .trim();
-  return `${base || 'Invoice'}.pdf`;
+    .toLowerCase()
+    .replace(/[\\/:*?"<>|\u0000-\u001F]+/g, '')
+    .replace(/\s+/g, '_');
+  const cleanInvNo = String(documentNumber || '0')
+    .trim()
+    .replace(/\s+/g, '');
+  const cleanDate = formatDateDMY(documentDate);
+  const base = `${cleanCustomer || 'customer'}_invno:${cleanInvNo || '0'}_${cleanDate}`;
+  return `${base}.pdf`;
 }
 
 type PdfCmd =
@@ -355,7 +366,11 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
   filename: string;
 } {
   const storeName = (payload.storeName || 'Abrar Medical Store').trim();
-  const filename = buildInvoicePdfFilename(payload.customerName, payload.documentNumber);
+  const filename = buildInvoicePdfFilename(
+    payload.customerName,
+    payload.documentNumber,
+    payload.documentDate
+  );
 
   const PAGE_W = 226.77; // 80mm
   const ML = 8;

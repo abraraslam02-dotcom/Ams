@@ -10,6 +10,7 @@ import {
   Save,
   Ban,
   Eye,
+  Download,
 } from 'lucide-react';
 import {
   CompanySettings,
@@ -21,6 +22,7 @@ import { api } from '../../services/api';
 import {
   executePrintElement,
   detectPrintCapabilities,
+  buildInvoicePdfTitle,
   PageOrientationOption,
   PageMarginOption,
   FontSizeScaleOption,
@@ -111,11 +113,38 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
 
   const capabilities = detectPrintCapabilities(settings?.default_printer);
 
+  const resolvedPartyName = doc
+    ? String(doc.supplier_name || doc.account_name || 'Supplier').trim()
+    : 'Supplier';
+  const resolvedDocNumber = doc
+    ? mode === 'invoice'
+      ? doc.bill_number || doc.supplier_invoice_number || `PUR-${doc.id}`
+      : doc.debit_note_number || `PRN-${doc.id}`
+    : '0';
+  const resolvedDocDate = doc
+    ? mode === 'invoice'
+      ? doc.bill_date || doc.invoice_date
+      : doc.return_date || doc.bill_date
+    : '';
+  const pdfDocumentTitle = buildInvoicePdfTitle(
+    resolvedPartyName,
+    resolvedDocNumber,
+    resolvedDocDate
+  );
+
+  useEffect(() => {
+    if (!isOpen || !doc) return;
+    const prevTitle = document.title;
+    document.title = pdfDocumentTitle;
+    return () => {
+      document.title = prevTitle;
+    };
+  }, [isOpen, doc, pdfDocumentTitle]);
+
   const handlePrint = () => {
     if (!doc) return;
-    const docNum = mode === 'invoice' ? doc.bill_number : doc.debit_note_number;
     executePrintElement(printAreaRef.current, {
-      title: `${storeName} - ${docNum}`,
+      title: pdfDocumentTitle,
       paperSize: 'a4',
       profileId: 'a4-purchase-invoice',
       orientation,
@@ -264,6 +293,17 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
             <button
               type="button"
               onClick={handlePrint}
+              title={`Save to PDF as: ${pdfDocumentTitle}.pdf`}
+              className="px-3.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Save to PDF</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrint}
+              title={`Print / Save PDF (${pdfDocumentTitle})`}
               className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />

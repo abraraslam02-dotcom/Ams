@@ -3335,6 +3335,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
   };
 
+  const [autoExportPdfOnOpen, setAutoExportPdfOnOpen] = useState<boolean>(false);
+
+  const handleExportCurrentPurchasePdf = () => {
+    setFormError(null);
+    if (validLines.length === 0) {
+      setFormError('Please add at least one Medicine Item before exporting the invoice to PDF.');
+      itemSearchInputRef.current?.focus();
+      return;
+    }
+    setAutoExportPdfOnOpen(true);
+    handlePreviewInvoice();
+  };
+
   // Preview the A4 invoice from the current (unsaved) form. Nothing is posted or saved.
   const handlePreviewInvoice = () => {
     setFormError(null);
@@ -5593,6 +5606,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                     <button
                       type="button"
+                      onClick={handleExportCurrentPurchasePdf}
+                      className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Save Purchase Invoice to PDF (supplier_invno:123_date)"
+                    >
+                      <Download className="w-3 h-3 text-sky-200" />
+                      <span>Export PDF</span>
+                    </button>
+
+                    <button
+                      type="button"
                       disabled={exportingExcel}
                       onClick={handleExportCurrentPurchaseToExcel}
                       className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
@@ -6841,6 +6864,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </button>
                     <button
                       type="button"
+                      onClick={handleExportCurrentPurchasePdf}
+                      className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Save Purchase Invoice to PDF (supplier_invno:123_date)"
+                    >
+                      <Download className="w-3 h-3 text-sky-200" />
+                      <span>Export PDF</span>
+                    </button>
+                    <button
+                      type="button"
                       disabled={exportingExcel}
                       onClick={handleExportCurrentPurchaseToExcel}
                       className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
@@ -7141,7 +7173,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       {/* A4 Print Modal (Purchase Invoice & Purchase Return) */}
       <PurchasePrintModal
         isOpen={printModalOpen}
-        onClose={() => setPrintModalOpen(false)}
+        autoDirectPrint={autoExportPdfOnOpen}
+        onClose={() => {
+          setPrintModalOpen(false);
+          setAutoExportPdfOnOpen(false);
+        }}
         mode={printMode}
         invoice={printInvoice}
         invoiceItems={printInvoiceItems}

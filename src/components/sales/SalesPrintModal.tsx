@@ -11,6 +11,7 @@ import {
   Ban,
   Eye,
   AlertTriangle,
+  Download,
 } from 'lucide-react';
 import {
   CompanySettings,
@@ -23,6 +24,7 @@ import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import {
   executePrintElement,
   detectPrintCapabilities,
+  buildInvoicePdfTitle,
   PaperSizeOption,
   PageOrientationOption,
   PageMarginOption,
@@ -187,14 +189,43 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
 
   const capabilities = detectPrintCapabilities(settings?.default_printer);
 
+  const resolvedPartyName = docRecord
+    ? String(
+        docRecord.customer_name ||
+          docRecord.buyer_name ||
+          'Walk-in Cash Customer'
+      ).trim()
+    : 'Walk-in Cash Customer';
+  const resolvedDocNumber = docRecord
+    ? isReturn
+      ? docRecord.return_number || `SRN-${docRecord.id}`
+      : docRecord.invoice_number || `SAL-${docRecord.id}`
+    : '0';
+  const resolvedDocDate = docRecord
+    ? isReturn
+      ? docRecord.return_date || docRecord.invoice_date
+      : docRecord.invoice_date
+    : '';
+  const pdfDocumentTitle = buildInvoicePdfTitle(
+    resolvedPartyName,
+    resolvedDocNumber,
+    resolvedDocDate
+  );
+
+  useEffect(() => {
+    if (!isOpen || !docRecord) return;
+    const prevTitle = document.title;
+    document.title = pdfDocumentTitle;
+    return () => {
+      document.title = prevTitle;
+    };
+  }, [isOpen, docRecord, pdfDocumentTitle]);
+
   const handlePrintNow = () => {
     if (!docRecord) return;
-    const docNum = isReturn
-      ? docRecord.return_number || `SRN-${docRecord.id}`
-      : docRecord.invoice_number || `SAL-${docRecord.id}`;
 
     executePrintElement(printAreaRef.current, {
-      title: `${storeName} - ${docNum}`,
+      title: pdfDocumentTitle,
       paperSize: format === '80mm' || format === '58mm' ? format : 'a4',
       profileId:
         format === '80mm'
@@ -490,10 +521,22 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               />
             )}
 
+            {/* Save to PDF Button (with formatted filename: customer_invno:123_date) */}
+            <button
+              type="button"
+              onClick={handlePrintNow}
+              title={`Save to PDF as: ${pdfDocumentTitle}.pdf`}
+              className="px-3.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Save to PDF</span>
+            </button>
+
             {/* Direct Print Button */}
             <button
               type="button"
               onClick={handlePrintNow}
+              title={`Print / Save PDF (${pdfDocumentTitle})`}
               className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
