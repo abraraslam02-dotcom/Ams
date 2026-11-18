@@ -1228,7 +1228,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               item_name: String(line.item_name || catMatch?.item_name || 'Medicine Item'),
               packing: String(line.packing || catVariant?.effective_packing || catMatch?.packing || '1x1'),
               strips_per_box: catMatch?.strips_per_box || 1,
-              units_per_strip: catMatch?.units_per_strip || Number(line.units_per_pack || 1),
+              units_per_strip:
+                Number(catMatch?.tablets_per_strip || catMatch?.units_per_strip) ||
+                Number(line.units_per_pack || 1),
               units_per_pack: Number(line.units_per_pack || catVariant?.units_per_pack || catMatch?.units_per_pack || 1),
               batch_number: String(
                 line.batch_number ||
@@ -1338,7 +1340,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             catMatch.image_url ||
             null,
           strips_per_box: catMatch.strips_per_box || r.strips_per_box,
-          units_per_strip: catMatch.units_per_strip || r.units_per_strip,
+          units_per_strip:
+            Number(catMatch.tablets_per_strip || catMatch.units_per_strip) || r.units_per_strip,
           available_stock_packs:
             r.available_stock_packs ||
             Number(catVariant?.default_batch?.available_packs ?? catMatch.total_available_packs ?? 0),
@@ -1630,7 +1633,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         item_name: item.item_name,
         packing: effPacking,
         strips_per_box: item.strips_per_box || 1,
-        units_per_strip: item.units_per_strip || 1,
+        units_per_strip: Number(item.tablets_per_strip || item.units_per_strip || 1),
         units_per_pack: effUnitsPerPack,
         batch_number: batch.batch_number,
         expiry_date: batch.expiry_date,
@@ -3976,7 +3979,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const handleAddStripToRow = (idx: number, stripsCount: number = 1) => {
     const r = rows[idx];
     if (!r || isSyrupItem(r)) return;
-    const strip = r.units_per_strip > 1 ? r.units_per_strip : 1;
+    const catMatch = r.item_id
+      ? catalogItems.find((c) => Number(c.id) === Number(r.item_id))
+      : null;
+    const configuredTabletsPerStrip = Number(
+      catMatch?.tablets_per_strip || catMatch?.units_per_strip || r.units_per_strip || 1
+    );
+    const strip = configuredTabletsPerStrip > 1 ? configuredTabletsPerStrip : 1;
     updateRowField(idx, 'loose_quantity', Number(r.loose_quantity || 0) + strip * stripsCount);
   };
 
@@ -4894,15 +4903,27 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           {isSyrupItem(row) ? (
                             <span className="text-[10px] font-bold text-amber-800">Bottle</span>
                           ) : (
-                            <NumericInput
-                              id={`pos_row_${rIdx}_loose_quantity`}
-                              value={row.loose_quantity}
-                              allowNegative={true}
-                              onFocus={() => setSelectedRowIndex(rIdx)}
-                              onChange={(e) => updateRowField(rIdx, 'loose_quantity', e.target.value)}
-                              onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'loose_quantity', true)}
-                              className="w-full px-1 py-0 text-center font-mono font-bold text-[11px] text-teal-950 border border-transparent focus:border-teal-500 bg-transparent focus:bg-white h-full leading-none outline-none"
-                            />
+                            <div className="flex items-center h-full">
+                              <NumericInput
+                                id={`pos_row_${rIdx}_loose_quantity`}
+                                value={row.loose_quantity}
+                                allowNegative={true}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'loose_quantity', e.target.value)}
+                                onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'loose_quantity', true)}
+                                className="w-full px-1 py-0 text-center font-mono font-bold text-[11px] text-teal-950 border border-transparent focus:border-teal-500 bg-transparent focus:bg-white h-full leading-none outline-none"
+                              />
+                              {row.item_id && row.units_per_strip > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAddStripToRow(rIdx, 1)}
+                                  title={`Add 1 Strip (+${row.units_per_strip} Loose Units)`}
+                                  className="px-1 py-0.5 rounded bg-teal-100 hover:bg-teal-200 text-teal-800 font-mono text-[9px] font-bold shrink-0 cursor-pointer mr-1 leading-tight"
+                                >
+                                  +1S
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
 
@@ -6258,13 +6279,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               {row.item_id && row.units_per_strip > 1 && (
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    updateRowField(
-                                      rIdx,
-                                      'loose_quantity',
-                                      Number(row.loose_quantity || 0) + row.units_per_strip
-                                    )
-                                  }
+                                  onClick={() => handleAddStripToRow(rIdx, 1)}
                                   title={`Add 1 Strip (+${row.units_per_strip} Loose Units)`}
                                   className="px-0.5 py-0 rounded-lg bg-teal-100 hover:bg-teal-200 text-teal-800 font-mono text-[8px] font-bold shrink-0 cursor-pointer mr-0.5 leading-tight"
                                 >
@@ -7741,8 +7756,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     minimum_stock: Number(updatedItem.minimum_stock || 0),
                     rack_number: String(updatedItem.rack_number || ''),
                     strips_per_box: Number(uAny.strips_per_box || c.strips_per_box || 1),
-                    units_per_strip: Number(uAny.units_per_strip || c.units_per_strip || 1),
+                    tablets_per_strip: Number(
+                      uAny.tablets_per_strip || uAny.units_per_strip || c.tablets_per_strip || c.units_per_strip || 1
+                    ),
+                    units_per_strip: Number(
+                      uAny.tablets_per_strip || uAny.units_per_strip || c.units_per_strip || 1
+                    ),
                     units_per_pack: Number(uAny.units_per_pack || c.units_per_pack || 1),
+                    purchase_unit: uAny.purchase_unit || c.purchase_unit || 'Box',
                     has_variants: Number(updatedItem.has_variants || 0),
                     image_url: updatedItem.image_url ?? c.image_url,
                     thumbnail_url: updatedItem.thumbnail_url ?? c.thumbnail_url,
@@ -7785,7 +7806,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 packing: r.variant_id ? r.packing : updatedItem.packing || r.packing,
                 barcode: r.variant_id ? r.barcode : updatedItem.barcode || r.barcode,
                 strips_per_box: Number(uAny.strips_per_box || r.strips_per_box || 1),
-                units_per_strip: Number(uAny.units_per_strip || r.units_per_strip || 1),
+                units_per_strip: Number(
+                  uAny.tablets_per_strip || uAny.units_per_strip || r.units_per_strip || 1
+                ),
                 units_per_pack: r.variant_id ? r.units_per_pack : newUnitsPerPack,
                 unit_price: updatedPrice,
                 loose_rate: updatedLoose,

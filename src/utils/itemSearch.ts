@@ -24,9 +24,10 @@ export interface BaseSearchableItem {
   loose_rate?: number;
   retail_loose_rate?: number;
   wholesale_loose_rate?: number;
-  units_per_pack?: number;
-  strips_per_box?: number;
-  units_per_strip?: number;
+  units_per_pack?: number | null;
+  strips_per_box?: number | null;
+  units_per_strip?: number | null;
+  tablets_per_strip?: number | null;
   total_available_packs?: number;
   total_available_units?: number;
   batches?: any[];

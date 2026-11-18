@@ -39,9 +39,13 @@ export interface FastSearchItem {
   minimum_stock: number;
   rack_number: string;
   status: string;
+  carton?: number | null;
+  boxes_per_carton?: number | null;
   strips_per_box: number;
+  tablets_per_strip?: number | null;
   units_per_strip: number;
   units_per_pack: number;
+  purchase_unit?: string;
   loose_rate?: number;
   retail_loose_rate: number;
   wholesale_loose_rate: number;

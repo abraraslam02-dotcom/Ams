@@ -24,55 +24,88 @@ export function round2(val: unknown): number {
 
 export interface ParsedPacking {
   packing: string;
+  carton?: number | null;
+  boxesPerCarton?: number | null;
   stripsPerBox: number;
   unitsPerStrip: number;
+  tabletsPerStrip: number;
   unitsPerPack: number;
+  purchaseUnit: string;
 }
 
 /**
  * Parses pharmaceutical packing strings such as "20x10", "10x10", "3x10", "1x1", "120ml"
- * into Box -> Strip -> Loose Unit conversion factors.
+ * into Carton -> Box -> Strip -> Loose Tablet conversion factors, prioritizing saved Item Registration values.
  */
-export function parsePacking(packingStr?: string | null): ParsedPacking {
-  const clean = (packingStr || '1x1').trim();
+export function parsePacking(
+  packingStr?: string | null,
+  itemConfig?: Record<string, unknown> | null
+): ParsedPacking {
+  const clean = (packingStr || String(itemConfig?.packing || '1x1')).trim();
+  let stripsPerBox = 1;
+  let unitsPerStrip = 1;
+  let unitsPerPack = 1;
+
   const matrixMatch = clean.match(/(\d+)\s*[xX*×]\s*(\d+)/);
   if (matrixMatch) {
-    const stripsPerBox = Math.max(1, parseInt(matrixMatch[1], 10) || 1);
-    const unitsPerStrip = Math.max(1, parseInt(matrixMatch[2], 10) || 1);
-    return {
-      packing: clean,
-      stripsPerBox,
-      unitsPerStrip,
-      unitsPerPack: stripsPerBox * unitsPerStrip,
-    };
-  }
-  const singleNum = clean.match(/(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc|pill|softgel|lozenge|'s|s\b)s?/i);
-  if (singleNum) {
-    const units = Math.max(1, parseInt(singleNum[1], 10) || 1);
-    return {
-      packing: clean,
-      stripsPerBox: 1,
-      unitsPerStrip: units,
-      unitsPerPack: units,
-    };
-  }
-  if (!/ml|mg|gm|g\b|kg|l\b|oz|drop|syr|susp|cream|oint|gel|lotion|inj|inf/i.test(clean)) {
-    const plainNum = clean.match(/^(\d+)$/);
-    if (plainNum) {
-      const units = Math.max(1, parseInt(plainNum[1], 10) || 1);
-      return {
-        packing: clean,
-        stripsPerBox: 1,
-        unitsPerStrip: units,
-        unitsPerPack: units,
-      };
+    stripsPerBox = Math.max(1, parseInt(matrixMatch[1], 10) || 1);
+    unitsPerStrip = Math.max(1, parseInt(matrixMatch[2], 10) || 1);
+    unitsPerPack = stripsPerBox * unitsPerStrip;
+  } else {
+    const singleNum = clean.match(
+      /(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc|pill|softgel|lozenge|'s|s\b)s?/i
+    );
+    if (singleNum) {
+      const units = Math.max(1, parseInt(singleNum[1], 10) || 1);
+      stripsPerBox = 1;
+      unitsPerStrip = units;
+      unitsPerPack = units;
+    } else if (
+      !/ml|mg|gm|g\b|kg|l\b|oz|drop|syr|susp|cream|oint|gel|lotion|inj|inf/i.test(clean)
+    ) {
+      const plainNum = clean.match(/^(\d+)$/);
+      if (plainNum) {
+        const units = Math.max(1, parseInt(plainNum[1], 10) || 1);
+        stripsPerBox = 1;
+        unitsPerStrip = units;
+        unitsPerPack = units;
+      }
     }
   }
+
+  if (itemConfig) {
+    const cfgStrips = Number(itemConfig.strips_per_box || 0);
+    const cfgTablets = Number(itemConfig.tablets_per_strip || itemConfig.units_per_strip || 0);
+    if (Number.isFinite(cfgStrips) && cfgStrips > 0) {
+      stripsPerBox = Math.max(1, Math.round(cfgStrips));
+    }
+    if (Number.isFinite(cfgTablets) && cfgTablets > 0) {
+      unitsPerStrip = Math.max(1, Math.round(cfgTablets));
+    }
+    if ((Number.isFinite(cfgStrips) && cfgStrips > 0) || (Number.isFinite(cfgTablets) && cfgTablets > 0)) {
+      unitsPerPack = Math.max(1, stripsPerBox * unitsPerStrip);
+    } else if (Number(itemConfig.units_per_pack || 0) > 0) {
+      unitsPerPack = Math.max(1, Math.round(Number(itemConfig.units_per_pack)));
+    }
+  }
+
+  const rawPurchaseUnit = String(itemConfig?.purchase_unit || 'Box').trim();
+  const purchaseUnit = ['Carton', 'Box', 'Strip', 'Tablet'].includes(rawPurchaseUnit)
+    ? rawPurchaseUnit
+    : 'Box';
+
   return {
     packing: clean || '1x1',
-    stripsPerBox: 1,
-    unitsPerStrip: 1,
-    unitsPerPack: 1,
+    carton: Number(itemConfig?.carton || 0) > 0 ? Number(itemConfig?.carton) : null,
+    boxesPerCarton:
+      Number(itemConfig?.boxes_per_carton || 0) > 0
+        ? Math.round(Number(itemConfig?.boxes_per_carton))
+        : null,
+    stripsPerBox,
+    unitsPerStrip,
+    tabletsPerStrip: unitsPerStrip,
+    unitsPerPack,
+    purchaseUnit,
   };
 }
 
@@ -1909,7 +1942,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     }
 
     const packingStr = String(raw.packing || dbVariant?.packing || dbItem.packing || '1x1').trim();
-    const parsedPack = parsePacking(packingStr);
+    const parsedPack = parsePacking(packingStr, dbVariant?.packing ? null : dbItem);
     const rawQty = Math.max(0, round2(raw.quantity || 0));
     const bonusQty = Math.max(0, round2(raw.bonus_quantity || 0));
     const looseQty = Math.max(0, round2(raw.loose_quantity || 0));

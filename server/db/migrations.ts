@@ -4426,6 +4426,107 @@ export function runMigrations(): MigrationResult {
       );
     }
 
+    // Migration 34: Add multi-level packing configuration & purchase_unit columns to items
+    const migrationName34 = '034_item_packing_configuration';
+    const applied34 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName34);
+    const itemCols34 = (
+      db.prepare('PRAGMA table_info(items)').all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!itemCols34.includes('carton')) {
+      db.exec('ALTER TABLE items ADD COLUMN carton REAL DEFAULT NULL;');
+    }
+    if (!itemCols34.includes('boxes_per_carton')) {
+      db.exec('ALTER TABLE items ADD COLUMN boxes_per_carton INTEGER DEFAULT NULL;');
+    }
+    if (!itemCols34.includes('strips_per_box')) {
+      db.exec('ALTER TABLE items ADD COLUMN strips_per_box INTEGER DEFAULT NULL;');
+    }
+    if (!itemCols34.includes('tablets_per_strip')) {
+      db.exec('ALTER TABLE items ADD COLUMN tablets_per_strip INTEGER DEFAULT NULL;');
+    }
+    if (!itemCols34.includes('units_per_strip')) {
+      db.exec('ALTER TABLE items ADD COLUMN units_per_strip INTEGER DEFAULT NULL;');
+    }
+    if (!itemCols34.includes('units_per_pack')) {
+      db.exec('ALTER TABLE items ADD COLUMN units_per_pack INTEGER DEFAULT NULL;');
+    }
+    if (!itemCols34.includes('purchase_unit')) {
+      db.exec("ALTER TABLE items ADD COLUMN purchase_unit TEXT DEFAULT 'Box';");
+    }
+
+    if (!applied34) {
+      const existingItemsForPacking = db
+        .prepare(
+          'SELECT id, packing, strips_per_box, tablets_per_strip, units_per_strip, units_per_pack, purchase_unit FROM items'
+        )
+        .all() as Array<{
+        id: number;
+        packing: string | null;
+        strips_per_box: number | null;
+        tablets_per_strip: number | null;
+        units_per_strip: number | null;
+        units_per_pack: number | null;
+        purchase_unit: string | null;
+      }>;
+
+      const updatePackingStmt = db.prepare(`
+        UPDATE items
+        SET strips_per_box = COALESCE(strips_per_box, ?),
+            tablets_per_strip = COALESCE(tablets_per_strip, ?),
+            units_per_strip = COALESCE(units_per_strip, ?),
+            units_per_pack = COALESCE(units_per_pack, ?),
+            purchase_unit = CASE WHEN purchase_unit IS NULL OR TRIM(purchase_unit) = '' THEN 'Box' ELSE purchase_unit END
+        WHERE id = ?
+      `);
+
+      for (const row of existingItemsForPacking) {
+        const clean = String(row.packing || '1x1').trim();
+        let stripsPerBox: number | null = null;
+        let tabletsPerStrip: number | null = null;
+        let unitsPerStrip = 1;
+        let unitsPerPack = 1;
+
+        const matrixMatch = clean.match(/(\d+)\s*[xX*×]\s*(\d+)/);
+        if (matrixMatch) {
+          stripsPerBox = Math.max(1, parseInt(matrixMatch[1], 10) || 1);
+          tabletsPerStrip = Math.max(1, parseInt(matrixMatch[2], 10) || 1);
+          unitsPerStrip = tabletsPerStrip;
+          unitsPerPack = stripsPerBox * tabletsPerStrip;
+        } else {
+          const singleNum = clean.match(
+            /(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc|pill|softgel|lozenge|'s|s\b)s?/i
+          );
+          if (singleNum) {
+            const units = Math.max(1, parseInt(singleNum[1], 10) || 1);
+            stripsPerBox = 1;
+            tabletsPerStrip = units;
+            unitsPerStrip = units;
+            unitsPerPack = units;
+          } else if (
+            !/ml|mg|gm|g\b|kg|l\b|oz|drop|syr|susp|cream|oint|gel|lotion|inj|inf/i.test(clean)
+          ) {
+            const plainNum = clean.match(/^(\d+)$/);
+            if (plainNum) {
+              const units = Math.max(1, parseInt(plainNum[1], 10) || 1);
+              stripsPerBox = 1;
+              tabletsPerStrip = units;
+              unitsPerStrip = units;
+              unitsPerPack = units;
+            }
+          }
+        }
+
+        updatePackingStmt.run(stripsPerBox, tabletsPerStrip, unitsPerStrip, unitsPerPack, row.id);
+      }
+
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+        migrationName34,
+        34
+      );
+    }
+
     const tables = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
@@ -4439,7 +4540,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

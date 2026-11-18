@@ -69,6 +69,8 @@ export interface ItemVariant {
   updated_at?: string;
 }
 
+export type ItemPurchaseUnit = 'Carton' | 'Box' | 'Strip' | 'Tablet';
+
 export interface Item {
   id: number;
   item_code: string;
@@ -77,6 +79,13 @@ export interface Item {
   generic_name: string | null;
   category: string;
   packing: string;
+  carton?: number | null;
+  boxes_per_carton?: number | null;
+  strips_per_box?: number | null;
+  tablets_per_strip?: number | null;
+  units_per_strip?: number;
+  units_per_pack?: number;
+  purchase_unit?: ItemPurchaseUnit | string | null;
   barcode: string | null;
   purchase_price: number;
   trade_price: number;

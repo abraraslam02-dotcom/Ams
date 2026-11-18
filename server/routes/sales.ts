@@ -593,7 +593,7 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
 
     const enriched = items.map((item) => {
       const itemId = Number(item.id);
-      const parsed = parsePacking(String(item.packing || '1x1'));
+      const parsed = parsePacking(String(item.packing || '1x1'), item);
       const itemVars = variantsByParent.get(itemId) || [];
       const hasVariants = Number(item.has_variants || 0) === 1;
       const itemLevelBatches = batchesByVariantKey.get(`${itemId}:0`) || [];
@@ -616,7 +616,10 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
       const defaultBatch = defaultSourceBatches[0] || null;
 
       const enrichedVariants = itemVars.map((v) => {
-        const vParsed = parsePacking(String(v.effective_packing || item.packing || '1x1'));
+        const vParsed = parsePacking(
+          String(v.effective_packing || item.packing || '1x1'),
+          v.packing ? null : item
+        );
         const vBatches = batchesByVariantKey.get(`${itemId}:${v.id}`) || [];
         const vTotalUnits = vBatches.reduce((sum, b) => sum + Number(b.total_stock_units || 0), 0);
         const vTotalPacks = round2(vTotalUnits / vParsed.unitsPerPack);
@@ -626,6 +629,7 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
           ...v,
           strips_per_box: vParsed.stripsPerBox,
           units_per_strip: vParsed.unitsPerStrip,
+          tablets_per_strip: vParsed.tabletsPerStrip,
           units_per_pack: vParsed.unitsPerPack,
           total_available_units: round2(vTotalUnits),
           total_available_packs: vTotalPacks,
@@ -655,9 +659,13 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
         has_variants: hasVariants ? 1 : 0,
         active_variant_count: enrichedVariants.length,
         variants: enrichedVariants,
+        carton: parsed.carton,
+        boxes_per_carton: parsed.boxesPerCarton,
         strips_per_box: parsed.stripsPerBox,
+        tablets_per_strip: parsed.tabletsPerStrip,
         units_per_strip: parsed.unitsPerStrip,
         units_per_pack: parsed.unitsPerPack,
+        purchase_unit: parsed.purchaseUnit,
         loose_rate: itemMasterLooseRate,
         retail_loose_rate: itemMasterLooseRate,
         wholesale_loose_rate: round2(wholesalePrice / parsed.unitsPerPack),
@@ -1296,7 +1304,7 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Item not found.' });
     }
 
-    const parsed = parsePacking(String(itemRow.packing || '1x1'));
+    const parsed = parsePacking(String(itemRow.packing || '1x1'), itemRow);
     const stockAgg = db
       .prepare(`
         SELECT
@@ -1814,7 +1822,10 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const variantName = variantRow ? (String(variantRow.variant_name || '').trim() || null) : null;
       const useVarCustom = Boolean(variantRow && Number(variantRow.use_parent_pricing ?? 1) === 0);
 
-      const parsed = parsePacking(String(line.packing || variantRow?.packing || itemRow.packing || '1x1'));
+      const parsed = parsePacking(
+        String(line.packing || variantRow?.packing || itemRow.packing || '1x1'),
+        variantRow?.packing ? null : itemRow
+      );
       const quantity = round2(Number(line.quantity ?? line.packs_quantity ?? 0));
       const looseQuantity = round2(Number(line.loose_quantity || 0));
 

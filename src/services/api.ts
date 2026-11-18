@@ -1416,6 +1416,13 @@ export const api = {
       category: item.category || 'Medicine',
       company_name: item.company_name || '',
       packing: item.packing || '1x1',
+      carton: item.carton ? Number(item.carton) : null,
+      boxes_per_carton: item.boxes_per_carton ? Number(item.boxes_per_carton) : null,
+      strips_per_box: item.strips_per_box ? Number(item.strips_per_box) : null,
+      tablets_per_strip: item.tablets_per_strip ? Number(item.tablets_per_strip) : null,
+      units_per_strip: item.units_per_strip || item.tablets_per_strip ? Number(item.units_per_strip || item.tablets_per_strip) : 1,
+      units_per_pack: item.units_per_pack ? Number(item.units_per_pack) : 1,
+      purchase_unit: item.purchase_unit || 'Box',
       purchase_price: round2Local(item.purchase_price || 0),
       trade_price: round2Local(item.trade_price || item.purchase_price || 0),
       wholesale_price: round2Local(item.wholesale_price || item.retail_price || 0),
@@ -3089,9 +3096,26 @@ export const api = {
       const salePrice = Number(item.retail_price ?? item.sale_price ?? item.wholesale_price ?? 0);
       const retailPrice = Number(item.retail_price ?? item.mrp ?? salePrice);
       const defaultBatch = itemBatches.find((b) => b.available_units > 0) || itemBatches[0] || null;
+      const parsedStrips = multMatch
+        ? Math.max(1, parseInt(multMatch[1], 10))
+        : 1;
+      const parsedUnitsPerStrip = multMatch
+        ? Math.max(1, parseInt(multMatch[2], 10))
+        : numMatch
+        ? Math.max(1, parseInt(numMatch[1], 10))
+        : 1;
+      const stripsPerBox = Math.max(1, Number(item.strips_per_box) || parsedStrips);
+      const unitsPerStrip = Math.max(
+        1,
+        Number(item.tablets_per_strip || item.units_per_strip) || parsedUnitsPerStrip
+      );
       return {
         ...item,
+        strips_per_box: stripsPerBox,
+        tablets_per_strip: unitsPerStrip,
+        units_per_strip: unitsPerStrip,
         units_per_pack: upp,
+        purchase_unit: item.purchase_unit || 'Box',
         loose_rate: Number(item.loose_rate || (salePrice / upp).toFixed(2)),
         retail_loose_rate: Number((retailPrice / upp).toFixed(2)),
         total_available_units: totalUnits,

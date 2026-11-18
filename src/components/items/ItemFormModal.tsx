@@ -52,6 +52,13 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     generic_name: '',
     category: 'Tablet',
     packing: '10x10',
+    carton: null,
+    boxes_per_carton: null,
+    strips_per_box: 10,
+    tablets_per_strip: 10,
+    units_per_strip: 10,
+    units_per_pack: 100,
+    purchase_unit: 'Box',
     barcode: '',
     purchase_price: 0,
     trade_price: 0,
@@ -89,6 +96,21 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         editingItem.loose_rate !== undefined && Number(editingItem.loose_rate) > 0
           ? Number(editingItem.loose_rate)
           : calculateLooseRateFromRetail(editingItem.retail_price || 0, editingItem.packing);
+      const matrixMatch = String(editingItem.packing || '').match(/(\d+)\s*[xX*×]\s*(\d+)/);
+      const resolvedStripsPerBox =
+        editingItem.strips_per_box && Number(editingItem.strips_per_box) > 0
+          ? Number(editingItem.strips_per_box)
+          : matrixMatch
+          ? parseInt(matrixMatch[1], 10)
+          : null;
+      const resolvedTabletsPerStrip =
+        editingItem.tablets_per_strip && Number(editingItem.tablets_per_strip) > 0
+          ? Number(editingItem.tablets_per_strip)
+          : editingItem.units_per_strip && Number(editingItem.units_per_strip) > 0
+          ? Number(editingItem.units_per_strip)
+          : matrixMatch
+          ? parseInt(matrixMatch[2], 10)
+          : null;
       setFormData({
         item_code: editingItem.item_code,
         company_name: editingItem.company_name,
@@ -96,6 +118,26 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         generic_name: editingItem.generic_name || '',
         category: editingItem.category,
         packing: editingItem.packing,
+        carton:
+          editingItem.carton !== undefined &&
+          editingItem.carton !== null &&
+          Number(editingItem.carton) > 0
+            ? Number(editingItem.carton)
+            : null,
+        boxes_per_carton:
+          editingItem.boxes_per_carton !== undefined &&
+          editingItem.boxes_per_carton !== null &&
+          Number(editingItem.boxes_per_carton) > 0
+            ? Number(editingItem.boxes_per_carton)
+            : null,
+        strips_per_box: resolvedStripsPerBox,
+        tablets_per_strip: resolvedTabletsPerStrip,
+        units_per_strip: resolvedTabletsPerStrip || 1,
+        units_per_pack:
+          editingItem.units_per_pack && Number(editingItem.units_per_pack) > 0
+            ? Number(editingItem.units_per_pack)
+            : parsePackingUnits(editingItem.packing),
+        purchase_unit: editingItem.purchase_unit || 'Box',
         barcode: editingItem.barcode || '',
         purchase_price: editingItem.purchase_price,
         trade_price: editingItem.trade_price,
@@ -186,16 +228,86 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     }
   };
 
-  const packingUnits = parsePackingUnits(formData.packing);
+  const configuredStrips =
+    formData.strips_per_box && Number(formData.strips_per_box) > 0
+      ? Math.round(Number(formData.strips_per_box))
+      : null;
+  const configuredTablets =
+    formData.tablets_per_strip && Number(formData.tablets_per_strip) > 0
+      ? Math.round(Number(formData.tablets_per_strip))
+      : null;
+  const packingUnits =
+    configuredStrips && configuredTablets
+      ? configuredStrips * configuredTablets
+      : configuredTablets
+      ? configuredTablets
+      : parsePackingUnits(formData.packing);
   const calculatedLooseRetailPrice =
     packingUnits > 0 && formData.retail_price > 0
-      ? calculateLooseRateFromRetail(formData.retail_price, formData.packing)
+      ? Math.round(((formData.retail_price / packingUnits) + Number.EPSILON) * 100) / 100
       : formData.retail_price;
   const looseRetailPrice = looseRateTouched
     ? Number(formData.loose_rate || 0)
     : formData.loose_rate !== undefined && Number(formData.loose_rate) > 0
     ? Number(formData.loose_rate)
     : calculatedLooseRetailPrice;
+
+  const updateMultiLevelPacking = (
+    changes: Partial<
+      Pick<
+        ItemFormData,
+        'carton' | 'boxes_per_carton' | 'strips_per_box' | 'tablets_per_strip' | 'purchase_unit'
+      >
+    >
+  ) => {
+    setFormData((prev) => {
+      const next = { ...prev, ...changes };
+      const nextStrips =
+        next.strips_per_box !== undefined && next.strips_per_box !== null && Number(next.strips_per_box) > 0
+          ? Math.round(Number(next.strips_per_box))
+          : null;
+      const nextTablets =
+        next.tablets_per_strip !== undefined && next.tablets_per_strip !== null && Number(next.tablets_per_strip) > 0
+          ? Math.round(Number(next.tablets_per_strip))
+          : null;
+
+      let nextPacking = prev.packing;
+      const isMatrixOrDefault =
+        !nextPacking.trim() ||
+        nextPacking.trim() === '1x1' ||
+        /^\d+\s*[xX*×]\s*\d+$/.test(nextPacking.trim());
+
+      if (nextStrips && nextTablets && isMatrixOrDefault) {
+        nextPacking = `${nextStrips}x${nextTablets}`;
+      } else if (nextTablets && !nextStrips && isMatrixOrDefault) {
+        nextPacking = `1x${nextTablets}`;
+      } else if (nextStrips && !nextTablets && isMatrixOrDefault) {
+        nextPacking = `${nextStrips}x1`;
+      }
+
+      const nextUnitsPerStrip = nextTablets || 1;
+      const nextUnitsPerPack =
+        nextStrips && nextTablets
+          ? nextStrips * nextTablets
+          : nextTablets
+          ? nextTablets
+          : parsePackingUnits(nextPacking);
+
+      const nextLooseRate = !looseRateTouched
+        ? prev.retail_price > 0
+          ? Math.round(((prev.retail_price / Math.max(1, nextUnitsPerPack)) + Number.EPSILON) * 100) / 100
+          : 0
+        : prev.loose_rate;
+
+      return {
+        ...next,
+        packing: nextPacking,
+        units_per_strip: nextUnitsPerStrip,
+        units_per_pack: nextUnitsPerPack,
+        loose_rate: nextLooseRate,
+      };
+    });
+  };
 
   const submitItem = async (openVariantsAfterSave = false) => {
     setFormError(null);
@@ -226,6 +338,21 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
       setSaving(true);
       const payload = {
         ...formData,
+        carton:
+          formData.carton !== undefined && formData.carton !== null && Number(formData.carton) > 0
+            ? Number(formData.carton)
+            : null,
+        boxes_per_carton:
+          formData.boxes_per_carton !== undefined &&
+          formData.boxes_per_carton !== null &&
+          Number(formData.boxes_per_carton) > 0
+            ? Math.round(Number(formData.boxes_per_carton))
+            : null,
+        strips_per_box: configuredStrips,
+        tablets_per_strip: configuredTablets,
+        units_per_strip: configuredTablets || 1,
+        units_per_pack: packingUnits,
+        purchase_unit: formData.purchase_unit || 'Box',
         has_variants: Number(formData.has_variants) === 1 ? 1 : 0,
       };
       const res =
@@ -483,18 +610,139 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
             </div>
           </div>
 
-          {/* Section 2: Packing (Loose & Full Pack Support) */}
-          <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200/80 space-y-2">
-            <div className="flex items-center justify-between">
+          {/* Section 2: Multi-Level Packing Configuration & Purchase Units */}
+          <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200/80 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-900 flex items-center gap-1.5">
                 <Calculator className="w-4 h-4 text-emerald-700" />
-                <span>2. Packing & Loose/Full Pack Conversion</span>
+                <span>2. Multi-Level Packing Configuration & Purchase Units</span>
               </h4>
-              <span className="text-[11px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded">
-                Units/Pack: {packingUnits}
-              </span>
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                {formData.boxes_per_carton && Number(formData.boxes_per_carton) > 0 && (
+                  <span className="font-semibold text-teal-800 bg-teal-100/80 border border-teal-200 px-2 py-0.5 rounded">
+                    {Number(formData.carton || 1)} Carton = {Number(formData.boxes_per_carton)} Boxes
+                  </span>
+                )}
+                {configuredStrips && (
+                  <span className="font-semibold text-emerald-800 bg-emerald-100/80 border border-emerald-200 px-2 py-0.5 rounded">
+                    1 Box = {configuredStrips} Strips
+                  </span>
+                )}
+                {configuredTablets && (
+                  <span className="font-semibold text-sky-800 bg-sky-100/80 border border-sky-200 px-2 py-0.5 rounded">
+                    1 Strip = {configuredTablets} Tablets
+                  </span>
+                )}
+                <span className="font-bold text-emerald-900 bg-emerald-200/70 px-2 py-0.5 rounded">
+                  Units/Pack: {packingUnits}
+                </span>
+              </div>
             </div>
 
+            {/* Row 1: Optional Multi-Level Packing Hierarchy + Purchase Unit */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
+              <div className="space-y-1">
+                <label className="block text-[11px] font-semibold text-slate-700">
+                  Carton <span className="text-slate-400 font-normal">(Optional)</span>
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  value={formData.carton ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateMultiLevelPacking({
+                      carton: raw === '' ? null : Math.max(0, Number(raw)),
+                    });
+                  }}
+                  placeholder="e.g. 1"
+                  className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[11px] font-semibold text-slate-700">
+                  Boxes / Carton <span className="text-slate-400 font-normal">(Optional)</span>
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  value={formData.boxes_per_carton ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateMultiLevelPacking({
+                      boxes_per_carton: raw === '' ? null : Math.max(0, Math.round(Number(raw))),
+                    });
+                  }}
+                  placeholder="e.g. 100"
+                  className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[11px] font-semibold text-slate-700">
+                  Strips / Box <span className="text-slate-400 font-normal">(Optional)</span>
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  value={formData.strips_per_box ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateMultiLevelPacking({
+                      strips_per_box: raw === '' ? null : Math.max(0, Math.round(Number(raw))),
+                    });
+                  }}
+                  placeholder="e.g. 10"
+                  className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[11px] font-semibold text-slate-700">
+                  Tablets / Strip <span className="text-slate-400 font-normal">(Optional)</span>
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="1"
+                  value={formData.tablets_per_strip ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    updateMultiLevelPacking({
+                      tablets_per_strip: raw === '' ? null : Math.max(0, Math.round(Number(raw))),
+                    });
+                  }}
+                  placeholder="e.g. 10"
+                  className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[11px] font-semibold text-slate-800">
+                  Purchase Unit
+                </label>
+                <select
+                  value={formData.purchase_unit || 'Box'}
+                  onChange={(e) =>
+                    updateMultiLevelPacking({
+                      purchase_unit: e.target.value as 'Carton' | 'Box' | 'Strip' | 'Tablet',
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 text-xs font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                >
+                  <option value="Box">Box</option>
+                  <option value="Carton">Carton</option>
+                  <option value="Strip">Strip</option>
+                  <option value="Tablet">Tablet</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Row 2: Packing Specification & Live Price Preview */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
               <div className="space-y-1">
                 <label className="block text-xs font-semibold text-slate-800">
@@ -506,9 +754,16 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   value={formData.packing}
                   onChange={(e) => {
                     const nextPacking = e.target.value;
+                    const matrix = nextPacking.trim().match(/^(\d+)\s*[xX*×]\s*(\d+)$/);
+                    const parsedStrips = matrix ? Math.max(1, parseInt(matrix[1], 10)) : formData.strips_per_box;
+                    const parsedTablets = matrix ? Math.max(1, parseInt(matrix[2], 10)) : formData.tablets_per_strip;
                     setFormData((prev) => ({
                       ...prev,
                       packing: nextPacking,
+                      strips_per_box: parsedStrips,
+                      tablets_per_strip: parsedTablets,
+                      units_per_strip: parsedTablets && Number(parsedTablets) > 0 ? Number(parsedTablets) : 1,
+                      units_per_pack: parsePackingUnits(nextPacking),
                       loose_rate: !looseRateTouched
                         ? calculateLooseRateFromRetail(prev.retail_price, nextPacking)
                         : prev.loose_rate,
@@ -518,7 +773,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   className="w-full px-3 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
                 <p className="text-[10px] text-slate-500">
-                  Formats: 10x10 (10 strips of 10 = 100), 1x1 (Syrup), 10 (Ampoules)
+                  Synced with Strips/Box &times; Tablets/Strip (e.g. 10x10 = 100 tablets)
                 </p>
               </div>
 
@@ -527,7 +782,9 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                 <span className="text-sm font-bold text-slate-900 font-mono">
                   Rs. {formData.retail_price.toFixed(2)}
                 </span>
-                <span className="text-[10px] text-emerald-700">Per Box / Pack</span>
+                <span className="text-[10px] text-emerald-700">
+                  Per {formData.purchase_unit || 'Box'} / Pack
+                </span>
               </div>
 
               <div className="p-2.5 rounded-lg bg-white border border-emerald-200 flex flex-col justify-center">
@@ -535,7 +792,9 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                 <span className="text-sm font-bold text-emerald-700 font-mono">
                   Rs. {looseRetailPrice.toFixed(2)}
                 </span>
-                <span className="text-[10px] text-slate-500">Per Tablet / Unit</span>
+                <span className="text-[10px] text-slate-500">
+                  Per Tablet / Unit {configuredTablets ? `(1 Strip = ${configuredTablets})` : ''}
+                </span>
               </div>
             </div>
           </div>

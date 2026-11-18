@@ -26,6 +26,13 @@ export interface ItemRow {
   generic_name: string | null;
   category: string;
   packing: string;
+  carton?: number | null;
+  boxes_per_carton?: number | null;
+  strips_per_box?: number | null;
+  tablets_per_strip?: number | null;
+  units_per_strip?: number | null;
+  units_per_pack?: number | null;
+  purchase_unit?: string | null;
   barcode: string | null;
   purchase_price: number;
   trade_price: number;
@@ -63,6 +70,135 @@ function parseUnitsFromPacking(packingStr: string): number {
     }
   }
   return 1;
+}
+
+function parseOptionalPositiveInt(val: unknown): number | null {
+  if (val === undefined || val === null || String(val).trim() === '') return null;
+  const n = Math.round(Number(val));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function parseOptionalPositiveFloat(val: unknown): number | null {
+  if (val === undefined || val === null || String(val).trim() === '') return null;
+  const n = round2(Number(val));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function normalizePurchaseUnit(val: unknown, fallback: string = 'Box'): 'Carton' | 'Box' | 'Strip' | 'Tablet' {
+  const clean = String(val || fallback || 'Box').trim();
+  if (clean === 'Carton' || clean === 'Box' || clean === 'Strip' || clean === 'Tablet') {
+    return clean;
+  }
+  return 'Box';
+}
+
+function resolveMultiLevelPackingConfig(
+  input: {
+    packing?: unknown;
+    carton?: unknown;
+    boxes_per_carton?: unknown;
+    strips_per_box?: unknown;
+    tablets_per_strip?: unknown;
+    units_per_strip?: unknown;
+    units_per_pack?: unknown;
+    purchase_unit?: unknown;
+  },
+  existing?: Partial<ItemRow>
+) {
+  const carton =
+    input.carton !== undefined
+      ? parseOptionalPositiveFloat(input.carton)
+      : parseOptionalPositiveFloat(existing?.carton);
+  const boxesPerCarton =
+    input.boxes_per_carton !== undefined
+      ? parseOptionalPositiveInt(input.boxes_per_carton)
+      : parseOptionalPositiveInt(existing?.boxes_per_carton);
+  let stripsPerBox =
+    input.strips_per_box !== undefined
+      ? parseOptionalPositiveInt(input.strips_per_box)
+      : parseOptionalPositiveInt(existing?.strips_per_box);
+  let tabletsPerStrip =
+    input.tablets_per_strip !== undefined
+      ? parseOptionalPositiveInt(input.tablets_per_strip)
+      : input.units_per_strip !== undefined
+      ? parseOptionalPositiveInt(input.units_per_strip)
+      : parseOptionalPositiveInt(existing?.tablets_per_strip ?? existing?.units_per_strip);
+
+  const purchaseUnit = normalizePurchaseUnit(input.purchase_unit, existing?.purchase_unit || 'Box');
+
+  let finalPacking =
+    input.packing !== undefined && String(input.packing).trim() !== ''
+      ? String(input.packing).trim()
+      : String(existing?.packing || '').trim();
+
+  const matrixMatch = finalPacking.match(/^(\d+)\s*[xX*×]\s*(\d+)$/);
+
+  if (stripsPerBox && tabletsPerStrip) {
+    if (!finalPacking || finalPacking === '1x1' || matrixMatch) {
+      finalPacking = `${stripsPerBox}x${tabletsPerStrip}`;
+    }
+  } else if (tabletsPerStrip && !stripsPerBox) {
+    if (!finalPacking || finalPacking === '1x1') {
+      finalPacking = `1x${tabletsPerStrip}`;
+    }
+  } else if (stripsPerBox && !tabletsPerStrip) {
+    if (!finalPacking || finalPacking === '1x1') {
+      finalPacking = `${stripsPerBox}x1`;
+    }
+  }
+
+  if (!finalPacking) {
+    finalPacking = '1x1';
+  }
+
+  const resolvedMatrix = finalPacking.match(/(\d+)\s*[xX*×]\s*(\d+)/);
+  if (resolvedMatrix) {
+    if (!stripsPerBox) {
+      stripsPerBox = Math.max(1, parseInt(resolvedMatrix[1], 10) || 1);
+    }
+    if (!tabletsPerStrip) {
+      tabletsPerStrip = Math.max(1, parseInt(resolvedMatrix[2], 10) || 1);
+    }
+  }
+
+  const effStrips = stripsPerBox && stripsPerBox > 0 ? stripsPerBox : 1;
+  const effTablets =
+    tabletsPerStrip && tabletsPerStrip > 0
+      ? tabletsPerStrip
+      : resolvedMatrix
+      ? Math.max(1, parseInt(resolvedMatrix[2], 10) || 1)
+      : parseUnitsFromPacking(finalPacking);
+  const unitsPerStrip = Math.max(1, effTablets);
+  const unitsPerPack =
+    stripsPerBox || tabletsPerStrip
+      ? Math.max(1, effStrips * effTablets)
+      : Math.max(1, parseUnitsFromPacking(finalPacking));
+
+  return {
+    packing: finalPacking,
+    carton,
+    boxes_per_carton: boxesPerCarton,
+    strips_per_box: stripsPerBox,
+    tablets_per_strip: tabletsPerStrip,
+    units_per_strip: unitsPerStrip,
+    units_per_pack: unitsPerPack,
+    purchase_unit: purchaseUnit,
+  };
+}
+
+function enrichItemWithPacking(it: ItemRow) {
+  const resolved = resolveMultiLevelPackingConfig({}, it);
+  return {
+    ...it,
+    packing: resolved.packing,
+    carton: resolved.carton,
+    boxes_per_carton: resolved.boxes_per_carton,
+    strips_per_box: resolved.strips_per_box ?? 1,
+    tablets_per_strip: resolved.tablets_per_strip ?? resolved.units_per_strip,
+    units_per_strip: resolved.units_per_strip,
+    units_per_pack: resolved.units_per_pack,
+    purchase_unit: resolved.purchase_unit,
+  };
 }
 
 export function calculateRetailPriceFromPurchase(purchasePrice: number): {
@@ -210,7 +346,7 @@ itemsRouter.get('/', (req: Request, res: Response) => {
       }
 
       return {
-        ...it,
+        ...enrichItemWithPacking(it),
         has_variants: hasVariants ? 1 : 0,
         image_url: String(it.image_url || ''),
         thumbnail_url: String(it.thumbnail_url || it.image_url || ''),
@@ -1113,7 +1249,7 @@ itemsRouter.get('/:id', (req: Request, res: Response) => {
     return res.json({
       success: true,
       item: {
-        ...item,
+        ...enrichItemWithPacking(item),
         has_variants: hasVariants ? 1 : 0,
         image_url: String(item.image_url || ''),
         thumbnail_url: String(item.thumbnail_url || item.image_url || ''),
@@ -1143,6 +1279,13 @@ itemsRouter.post('/', (req: Request, res: Response) => {
       generic_name = '',
       category,
       packing = '1x1',
+      carton,
+      boxes_per_carton,
+      strips_per_box,
+      tablets_per_strip,
+      units_per_strip,
+      units_per_pack,
+      purchase_unit = 'Box',
       barcode = '',
       purchase_price = 0,
       trade_price = 0,
@@ -1171,7 +1314,19 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     if (!category || String(category).trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Category is required.' });
     }
-    if (!packing || String(packing).trim().length === 0) {
+
+    const packingConfig = resolveMultiLevelPackingConfig({
+      packing,
+      carton,
+      boxes_per_carton,
+      strips_per_box,
+      tablets_per_strip,
+      units_per_strip,
+      units_per_pack,
+      purchase_unit,
+    });
+
+    if (!packingConfig.packing || String(packingConfig.packing).trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Packing is required.' });
     }
 
@@ -1191,7 +1346,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     const tPrice = Math.round((parseFloat(trade_price) || 0.0) * 100) / 100;
     const wPrice = Math.round((parseFloat(wholesale_price) || 0.0) * 100) / 100;
     const rPrice = Math.round((parseFloat(retail_price) || 0.0) * 100) / 100;
-    const packingUnits = parseUnitsFromPacking(String(packing));
+    const packingUnits = Math.max(1, packingConfig.units_per_pack);
     const parsedLoose = loose_rate !== undefined && loose_rate !== null && String(loose_rate).trim() !== ''
       ? parseFloat(loose_rate)
       : NaN;
@@ -1215,10 +1370,11 @@ itemsRouter.post('/', (req: Request, res: Response) => {
 
       const insertSql = `
         INSERT INTO items (
-          item_code, company_name, item_name, generic_name, category, packing, barcode,
-          purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+          item_code, company_name, item_name, generic_name, category, packing,
+          carton, boxes_per_carton, strips_per_box, tablets_per_strip, units_per_strip, units_per_pack, purchase_unit,
+          barcode, purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
           opening_stock, minimum_stock, rack_number, has_variants, image_id, image_url, thumbnail_url, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
       const result = db.prepare(insertSql).run(
@@ -1227,7 +1383,14 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         String(item_name).trim(),
         generic_name ? String(generic_name).trim() : null,
         String(category).trim(),
-        String(packing).trim(),
+        packingConfig.packing,
+        packingConfig.carton,
+        packingConfig.boxes_per_carton,
+        packingConfig.strips_per_box,
+        packingConfig.tablets_per_strip,
+        packingConfig.units_per_strip,
+        packingConfig.units_per_pack,
+        packingConfig.purchase_unit,
         cleanBarcode || null,
         pPrice,
         tPrice,
@@ -1260,7 +1423,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     return res.status(201).json({
       success: true,
       message: `Item "${newItem.item_name}" (${newItem.item_code}) created successfully.`,
-      item: { ...newItem, variants: [] },
+      item: { ...enrichItemWithPacking(newItem), variants: [] },
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -1289,6 +1452,13 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       generic_name,
       category,
       packing,
+      carton,
+      boxes_per_carton,
+      strips_per_box,
+      tablets_per_strip,
+      units_per_strip,
+      units_per_pack,
+      purchase_unit,
       barcode,
       purchase_price,
       trade_price,
@@ -1350,12 +1520,26 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       }
     }
 
+    const packingConfig = resolveMultiLevelPackingConfig(
+      {
+        packing,
+        carton,
+        boxes_per_carton,
+        strips_per_box,
+        tablets_per_strip,
+        units_per_strip,
+        units_per_pack,
+        purchase_unit,
+      },
+      existingItem
+    );
+
     const pPrice = purchase_price !== undefined ? Math.round((parseFloat(purchase_price) || 0.0) * 100) / 100 : existingItem.purchase_price;
     const tPrice = trade_price !== undefined ? Math.round((parseFloat(trade_price) || 0.0) * 100) / 100 : existingItem.trade_price;
     const wPrice = wholesale_price !== undefined ? Math.round((parseFloat(wholesale_price) || 0.0) * 100) / 100 : existingItem.wholesale_price;
     const rPrice = retail_price !== undefined ? Math.round((parseFloat(retail_price) || 0.0) * 100) / 100 : existingItem.retail_price;
-    const finalPacking = packing !== undefined ? String(packing).trim() : existingItem.packing;
-    const packingUnits = parseUnitsFromPacking(finalPacking);
+    const finalPacking = packingConfig.packing;
+    const packingUnits = Math.max(1, packingConfig.units_per_pack);
     const existingLoose = Number(existingItem.loose_rate || 0) > 0
       ? round2(Number(existingItem.loose_rate))
       : round2(rPrice / Math.max(1, packingUnits));
@@ -1394,6 +1578,13 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
         generic_name = ?,
         category = ?,
         packing = ?,
+        carton = ?,
+        boxes_per_carton = ?,
+        strips_per_box = ?,
+        tablets_per_strip = ?,
+        units_per_strip = ?,
+        units_per_pack = ?,
+        purchase_unit = ?,
         barcode = ?,
         purchase_price = ?,
         trade_price = ?,
@@ -1426,6 +1617,13 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       generic_name !== undefined ? (generic_name ? String(generic_name).trim() : null) : existingItem.generic_name,
       category !== undefined ? String(category).trim() : existingItem.category,
       finalPacking,
+      packingConfig.carton,
+      packingConfig.boxes_per_carton,
+      packingConfig.strips_per_box,
+      packingConfig.tablets_per_strip,
+      packingConfig.units_per_strip,
+      packingConfig.units_per_pack,
+      packingConfig.purchase_unit,
       nextBarcode,
       pPrice,
       tPrice,
@@ -1445,6 +1643,22 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       id
     );
 
+    // Sync non-variant inventory batch packing metadata (strips_per_box, units_per_strip, units_per_pack) without altering stock counts
+    db.prepare(`
+      UPDATE inventory
+      SET packing = ?,
+          strips_per_box = ?,
+          units_per_strip = ?,
+          units_per_pack = ?
+      WHERE item_id = ? AND COALESCE(variant_key, 0) = 0
+    `).run(
+      finalPacking,
+      Math.max(1, Number(packingConfig.strips_per_box || 1)),
+      Math.max(1, Number(packingConfig.units_per_strip || 1)),
+      Math.max(1, Number(packingConfig.units_per_pack || 1)),
+      id
+    );
+
     // Changing Main Product picture never overwrites custom variant pictures; clean up unused old image only if unreferenced
     if (oldImgId && oldImgId !== nextImageId) {
       deleteUnusedProductImage(oldImgId, oldImgUrl);
@@ -1456,7 +1670,7 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
     return res.json({
       success: true,
       message: `Item "${updatedItem.item_name}" updated successfully.`,
-      item: { ...updatedItem, variants },
+      item: { ...enrichItemWithPacking(updatedItem), variants },
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
