@@ -210,14 +210,14 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
               <Package className="w-4 h-4" />
             </div>
             <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-              Items Master (Abrar Medical Store)
+              Item Registration &amp; Items Master (Abrar Medical Store)
             </h2>
             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-              Active Module
+              Multi-Level Packing Active
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Strict 17-field catalog • Decimal PKR pricing • Loose & full packing conversion • Excel Import/Export
+            Multi-Level Packing (Carton, Boxes/Carton, Strips/Box, Tablets/Strip &amp; Purchase Unit) • Decimal PKR pricing • Excel Import/Export
           </p>
         </div>
 
@@ -266,7 +266,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
             className="px-4 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Add New Item</span>
+            <span>Item Registration / Add Item</span>
           </button>
         </div>
       </div>
@@ -657,10 +657,36 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
                         </span>
                       </td>
 
-                      {/* Packing (Loose & Full Pack support) */}
+                      {/* Packing (Multi-Level Packing & Loose support) */}
                       <td className="py-2 px-3 whitespace-nowrap">
-                        <div className="flex flex-col">
-                          <span className="font-mono font-bold text-slate-800">{item.packing}</span>
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono font-bold text-slate-800">{item.packing}</span>
+                            {item.purchase_unit && (
+                              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                {item.purchase_unit}
+                              </span>
+                            )}
+                          </div>
+                          {(Number(item.boxes_per_carton || 0) > 0 ||
+                            Number(item.strips_per_box || 0) > 0 ||
+                            Number(item.tablets_per_strip || 0) > 0) && (
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              {[
+                                Number(item.boxes_per_carton || 0) > 0
+                                  ? `${Number(item.carton || 1)}C=${Number(item.boxes_per_carton)}B`
+                                  : null,
+                                Number(item.strips_per_box || 0) > 0
+                                  ? `1B=${Number(item.strips_per_box)}S`
+                                  : null,
+                                Number(item.tablets_per_strip || 0) > 0
+                                  ? `1S=${Number(item.tablets_per_strip)}T`
+                                  : null,
+                              ]
+                                .filter(Boolean)
+                                .join(' • ')}
+                            </span>
+                          )}
                           <span className="text-[10px] text-emerald-700" title="Loose unit rate">
                             Rs. {loosePrice.toFixed(2)} /unit
                           </span>

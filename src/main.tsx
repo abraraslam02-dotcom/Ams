@@ -74,7 +74,7 @@ async function warmOfflineAppShellCache() {
       await navigator.serviceWorker.ready.catch(() => {});
     }
     const cacheNames = await window.caches.keys();
-    const activeCacheName = cacheNames.find((name) => name.startsWith('ams-runtime-v12-'));
+    const activeCacheName = cacheNames.find((name) => name.startsWith('ams-runtime-v13-'));
     if (!activeCacheName) return;
     const cache = await window.caches.open(activeCacheName);
     const urlsToWarm = new Set<string>([

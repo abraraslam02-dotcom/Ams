@@ -3,7 +3,6 @@ import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
-import {VitePWA} from 'vite-plugin-pwa';
 
 function computeBuildHash(input: string): string {
   let hash = 2166136261;
@@ -30,9 +29,9 @@ function buildOfflineFirstSwScript(assetUrls: string[], buildHash: string): stri
   ];
   const uniqueUrls = Array.from(new Set(baseUrls));
 
-  return `// AMS Service Worker v12 (Build ${buildHash} - Auto-Updating Offline-First App Shell)
-const SW_VERSION = 'ams-sw-v12-${buildHash}';
-const RUNTIME_CACHE = 'ams-runtime-v12-${buildHash}';
+  return `// AMS Service Worker v13 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v13-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v13-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -42,9 +41,13 @@ self.addEventListener('install', (event) => {
       await Promise.allSettled(
         PRECACHE_URLS.map(async (url) => {
           try {
-            const req = new Request(url, { cache: 'no-store' });
-            const res = await fetch(req);
-            if (res && res.status === 200) {
+            const res = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+            if (
+              res &&
+              res.status === 200 &&
+              !res.redirected &&
+              !String(res.url || '').includes('__cookie_check')
+            ) {
               await cache.put(url, res.clone());
             }
           } catch (e) {}
@@ -57,17 +60,31 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
+    let deletedLegacyCache = false;
     try {
       const keys = await caches.keys();
       for (const key of keys) {
         if (key !== RUNTIME_CACHE) {
+          deletedLegacyCache = true;
           await caches.delete(key);
         }
       }
       await self.clients.claim();
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
-        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, buildHash: '${buildHash}' });
+        try {
+          client.postMessage({
+            type: 'AMS_SW_ACTIVATED',
+            version: SW_VERSION,
+            buildHash: '${buildHash}',
+            deletedLegacy: deletedLegacyCache,
+          });
+        } catch (e) {}
+        if (deletedLegacyCache && 'navigate' in client && client.url) {
+          try {
+            await client.navigate(client.url);
+          } catch (e) {}
+        }
       }
     } catch (err) {}
   })());
@@ -85,6 +102,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (
+    url.pathname.startsWith('/__') ||
+    url.pathname.startsWith('/api/') ||
     url.pathname === '/sw.js' ||
     url.pathname === '/dev-sw.js' ||
     url.pathname === '/registerSW.js' ||
@@ -92,33 +111,28 @@ self.addEventListener('fetch', (event) => {
   ) {
     return;
   }
-  if (url.pathname.startsWith('/api/')) return;
 
-  // Navigation requests (HTML app shell for / and /salesman): Network-first with no-store so updates show immediately
+  // Navigation requests (HTML app shell): Network-first using original req so browser handles redirects/cookies natively
   const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
   if (isNav) {
     event.respondWith((async () => {
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15000);
-        const networkRequest = new Request(req.url, {
-          method: 'GET',
-          headers: req.headers,
-          cache: 'no-store',
-          credentials: req.credentials,
-          redirect: req.redirect,
-        });
-        const networkResponse = await fetch(networkRequest, { signal: controller.signal });
-        clearTimeout(timer);
-        if (networkResponse && networkResponse.status === 200) {
-          const cache = await caches.open(RUNTIME_CACHE);
-          cache.put(req, networkResponse.clone()).catch(() => {});
-          cache.put('/index.html', networkResponse.clone()).catch(() => {});
-          cache.put('/', networkResponse.clone()).catch(() => {});
+        const networkResponse = await fetch(req);
+        if (networkResponse) {
+          if (
+            networkResponse.status === 200 &&
+            !networkResponse.redirected &&
+            !String(networkResponse.url || '').includes('__cookie_check')
+          ) {
+            const cache = await caches.open(RUNTIME_CACHE);
+            cache.put(req, networkResponse.clone()).catch(() => {});
+            cache.put('/index.html', networkResponse.clone()).catch(() => {});
+            cache.put('/', networkResponse.clone()).catch(() => {});
+          }
           return networkResponse;
         }
       } catch (err) {
-        // Offline or network timeout -> fall back to cached HTML shell
+        // Offline fallback
       }
       const cache = await caches.open(RUNTIME_CACHE);
       const cachedExact = await cache.match(req, { ignoreSearch: true });
@@ -131,34 +145,24 @@ self.addEventListener('fetch', (event) => {
       if (cachedIndex) return cachedIndex;
       const cachedRoot = await cache.match('/', { ignoreSearch: true });
       if (cachedRoot) return cachedRoot;
-      return new Response('Offline - App Shell Not Cached Yet', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+      return new Response('Offline - App Shell Not Cached Yet', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain' },
+      });
     })());
     return;
   }
 
-  // Hashed static bundles (/assets/*) and icons: Cache-First (content-hashed filenames guarantee immutability)
-  if (url.pathname.startsWith('/assets/') || /\\.(png|svg|ico|woff2?|ttf)$/i.test(url.pathname)) {
-    event.respondWith((async () => {
-      const cache = await caches.open(RUNTIME_CACHE);
-      const cached = (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true }));
-      if (cached) {
-        return cached;
-      }
-      const netRes = await fetch(req);
-      if (netRes && netRes.status === 200) {
-        cache.put(req, netRes.clone()).catch(() => {});
-      }
-      return netRes;
-    })());
-    return;
-  }
-
-  // All other same-origin GET requests: Network-First with Cache Fallback
+  // All static assets & same-origin GET requests: Network-first with offline cache fallback
   event.respondWith((async () => {
     const cache = await caches.open(RUNTIME_CACHE);
     try {
-      const networkResponse = await fetch(new Request(req, { cache: 'no-store' }));
-      if (networkResponse && networkResponse.status === 200) {
+      const networkResponse = await fetch(req);
+      if (
+        networkResponse &&
+        networkResponse.status === 200 &&
+        !String(networkResponse.url || '').includes('__cookie_check')
+      ) {
         cache.put(req, networkResponse.clone()).catch(() => {});
       }
       return networkResponse;
@@ -177,62 +181,6 @@ export default defineConfig(() => {
     plugins: [
       react(),
       tailwindcss(),
-      VitePWA({
-        registerType: 'autoUpdate',
-        includeAssets: [
-          'icon.svg',
-          'apple-touch-icon.png',
-          'pwa-192x192.png',
-          'pwa-512x512.png',
-          'pwa-maskable-512x512.png',
-        ],
-        manifest: {
-          id: '/',
-          name: 'Abrar Medical Store (AMS) - POS & ERP',
-          short_name: 'AMS ERP',
-          description:
-            'Offline-First Desktop Point of Sale (POS), Billing, Inventory & Accounting System for Abrar Medical Store.',
-          theme_color: '#065f46',
-          background_color: '#0f172a',
-          display: 'standalone',
-          orientation: 'any',
-          start_url: '/',
-          scope: '/',
-          categories: ['business', 'finance', 'medical', 'productivity'],
-          icons: [
-            {
-              src: '/pwa-192x192.png',
-              sizes: '192x192',
-              type: 'image/png',
-              purpose: 'any',
-            },
-            {
-              src: '/pwa-512x512.png',
-              sizes: '512x512',
-              type: 'image/png',
-              purpose: 'any',
-            },
-            {
-              src: '/pwa-maskable-512x512.png',
-              sizes: '512x512',
-              type: 'image/png',
-              purpose: 'maskable',
-            },
-          ],
-        },
-        workbox: {
-          globPatterns: [],
-          cleanupOutdatedCaches: true,
-          clientsClaim: true,
-          skipWaiting: true,
-          navigateFallback: null,
-        },
-        devOptions: {
-          enabled: false,
-          type: 'module',
-          resolveTempFolder: () => '/tmp/ams-pwa-dev-dist',
-        },
-      }),
       {
         name: 'ams-network-first-sw',
         enforce: 'post',
@@ -283,3 +231,4 @@ export default defineConfig(() => {
     },
   };
 });
+

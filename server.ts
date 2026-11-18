@@ -254,9 +254,9 @@ async function startServer() {
     ];
     const uniqueUrls = Array.from(new Set(baseUrls));
 
-    return `// AMS Service Worker v12 (Build ${buildHash} - Auto-Updating Offline-First App Shell)
-const SW_VERSION = 'ams-sw-v12-${buildHash}';
-const RUNTIME_CACHE = 'ams-runtime-v12-${buildHash}';
+    return `// AMS Service Worker v13 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v13-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v13-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -266,9 +266,13 @@ self.addEventListener('install', (event) => {
       await Promise.allSettled(
         PRECACHE_URLS.map(async (url) => {
           try {
-            const req = new Request(url, { cache: 'no-store' });
-            const res = await fetch(req);
-            if (res && res.status === 200) {
+            const res = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+            if (
+              res &&
+              res.status === 200 &&
+              !res.redirected &&
+              !String(res.url || '').includes('__cookie_check')
+            ) {
               await cache.put(url, res.clone());
             }
           } catch (e) {}
@@ -281,17 +285,31 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
+    let deletedLegacyCache = false;
     try {
       const keys = await caches.keys();
       for (const key of keys) {
         if (key !== RUNTIME_CACHE) {
+          deletedLegacyCache = true;
           await caches.delete(key);
         }
       }
       await self.clients.claim();
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
-        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, buildHash: '${buildHash}' });
+        try {
+          client.postMessage({
+            type: 'AMS_SW_ACTIVATED',
+            version: SW_VERSION,
+            buildHash: '${buildHash}',
+            deletedLegacy: deletedLegacyCache,
+          });
+        } catch (e) {}
+        if (deletedLegacyCache && 'navigate' in client && client.url) {
+          try {
+            await client.navigate(client.url);
+          } catch (e) {}
+        }
       }
     } catch (err) {}
   })());
@@ -309,6 +327,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (
+    url.pathname.startsWith('/__') ||
+    url.pathname.startsWith('/api/') ||
     url.pathname === '/sw.js' ||
     url.pathname === '/dev-sw.js' ||
     url.pathname === '/registerSW.js' ||
@@ -316,28 +336,23 @@ self.addEventListener('fetch', (event) => {
   ) {
     return;
   }
-  if (url.pathname.startsWith('/api/')) return;
 
   const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
   if (isNav) {
     event.respondWith((async () => {
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15000);
-        const networkRequest = new Request(req.url, {
-          method: 'GET',
-          headers: req.headers,
-          cache: 'no-store',
-          credentials: req.credentials,
-          redirect: req.redirect,
-        });
-        const networkResponse = await fetch(networkRequest, { signal: controller.signal });
-        clearTimeout(timer);
-        if (networkResponse && networkResponse.status === 200) {
-          const cache = await caches.open(RUNTIME_CACHE);
-          cache.put(req, networkResponse.clone()).catch(() => {});
-          cache.put('/index.html', networkResponse.clone()).catch(() => {});
-          cache.put('/', networkResponse.clone()).catch(() => {});
+        const networkResponse = await fetch(req);
+        if (networkResponse) {
+          if (
+            networkResponse.status === 200 &&
+            !networkResponse.redirected &&
+            !String(networkResponse.url || '').includes('__cookie_check')
+          ) {
+            const cache = await caches.open(RUNTIME_CACHE);
+            cache.put(req, networkResponse.clone()).catch(() => {});
+            cache.put('/index.html', networkResponse.clone()).catch(() => {});
+            cache.put('/', networkResponse.clone()).catch(() => {});
+          }
           return networkResponse;
         }
       } catch (err) {}
@@ -352,23 +367,10 @@ self.addEventListener('fetch', (event) => {
       if (cachedIndex) return cachedIndex;
       const cachedRoot = await cache.match('/', { ignoreSearch: true });
       if (cachedRoot) return cachedRoot;
-      return new Response('Offline - App Shell Not Cached Yet', { status: 503, headers: { 'Content-Type': 'text/plain' } });
-    })());
-    return;
-  }
-
-  if (url.pathname.startsWith('/assets/') || /\.(png|svg|ico|woff2?|ttf)$/i.test(url.pathname)) {
-    event.respondWith((async () => {
-      const cache = await caches.open(RUNTIME_CACHE);
-      const cached = (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true }));
-      if (cached) {
-        return cached;
-      }
-      const netRes = await fetch(req);
-      if (netRes && netRes.status === 200) {
-        cache.put(req, netRes.clone()).catch(() => {});
-      }
-      return netRes;
+      return new Response('Offline - App Shell Not Cached Yet', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain' },
+      });
     })());
     return;
   }
@@ -376,8 +378,12 @@ self.addEventListener('fetch', (event) => {
   event.respondWith((async () => {
     const cache = await caches.open(RUNTIME_CACHE);
     try {
-      const networkResponse = await fetch(new Request(req, { cache: 'no-store' }));
-      if (networkResponse && networkResponse.status === 200) {
+      const networkResponse = await fetch(req);
+      if (
+        networkResponse &&
+        networkResponse.status === 200 &&
+        !String(networkResponse.url || '').includes('__cookie_check')
+      ) {
         cache.put(req, networkResponse.clone()).catch(() => {});
       }
       return networkResponse;

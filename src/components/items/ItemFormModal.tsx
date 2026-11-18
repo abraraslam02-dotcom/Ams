@@ -384,13 +384,17 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         <div className="bg-gradient-to-r from-slate-900 to-emerald-950 text-white px-6 py-4 flex items-center justify-between border-b border-emerald-800/40">
           <div>
             <h3 className="text-base font-bold text-white flex items-center gap-2">
-              <span>{isEditing ? 'Edit Item in Items Master' : 'Add New Item to Items Master'}</span>
+              <span>
+                {isEditing
+                  ? 'Item Registration — Edit Item in Items Master'
+                  : 'Item Registration — Add New Item to Items Master'}
+              </span>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                Abrar Medical Store
+                Multi-Level Packing Enabled
               </span>
             </h3>
             <p className="text-xs text-slate-300 mt-0.5">
-              All 17 standard fields saved permanently in SQLite database.
+              Includes Multi-Level Packing Configuration (Carton, Boxes/Carton, Strips/Box, Tablets/Strip &amp; Purchase Unit)
             </p>
           </div>
           <button
@@ -409,84 +413,6 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
               <span className="font-medium">{formError}</span>
             </div>
           )}
-
-          {/* Product Picture & Optional Variant Mode */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
-            <div className="lg:col-span-7">
-              <ProductImageUploader
-                label="Main Product Picture"
-                imageUrl={formData.image_url || null}
-                thumbnailUrl={formData.thumbnail_url || null}
-                onImageUploaded={(img) =>
-                  setFormData((prev) => ({
-                    ...prev,
-                    image_id: img.image_id,
-                    image_url: img.image_url,
-                    thumbnail_url: img.thumbnail_url,
-                  }))
-                }
-                onRemoveImage={() =>
-                  setFormData((prev) => ({
-                    ...prev,
-                    image_id: null,
-                    image_url: '',
-                    thumbnail_url: '',
-                  }))
-                }
-              />
-            </div>
-
-            <div className="lg:col-span-5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-2">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5 text-sky-600" />
-                    <span>Has Variants?</span>
-                  </span>
-                  <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 text-[11px] font-bold">
-                    <button
-                      type="button"
-                      onClick={() => setFormData((p) => ({ ...p, has_variants: 0 }))}
-                      className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
-                        Number(formData.has_variants) !== 1
-                          ? 'bg-slate-900 text-white'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      No (Standard)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFormData((p) => ({ ...p, has_variants: 1 }))}
-                      className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
-                        Number(formData.has_variants) === 1
-                          ? 'bg-sky-600 text-white'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      Yes (Variants)
-                    </button>
-                  </div>
-                </div>
-                <p className="text-[11px] text-slate-500 leading-snug">
-                  {Number(formData.has_variants) === 1
-                    ? 'Enabled: Add colours, flavours, or types (e.g. Black, Blue, Green) in Variant Management while keeping each size as a separate Main Product.'
-                    : 'Standard mode: Item works directly in Purchases & Sales without extra variant selection.'}
-                </p>
-              </div>
-              {Number(formData.has_variants) === 1 && isEditing && editingItem && onManageVariants && (
-                <button
-                  type="button"
-                  onClick={() => submitItem(true)}
-                  disabled={saving || Boolean(codeError)}
-                  className="w-full py-1.5 px-3 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <Layers className="w-3.5 h-3.5" />
-                  <span>Save & Open Variant Management</span>
-                </button>
-              )}
-            </div>
-          </div>
 
           {/* Section 1: Basic Identifiers */}
           <div className="space-y-2">
@@ -611,11 +537,11 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           </div>
 
           {/* Section 2: Multi-Level Packing Configuration & Purchase Units */}
-          <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200/80 space-y-3">
+          <div className="p-3.5 rounded-xl bg-emerald-50/70 border-2 border-emerald-300/90 space-y-3 shadow-2xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-900 flex items-center gap-1.5">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-950 flex items-center gap-1.5">
                 <Calculator className="w-4 h-4 text-emerald-700" />
-                <span>2. Multi-Level Packing Configuration & Purchase Units</span>
+                <span>2. Multi-Level Packing Configuration &amp; Purchase Units</span>
               </h4>
               <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                 {formData.boxes_per_carton && Number(formData.boxes_per_carton) > 0 && (
@@ -663,7 +589,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
               <div className="space-y-1">
                 <label className="block text-[11px] font-semibold text-slate-700">
-                  Boxes / Carton <span className="text-slate-400 font-normal">(Optional)</span>
+                  Boxes per Carton <span className="text-slate-400 font-normal">(Optional)</span>
                 </label>
                 <input
                   type="number"
@@ -683,7 +609,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
               <div className="space-y-1">
                 <label className="block text-[11px] font-semibold text-slate-700">
-                  Strips / Box <span className="text-slate-400 font-normal">(Optional)</span>
+                  Strips per Box <span className="text-slate-400 font-normal">(Optional)</span>
                 </label>
                 <input
                   type="number"
@@ -703,7 +629,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
               <div className="space-y-1">
                 <label className="block text-[11px] font-semibold text-slate-700">
-                  Tablets / Strip <span className="text-slate-400 font-normal">(Optional)</span>
+                  Tablets per Strip <span className="text-slate-400 font-normal">(Optional)</span>
                 </label>
                 <input
                   type="number"
@@ -796,6 +722,84 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   Per Tablet / Unit {configuredTablets ? `(1 Strip = ${configuredTablets})` : ''}
                 </span>
               </div>
+            </div>
+          </div>
+
+          {/* Product Picture & Optional Variant Mode */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+            <div className="lg:col-span-7">
+              <ProductImageUploader
+                label="Main Product Picture"
+                imageUrl={formData.image_url || null}
+                thumbnailUrl={formData.thumbnail_url || null}
+                onImageUploaded={(img) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    image_id: img.image_id,
+                    image_url: img.image_url,
+                    thumbnail_url: img.thumbnail_url,
+                  }))
+                }
+                onRemoveImage={() =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    image_id: null,
+                    image_url: '',
+                    thumbnail_url: '',
+                  }))
+                }
+              />
+            </div>
+
+            <div className="lg:col-span-5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-2">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-sky-600" />
+                    <span>Has Variants?</span>
+                  </span>
+                  <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setFormData((p) => ({ ...p, has_variants: 0 }))}
+                      className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                        Number(formData.has_variants) !== 1
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      No (Standard)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData((p) => ({ ...p, has_variants: 1 }))}
+                      className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                        Number(formData.has_variants) === 1
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Yes (Variants)
+                    </button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-snug">
+                  {Number(formData.has_variants) === 1
+                    ? 'Enabled: Add colours, flavours, or types (e.g. Black, Blue, Green) in Variant Management while keeping each size as a separate Main Product.'
+                    : 'Standard mode: Item works directly in Purchases & Sales without extra variant selection.'}
+                </p>
+              </div>
+              {Number(formData.has_variants) === 1 && isEditing && editingItem && onManageVariants && (
+                <button
+                  type="button"
+                  onClick={() => submitItem(true)}
+                  disabled={saving || Boolean(codeError)}
+                  className="w-full py-1.5 px-3 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Save & Open Variant Management</span>
+                </button>
+              )}
             </div>
           </div>
 
