@@ -52,9 +52,11 @@ export function getDatabase(): Database.Database {
       wasDatabaseCreatedOnBoot = true;
     }
 
-    // Seed runtime database from workspace data/ams_medical.db if not yet initialized in container
+    // In development/test only, seed runtime database from data/ams_medical.db if not yet initialized.
+    // In production, NEVER silently copy a local seed/old file over a missing runtime DB — hydrate strictly from current active cloud DB or block with error.
     if (
       dbMissingBeforeOpen &&
+      config.envScope !== 'production' &&
       config.seedDatabasePath &&
       config.seedDatabasePath !== config.databasePath &&
       fs.existsSync(config.seedDatabasePath)

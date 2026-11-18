@@ -23,6 +23,7 @@ import {
   ensureLocalBackupFileFromCloudSQL,
   runPreDeploymentSafetyChecks,
   syncDatabaseToCloudSQL,
+  reconnectToCurrentDatabase,
 } from '../services/cloudPersistenceService.ts';
 
 export const systemRouter = Router();
@@ -40,13 +41,15 @@ function canAdministerSystem(req: Request): boolean {
  */
 systemRouter.get('/health', (_req: Request, res: Response) => {
   const dbStatus = checkDatabaseConnection();
+  const cloudStatus = getCloudPersistenceStatus();
+  const dbHealthy = dbStatus.connected && !cloudStatus.connectionBlocked;
   const uptimeSeconds = Math.floor(process.uptime());
 
   let lastBackup: Record<string, unknown> | null = null;
   let totalBackups = 0;
   let unresolvedErrors = 0;
 
-  if (dbStatus.connected) {
+  if (dbHealthy) {
     try {
       const db = getDatabase();
       lastBackup =
@@ -66,8 +69,8 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
     }
   }
 
-  res.json({
-    status: dbStatus.connected ? 'healthy' : 'degraded',
+  res.status(dbHealthy ? 200 : 503).json({
+    status: dbHealthy ? 'healthy' : 'degraded',
     service: 'Abrar Medical Store API',
     version: APP_VERSION,
     environment: config.nodeEnv,
@@ -75,14 +78,14 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
     nodeVersion: process.version,
     timestamp: new Date().toISOString(),
     database: {
-      connected: dbStatus.connected,
+      connected: dbHealthy,
       driver: dbStatus.driver,
       path: dbStatus.databasePath,
       latencyMs: dbStatus.latencyMs,
       integrity: dbStatus.integrityCheck,
       journalMode: dbStatus.journalMode,
       foreignKeys: dbStatus.foreignKeysEnabled,
-      error: dbStatus.error,
+      error: cloudStatus.connectionError || dbStatus.error,
     },
     backup: {
       backupDirectory: getBackupDirectory(),
@@ -90,7 +93,10 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
       lastBackup,
       unresolvedErrors,
     },
-    cloudPersistence: getCloudPersistenceStatus(),
+    cloudPersistence: cloudStatus,
+    connectionBlocked: Boolean(cloudStatus.connectionBlocked),
+    connectionError: cloudStatus.connectionError || null,
+    databaseIdentity: cloudStatus.databaseIdentity || cloudStatus.externalLocation,
     localization: {
       currency: config.appCurrency,
       currencySymbol: config.appCurrencySymbol,
@@ -99,6 +105,29 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
       locale: config.appLocale,
     },
   });
+});
+
+/**
+ * Explicit Reconnect to Current Active Database
+ * Re-establishes connectivity to the SAME active database without ever switching or seeding an older copy.
+ */
+systemRouter.post('/reconnect-db', async (_req: Request, res: Response) => {
+  try {
+    const result = await reconnectToCurrentDatabase(true);
+    const ok = !result.blocked && result.connected;
+    return res.status(ok ? 200 : 503).json({
+      success: ok,
+      ...result,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(503).json({
+      success: false,
+      connected: false,
+      blocked: true,
+      error: msg,
+    });
+  }
 });
 
 /**

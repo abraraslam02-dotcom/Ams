@@ -241,13 +241,13 @@ itemsRouter.get('/', (req: Request, res: Response) => {
         `(item_code LIKE ? OR barcode LIKE ? OR item_name LIKE ? OR company_name LIKE ? OR generic_name LIKE ? OR EXISTS (
           SELECT 1 FROM item_variants iv
           WHERE iv.parent_item_id = items.id
-            AND (iv.variant_code LIKE ? OR iv.variant_name LIKE ? OR iv.colour LIKE ? OR iv.flavour LIKE ? OR iv.variant_type LIKE ? OR iv.barcode LIKE ?)
+            AND (iv.variant_code LIKE ? OR iv.variant_name LIKE ? OR iv.colour LIKE ? OR iv.flavour LIKE ? OR iv.variant_type LIKE ? OR iv.other_attributes LIKE ? OR iv.barcode LIKE ?)
         ) OR EXISTS (
           SELECT 1 FROM item_variant_barcodes ib
           WHERE ib.item_id = items.id AND ib.barcode LIKE ?
         ))`
       );
-      params.push(term, term, term, term, term, term, term, term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term, term, term, term, term);
     }
 
     if (category && typeof category === 'string' && category !== 'all') {
@@ -723,10 +723,26 @@ itemsRouter.get('/:id/variants/next-code', (req: Request, res: Response) => {
  */
 itemsRouter.get('/:id/variants', (req: Request, res: Response) => {
   try {
+    const db = getDatabase();
     const parentItemId = parseInt(req.params.id, 10);
-    const includeInactive = req.query.includeInactive !== 'false';
+    if (!Number.isFinite(parentItemId) || parentItemId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid Main Product ID.' });
+    }
+    const parentItem = db.prepare('SELECT * FROM items WHERE id = ?').get(parentItemId) as ItemRow | undefined;
+    if (!parentItem) {
+      return res.status(404).json({ success: false, error: 'Main Product not found.' });
+    }
+    const includeInactive =
+      req.query.includeInactive !== 'false' && req.query.include_inactive !== 'false';
     const variants = getEnrichedVariants({ parentItemId, includeInactive });
-    return res.json({ success: true, variants, count: variants.length });
+    const nextVariantCode = getNextVariantCodeForItem(parentItemId);
+    return res.json({
+      success: true,
+      parent: enrichItemWithPacking(parentItem),
+      variants,
+      nextVariantCode,
+      count: variants.length,
+    });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ success: false, error: errorMsg });
@@ -746,14 +762,30 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Main Product not found.' });
     }
 
+    const safeStr = (v: unknown): string => (v === null || v === undefined ? '' : String(v).trim());
+    const safeNum = (v: unknown, fallback = 0): number => {
+      if (v === null || v === undefined || v === '') return Number.isFinite(fallback) ? fallback : 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : Number.isFinite(fallback) ? fallback : 0;
+    };
+
     const body = req.body || {};
-    const variantName = String(body.variant_name || '').trim();
+    const colourVal = safeStr(body.colour);
+    const flavourVal = safeStr(body.flavour);
+    const typeVal = safeStr(body.variant_type);
+    const otherAttrVal = safeStr(body.other_attributes);
+    const variantName =
+      safeStr(body.variant_name) ||
+      [colourVal, flavourVal, typeVal, otherAttrVal].filter(Boolean).join(' / ');
     if (!variantName) {
-      return res.status(400).json({ success: false, error: 'Variant Name is required.' });
+      return res.status(400).json({
+        success: false,
+        error: 'Variant Name or at least one attribute (Colour / Flavour / Type) is required.',
+      });
     }
 
     const createVariantTx = db.transaction(() => {
-      let variantCode = String(body.variant_code || '').trim();
+      let variantCode = safeStr(body.variant_code);
       if (!variantCode) {
         variantCode = getNextVariantCodeForItem(parentItemId);
       } else {
@@ -768,16 +800,18 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
         }
       }
 
-      const rawBarcode = String(body.barcode || '').trim();
+      const rawBarcode = safeStr(body.barcode);
       const extraBarcodesInput: Array<{ barcode: string; barcode_type?: string }> = Array.isArray(body.barcodes)
         ? body.barcodes
         : [];
       const allSubmittedBarcodes = [
-        ...(rawBarcode ? [{ barcode: rawBarcode, barcode_type: String(body.barcode_type || 'manufacturer'), is_primary: 1 }] : []),
+        ...(rawBarcode
+          ? [{ barcode: rawBarcode, barcode_type: safeStr(body.barcode_type) || 'manufacturer', is_primary: 1 }]
+          : []),
         ...extraBarcodesInput
-          .filter((b) => b && String(b.barcode || '').trim())
+          .filter((b) => b && safeStr(b.barcode))
           .map((b) => ({
-            barcode: String(b.barcode).trim(),
+            barcode: safeStr(b.barcode),
             barcode_type: b.barcode_type === 'generated' ? 'generated' : 'manufacturer',
             is_primary: rawBarcode ? 0 : 1,
           })),
@@ -803,20 +837,21 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
 
       const primaryBarcode = cleanBarcodes[0]?.barcode || '';
       const useParentPricing = body.use_parent_pricing === false || body.use_parent_pricing === 0 ? 0 : 1;
-      const pPrice = round2(parseFloat(body.purchase_price ?? parentItem.purchase_price) || 0);
-      const tPrice = round2(parseFloat(body.trade_price ?? parentItem.trade_price) || 0);
-      const wPrice = round2(parseFloat(body.wholesale_price ?? parentItem.wholesale_price) || 0);
-      const rPrice = round2(parseFloat(body.retail_price ?? parentItem.retail_price) || 0);
-      const effectivePacking = String(body.packing || parentItem.packing || '1x1').trim();
-      const units = parseUnitsFromPacking(effectivePacking);
+      const pPrice = round2(safeNum(body.purchase_price, safeNum(parentItem.purchase_price, 0)));
+      const tPrice = round2(safeNum(body.trade_price, safeNum(parentItem.trade_price, 0)));
+      const wPrice = round2(safeNum(body.wholesale_price, safeNum(parentItem.wholesale_price, 0)));
+      const rPrice = round2(safeNum(body.retail_price, safeNum(parentItem.retail_price, 0)));
+      const rawPacking = safeStr(body.packing);
+      const effectivePacking = rawPacking || safeStr(parentItem.packing) || '1x1';
+      const units = Math.max(1, parseUnitsFromPacking(effectivePacking));
       const lRate =
-        body.loose_rate !== undefined && body.loose_rate !== ''
-          ? round2(parseFloat(body.loose_rate) || 0)
-          : round2(rPrice / Math.max(1, units));
-      const dPct = round2(parseFloat(body.discount_percent ?? parentItem.discount_percent) || 0);
-      const taxPct = round2(parseFloat(body.tax_percent ?? parentItem.tax_percent) || 0);
-      const oStock = round2(parseFloat(body.opening_stock ?? 0) || 0);
-      const mStock = round2(parseFloat(body.minimum_stock ?? parentItem.minimum_stock) || 0);
+        body.loose_rate !== undefined && body.loose_rate !== null && body.loose_rate !== ''
+          ? round2(safeNum(body.loose_rate, 0))
+          : round2(rPrice / units);
+      const dPct = round2(safeNum(body.discount_percent, safeNum(parentItem.discount_percent, 0)));
+      const taxPct = round2(safeNum(body.tax_percent, safeNum(parentItem.tax_percent, 0)));
+      const oStock = round2(safeNum(body.opening_stock, 0));
+      const mStock = round2(safeNum(body.minimum_stock, safeNum(parentItem.minimum_stock, 0)));
       const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
 
       // Ensure parent has_variants = 1 when variants are added
@@ -838,12 +873,12 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
           parentItemId,
           variantCode,
           variantName,
-          String(body.colour || '').trim(),
-          String(body.flavour || '').trim(),
-          String(body.variant_type || '').trim(),
-          String(body.other_attributes || '').trim(),
+          colourVal,
+          flavourVal,
+          typeVal,
+          otherAttrVal,
           primaryBarcode,
-          String(body.packing || '').trim(),
+          rawPacking,
           useParentPricing,
           pPrice,
           tPrice,
@@ -854,10 +889,10 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
           taxPct,
           oStock,
           mStock,
-          String(body.rack_number || '').trim(),
-          body.image_id ? Number(body.image_id) : null,
-          String(body.image_url || '').trim(),
-          String(body.thumbnail_url || body.image_url || '').trim(),
+          safeStr(body.rack_number),
+          body.image_id ? Number(body.image_id) || null : null,
+          safeStr(body.image_url),
+          safeStr(body.thumbnail_url || body.image_url),
           status,
           req.user?.username || 'Super Admin'
         );
@@ -901,11 +936,21 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Variant not found.' });
     }
 
+    const safeStr = (v: unknown): string => (v === null || v === undefined ? '' : String(v).trim());
+    const safeNum = (v: unknown, fallback = 0): number => {
+      if (v === null || v === undefined || v === '') return Number.isFinite(fallback) ? fallback : 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : Number.isFinite(fallback) ? fallback : 0;
+    };
+
     const parentItem = db.prepare('SELECT * FROM items WHERE id = ?').get(existing.parent_item_id) as ItemRow;
     const body = req.body || {};
 
     const updateTx = db.transaction(() => {
-      const nextCode = body.variant_code !== undefined ? String(body.variant_code).trim() : String(existing.variant_code);
+      const nextCode =
+        body.variant_code !== undefined
+          ? safeStr(body.variant_code)
+          : safeStr(existing.variant_code);
       if (!nextCode) throw new Error('Variant Code cannot be empty.');
 
       const dupV = db
@@ -918,10 +963,19 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
         throw new Error(`Variant Code "${nextCode}" is already in use.`);
       }
 
-      const nextName = body.variant_name !== undefined ? String(body.variant_name).trim() : String(existing.variant_name);
+      const nextColour = body.colour !== undefined ? safeStr(body.colour) : safeStr(existing.colour);
+      const nextFlavour = body.flavour !== undefined ? safeStr(body.flavour) : safeStr(existing.flavour);
+      const nextType = body.variant_type !== undefined ? safeStr(body.variant_type) : safeStr(existing.variant_type);
+      const nextOtherAttr =
+        body.other_attributes !== undefined ? safeStr(body.other_attributes) : safeStr(existing.other_attributes);
+
+      const nextName =
+        body.variant_name !== undefined
+          ? safeStr(body.variant_name) || [nextColour, nextFlavour, nextType, nextOtherAttr].filter(Boolean).join(' / ')
+          : safeStr(existing.variant_name);
       if (!nextName) throw new Error('Variant Name cannot be empty.');
 
-      let nextBarcode = body.barcode !== undefined ? String(body.barcode).trim() : String(existing.barcode || '');
+      const nextBarcode = body.barcode !== undefined ? safeStr(body.barcode) : safeStr(existing.barcode);
       if (nextBarcode) {
         const conflict = findBarcodeConflict(nextBarcode, { excludeVariantId: variantId });
         if (conflict) {
@@ -936,34 +990,41 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
             : 1
           : Number(existing.use_parent_pricing ?? 1);
 
-      const pPrice = body.purchase_price !== undefined ? round2(body.purchase_price) : round2(existing.purchase_price);
-      const tPrice = body.trade_price !== undefined ? round2(body.trade_price) : round2(existing.trade_price);
-      const wPrice = body.wholesale_price !== undefined ? round2(body.wholesale_price) : round2(existing.wholesale_price);
-      const rPrice = body.retail_price !== undefined ? round2(body.retail_price) : round2(existing.retail_price);
-      const packing = body.packing !== undefined ? String(body.packing).trim() : String(existing.packing || '');
-      const units = parseUnitsFromPacking(packing || parentItem?.packing || '1x1');
+      const pPrice = round2(safeNum(body.purchase_price, safeNum(existing.purchase_price, 0)));
+      const tPrice = round2(safeNum(body.trade_price, safeNum(existing.trade_price, 0)));
+      const wPrice = round2(safeNum(body.wholesale_price, safeNum(existing.wholesale_price, 0)));
+      const rPrice = round2(safeNum(body.retail_price, safeNum(existing.retail_price, 0)));
+      const packing = body.packing !== undefined ? safeStr(body.packing) : safeStr(existing.packing);
+      const units = Math.max(1, parseUnitsFromPacking(packing || parentItem?.packing || '1x1'));
       const lRate =
-        body.loose_rate !== undefined && body.loose_rate !== ''
-          ? round2(body.loose_rate)
-          : round2(existing.loose_rate || rPrice / Math.max(1, units));
-      const dPct = body.discount_percent !== undefined ? round2(body.discount_percent) : round2(existing.discount_percent);
-      const taxPct = body.tax_percent !== undefined ? round2(body.tax_percent) : round2(existing.tax_percent);
-      const oStock = body.opening_stock !== undefined ? round2(body.opening_stock) : round2(existing.opening_stock);
-      const mStock = body.minimum_stock !== undefined ? round2(body.minimum_stock) : round2(existing.minimum_stock);
-      const rack = body.rack_number !== undefined ? String(body.rack_number).trim() : String(existing.rack_number || '');
-      const status = body.status !== undefined ? (body.status === 'Inactive' ? 'Inactive' : 'Active') : existing.status;
+        body.loose_rate !== undefined && body.loose_rate !== null && body.loose_rate !== ''
+          ? round2(safeNum(body.loose_rate, 0))
+          : round2(safeNum(existing.loose_rate, rPrice / units));
+      const dPct = round2(safeNum(body.discount_percent, safeNum(existing.discount_percent, 0)));
+      const taxPct = round2(safeNum(body.tax_percent, safeNum(existing.tax_percent, 0)));
+      const oStock = round2(safeNum(body.opening_stock, safeNum(existing.opening_stock, 0)));
+      const mStock = round2(safeNum(body.minimum_stock, safeNum(existing.minimum_stock, 0)));
+      const rack = body.rack_number !== undefined ? safeStr(body.rack_number) : safeStr(existing.rack_number);
+      const status =
+        body.status !== undefined
+          ? body.status === 'Inactive'
+            ? 'Inactive'
+            : 'Active'
+          : safeStr(existing.status) === 'Inactive'
+          ? 'Inactive'
+          : 'Active';
 
-      const nextImgId = body.image_id !== undefined ? (body.image_id ? Number(body.image_id) : null) : existing.image_id;
-      const nextImgUrl = body.image_url !== undefined ? String(body.image_url || '').trim() : String(existing.image_url || '');
+      const nextImgId = body.image_id !== undefined ? (body.image_id ? Number(body.image_id) || null : null) : existing.image_id;
+      const nextImgUrl = body.image_url !== undefined ? safeStr(body.image_url) : safeStr(existing.image_url);
       const nextThumbUrl =
         body.thumbnail_url !== undefined
-          ? String(body.thumbnail_url || '').trim()
+          ? safeStr(body.thumbnail_url)
           : body.image_url !== undefined
           ? nextImgUrl
-          : String(existing.thumbnail_url || '');
+          : safeStr(existing.thumbnail_url);
 
       const oldImgId = existing.image_id ? Number(existing.image_id) : null;
-      const oldImgUrl = String(existing.image_url || '');
+      const oldImgUrl = safeStr(existing.image_url);
 
       db.prepare(
         `UPDATE item_variants SET
@@ -976,10 +1037,10 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
       ).run(
         nextCode,
         nextName,
-        body.colour !== undefined ? String(body.colour).trim() : String(existing.colour || ''),
-        body.flavour !== undefined ? String(body.flavour).trim() : String(existing.flavour || ''),
-        body.variant_type !== undefined ? String(body.variant_type).trim() : String(existing.variant_type || ''),
-        body.other_attributes !== undefined ? String(body.other_attributes).trim() : String(existing.other_attributes || ''),
+        nextColour,
+        nextFlavour,
+        nextType,
+        nextOtherAttr,
         nextBarcode,
         packing,
         useParentPricing,
@@ -1082,7 +1143,7 @@ itemsRouter.post('/variants/:variantId/barcodes', (req: Request, res: Response) 
       return res.status(404).json({ success: false, error: 'Variant not found.' });
     }
 
-    const generate = Boolean(req.body?.generate);
+    const generate = Boolean(req.body?.generate || req.body?.auto_generate);
     const rawCode = generate
       ? generateUniqueVariantBarcode(String(variant.variant_code))
       : String(req.body?.barcode || '').trim();
@@ -1119,6 +1180,7 @@ itemsRouter.post('/variants/:variantId/barcodes', (req: Request, res: Response) 
     return res.status(201).json({
       success: true,
       barcode: rawCode,
+      addedBarcode: rawCode,
       variant: enriched,
     });
   } catch (error: unknown) {

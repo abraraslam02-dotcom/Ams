@@ -76,6 +76,9 @@ export interface CloudPersistenceStatus {
   cloudRecordCounts: Record<string, number> | null;
   localRecordCounts: Record<string, number> | null;
   protectionLockActive: boolean;
+  connectionBlocked?: boolean;
+  connectionError?: string | null;
+  databaseIdentity?: string;
 }
 
 const VAULT_COLLECTION = 'ams_vault_e5f2831c';
@@ -123,6 +126,9 @@ let pendingUploadReason = 'queued_mutation';
 let backgroundInterval: NodeJS.Timeout | null = null;
 let quotaCooldownUntil = 0;
 let cachedManifest: ManifestMetadata | null = null;
+let dbConnectionBlocked = false;
+let dbConnectionErrorMessage: string | null = null;
+let lastReconnectAttemptAt = 0;
 
 interface VaultDocFields {
   vaultKey: string;
@@ -181,50 +187,85 @@ function buildFirestoreDocUrl(docId: string): string {
   return `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/${VAULT_COLLECTION}/${cleanId}?key=${encodeURIComponent(FIRESTORE_API_KEY)}`;
 }
 
-async function readVaultDocument(docId: string): Promise<VaultDocFields | null> {
+type VaultReadResult =
+  | { status: 'found'; doc: VaultDocFields }
+  | { status: 'not_found' }
+  | { status: 'unreachable'; error: string };
+
+async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult> {
+  if (!FIRESTORE_API_KEY || !FIRESTORE_PROJECT_ID || !FIRESTORE_DATABASE_ID) {
+    isConnected = false;
+    return { status: 'unreachable', error: 'Cloud database configuration is missing.' };
+  }
   if (Date.now() < quotaCooldownUntil) {
-    return null;
+    isConnected = false;
+    return {
+      status: 'unreachable',
+      error: 'Active database connection temporarily throttled (HTTP 429). Reconnecting automatically to the same database.',
+    };
   }
   const url = buildFirestoreDocUrl(docId);
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(6000),
-  });
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(6000),
+    });
 
-  if (response.status === 404) {
+    if (response.status === 404) {
+      isConnected = true;
+      return { status: 'not_found' };
+    }
+
+    if (response.status === 429) {
+      quotaCooldownUntil = Date.now() + 60 * 1000;
+      isConnected = false;
+      const msg = 'Active database connection rate-limited (HTTP 429).';
+      lastError = msg;
+      return { status: 'unreachable', error: msg };
+    }
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      isConnected = false;
+      const msg = `Firestore GET ${docId} failed (${response.status}): ${errText.slice(0, 240)}`;
+      lastError = msg;
+      return { status: 'unreachable', error: msg };
+    }
+
     isConnected = true;
-    return null;
+    const json = (await response.json()) as {
+      fields?: Record<string, { stringValue?: string; integerValue?: string }>;
+    };
+    const f = json.fields || {};
+    return {
+      status: 'found',
+      doc: {
+        vaultKey: String(f.vaultKey?.stringValue || ''),
+        docId: String(f.docId?.stringValue || docId),
+        chunkIndex: Number(f.chunkIndex?.integerValue || 0),
+        totalChunks: Number(f.totalChunks?.integerValue || 1),
+        versionSeq: Number(f.versionSeq?.integerValue || 1),
+        sha256Hash: String(f.sha256Hash?.stringValue || ''),
+        payload: String(f.payload?.stringValue || ''),
+        recordCounts: String(f.recordCounts?.stringValue || '{}'),
+        updatedByEnv: String(f.updatedByEnv?.stringValue || 'unknown'),
+        updatedAt: String(f.updatedAt?.stringValue || ''),
+      },
+    };
+  } catch (err: unknown) {
+    isConnected = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    lastError = msg;
+    return { status: 'unreachable', error: msg };
   }
+}
 
-  if (response.status === 429) {
-    quotaCooldownUntil = Date.now() + 10 * 60 * 1000;
-    isConnected = true;
-    return null;
-  }
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
-    throw new Error(`Firestore GET ${docId} failed (${response.status}): ${errText.slice(0, 240)}`);
-  }
-
-  isConnected = true;
-  const json = (await response.json()) as {
-    fields?: Record<string, { stringValue?: string; integerValue?: string }>;
-  };
-  const f = json.fields || {};
-  return {
-    vaultKey: String(f.vaultKey?.stringValue || ''),
-    docId: String(f.docId?.stringValue || docId),
-    chunkIndex: Number(f.chunkIndex?.integerValue || 0),
-    totalChunks: Number(f.totalChunks?.integerValue || 1),
-    versionSeq: Number(f.versionSeq?.integerValue || 1),
-    sha256Hash: String(f.sha256Hash?.stringValue || ''),
-    payload: String(f.payload?.stringValue || ''),
-    recordCounts: String(f.recordCounts?.stringValue || '{}'),
-    updatedByEnv: String(f.updatedByEnv?.stringValue || 'unknown'),
-    updatedAt: String(f.updatedAt?.stringValue || ''),
-  };
+async function readVaultDocument(docId: string): Promise<VaultDocFields | null> {
+  const result = await readVaultDocumentDetailed(docId);
+  if (result.status === 'found') return result.doc;
+  if (result.status === 'not_found') return null;
+  throw new Error(result.error);
 }
 
 async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
@@ -420,19 +461,32 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
     cloudRecordCounts,
     localRecordCounts: localInspect.counts as unknown as Record<string, number>,
     protectionLockActive: true,
+    connectionBlocked: dbConnectionBlocked,
+    connectionError: dbConnectionErrorMessage,
+    databaseIdentity: EXTERNAL_DB_LOCATION,
   };
 }
 
+type ManifestFetchResult =
+  | { status: 'found'; manifest: ManifestMetadata }
+  | { status: 'not_found' }
+  | { status: 'unreachable'; error: string };
+
 /**
- * Fetches and parses the current environment's cloud manifest from Firestore if it exists.
+ * Fetches and parses the current environment's cloud manifest from Firestore with strict reachability tracking.
+ * Never returns stale cachedManifest as a live result when network is unreachable.
  */
-async function fetchCloudManifest(): Promise<ManifestMetadata | null> {
-  if (Date.now() < quotaCooldownUntil) {
-    return cachedManifest;
+async function fetchCloudManifestDetailed(): Promise<ManifestFetchResult> {
+  const docResult = await readVaultDocumentDetailed(MANIFEST_DOC_ID);
+  if (docResult.status === 'unreachable') {
+    return { status: 'unreachable', error: docResult.error };
   }
-  const doc = await readVaultDocument(MANIFEST_DOC_ID);
-  if (!doc || !doc.payload) {
-    return cachedManifest;
+  if (docResult.status === 'not_found') {
+    return { status: 'not_found' };
+  }
+  const doc = docResult.doc;
+  if (!doc.payload) {
+    return { status: 'not_found' };
   }
   try {
     const decrypted = decryptToBuffer(doc.payload);
@@ -443,10 +497,18 @@ async function fetchCloudManifest(): Promise<ManifestMetadata | null> {
       sha256Hash: String(doc.sha256Hash || meta.sha256Hash || ''),
     };
     cachedManifest = parsed;
-    return parsed;
-  } catch {
-    return cachedManifest;
+    return { status: 'found', manifest: parsed };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 'unreachable', error: `Manifest decrypt/parse failed: ${msg}` };
   }
+}
+
+async function fetchCloudManifest(): Promise<ManifestMetadata | null> {
+  const result = await fetchCloudManifestDetailed();
+  if (result.status === 'found') return result.manifest;
+  if (result.status === 'not_found') return null;
+  throw new Error(result.error);
 }
 
 /**
@@ -1067,6 +1129,63 @@ async function uploadLocalDbToCloud(
   }
 }
 
+async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> {
+  isInitialized = true;
+  const manifestRes = await fetchCloudManifestDetailed();
+  const localInspect = inspectSqliteSnapshot(config.databasePath);
+  const localScore = getBusinessRecordScore(localInspect.counts);
+
+  if (manifestRes.status === 'unreachable') {
+    isConnected = false;
+    lastError = manifestRes.error;
+    // Never fall back to an empty, backup, seed, or cached database when active remote vault is unreachable on a blank container!
+    if (localScore === 0 || getWasDatabaseCreatedOnBoot()) {
+      dbConnectionBlocked = true;
+      dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${manifestRes.error}. Database switching is disabled to protect your data. Restore network and reconnect to resume using the same database.`;
+    } else {
+      // Existing verified local active database for this exact container — keep using THIS database without switching, and surface clear connectivity error
+      dbConnectionBlocked = false;
+      dbConnectionErrorMessage = null;
+    }
+    console.warn(`[AMS Cloud Persistence] Active database check (${reason}) unreachable: ${manifestRes.error}`);
+    return;
+  }
+
+  dbConnectionBlocked = false;
+  dbConnectionErrorMessage = null;
+
+  if (manifestRes.status === 'found') {
+    const manifest = manifestRes.manifest;
+    cloudRecordCounts = manifest.counts as unknown as Record<string, number>;
+    const cloudScore = getBusinessRecordScore(manifest.counts);
+
+    console.log(
+      `[AMS Cloud Persistence] Startup check (${reason}) — External Firestore v${manifest.versionSeq} (score=${cloudScore}) vs Local DB (score=${localScore})`
+    );
+
+    if (cloudScore > 0 || manifest.versionSeq > lastVersionSeq) {
+      await restoreOrMergeFromCloud(reason);
+    }
+
+    const afterInspect = inspectSqliteSnapshot(config.databasePath);
+    const afterScore = getBusinessRecordScore(afterInspect.counts);
+    if (afterScore > cloudScore) {
+      await uploadLocalDbToCloud(`${reason}_superset_sync`);
+    } else {
+      lastVersionSeq = manifest.versionSeq;
+      lastSha256 = manifest.sha256Hash;
+    }
+    lastError = null;
+  } else {
+    // Confirmed HTTP 404 — brand-new vault for this environment. Never overwrite any existing cloud DB.
+    console.log(
+      `[AMS Cloud Persistence] Confirmed new Firestore vault (${MANIFEST_DOC_ID}). Initializing with current ${config.envScope} database...`
+    );
+    await uploadLocalDbToCloud('initial_vault_bootstrap');
+    lastError = null;
+  }
+}
+
 /**
  * Initializes permanent external cloud persistence on server boot.
  * Safe to call multiple times; returns the same initialization promise.
@@ -1078,43 +1197,15 @@ export async function initCloudPersistence(): Promise<void> {
 
   initPromise = (async () => {
     try {
-      isInitialized = true;
-      const manifest = await fetchCloudManifest();
-
-      if (manifest) {
-        cloudRecordCounts = manifest.counts as unknown as Record<string, number>;
-        const cloudScore = getBusinessRecordScore(manifest.counts);
-        const localInspect = inspectSqliteSnapshot(config.databasePath);
-        const localScore = getBusinessRecordScore(localInspect.counts);
-
-        console.log(
-          `[AMS Cloud Persistence] Startup check — External Firestore v${manifest.versionSeq} (score=${cloudScore}) vs Local container DB (score=${localScore})`
-        );
-
-        // Always restore or merge from cloud on startup when cloud has records
-        if (cloudScore > 0 || manifest.versionSeq > lastVersionSeq) {
-          await restoreOrMergeFromCloud('startup_hydration');
-        }
-
-        // After merging, if local has additional records not yet in cloud, push the merged superset back
-        const afterInspect = inspectSqliteSnapshot(config.databasePath);
-        const afterScore = getBusinessRecordScore(afterInspect.counts);
-        if (afterScore > cloudScore) {
-          await uploadLocalDbToCloud('startup_superset_sync');
-        } else {
-          lastVersionSeq = manifest.versionSeq;
-          lastSha256 = manifest.sha256Hash;
-        }
-        lastError = null;
-      } else {
-        console.log(
-          `[AMS Cloud Persistence] No existing Firestore manifest (${MANIFEST_DOC_ID}) found. Initializing permanent Firestore vault with current ${config.envScope} database...`
-        );
-        await uploadLocalDbToCloud('initial_vault_bootstrap');
-      }
+      await syncOrBlockAgainstCurrentDatabase('startup_hydration');
     } catch (err: unknown) {
       isConnected = false;
       lastError = err instanceof Error ? err.message : String(err);
+      const localInspect = inspectSqliteSnapshot(config.databasePath);
+      if (getBusinessRecordScore(localInspect.counts) === 0 || getWasDatabaseCreatedOnBoot()) {
+        dbConnectionBlocked = true;
+        dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${lastError}. Reconnect to resume using the same database.`;
+      }
       console.error('[AMS Cloud Persistence] Initialization error:', lastError);
     } finally {
       isHydrationComplete = true;
@@ -1122,6 +1213,28 @@ export async function initCloudPersistence(): Promise<void> {
   })();
 
   return initPromise;
+}
+
+/**
+ * Reconnects explicitly to the SAME current active database once network returns.
+ */
+export async function reconnectToCurrentDatabase(force = true): Promise<{
+  connected: boolean;
+  blocked: boolean;
+  error: string | null;
+  status: CloudPersistenceStatus;
+}> {
+  if (force) {
+    quotaCooldownUntil = 0;
+  }
+  lastReconnectAttemptAt = Date.now();
+  await syncOrBlockAgainstCurrentDatabase(force ? 'manual_reconnect' : 'auto_reconnect');
+  return {
+    connected: isConnected,
+    blocked: dbConnectionBlocked,
+    error: dbConnectionErrorMessage || lastError,
+    status: getCloudPersistenceStatus(),
+  };
 }
 
 /**
@@ -1323,20 +1436,55 @@ const NON_MUTATING_SYNC_ROUTES = new Set([
  */
 export async function cloudPersistenceMiddleware(
   req: { method?: string; path?: string; originalUrl?: string },
-  res: { statusCode: number; on: (event: string, listener: () => void) => void },
+  res: {
+    statusCode: number;
+    status: (code: number) => { json: (body: unknown) => void };
+    on: (event: string, listener: () => void) => void;
+  },
   next: () => void
 ): Promise<void> {
   try {
     await ensureCloudPersistenceReady();
   } catch {
-    // Proceed even if cloud check had a transient network warning
+    // Proceed cleanly to check connectionBlocked status
+  }
+
+  const routeLabel = String(req.originalUrl || req.path || '').split('?')[0];
+  const bypassBlockRoutes = new Set([
+    '/api/system/health',
+    '/api/system/reconnect-db',
+    '/api/system/deployment-safety',
+    '/api/auth/status',
+    '/api/auth/login',
+    '/api/auth/logout',
+  ]);
+
+  if (dbConnectionBlocked) {
+    // Periodically auto-probe when traffic resumes so recovery happens automatically on the SAME current DB
+    if (Date.now() - lastReconnectAttemptAt > 5000) {
+      try {
+        await reconnectToCurrentDatabase(false);
+      } catch {
+        // remain blocked
+      }
+    }
+    if (dbConnectionBlocked && !bypassBlockRoutes.has(routeLabel)) {
+      res.status(503).json({
+        success: false,
+        dbConnectionError: true,
+        databaseIdentity: EXTERNAL_DB_LOCATION,
+        error:
+          dbConnectionErrorMessage ||
+          `Active database (${EXTERNAL_DB_LOCATION}) cannot be reached. Operations stopped to prevent database switching.`,
+      });
+      return;
+    }
   }
 
   const method = String(req.method || 'GET').toUpperCase();
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
-        const routeLabel = String(req.originalUrl || req.path || '').split('?')[0];
         if (!NON_MUTATING_SYNC_ROUTES.has(routeLabel)) {
           scheduleCloudUpload(`http:${method}:${routeLabel}`);
         }
@@ -1542,8 +1690,10 @@ export function hydrateSqliteFromCloudRecords(
 
         const sLines = Array.isArray(s?.items) ? s.items : Array.isArray(s?.lines) ? s.lines : [];
         const existing = db
-          .prepare('SELECT id FROM sales WHERE invoice_number = ? OR (client_request_id IS NOT NULL AND client_request_id = ?)')
-          .get(invNo, String(s?.client_tx_id || s?.client_request_id || '')) as { id: number } | undefined;
+          .prepare(
+            'SELECT id FROM sales WHERE (? > 0 AND id = ?) OR invoice_number = ? OR (client_request_id IS NOT NULL AND client_request_id = ?)'
+          )
+          .get(id, id, invNo, String(s?.client_tx_id || s?.client_request_id || '')) as { id: number } | undefined;
 
         if (!existing && sLines.length === 0) {
           // Never create header-only ghost sales invoices without any line items
@@ -1888,8 +2038,13 @@ export function startCloudPersistenceBackgroundLoop(): void {
   if (backgroundInterval) return;
   backgroundInterval = setInterval(() => {
     void (async () => {
-      if (!isHydrationComplete || isSyncInFlight || Date.now() < quotaCooldownUntil) return;
+      if (!isHydrationComplete || isSyncInFlight) return;
+      if (dbConnectionBlocked) {
+        await reconnectToCurrentDatabase(false);
+        return;
+      }
+      if (Date.now() < quotaCooldownUntil) return;
       await pullFromCloudPersistenceIfNewer('background_poll');
     })();
-  }, 120000);
+  }, 15000);
 }

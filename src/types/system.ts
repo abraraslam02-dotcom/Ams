@@ -22,6 +22,17 @@ export interface HealthResponse {
     lastBackup: Record<string, unknown> | null;
     unresolvedErrors: number;
   };
+  cloudPersistence?: {
+    connected?: boolean;
+    connectionBlocked?: boolean;
+    connectionError?: string | null;
+    databaseIdentity?: string;
+    externalLocation?: string;
+    [key: string]: unknown;
+  };
+  connectionBlocked?: boolean;
+  connectionError?: string | null;
+  databaseIdentity?: string;
   localization: {
     currency: string;
     currencySymbol: string;

@@ -29,9 +29,9 @@ function buildOfflineFirstSwScript(assetUrls: string[], buildHash: string): stri
   ];
   const uniqueUrls = Array.from(new Set(baseUrls));
 
-  return `// AMS Service Worker v13 (Build ${buildHash} - Network-First Auto-Updating App Shell)
-const SW_VERSION = 'ams-sw-v13-${buildHash}';
-const RUNTIME_CACHE = 'ams-runtime-v13-${buildHash}';
+  return `// AMS Service Worker v14 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v14-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v14-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -117,7 +117,7 @@ self.addEventListener('fetch', (event) => {
   if (isNav) {
     event.respondWith((async () => {
       try {
-        const networkResponse = await fetch(req);
+        const networkResponse = await fetch(req, { cache: 'no-store' });
         if (networkResponse) {
           if (
             networkResponse.status === 200 &&
@@ -157,7 +157,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith((async () => {
     const cache = await caches.open(RUNTIME_CACHE);
     try {
-      const networkResponse = await fetch(req);
+      const networkResponse = await fetch(req, { cache: 'no-store' });
       if (
         networkResponse &&
         networkResponse.status === 200 &&
@@ -177,7 +177,11 @@ self.addEventListener('fetch', (event) => {
 }
 
 export default defineConfig(() => {
+  const BUILD_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   return {
+    define: {
+      __AMS_BUILD_ID__: JSON.stringify(BUILD_ID),
+    },
     plugins: [
       react(),
       tailwindcss(),
@@ -209,7 +213,7 @@ export default defineConfig(() => {
               );
               fs.writeFileSync(
                 path.join(outDir, 'version.json'),
-                JSON.stringify({ buildHash, assets: assetUrls }),
+                JSON.stringify({ buildId: BUILD_ID, buildHash, builtAt: new Date().toISOString(), assets: assetUrls }),
                 'utf8'
               );
             }

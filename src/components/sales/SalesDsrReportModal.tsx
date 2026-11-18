@@ -58,6 +58,26 @@ function formatDateDMY(raw: unknown): string {
   return str;
 }
 
+function formatThermalCompanyName(raw: string): string {
+  const clean = String(raw || '').trim();
+  if (!clean) return 'UNASSIGNED';
+  const shortened = clean
+    .replace(
+      /\b(private|pvt\.?|limited|ltd\.?|incorporated|inc\.?|corp\.?|corporation|co\.?)\b/gi,
+      ''
+    )
+    .replace(
+      /\b(pharmaceuticals?|pharma|laboratories|labs?|healthcare|health\s*care|international|intl\.?|enterprises?|industries|distributors?|distribution|medical)\b/gi,
+      ''
+    )
+    .replace(/[().,]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const candidate = shortened || clean;
+  if (candidate.length <= 24) return candidate;
+  return `${candidate.slice(0, 23).trim()}…`;
+}
+
 export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
   isOpen,
   onClose,
@@ -616,54 +636,60 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                 <div
                   ref={thermalPrintRef}
                   style={{ width: '80mm', maxWidth: '80mm', height: 'auto', minHeight: 0 }}
-                  className="thermal-receipt thermal-80mm bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-tight w-[80mm] max-w-[80mm] h-auto min-h-0 self-start px-[1.5mm] py-[1.5mm] text-[9px] relative print:border-0 print:shadow-none print:p-0.5"
+                  className="thermal-receipt thermal-80mm bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-[1.08] w-[80mm] max-w-[80mm] h-auto min-h-0 self-start px-[1mm] py-[1mm] text-[7.5px] relative print:border-0 print:shadow-none print:p-[0.8mm]"
                 >
                   {/* Compact Header: Store name + report title */}
-                  <div className="text-center pb-0.5">
-                    <div className="font-black text-black tracking-tight leading-tight text-[11px] uppercase">
+                  <div className="text-center pb-[1px]">
+                    <div className="font-black text-black tracking-tight leading-none text-[9.5px] uppercase truncate">
                       {displayStoreName}
                     </div>
-                    <div className="font-bold text-black leading-tight text-[8.5px]">
+                    <div className="font-bold text-black leading-tight text-[7px]">
                       DSR – Daily Stock Requisition
                     </div>
                   </div>
 
                   {/* Compact Boxed meta: Customer, Date, Invoice No */}
-                  <table className="w-full border-collapse border border-black text-black text-[8.5px] leading-tight">
+                  <table className="w-full table-fixed border-collapse border border-black text-black text-[7.5px] leading-[1.08]">
+                    <colgroup>
+                      <col style={{ width: '16%' }} />
+                      <col style={{ width: '36%' }} />
+                      <col style={{ width: '14%' }} />
+                      <col style={{ width: '34%' }} />
+                    </colgroup>
                     <tbody>
-                      <tr>
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap w-[22%]">
+                      <tr className="break-inside-avoid">
+                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
                           Party
                         </td>
                         <td
                           colSpan={3}
-                          className="border border-black px-1 py-0 font-bold break-words text-[9px]"
+                          className="border border-black px-1 py-[0.5px] font-bold break-words text-[7.5px]"
                         >
                           {displayCustomerName}
                         </td>
                       </tr>
-                      <tr>
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap">
+                      <tr className="break-inside-avoid">
+                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
                           Inv#
                         </td>
-                        <td className="border border-black px-1 py-0 font-bold font-mono text-[8.5px]">
+                        <td className="border border-black px-1 py-[0.5px] font-bold font-mono text-[7.5px] truncate">
                           {displayInvoiceNumber}
                         </td>
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap">
+                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
                           Date
                         </td>
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap text-[8px]">
+                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap text-[7px]">
                           {formatDateDMY(displayInvoiceDate)}
                         </td>
                       </tr>
                       {(displayCustomerPhone || displayCustomerAddress) && (
-                        <tr>
-                          <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap">
+                        <tr className="break-inside-avoid">
+                          <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
                             Info
                           </td>
                           <td
                             colSpan={3}
-                            className="border border-black px-1 py-0 font-medium break-words text-[8px]"
+                            className="border border-black px-1 py-[0.5px] font-medium break-words text-[7px]"
                           >
                             {[displayCustomerPhone, displayCustomerAddress]
                               .filter(Boolean)
@@ -675,22 +701,29 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                   </table>
 
                   {/* Compact Boxed items table: # | Item Name | Qty | LQty | Bonus (company-wise A-Z) */}
-                  <table className="w-full border-collapse border border-black border-t-0 text-black text-[8.5px] leading-tight">
+                  <table className="w-full table-fixed border-collapse border border-black border-t-0 text-black text-[7.5px] leading-[1.08]">
+                    <colgroup>
+                      <col style={{ width: '16px' }} />
+                      <col />
+                      <col style={{ width: '24px' }} />
+                      <col style={{ width: '22px' }} />
+                      <col style={{ width: '22px' }} />
+                    </colgroup>
                     <thead>
-                      <tr className="font-bold text-black bg-white text-[8px]">
-                        <th className="border border-black px-0.5 py-0 text-center font-bold w-[18px]">
+                      <tr className="font-bold text-black bg-white text-[7px]">
+                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold">
                           #
                         </th>
-                        <th className="border border-black px-1 py-0 text-left font-bold">
+                        <th className="border border-black px-1 py-[0.5px] text-left font-bold">
                           Item Name
                         </th>
-                        <th className="border border-black px-0.5 py-0 text-center font-bold whitespace-nowrap w-[28px]">
+                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold whitespace-nowrap">
                           Qty
                         </th>
-                        <th className="border border-black px-0.5 py-0 text-center font-bold whitespace-nowrap w-[28px]">
-                          LQty
+                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold whitespace-nowrap">
+                          LQ
                         </th>
-                        <th className="border border-black px-0.5 py-0 text-center font-bold whitespace-nowrap w-[30px]">
+                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold whitespace-nowrap">
                           Bon
                         </th>
                       </tr>
@@ -698,29 +731,30 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     <tbody>
                       {dsrData.groups.map((group) => (
                         <React.Fragment key={group.companyName}>
-                          <tr>
+                          <tr className="break-inside-avoid">
                             <td
                               colSpan={5}
-                              className="border border-black px-1 py-0 bg-slate-100 font-bold uppercase text-[8px] leading-tight break-words"
+                              title={group.companyName}
+                              className="border border-black px-1 py-[0.5px] bg-slate-100 font-bold uppercase text-[7px] leading-[1.05] truncate overflow-hidden whitespace-nowrap"
                             >
-                              {group.companyName}
+                              {formatThermalCompanyName(group.companyName)}
                             </td>
                           </tr>
                           {group.items.map((item) => (
-                            <tr key={item.rowId} className="align-middle leading-tight">
-                              <td className="border border-black px-0.5 py-0 text-center font-semibold text-[8px]">
+                            <tr key={item.rowId} className="align-middle leading-[1.08] break-inside-avoid">
+                              <td className="border border-black px-0.5 py-[0.5px] text-center font-semibold text-[7px] whitespace-nowrap">
                                 {item.sNo}
                               </td>
-                              <td className="border border-black px-1 py-0 font-semibold break-words leading-tight text-[8.5px]">
+                              <td className="border border-black px-1 py-[0.5px] font-semibold break-words leading-[1.08] text-[7.5px]">
                                 {item.itemName}
                               </td>
-                              <td className="border border-black px-0.5 py-0 text-center font-mono font-bold whitespace-nowrap text-[8.5px]">
+                              <td className="border border-black px-0.5 py-[0.5px] text-center font-mono font-bold whitespace-nowrap overflow-hidden text-[7.5px]">
                                 {formatQtyValue(item.qty)}
                               </td>
-                              <td className="border border-black px-0.5 py-0 text-center font-mono font-semibold whitespace-nowrap text-[8px]">
+                              <td className="border border-black px-0.5 py-[0.5px] text-center font-mono font-semibold whitespace-nowrap overflow-hidden text-[7px]">
                                 {item.looseQty > 0 ? formatQtyValue(item.looseQty) : '-'}
                               </td>
-                              <td className="border border-black px-0.5 py-0 text-center font-mono font-semibold whitespace-nowrap text-[8px]">
+                              <td className="border border-black px-0.5 py-[0.5px] text-center font-mono font-semibold whitespace-nowrap overflow-hidden text-[7px]">
                                 {item.bonusQty > 0 ? formatQtyValue(item.bonusQty) : '-'}
                               </td>
                             </tr>
@@ -731,13 +765,13 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                   </table>
 
                   {/* Compact Last line: Total Items */}
-                  <table className="w-full border-collapse border border-black border-t-0 text-black">
+                  <table className="w-full table-fixed border-collapse border border-black border-t-0 text-black">
                     <tbody>
-                      <tr className="font-bold text-[8.5px] leading-tight">
-                        <td className="border border-black px-1 py-0 text-left font-bold uppercase">
-                          Total Items: {dsrData.totalItems}
+                      <tr className="font-bold text-[7.5px] leading-[1.1] break-inside-avoid">
+                        <td className="border border-black px-1 py-[0.5px] text-left font-bold uppercase">
+                          Items: {dsrData.totalItems}
                         </td>
-                        <td className="border border-black px-1 py-0 text-right font-mono font-bold">
+                        <td className="border border-black px-1 py-[0.5px] text-right font-mono font-bold whitespace-nowrap">
                           Qty: {formatQtyValue(dsrData.totalQty)}
                         </td>
                       </tr>

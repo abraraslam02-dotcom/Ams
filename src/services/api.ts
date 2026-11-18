@@ -271,12 +271,51 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     }
   }
   const method = String(init?.method || 'GET').toUpperCase();
-  const res = await fetch(url, {
-    ...init,
-    cache: init?.cache ?? 'no-store',
-    credentials: init?.credentials ?? 'include',
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      cache: init?.cache ?? 'no-store',
+      credentials: init?.credentials ?? 'include',
+      headers,
+    });
+  } catch (err) {
+    if (typeof window !== 'undefined' && url.startsWith('/api/')) {
+      window.dispatchEvent(
+        new CustomEvent('ams-db-connection-error', {
+          detail: {
+            message:
+              'Network unavailable — current active database cannot be reached. Reconnect to resume using the same database.',
+          },
+        })
+      );
+    }
+    throw err;
+  }
+
+  if (typeof window !== 'undefined' && res.status === 503 && url.startsWith('/api/')) {
+    try {
+      const errBody = await res.clone().json().catch(() => null);
+      if (errBody && (errBody.dbConnectionError || errBody.connectionBlocked)) {
+        window.dispatchEvent(
+          new CustomEvent('ams-db-connection-error', {
+            detail: {
+              message:
+                errBody.error ||
+                errBody.connectionError ||
+                'Active database is currently unreachable. Reconnect to resume using the same database.',
+              databaseIdentity: errBody.databaseIdentity,
+            },
+          })
+        );
+      }
+    } catch {
+      // ignore clone errors
+    }
+  } else if (typeof window !== 'undefined' && res.ok && url.startsWith('/api/') && !url.includes('/api/system/health')) {
+    window.dispatchEvent(new CustomEvent('ams-db-connection-restored'));
+  }
+
   if (
     res.status === 401 &&
     !url.includes('/api/auth/login') &&
@@ -370,35 +409,121 @@ function getLocalPrefixForAccountGroup(accountGroup: string, mainGroup?: string)
 
 export const api = {
   /**
-   * Fetch system health and database connectivity (with Offline Local Fallback)
+   * Fetch live system health and current active database connectivity (never masks disconnected DBs with cached/fake local DBs)
    */
   async getHealth(): Promise<HealthResponse> {
     try {
       const res = await authFetch('/api/system/health');
-      if (res.ok) {
-        const data = await res.json();
-        offlineStorage.cacheApiData('system_health', data).catch(() => {});
-        return data;
+      const data = await res.json().catch(() => null);
+      if (data && typeof data === 'object') {
+        if (typeof window !== 'undefined') {
+          if (!data?.database?.connected || data?.connectionBlocked || data?.cloudPersistence?.connectionBlocked) {
+            window.dispatchEvent(
+              new CustomEvent('ams-db-connection-error', {
+                detail: {
+                  message:
+                    data?.connectionError ||
+                    data?.database?.error ||
+                    'Current active database cannot be reached. Reconnect to resume using the same database.',
+                  databaseIdentity: data?.databaseIdentity || data?.cloudPersistence?.databaseIdentity,
+                },
+              })
+            );
+          } else {
+            window.dispatchEvent(new CustomEvent('ams-db-connection-restored'));
+          }
+        }
+        return data as HealthResponse;
       }
     } catch {
-      // Offline fallback
+      // Unreachable
     }
-    const cached = await offlineStorage.getCachedApiData<HealthResponse>('system_health');
-    if (cached) return cached;
+    const errMsg =
+      'Network unavailable — current active database cannot be reached. Reconnect to resume using the same database.';
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-db-connection-error', {
+          detail: { message: errMsg },
+        })
+      );
+    }
     return {
-      status: 'ok',
+      status: 'degraded',
       timestamp: new Date().toISOString(),
-      service: 'Abrar Medical Store ERP (Offline Local Mode)',
-      version: '2.0.0',
-      environment: 'offline-local',
+      service: 'Abrar Medical Store API',
+      version: '2.12.0-ERP',
+      environment: 'unreachable',
+      uptimeSeconds: 0,
+      nodeVersion: '',
       database: {
-        connected: true,
-        path: 'ams_medical.db (IndexedDB Local Mirror)',
+        connected: false,
+        driver: 'sqlite3',
+        path: 'Current Active Database (Unreachable)',
+        latencyMs: 0,
+        integrity: 'unknown',
         journalMode: 'WAL',
         foreignKeys: true,
-        tableCount: 18,
+        error: errMsg,
       },
-    } as any;
+      connectionBlocked: true,
+      connectionError: errMsg,
+      cloudPersistence: {
+        connected: false,
+        connectionBlocked: true,
+        connectionError: errMsg,
+      },
+      localization: {
+        currency: 'PKR',
+        currencySymbol: 'Rs.',
+        timezone: 'Asia/Karachi',
+        timezoneOffset: '+05:00',
+        locale: 'en-PK',
+      },
+    };
+  },
+
+  /**
+   * Explicitly reconnect to the SAME current active database without switching databases
+   */
+  async reconnectDatabase(): Promise<{
+    success: boolean;
+    connected: boolean;
+    blocked: boolean;
+    error: string | null;
+    status?: Record<string, unknown>;
+  }> {
+    const res = await fetch('/api/system/reconnect-db', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getStoredAuthToken() ? { Authorization: `Bearer ${getStoredAuthToken()}` } : {}),
+      },
+    });
+    const data = await res.json().catch(() => ({
+      success: false,
+      connected: false,
+      blocked: true,
+      error: `Reconnect failed (HTTP ${res.status})`,
+    }));
+    if (typeof window !== 'undefined') {
+      if (res.ok && data?.success) {
+        window.dispatchEvent(new CustomEvent('ams-db-connection-restored'));
+      } else {
+        window.dispatchEvent(
+          new CustomEvent('ams-db-connection-error', {
+            detail: {
+              message:
+                data?.error ||
+                'Unable to reach the current active database. Check network connection and retry.',
+              databaseIdentity: data?.status?.databaseIdentity,
+            },
+          })
+        );
+      }
+    }
+    return data;
   },
 
   /**
@@ -587,31 +712,32 @@ export const api = {
   },
 
   /**
-   * Fetch detailed database diagnostics and table schemas (with Offline Local Fallback)
+   * Fetch detailed database diagnostics and table schemas
    */
   async getDatabaseStatus(): Promise<DatabaseStatusResponse> {
     try {
       const res = await authFetch('/api/system/database');
-      if (res.ok) {
-        const data = await res.json();
-        offlineStorage.cacheApiData('database_status', data).catch(() => {});
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
         return data;
       }
+      if (data && typeof data === 'object') {
+        return data as DatabaseStatusResponse;
+      }
     } catch {
-      // Offline fallback
+      // Unreachable
     }
-    const cached = await offlineStorage.getCachedApiData<DatabaseStatusResponse>('database_status');
-    if (cached) return cached;
     return {
-      success: true,
+      success: false,
       diagnostics: {
-        connected: true,
-        databasePath: 'ams_medical.db (Local Offline Mode)',
+        connected: false,
+        databasePath: 'Current Active Database (Unreachable)',
         fileSizeBytes: 0,
         journalMode: 'WAL',
         foreignKeysEnabled: true,
-        integrityCheck: 'ok',
-        tablesCount: 18,
+        integrityCheck: 'unknown',
+        tablesCount: 0,
+        error: 'Network unavailable — active database cannot be reached.',
       },
       tables: [],
     } as any;
@@ -1006,19 +1132,12 @@ export const api = {
             return merged;
           });
 
-          // If server returned 0 items on an unfiltered query while local IndexedDB has items,
-          // rehydrate server + Firestore from local IndexedDB automatically
-          if (data.items.length === 0 && existingLocal.length > 0 && !params?.q && !params?.category && !params?.company) {
-            await offlineSyncManager.rehydrateServerFromLocal();
-          }
-
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
             const isUnsynced =
               loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
-            const serverWasEmpty = data.items.length === 0 && !params?.q;
-            if (!isUnsynced && !serverWasEmpty) {
+            if (!isUnsynced) {
               continue;
             }
             const locCode = String(loc?.item_code || '').toLowerCase();
@@ -1741,18 +1860,10 @@ export const api = {
           const seenIds = new Set<number>(
             data.accounts.map((a: any) => Number(a?.id || 0)).filter((n: number) => n > 0)
           );
-          const serverCustomCount = data.accounts.filter((a: any) => Number(a?.is_system_account || 0) === 0).length;
-          const localCustomCount = existingLocal.filter((a: any) => Number(a?.is_system_account || 0) === 0).length;
-          if (serverCustomCount === 0 && localCustomCount > 0 && !params?.q) {
-            await offlineSyncManager.rehydrateServerFromLocal();
-          }
-
           for (const loc of existingLocal) {
             const isUnsynced =
               loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
-            const shouldRecoverCustom =
-              serverCustomCount === 0 && Number(loc?.is_system_account || 0) === 0 && !params?.q;
-            if (!isUnsynced && !shouldRecoverCustom) {
+            if (!isUnsynced) {
               continue;
             }
             const code = String(loc?.account_code || '').toLowerCase();
@@ -3233,17 +3344,32 @@ export const api = {
             !params?.startDate &&
             !params?.endDate;
 
-          // Reconcile stale synced held records in IndexedDB that are no longer held on active DB
-          if (isUnfilteredHeldList) {
-            for (const loc of existingLocal) {
-              const locSt = String(loc?.status || '').trim().toLowerCase();
-              const isHeldLoc = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt);
-              const isPendingLoc =
-                loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
-              const sid = Number(loc?.server_id || loc?.id || 0);
-              if (isHeldLoc && !isPendingLoc && sid > 0 && !seenServerIds.has(sid) && loc?.client_tx_id) {
-                offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
-              }
+          // Reconcile stale synced held records in IndexedDB:
+          // 1) Any local held/draft record whose server_id or invoice_number matches a completed/posted/cancelled server invoice must be removed
+          // 2) On unfiltered held list, remove any non-pending local held record no longer present in server held list
+          for (const loc of existingLocal) {
+            const locSt = String(loc?.status || '').trim().toLowerCase();
+            const isHeldLoc = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt);
+            if (!isHeldLoc || !loc?.client_tx_id) continue;
+            const isPendingLoc =
+              loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+            const sid = Number(loc?.server_id || loc?.id || 0);
+            const matchedNonHeldServerRow =
+              sid > 0
+                ? rows.find(
+                    (s: any) =>
+                      Number(s?.id || s?.server_id || 0) === sid &&
+                      !['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(
+                        String(s?.status || '').trim().toLowerCase()
+                      )
+                  )
+                : null;
+            if (matchedNonHeldServerRow) {
+              offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
+              continue;
+            }
+            if (isUnfilteredHeldList && !isPendingLoc && sid > 0 && !seenServerIds.has(sid)) {
+              offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
             }
           }
 
@@ -3551,6 +3677,13 @@ export const api = {
             created_at: savedInvoice.created_at || nowIso,
             updated_at: savedInvoice.updated_at || nowIso,
           };
+          const existingSales = await offlineStorage.getAll<any>('sales').catch(() => []);
+          for (const loc of existingSales) {
+            const sameServer = savedInvoice.id && (Number(loc?.id) === Number(savedInvoice.id) || Number(loc?.server_id) === Number(savedInvoice.id));
+            if (sameServer && loc?.client_tx_id && String(loc.client_tx_id) !== String(saleRecord.client_tx_id)) {
+              await offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
+            }
+          }
           await offlineStorage.put('sales', saleRecord);
           if (data.invoice) data.invoice = saleRecord;
           if (data.data) data.data = saleRecord;
@@ -3614,7 +3747,10 @@ export const api = {
         const savedInvoice = data.invoice || data.data || data.sale;
         const canonicalId = savedInvoice?.id || existing?.id || id;
         const txKey = String(
-          savedInvoice?.client_tx_id || existing?.client_tx_id || `SRV-SALE-${canonicalId}`
+          savedInvoice?.client_tx_id ||
+            savedInvoice?.client_request_id ||
+            existing?.client_tx_id ||
+            `SRV-SALE-${canonicalId}`
         );
         const saleRecord = {
           ...(existing || {}),
@@ -3632,9 +3768,28 @@ export const api = {
         };
         for (const loc of allSales) {
           const matchesSameSale =
-            String(loc.id) === String(canonicalId) || String(loc.server_id) === String(canonicalId);
+            String(loc.id) === String(canonicalId) ||
+            String(loc.server_id) === String(canonicalId) ||
+            String(loc.id) === String(id) ||
+            (existing?.invoice_number && String(loc.invoice_number) === String(existing.invoice_number));
           if (matchesSameSale && loc.client_tx_id && String(loc.client_tx_id) !== txKey) {
             await offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
+          }
+        }
+        // Purge any queued sync operations referencing this held/updated invoice so they never replay an old held state
+        const queuedOps = await offlineStorage.getAll<any>('sync_queue').catch(() => []);
+        for (const qItem of queuedOps) {
+          if (qItem?.entity !== 'sales') continue;
+          const qLocalId = String(qItem?.local_id || '');
+          const qPayloadId = String(qItem?.payload?.id || '');
+          const matchesQueuedSale =
+            qLocalId === String(canonicalId) ||
+            qLocalId === String(id) ||
+            qPayloadId === String(canonicalId) ||
+            qPayloadId === String(id) ||
+            (existing?.client_tx_id && String(qItem?.client_tx_id) === String(existing.client_tx_id));
+          if (matchesQueuedSale && qItem?.client_tx_id) {
+            await offlineStorage.delete('sync_queue', String(qItem.client_tx_id)).catch(() => {});
           }
         }
         await offlineStorage.put('sales', saleRecord);

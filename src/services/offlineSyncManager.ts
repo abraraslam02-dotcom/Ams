@@ -486,11 +486,15 @@ class OfflineSyncManager {
       if (remoteTs > latestUpdatedAt) latestUpdatedAt = remoteTs;
 
       const existingRowsForServerId = srvId > 0 ? localRowsByServerId.get(srvId) || [] : [];
+      const remoteStatus = String(remote?.status || '').trim().toLowerCase();
+      const isRemoteFinal = ['completed', 'posted', 'cancelled'].includes(remoteStatus);
       let hasPendingCollision = false;
       for (const existingRow of existingRowsForServerId) {
         const existingTx = String(existingRow?.client_tx_id || '');
         if (!existingTx || existingTx === remoteTxId) continue;
-        if (pendingTxIds.has(existingTx)) {
+        const existingStatus = String(existingRow?.status || '').trim().toLowerCase();
+        const isExistingHeld = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(existingStatus);
+        if (pendingTxIds.has(existingTx) && !(storeName === 'sales' && isRemoteFinal && isExistingHeld)) {
           hasPendingCollision = true;
           continue;
         }
@@ -652,6 +656,25 @@ class OfflineSyncManager {
           headers: getStoredAuthHeaders(),
           cache: 'no-store',
         });
+        const statusJson = await statusRes.clone().json().catch(() => null);
+        if (
+          statusRes.status === 503 ||
+          statusJson?.dbConnectionError ||
+          statusJson?.connectionBlocked
+        ) {
+          const msg =
+            statusJson?.error ||
+            statusJson?.connectionError ||
+            'Current active database is unreachable. Reconnect to resume using the same database.';
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('ams-db-connection-error', {
+                detail: { message: msg, databaseIdentity: statusJson?.databaseIdentity },
+              })
+            );
+          }
+          throw new Error(msg);
+        }
         if (!statusRes.ok && statusRes.status !== 401) {
           throw new Error(`Server status HTTP ${statusRes.status}`);
         }
@@ -791,8 +814,7 @@ class OfflineSyncManager {
         }
       }
 
-      // Step 2.5: Ensure any local IndexedDB records missing on the server are non-destructively rehydrated
-      await this.rehydrateServerFromLocal();
+      // Local IndexedDB is never auto-pushed over a fresh/unreachable central database.
 
       // Step 3: Build protected IDs for any remaining pending/failed local records
       const [remainingPending, remainingFailed] = await Promise.all([

@@ -2,18 +2,30 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
+declare const __AMS_BUILD_ID__: string;
+const CLIENT_BUILD_ID = typeof __AMS_BUILD_ID__ !== 'undefined' ? __AMS_BUILD_ID__ : 'dev';
+
 const RELOAD_GUARD_KEY = 'ams_last_sw_auto_reload_at';
+const RELOAD_BUILD_GUARD_KEY = 'ams_reloaded_for_build_v2';
 let swRegistrationRef: ServiceWorkerRegistration | null = null;
 let reloadingForUpdate = false;
 
-function triggerControlledReloadOnce() {
+function triggerControlledReloadOnce(targetBuildId?: string) {
   if (reloadingForUpdate || typeof window === 'undefined') return;
   try {
-    const lastReload = Number(sessionStorage.getItem(RELOAD_GUARD_KEY) || '0');
-    if (Date.now() - lastReload < 15000) {
-      return;
+    if (targetBuildId) {
+      const prevTarget = sessionStorage.getItem(RELOAD_BUILD_GUARD_KEY);
+      if (prevTarget === targetBuildId) {
+        return;
+      }
+      sessionStorage.setItem(RELOAD_BUILD_GUARD_KEY, targetBuildId);
+    } else {
+      const lastReload = Number(sessionStorage.getItem(RELOAD_GUARD_KEY) || '0');
+      if (Date.now() - lastReload < 5000) {
+        return;
+      }
+      sessionStorage.setItem(RELOAD_GUARD_KEY, String(Date.now()));
     }
-    sessionStorage.setItem(RELOAD_GUARD_KEY, String(Date.now()));
   } catch {
     // ignore storage errors
   }
@@ -44,15 +56,30 @@ async function checkForPublishedUpdate() {
     }
 
     const currentAsset = getCurrentMainAssetPath();
-    if (!currentAsset) {
+    if (!currentAsset && CLIENT_BUILD_ID === 'dev') {
       // Dev mode (Vite serves /src/main.tsx directly) — skip production bundle hash comparison
       return;
     }
 
-    const res = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+    const res = await fetch(`/version.json?t=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    });
     if (!res.ok) return;
-    const data = (await res.json()) as { buildHash?: string; assets?: string[] };
-    if (Array.isArray(data?.assets) && data.assets.length > 0 && !data.assets.includes(currentAsset)) {
+    const data = (await res.json()) as { buildId?: string; buildHash?: string; assets?: string[] };
+    const remoteBuildId = String(data?.buildId || data?.buildHash || '');
+    const buildIdMismatch =
+      Boolean(data?.buildId) &&
+      CLIENT_BUILD_ID !== 'dev' &&
+      !String(data.buildId).startsWith('dev-') &&
+      data.buildId !== CLIENT_BUILD_ID;
+    const assetMismatch =
+      Boolean(currentAsset) &&
+      Array.isArray(data?.assets) &&
+      data.assets.length > 0 &&
+      !data.assets.includes(currentAsset!);
+
+    if (buildIdMismatch || assetMismatch) {
       if ('caches' in window) {
         const keys = await window.caches.keys();
         await Promise.allSettled(keys.map((k) => window.caches.delete(k)));
@@ -60,7 +87,7 @@ async function checkForPublishedUpdate() {
       if (swRegistrationRef) {
         await swRegistrationRef.update().catch(() => {});
       }
-      triggerControlledReloadOnce();
+      triggerControlledReloadOnce(remoteBuildId || undefined);
     }
   } catch {
     // Ignore update check failures when offline or server restarting
@@ -74,7 +101,9 @@ async function warmOfflineAppShellCache() {
       await navigator.serviceWorker.ready.catch(() => {});
     }
     const cacheNames = await window.caches.keys();
-    const activeCacheName = cacheNames.find((name) => name.startsWith('ams-runtime-v13-'));
+    const activeCacheName = cacheNames.find(
+      (name) => name.startsWith('ams-runtime-v14-') || name.startsWith('ams-runtime-v13-')
+    );
     if (!activeCacheName) return;
     const cache = await window.caches.open(activeCacheName);
     const urlsToWarm = new Set<string>([

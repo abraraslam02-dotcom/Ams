@@ -298,15 +298,50 @@ export const VariantManagementView: React.FC<VariantManagementViewProps> = ({
   const handleSaveVariant = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!parentItem) return;
-    if (!variantForm.variant_name.trim() && !variantForm.colour.trim() && !variantForm.flavour.trim() && !variantForm.variant_type.trim()) {
-      setBanner({ type: 'error', message: 'Please enter Variant Name or at least one attribute (Colour / Flavour / Type).' });
+    const derivedName = [
+      variantForm.colour,
+      variantForm.flavour,
+      variantForm.variant_type,
+      variantForm.other_attributes,
+    ]
+      .map((s) => String(s || '').trim())
+      .filter(Boolean)
+      .join(' / ');
+    const finalName = String(variantForm.variant_name || '').trim() || derivedName;
+    if (!finalName) {
+      setBanner({
+        type: 'error',
+        message: 'Please enter Variant Name or at least one attribute (Colour / Flavour / Type).',
+      });
       return;
     }
 
     try {
       setSavingVariant(true);
+      const safeNumVal = (v: unknown, fallback = 0) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : fallback;
+      };
       const payload = {
         ...variantForm,
+        variant_code: String(variantForm.variant_code || '').trim(),
+        variant_name: finalName,
+        colour: String(variantForm.colour || '').trim(),
+        flavour: String(variantForm.flavour || '').trim(),
+        variant_type: String(variantForm.variant_type || '').trim(),
+        other_attributes: String(variantForm.other_attributes || '').trim(),
+        barcode: String(variantForm.barcode || '').trim(),
+        packing: String(variantForm.packing || '').trim(),
+        rack_number: String(variantForm.rack_number || '').trim(),
+        purchase_price: safeNumVal(variantForm.purchase_price, 0),
+        trade_price: safeNumVal(variantForm.trade_price, 0),
+        wholesale_price: safeNumVal(variantForm.wholesale_price, 0),
+        retail_price: safeNumVal(variantForm.retail_price, 0),
+        loose_rate: safeNumVal(variantForm.loose_rate, 0),
+        discount_percent: safeNumVal(variantForm.discount_percent, 0),
+        tax_percent: safeNumVal(variantForm.tax_percent, 0),
+        opening_stock: safeNumVal(variantForm.opening_stock, 0),
+        minimum_stock: safeNumVal(variantForm.minimum_stock, 0),
         use_parent_pricing: variantForm.use_parent_pricing ? 1 : 0,
       };
       if (editingVariant) {

@@ -525,6 +525,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   const editingSaleIdRef = useRef<number | null>(null);
   const isResumingRef = useRef<boolean>(false);
+  const submittingRef = useRef<boolean>(false);
 
   useEffect(() => {
     editingSaleIdRef.current = editingSaleId;
@@ -2419,7 +2420,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     targetStatus: 'completed' | 'held' | 'draft',
     autoPrintFormat?: 'a4' | '80mm' | '58mm'
   ) => {
-    if (submitting) return;
+    if (submitting || submittingRef.current) return;
+    submittingRef.current = true;
     try {
       setErrorMsg(null);
       setSuccessMsg(null);
@@ -2533,6 +2535,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       const savedInvoice = (res?.data || res?.invoice || res?.sale || res) as SalesInvoiceRecord;
       if (prevEditingId && targetStatus === 'completed') {
+        localStorage.removeItem(ACTIVE_DRAFT_STORAGE_KEY);
         setHeldInvoices((prev) => prev.filter((h) => Number(h.id) !== Number(prevEditingId)));
       }
 
@@ -2582,9 +2585,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
 
       await resetToNewInvoice();
+      void refreshHeldInvoices();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -3260,6 +3265,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }, 25);
   };
 
+  const advanceToNextRowItemCode = (fromRowIdx: number, mode: 'pos' | 'access') => {
+    const nextRowIdx = fromRowIdx + 1;
+    if (nextRowIdx >= rows.length) {
+      setRows((prev) => ensureMinimumRows([...prev, createEmptyRow()]));
+    }
+
+    setSelectedRowIndex(nextRowIdx);
+    setRecordJumpInput(String(nextRowIdx + 1));
+    setShowSearchDropdown(false);
+    setQuickSearchQuery('');
+    setActiveSearchRowIdx(nextRowIdx);
+
+    const prefix = mode === 'pos' ? 'pos_row' : 'cell';
+    const itemCodeId = `${prefix}_${nextRowIdx}_item_code`;
+    pendingFocusTargetRef.current = itemCodeId;
+    window.requestAnimationFrame(() => {
+      setTimeout(() => {
+        const el = document.getElementById(itemCodeId) as HTMLInputElement | null;
+        if (el) {
+          el.focus();
+          el.select?.();
+          el.closest('tr')?.scrollIntoView({ block: 'nearest' });
+        }
+      }, 20);
+    });
+  };
+
   // POS View Keyboard Navigation: 1. Quantity -> 2. Discount -> 3. Price -> 4. Loose Quantity -> 5. Loose Rate -> Enter -> New Row & Item Search
   const handlePosFieldKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
@@ -3271,6 +3303,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       | 'unit_price'
       | 'loose_quantity'
       | 'loose_rate'
+      | 'line_total'
       | 'remarks',
     isTableInput: boolean = false
   ) => {
@@ -3285,7 +3318,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       | 'loose_rate'
       | 'remarks'
     >;
-    const curIdx = posOrder.indexOf(fieldName);
 
     if (e.key === 'Escape') {
       if (showCompactHistoryPopup) {
@@ -3296,6 +3328,41 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         return;
       }
     }
+
+    if (fieldName === 'line_total') {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        advanceToNextRowItemCode(rowIdx, 'pos');
+        return;
+      }
+      if (e.key === 'Tab' && !e.shiftKey) {
+        e.preventDefault();
+        focusCell(rowIdx, 'remarks', 'pos_row');
+        return;
+      }
+      if (e.key === 'Tab' && e.shiftKey) {
+        e.preventDefault();
+        const prevCol = isSyrupItem(row) ? 'bonus_quantity' : 'loose_rate';
+        focusCell(rowIdx, prevCol, 'pos_row');
+        return;
+      }
+      if (isTableInput && e.key === 'ArrowUp' && rowIdx > 0) {
+        e.preventDefault();
+        setSelectedRowIndex(rowIdx - 1);
+        focusCell(rowIdx - 1, 'line_total', 'pos_row');
+        return;
+      }
+      if (isTableInput && e.key === 'ArrowDown' && rowIdx < entryRowIdx) {
+        e.preventDefault();
+        setSelectedRowIndex(rowIdx + 1);
+        focusCell(rowIdx + 1, 'line_total', 'pos_row');
+        return;
+      }
+      return;
+    }
+
+    const curIdx = posOrder.indexOf(fieldName);
 
     if (ctrlPriceHistoryArmedRef.current && e.ctrlKey && e.key !== 'Control') {
       ctrlPriceHistoryArmedRef.current = false;
@@ -3611,6 +3678,25 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           rowIndex,
           returnFocusId: `cell_${rowIndex}_unit_price`,
         });
+        return;
+      }
+    }
+
+    if (colName === 'line_total') {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        advanceToNextRowItemCode(rowIndex, 'access');
+        return;
+      }
+      if (e.key === 'Tab' && !e.shiftKey) {
+        e.preventDefault();
+        focusCell(rowIndex, 'remarks', 'cell');
+        return;
+      }
+      if (e.key === 'Tab' && e.shiftKey) {
+        e.preventDefault();
+        focusCell(rowIndex, 'bonus_quantity', 'cell');
         return;
       }
     }
@@ -4976,14 +5062,25 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 11. Net Amount */}
-                        <td
-                          className={`py-0 px-1.5 text-right font-mono font-black text-[11px] border-r border-slate-200 h-9 align-middle whitespace-nowrap ${
-                            isZeroNet
-                              ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
-                              : 'text-slate-900 bg-slate-50/80'
-                          }`}
-                        >
-                          {hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle whitespace-nowrap">
+                          <input
+                            id={`pos_row_${rIdx}_line_total`}
+                            type="text"
+                            readOnly
+                            tabIndex={0}
+                            value={hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
+                            onFocus={(e) => {
+                              setSelectedRowIndex(rIdx);
+                              e.currentTarget.select();
+                            }}
+                            onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'line_total', true)}
+                            title="Net Amount (Press Enter to move to next row Item Code)"
+                            className={`w-full px-1.5 py-0 text-right font-mono font-black text-[11px] border border-transparent focus:border-emerald-500 h-full leading-none outline-none ${
+                              isZeroNet
+                                ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300 focus:bg-orange-50'
+                                : 'text-slate-900 bg-slate-50/80 focus:bg-white'
+                            }`}
+                          />
                         </td>
 
                         {/* 12. Remarks */}
@@ -6318,14 +6415,25 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         </td>
 
                         {/* 9. Net Amount */}
-                        <td
-                          className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
-                            isZeroNet
-                              ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
-                              : 'text-slate-900 bg-slate-50/60'
-                          }`}
-                        >
-                          {hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
+                        <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
+                          <input
+                            id={`cell_${rIdx}_line_total`}
+                            type="text"
+                            readOnly
+                            tabIndex={0}
+                            value={hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
+                            onFocus={(e) => {
+                              setSelectedRowIndex(rIdx);
+                              e.currentTarget.select();
+                            }}
+                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'line_total')}
+                            title="Net Amount (Press Enter to move to next row Item Code)"
+                            className={`w-full px-1 py-0 border border-transparent focus:border-blue-600 text-right font-mono font-black text-[11px] h-[15px] leading-none outline-none ${
+                              isZeroNet
+                                ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300 focus:bg-orange-50'
+                                : 'text-slate-900 bg-slate-50/60 focus:bg-white'
+                            }`}
+                          />
                         </td>
 
                         {/* 10. Last Purchase Price */}

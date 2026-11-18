@@ -211,7 +211,24 @@ async function startServer() {
     return (hash >>> 0).toString(16).padStart(8, '0');
   }
 
-  function getBuildMetadata(): { buildHash: string; assetUrls: string[] } {
+  function getBuildMetadata(): { buildId: string; buildHash: string; assetUrls: string[] } {
+    if (serveStaticDist) {
+      const distVersionFile = path.join(distPath, 'version.json');
+      try {
+        if (fs.existsSync(distVersionFile)) {
+          const parsed = JSON.parse(fs.readFileSync(distVersionFile, 'utf8'));
+          if (parsed && typeof parsed.buildHash === 'string' && Array.isArray(parsed.assets)) {
+            return {
+              buildId: String(parsed.buildId || parsed.buildHash),
+              buildHash: parsed.buildHash,
+              assetUrls: parsed.assets,
+            };
+          }
+        }
+      } catch {
+        // fallback below
+      }
+    }
     const assetUrls: string[] = [];
     let indexHtmlContent = '';
     try {
@@ -233,7 +250,7 @@ async function startServer() {
       serveStaticDist && (assetUrls.length > 0 || indexHtmlContent.length > 0)
         ? computeSwBuildHash(`${assetUrls.join('|')}::${indexHtmlContent}`)
         : `dev-${process.pid}`;
-    return { buildHash, assetUrls };
+    return { buildId: buildHash, buildHash, assetUrls };
   }
 
   // Dynamically build the Service Worker script including all compiled /assets/* bundles if dist/assets exists
@@ -254,9 +271,9 @@ async function startServer() {
     ];
     const uniqueUrls = Array.from(new Set(baseUrls));
 
-    return `// AMS Service Worker v13 (Build ${buildHash} - Network-First Auto-Updating App Shell)
-const SW_VERSION = 'ams-sw-v13-${buildHash}';
-const RUNTIME_CACHE = 'ams-runtime-v13-${buildHash}';
+    return `// AMS Service Worker v14 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v14-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v14-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -341,7 +358,7 @@ self.addEventListener('fetch', (event) => {
   if (isNav) {
     event.respondWith((async () => {
       try {
-        const networkResponse = await fetch(req);
+        const networkResponse = await fetch(req, { cache: 'no-store' });
         if (networkResponse) {
           if (
             networkResponse.status === 200 &&
@@ -378,7 +395,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith((async () => {
     const cache = await caches.open(RUNTIME_CACHE);
     try {
-      const networkResponse = await fetch(req);
+      const networkResponse = await fetch(req, { cache: 'no-store' });
       if (
         networkResponse &&
         networkResponse.status === 200 &&
@@ -400,8 +417,10 @@ self.addEventListener('fetch', (event) => {
   app.get('/version.json', (_req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
-    const { buildHash, assetUrls } = getBuildMetadata();
-    res.json({ buildHash, assets: assetUrls });
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    const { buildId, buildHash, assetUrls } = getBuildMetadata();
+    res.json({ buildId, buildHash, assets: assetUrls });
   });
 
   app.get(['/sw.js', '/dev-sw.js'], (_req, res) => {

@@ -99,15 +99,30 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [notesLoading, setNotesLoading] = useState<boolean>(false);
   const [notesError, setNotesError] = useState<string | null>(null);
 
-  const recheckConnection = useCallback(async () => {
+  const recheckConnection = useCallback(async (force = true) => {
     setFirestoreStatus('checking');
-    const result = await testConnection();
+    const result = await testConnection(force);
     setFirestoreStatus(result.status);
     setFirestoreStatusMessage(result.message);
   }, []);
 
   useEffect(() => {
-    void recheckConnection();
+    void recheckConnection(false);
+
+    const handleOnline = () => {
+      void recheckConnection(true);
+    };
+    const handleOffline = () => {
+      setFirestoreStatus('offline');
+      setFirestoreStatusMessage('Device is offline. Firestore will reconnect when network returns.');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, [recheckConnection]);
 
   const syncUserDocuments = useCallback(async (user: FirebaseUser) => {
@@ -260,7 +275,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       },
       (error) => {
         setNotesLoading(false);
-        setNotesError(error instanceof Error ? error.message : String(error));
+        const msg = error instanceof Error ? error.message : String(error);
+        setNotesError(msg);
+        const code =
+          typeof error === 'object' && error !== null && 'code' in error
+            ? String((error as { code?: unknown }).code || '')
+            : '';
+        if (code === 'unavailable' || msg.includes('unavailable')) {
+          setFirestoreStatus('offline');
+          setFirestoreStatusMessage('Firestore backend unreachable (operating in offline mode).');
+          return;
+        }
         handleFirestoreError(error, OperationType.LIST, notesPath);
       }
     );

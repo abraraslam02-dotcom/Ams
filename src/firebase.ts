@@ -1,10 +1,36 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import {
+  initializeFirestore,
+  getFirestore,
+  setLogLevel,
+  doc,
+  getDocFromServer,
+  type Firestore,
+} from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 export const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+// Silence noisy @firebase/firestore internal OnlineStateTracker console.error banners during offline periods;
+// all real rule/write errors are explicitly caught & surfaced via handleFirestoreError and testConnection().
+setLogLevel('silent');
+
+function createFirestoreClient(): Firestore {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        experimentalForceLongPolling: true,
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreClient();
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -88,29 +114,74 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-export async function testConnection(): Promise<{
+export type ConnectionCheckResult = {
   status: 'connected' | 'offline' | 'error';
   message: string;
-}> {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return {
-      status: 'connected',
-      message: `Connected to Firestore (${firebaseConfig.projectId})`,
+};
+
+let pendingConnectionCheck: Promise<ConnectionCheckResult> | null = null;
+let lastConnectionResult: ConnectionCheckResult | null = null;
+
+export async function testConnection(force = false): Promise<ConnectionCheckResult> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const offlineRes: ConnectionCheckResult = {
+      status: 'offline',
+      message: 'Device is offline. Firestore will reconnect when network returns.',
     };
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-      return {
-        status: 'offline',
-        message: 'Please check your Firebase configuration (client is offline).',
-      };
-    }
-    return {
-      status: 'error',
-      message: error instanceof Error ? error.message : 'Unable to verify Firestore connection.',
-    };
+    lastConnectionResult = offlineRes;
+    return offlineRes;
   }
+
+  if (!force && lastConnectionResult) {
+    return lastConnectionResult;
+  }
+
+  if (pendingConnectionCheck) {
+    return pendingConnectionCheck;
+  }
+
+  pendingConnectionCheck = (async () => {
+    try {
+      await getDocFromServer(doc(db, 'test', 'connection'));
+      const okRes: ConnectionCheckResult = {
+        status: 'connected',
+        message: `Connected to Firestore (${firebaseConfig.projectId})`,
+      };
+      lastConnectionResult = okRes;
+      return okRes;
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code || '')
+          : '';
+      const msg = error instanceof Error ? error.message : String(error || '');
+      const isOfflineOrUnavailable =
+        code === 'unavailable' ||
+        msg.includes('the client is offline') ||
+        msg.includes('unavailable') ||
+        msg.includes('Failed to get document because the client is offline');
+
+      if (isOfflineOrUnavailable) {
+        const offlineRes: ConnectionCheckResult = {
+          status: 'offline',
+          message: 'Firestore backend unreachable (operating in offline mode).',
+        };
+        lastConnectionResult = offlineRes;
+        return offlineRes;
+      }
+
+      const errRes: ConnectionCheckResult = {
+        status: 'error',
+        message: msg || 'Unable to verify Firestore connection.',
+      };
+      lastConnectionResult = errRes;
+      return errRes;
+    } finally {
+      pendingConnectionCheck = null;
+    }
+  })();
+
+  return pendingConnectionCheck;
 }
 
 if (typeof window !== 'undefined') {

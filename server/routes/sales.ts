@@ -948,7 +948,7 @@ const handleGetItemHistory = (req: Request, res: Response) => {
       if (!itemRow) {
         try {
           const varMatch = db
-            .prepare('SELECT item_id FROM item_variants WHERE LOWER(TRIM(variant_code)) = LOWER(TRIM(?)) AND item_id IS NOT NULL LIMIT 1')
+            .prepare('SELECT parent_item_id AS item_id FROM item_variants WHERE LOWER(TRIM(variant_code)) = LOWER(TRIM(?)) AND parent_item_id IS NOT NULL LIMIT 1')
             .get(lookupCode) as { item_id: number } | undefined;
           if (varMatch?.item_id) {
             itemRow = db
@@ -3216,10 +3216,10 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
     }
 
     const reqClientId = req.body?.client_request_id ? String(req.body.client_request_id).trim() : '';
+    const isFromHoldConversion = Boolean(req.body?.from_hold_conversion);
     if (
       existingStatus === 'completed' &&
-      reqClientId &&
-      existing.client_request_id === reqClientId
+      (isFromHoldConversion || (reqClientId && existing.client_request_id === reqClientId))
     ) {
       return res.status(409).json({
         success: false,

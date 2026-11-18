@@ -132,6 +132,11 @@ function AppContent() {
   const [settings, setSettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [dbConnectionIssue, setDbConnectionIssue] = useState<{
+    message: string;
+    databaseIdentity?: string;
+  } | null>(null);
+  const [reconnectingDb, setReconnectingDb] = useState<boolean>(false);
 
   useEffect(() => {
     return offlineSyncManager.subscribe((state) => {
@@ -272,6 +277,23 @@ function AppContent() {
       setDiagnostics(dbData.diagnostics);
       setTables(dbData.tables || []);
       setSettings(settingsData.data);
+
+      const isBlocked =
+        healthData?.database?.connected === false ||
+        Boolean(healthData?.connectionBlocked) ||
+        Boolean(healthData?.cloudPersistence?.connectionBlocked);
+      if (isBlocked) {
+        setDbConnectionIssue({
+          message:
+            healthData?.connectionError ||
+            healthData?.database?.error ||
+            'Current active database is unreachable. Please check your network and reconnect to resume using the same database.',
+          databaseIdentity:
+            healthData?.databaseIdentity || healthData?.cloudPersistence?.databaseIdentity,
+        });
+      } else {
+        setDbConnectionIssue(null);
+      }
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       setError(errorMsg);
@@ -279,6 +301,58 @@ function AppContent() {
       setLoading(false);
     }
   }, [isAuthenticated]);
+
+  const handleReconnectDatabase = useCallback(async () => {
+    if (reconnectingDb) return;
+    setReconnectingDb(true);
+    try {
+      const res = await api.reconnectDatabase();
+      if (res.success && res.connected && !res.blocked) {
+        setDbConnectionIssue(null);
+        await fetchSystemData();
+        offlineSyncManager.syncNow().catch(() => {});
+      } else {
+        setDbConnectionIssue({
+          message:
+            res.error ||
+            'Still unable to reach the current active database. Check your internet connection and try again.',
+          databaseIdentity: String((res.status as any)?.databaseIdentity || ''),
+        });
+      }
+    } catch (err: unknown) {
+      setDbConnectionIssue({
+        message: err instanceof Error ? err.message : 'Unable to reach current active database.',
+      });
+    } finally {
+      setReconnectingDb(false);
+    }
+  }, [reconnectingDb, fetchSystemData]);
+
+  useEffect(() => {
+    const onDbErr = (e: Event) => {
+      const detail = (e as CustomEvent<{ message?: string; databaseIdentity?: string }>).detail;
+      setDbConnectionIssue({
+        message:
+          detail?.message ||
+          'Current active database cannot be reached. Reconnect to resume using the same database.',
+        databaseIdentity: detail?.databaseIdentity,
+      });
+    };
+    const onDbRestored = () => {
+      setDbConnectionIssue(null);
+    };
+    const onOnline = () => {
+      void handleReconnectDatabase();
+    };
+    window.addEventListener('ams-db-connection-error', onDbErr as EventListener);
+    window.addEventListener('ams-db-connection-restored', onDbRestored);
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('ams-db-connection-error', onDbErr as EventListener);
+      window.removeEventListener('ams-db-connection-restored', onDbRestored);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [handleReconnectDatabase]);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -779,6 +853,36 @@ function AppContent() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen w-full overflow-hidden min-w-0 print:h-auto print:overflow-visible print:block">
+        {dbConnectionIssue && (
+          <div className="bg-rose-700 text-white px-4 py-2.5 flex items-center justify-between gap-3 border-b border-rose-900 shadow-md shrink-0 print:hidden z-50">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <AlertCircle className="w-5 h-5 text-amber-300 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-xs font-extrabold tracking-wide uppercase">
+                  Active Database Connection Error — Operations Paused to Protect Live Data
+                </div>
+                <div className="text-xs text-rose-100 break-words mt-0.5">
+                  {dbConnectionIssue.message}
+                </div>
+                {dbConnectionIssue.databaseIdentity && (
+                  <div className="text-[10px] font-mono text-rose-200 truncate mt-0.5">
+                    Target Active DB: {dbConnectionIssue.databaseIdentity}
+                  </div>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={reconnectingDb}
+              onClick={handleReconnectDatabase}
+              className="px-3 py-1.5 rounded-lg bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-60 text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${reconnectingDb ? 'animate-spin' : ''}`} />
+              <span>{reconnectingDb ? 'Reconnecting...' : 'Reconnect to Same Database'}</span>
+            </button>
+          </div>
+        )}
+
         {!isFullScreenInvoice && (
           <TopHeader
             currentViewTitle={headerInfo.title}

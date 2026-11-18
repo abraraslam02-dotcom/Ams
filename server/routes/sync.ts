@@ -335,7 +335,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
       return {
         ...s,
         server_id: s.id,
-        client_tx_id: s.client_request_id || `SERVER-SALE-${s.id}`,
+        client_tx_id: s.client_request_id || `SRV-SALE-${s.id}`,
         item_count: lines.length,
         items: lines,
         lines,
@@ -686,9 +686,16 @@ syncRouter.post('/push', (req: Request, res: Response) => {
 
       try {
         if (action === 'CREATE_SALE' || action === 'HOLD_SALE') {
-          const existingSale = db
-            .prepare('SELECT id, invoice_number FROM sales WHERE client_request_id = ? LIMIT 1')
-            .get(client_tx_id) as { id: number; invoice_number: string } | undefined;
+          const incomingInvNo = String(payload.invoice_number || '').trim();
+          const existingSale =
+            (db
+              .prepare('SELECT id, invoice_number, status FROM sales WHERE client_request_id = ? LIMIT 1')
+              .get(client_tx_id) as { id: number; invoice_number: string; status: string } | undefined) ||
+            (incomingInvNo && action === 'HOLD_SALE'
+              ? (db
+                  .prepare('SELECT id, invoice_number, status FROM sales WHERE invoice_number = ? LIMIT 1')
+                  .get(incomingInvNo) as { id: number; invoice_number: string; status: string } | undefined)
+              : undefined);
 
           if (existingSale) {
             db.prepare(`
@@ -762,7 +769,8 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           const incomingSaleSt = String(payload.status || '').trim().toLowerCase();
           const isIncomingHeldSale = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(incomingSaleSt);
           const isExistingCompletedSale = ['completed', 'posted'].includes(String(existingSaleRow?.status || '').trim().toLowerCase());
-          if (isIncomingStale(existingSaleRow, payload) || (isExistingCompletedSale && isIncomingHeldSale)) {
+          const isDuplicateHoldConversion = Boolean(payload.from_hold_conversion) && isExistingCompletedSale;
+          if (isIncomingStale(existingSaleRow, payload) || (isExistingCompletedSale && isIncomingHeldSale) || isDuplicateHoldConversion) {
             db.prepare(`
               INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
               VALUES (?, ?, 'UPDATE_SALE', 'sales', ?, ?, 'synced', ?)
