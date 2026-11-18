@@ -29,9 +29,9 @@ function buildOfflineFirstSwScript(assetUrls: string[], buildHash: string): stri
   ];
   const uniqueUrls = Array.from(new Set(baseUrls));
 
-  return `// AMS Service Worker v13 (Build ${buildHash} - Network-First Auto-Updating App Shell)
-const SW_VERSION = 'ams-sw-v13-${buildHash}';
-const RUNTIME_CACHE = 'ams-runtime-v13-${buildHash}';
+  return `// AMS Service Worker v15 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v15-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v15-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -99,6 +99,7 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
+  if (req.cache === 'only-if-cached' && req.mode !== 'same-origin') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   if (
@@ -107,12 +108,14 @@ self.addEventListener('fetch', (event) => {
     url.pathname === '/sw.js' ||
     url.pathname === '/dev-sw.js' ||
     url.pathname === '/registerSW.js' ||
-    url.pathname === '/version.json'
+    url.pathname === '/version.json' ||
+    url.pathname === '/version.json/'
   ) {
     return;
   }
 
-  // Navigation requests (HTML app shell): Network-first using original req so browser handles redirects/cookies natively
+  // Navigation requests (HTML app shell): pass req directly (never override RequestInit on navigate mode, which throws TypeError in Chromium/Edge)
+  // Server sends Cache-Control: no-store on all HTML responses so fetch(req) always hits the network when online.
   const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
   if (isNav) {
     event.respondWith((async () => {
@@ -153,14 +156,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // All static assets & same-origin GET requests: Network-first with offline cache fallback
+  // All static assets & same-origin GET requests: Network-first with no-store & offline cache fallback
   event.respondWith((async () => {
     const cache = await caches.open(RUNTIME_CACHE);
     try {
-      const networkResponse = await fetch(req);
+      const networkResponse = await fetch(req.url, { cache: 'no-store', credentials: 'same-origin' });
       if (
         networkResponse &&
         networkResponse.status === 200 &&
+        !networkResponse.redirected &&
         !String(networkResponse.url || '').includes('__cookie_check')
       ) {
         cache.put(req, networkResponse.clone()).catch(() => {});
@@ -177,7 +181,11 @@ self.addEventListener('fetch', (event) => {
 }
 
 export default defineConfig(() => {
+  const BUILD_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   return {
+    define: {
+      __AMS_BUILD_ID__: JSON.stringify(BUILD_ID),
+    },
     plugins: [
       react(),
       tailwindcss(),
@@ -209,7 +217,7 @@ export default defineConfig(() => {
               );
               fs.writeFileSync(
                 path.join(outDir, 'version.json'),
-                JSON.stringify({ buildHash, assets: assetUrls }),
+                JSON.stringify({ buildId: BUILD_ID, buildHash, builtAt: new Date().toISOString(), assets: assetUrls }),
                 'utf8'
               );
             }

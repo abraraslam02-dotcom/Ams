@@ -124,11 +124,47 @@ let isSyncInFlight = false;
 let pendingUploadAfterInFlight = false;
 let pendingUploadReason = 'queued_mutation';
 let backgroundInterval: NodeJS.Timeout | null = null;
-let quotaCooldownUntil = 0;
+let readCooldownUntil = 0;
+let writeCooldownUntil = 0;
+let lastManifestFetchAt = 0;
 let cachedManifest: ManifestMetadata | null = null;
 let dbConnectionBlocked = false;
 let dbConnectionErrorMessage: string | null = null;
 let lastReconnectAttemptAt = 0;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function computeLocalSqliteSha256(): string | null {
+  const dataDir = path.dirname(config.databasePath);
+  const tempPath = path.join(dataDir, `ams_hash_chk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.db`);
+  try {
+    const db = getDatabase();
+    try {
+      db.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // ignore
+    }
+    try {
+      const escaped = tempPath.replace(/'/g, "''");
+      db.exec(`VACUUM INTO '${escaped}';`);
+    } catch {
+      if (!fs.existsSync(config.databasePath)) return null;
+      fs.copyFileSync(config.databasePath, tempPath);
+    }
+    const buf = fs.readFileSync(tempPath);
+    return crypto.createHash('sha256').update(buf).digest('hex');
+  } catch {
+    return null;
+  } finally {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {
+      // ignore
+    }
+  }
+}
 
 interface VaultDocFields {
   vaultKey: string;
@@ -197,68 +233,88 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
     isConnected = false;
     return { status: 'unreachable', error: 'Cloud database configuration is missing.' };
   }
-  if (Date.now() < quotaCooldownUntil) {
+  if (Date.now() < readCooldownUntil) {
     isConnected = false;
     return {
       status: 'unreachable',
-      error: 'Active database connection temporarily throttled (HTTP 429). Reconnecting automatically to the same database.',
+      error:
+        lastError ||
+        'Active database read temporarily rate-limited (HTTP 429). Retrying automatically to the same database.',
     };
   }
   const url = buildFirestoreDocUrl(docId);
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(6000),
-    });
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(6000),
+      });
 
-    if (response.status === 404) {
+      if (response.status === 404) {
+        isConnected = true;
+        readCooldownUntil = 0;
+        return { status: 'not_found' };
+      }
+
+      if (response.status === 429) {
+        const errText = await response.text().catch(() => '');
+        const isDailyQuota = /quota exceeded/i.test(errText);
+        if (!isDailyQuota && attempt < maxAttempts) {
+          await sleepMs(650 * attempt);
+          continue;
+        }
+        readCooldownUntil = Date.now() + (isDailyQuota ? 5 * 60 * 1000 : 15 * 1000);
+        isConnected = false;
+        const msg = isDailyQuota
+          ? `Firestore daily read quota exceeded. Quota resets tomorrow (upgrade console: https://console.firebase.google.com/project/${FIRESTORE_PROJECT_ID}/firestore/databases/${FIRESTORE_DATABASE_ID}/data?openUpgradeDialog=true).`
+          : 'Active database connection temporarily rate-limited (HTTP 429). Retrying automatically.';
+        lastError = msg;
+        return { status: 'unreachable', error: msg };
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        isConnected = false;
+        const msg = `Firestore GET ${docId} failed (${response.status}): ${errText.slice(0, 240)}`;
+        lastError = msg;
+        return { status: 'unreachable', error: msg };
+      }
+
       isConnected = true;
-      return { status: 'not_found' };
-    }
-
-    if (response.status === 429) {
-      quotaCooldownUntil = Date.now() + 60 * 1000;
+      readCooldownUntil = 0;
+      const json = (await response.json()) as {
+        fields?: Record<string, { stringValue?: string; integerValue?: string }>;
+      };
+      const f = json.fields || {};
+      return {
+        status: 'found',
+        doc: {
+          vaultKey: String(f.vaultKey?.stringValue || ''),
+          docId: String(f.docId?.stringValue || docId),
+          chunkIndex: Number(f.chunkIndex?.integerValue || 0),
+          totalChunks: Number(f.totalChunks?.integerValue || 1),
+          versionSeq: Number(f.versionSeq?.integerValue || 1),
+          sha256Hash: String(f.sha256Hash?.stringValue || ''),
+          payload: String(f.payload?.stringValue || ''),
+          recordCounts: String(f.recordCounts?.stringValue || '{}'),
+          updatedByEnv: String(f.updatedByEnv?.stringValue || 'unknown'),
+          updatedAt: String(f.updatedAt?.stringValue || ''),
+        },
+      };
+    } catch (err: unknown) {
+      if (attempt < maxAttempts) {
+        await sleepMs(400 * attempt);
+        continue;
+      }
       isConnected = false;
-      const msg = 'Active database connection rate-limited (HTTP 429).';
+      const msg = err instanceof Error ? err.message : String(err);
       lastError = msg;
       return { status: 'unreachable', error: msg };
     }
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      isConnected = false;
-      const msg = `Firestore GET ${docId} failed (${response.status}): ${errText.slice(0, 240)}`;
-      lastError = msg;
-      return { status: 'unreachable', error: msg };
-    }
-
-    isConnected = true;
-    const json = (await response.json()) as {
-      fields?: Record<string, { stringValue?: string; integerValue?: string }>;
-    };
-    const f = json.fields || {};
-    return {
-      status: 'found',
-      doc: {
-        vaultKey: String(f.vaultKey?.stringValue || ''),
-        docId: String(f.docId?.stringValue || docId),
-        chunkIndex: Number(f.chunkIndex?.integerValue || 0),
-        totalChunks: Number(f.totalChunks?.integerValue || 1),
-        versionSeq: Number(f.versionSeq?.integerValue || 1),
-        sha256Hash: String(f.sha256Hash?.stringValue || ''),
-        payload: String(f.payload?.stringValue || ''),
-        recordCounts: String(f.recordCounts?.stringValue || '{}'),
-        updatedByEnv: String(f.updatedByEnv?.stringValue || 'unknown'),
-        updatedAt: String(f.updatedAt?.stringValue || ''),
-      },
-    };
-  } catch (err: unknown) {
-    isConnected = false;
-    const msg = err instanceof Error ? err.message : String(err);
-    lastError = msg;
-    return { status: 'unreachable', error: msg };
   }
+  return { status: 'unreachable', error: lastError || 'Unable to read Firestore document.' };
 }
 
 async function readVaultDocument(docId: string): Promise<VaultDocFields | null> {
@@ -269,7 +325,7 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
 }
 
 async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
-  if (Date.now() < quotaCooldownUntil) {
+  if (Date.now() < writeCooldownUntil) {
     return false;
   }
   const url = buildFirestoreDocUrl(doc.docId);
@@ -288,27 +344,41 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
     },
   };
 
-  const response = await fetch(url, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8000),
-  });
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8000),
+    });
 
-  if (response.status === 429) {
-    quotaCooldownUntil = Date.now() + 10 * 60 * 1000;
+    if (response.status === 429) {
+      const errText = await response.text().catch(() => '');
+      const isDailyQuota = /quota exceeded/i.test(errText);
+      if (!isDailyQuota && attempt < 2) {
+        await sleepMs(1200);
+        continue;
+      }
+      writeCooldownUntil = Date.now() + (isDailyQuota ? 10 * 60 * 1000 : 60 * 1000);
+      if (isDailyQuota) {
+        console.warn(
+          `[AMS Cloud Persistence] Firestore write quota exceeded; local database remains active & protected.`
+        );
+      }
+      return false;
+    }
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      throw new Error(
+        `Firestore PATCH ${doc.docId} failed (${response.status}): ${errText.slice(0, 240)}`
+      );
+    }
     isConnected = true;
-    return false;
+    writeCooldownUntil = 0;
+    return true;
   }
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
-    throw new Error(
-      `Firestore PATCH ${doc.docId} failed (${response.status}): ${errText.slice(0, 240)}`
-    );
-  }
-  isConnected = true;
-  return true;
+  return false;
 }
 
 /**
@@ -497,6 +567,7 @@ async function fetchCloudManifestDetailed(): Promise<ManifestFetchResult> {
       sha256Hash: String(doc.sha256Hash || meta.sha256Hash || ''),
     };
     cachedManifest = parsed;
+    lastManifestFetchAt = Date.now();
     return { status: 'found', manifest: parsed };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -942,8 +1013,8 @@ async function uploadLocalDbToCloud(
       return true;
     }
 
-    // If Firestore free-tier quota cooldown is active, skip remote upload cleanly while local persistent DB is saved
-    if (Date.now() < quotaCooldownUntil) {
+    // If Firestore write quota cooldown is active, skip remote upload cleanly while local persistent DB is saved
+    if (Date.now() < writeCooldownUntil) {
       lastSha256 = initialSha256;
       lastSyncAt = new Date().toISOString();
       cloudRecordCounts = localInspection.counts as unknown as Record<string, number>;
@@ -951,7 +1022,10 @@ async function uploadLocalDbToCloud(
     }
 
     // 2. Check existing cloud manifest BEFORE uploading to prevent overwriting live data
-    const existingManifest = await fetchCloudManifest();
+    const existingManifest =
+      cachedManifest && Date.now() - lastManifestFetchAt < 25000 && !options?.forceOverwrite
+        ? cachedManifest
+        : await fetchCloudManifest();
     const localScore = getBusinessRecordScore(localInspection.counts);
     const cloudScore = existingManifest ? getBusinessRecordScore(existingManifest.counts) : 0;
 
@@ -982,7 +1056,7 @@ async function uploadLocalDbToCloud(
         Number(existingManifest.counts?.customAccounts || 0) >
           Number(localInspection.counts.customAccounts || 0);
 
-      if (hasMissingCloudItems && localTombstones <= cloudTombstones && Date.now() >= quotaCooldownUntil) {
+      if (hasMissingCloudItems && localTombstones <= cloudTombstones && Date.now() >= readCooldownUntil) {
         try {
           const cloudBuf = await downloadVerifiedCloudSqliteBuffer(existingManifest);
           const mergeTempPath = path.join(dataDir, `ams_preupload_merge_${Date.now()}.db`);
@@ -1117,12 +1191,12 @@ async function uploadLocalDbToCloud(
     }
     isSyncInFlight = false;
 
-    if (pendingUploadAfterInFlight && Date.now() >= quotaCooldownUntil) {
+    if (pendingUploadAfterInFlight && Date.now() >= writeCooldownUntil) {
       pendingUploadAfterInFlight = false;
       const nextReason = pendingUploadReason;
       setTimeout(() => {
         void uploadLocalDbToCloud(nextReason);
-      }, 1500);
+      }, 3000);
     } else {
       pendingUploadAfterInFlight = false;
     }
@@ -1162,6 +1236,15 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     console.log(
       `[AMS Cloud Persistence] Startup check (${reason}) — External Firestore v${manifest.versionSeq} (score=${cloudScore}) vs Local DB (score=${localScore})`
     );
+
+    // Fast SHA-256 verification: if local active DB already matches cloud hash byte-for-byte, skip downloading chunks
+    const localHash = !getWasDatabaseCreatedOnBoot() && localScore > 0 ? computeLocalSqliteSha256() : null;
+    if (localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) {
+      lastVersionSeq = manifest.versionSeq;
+      lastSha256 = manifest.sha256Hash;
+      lastError = null;
+      return;
+    }
 
     if (cloudScore > 0 || manifest.versionSeq > lastVersionSeq) {
       await restoreOrMergeFromCloud(reason);
@@ -1225,7 +1308,8 @@ export async function reconnectToCurrentDatabase(force = true): Promise<{
   status: CloudPersistenceStatus;
 }> {
   if (force) {
-    quotaCooldownUntil = 0;
+    readCooldownUntil = 0;
+    writeCooldownUntil = 0;
   }
   lastReconnectAttemptAt = Date.now();
   await syncOrBlockAgainstCurrentDatabase(force ? 'manual_reconnect' : 'auto_reconnect');
@@ -1255,12 +1339,18 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
   let manifest: ManifestMetadata | null = null;
   let externalDbConnected = false;
 
-  try {
-    manifest = await fetchCloudManifest();
-    externalDbConnected = isConnected;
-  } catch (err) {
-    lastError = err instanceof Error ? err.message : String(err);
-    externalDbConnected = false;
+  // Reuse just-verified startup manifest if checked within the last 15s to prevent redundant Firestore burst reads
+  if (isConnected && !dbConnectionBlocked && cachedManifest && Date.now() - lastManifestFetchAt < 15000) {
+    manifest = cachedManifest;
+    externalDbConnected = true;
+  } else {
+    try {
+      manifest = await fetchCloudManifest();
+      externalDbConnected = isConnected;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      externalDbConnected = false;
+    }
   }
 
   const localScore = getBusinessRecordScore(localInspection.counts);
@@ -1318,7 +1408,7 @@ export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check')
 }
 
 /**
- * Schedules a fast debounced upload (15ms) after any database mutation.
+ * Schedules a debounced upload (8s) after any database mutation to avoid Firestore write bursts.
  */
 export function scheduleCloudUpload(reason = 'mutation'): void {
   if (uploadTimer) {
@@ -1327,7 +1417,7 @@ export function scheduleCloudUpload(reason = 'mutation'): void {
   uploadTimer = setTimeout(() => {
     uploadTimer = null;
     void uploadLocalDbToCloud(reason);
-  }, 2000);
+  }, 8000);
 }
 
 /**
@@ -2036,14 +2126,19 @@ export function hydrateSqliteFromCloudRecords(
  */
 export function startCloudPersistenceBackgroundLoop(): void {
   if (backgroundInterval) return;
+  let lastHealthyPollAt = Date.now();
   backgroundInterval = setInterval(() => {
     void (async () => {
       if (!isHydrationComplete || isSyncInFlight) return;
       if (dbConnectionBlocked) {
-        await reconnectToCurrentDatabase(false);
+        if (Date.now() >= readCooldownUntil) {
+          await reconnectToCurrentDatabase(false);
+        }
         return;
       }
-      if (Date.now() < quotaCooldownUntil) return;
+      if (Date.now() < readCooldownUntil) return;
+      if (Date.now() - lastHealthyPollAt < 120000) return;
+      lastHealthyPollAt = Date.now();
       await pullFromCloudPersistenceIfNewer('background_poll');
     })();
   }, 15000);

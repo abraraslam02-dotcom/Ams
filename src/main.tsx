@@ -7,22 +7,23 @@ const CLIENT_BUILD_ID = typeof __AMS_BUILD_ID__ !== 'undefined' ? __AMS_BUILD_ID
 
 const RELOAD_GUARD_KEY = 'ams_last_sw_auto_reload_at';
 const RELOAD_BUILD_GUARD_KEY = 'ams_reloaded_for_build_v2';
+const RELOAD_NUKED_GUARD_KEY = 'ams_sw_nuked_for_build_v1';
 let swRegistrationRef: ServiceWorkerRegistration | null = null;
 let reloadingForUpdate = false;
 
-function triggerControlledReloadOnce(targetBuildId?: string) {
-  if (reloadingForUpdate || typeof window === 'undefined') return;
+function triggerControlledReloadOnce(targetBuildId?: string): boolean {
+  if (reloadingForUpdate || typeof window === 'undefined') return false;
   try {
     if (targetBuildId) {
       const prevTarget = sessionStorage.getItem(RELOAD_BUILD_GUARD_KEY);
       if (prevTarget === targetBuildId) {
-        return;
+        return false;
       }
       sessionStorage.setItem(RELOAD_BUILD_GUARD_KEY, targetBuildId);
     } else {
       const lastReload = Number(sessionStorage.getItem(RELOAD_GUARD_KEY) || '0');
       if (Date.now() - lastReload < 5000) {
-        return;
+        return false;
       }
       sessionStorage.setItem(RELOAD_GUARD_KEY, String(Date.now()));
     }
@@ -31,6 +32,7 @@ function triggerControlledReloadOnce(targetBuildId?: string) {
   }
   reloadingForUpdate = true;
   window.location.reload();
+  return true;
 }
 
 function getCurrentMainAssetPath(): string | null {
@@ -48,8 +50,52 @@ function getCurrentMainAssetPath(): string | null {
   return null;
 }
 
-async function checkForPublishedUpdate() {
-  if (typeof window === 'undefined' || !navigator.onLine) return;
+async function waitForServiceWorkerActivation(reg: ServiceWorkerRegistration | null, timeoutMs = 2200): Promise<void> {
+  if (!reg || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  try {
+    await reg.update().catch(() => {});
+    if (reg.waiting) {
+      reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+    }
+    const pendingWorker = reg.installing || reg.waiting;
+    if (!pendingWorker) return;
+
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = window.setTimeout(finish, timeoutMs);
+      navigator.serviceWorker.addEventListener('controllerchange', finish, { once: true });
+      pendingWorker.addEventListener('statechange', () => {
+        if (pendingWorker.state === 'installed') {
+          pendingWorker.postMessage({ type: 'SKIP_WAITING' });
+        } else if (pendingWorker.state === 'activated' || pendingWorker.state === 'redundant') {
+          finish();
+        }
+      });
+    });
+  } catch {
+    // proceed with reload
+  }
+}
+
+async function clearAllBrowserCaches(): Promise<void> {
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const keys = await window.caches.keys();
+      await Promise.allSettled(keys.map((k) => window.caches.delete(k)));
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function checkForPublishedUpdate(): Promise<boolean> {
+  if (typeof window === 'undefined' || !navigator.onLine) return false;
   try {
     if (swRegistrationRef) {
       await swRegistrationRef.update().catch(() => {});
@@ -58,14 +104,14 @@ async function checkForPublishedUpdate() {
     const currentAsset = getCurrentMainAssetPath();
     if (!currentAsset && CLIENT_BUILD_ID === 'dev') {
       // Dev mode (Vite serves /src/main.tsx directly) — skip production bundle hash comparison
-      return;
+      return false;
     }
 
     const res = await fetch(`/version.json?t=${Date.now()}`, {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache' },
     });
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const data = (await res.json()) as { buildId?: string; buildHash?: string; assets?: string[] };
     const remoteBuildId = String(data?.buildId || data?.buildHash || '');
     const buildIdMismatch =
@@ -80,18 +126,43 @@ async function checkForPublishedUpdate() {
       !data.assets.includes(currentAsset!);
 
     if (buildIdMismatch || assetMismatch) {
-      if ('caches' in window) {
-        const keys = await window.caches.keys();
-        await Promise.allSettled(keys.map((k) => window.caches.delete(k)));
+      await clearAllBrowserCaches();
+
+      // Check if a normal reload already ran for this build yet an old SW still served stale HTML
+      let alreadyTriedReloadForBuild = false;
+      let alreadyNukedForBuild = false;
+      try {
+        alreadyTriedReloadForBuild =
+          Boolean(remoteBuildId) && sessionStorage.getItem(RELOAD_BUILD_GUARD_KEY) === remoteBuildId;
+        alreadyNukedForBuild =
+          Boolean(remoteBuildId) && sessionStorage.getItem(RELOAD_NUKED_GUARD_KEY) === remoteBuildId;
+      } catch {
+        // ignore
       }
-      if (swRegistrationRef) {
-        await swRegistrationRef.update().catch(() => {});
+
+      if (alreadyTriedReloadForBuild && !alreadyNukedForBuild && 'serviceWorker' in navigator) {
+        try {
+          if (remoteBuildId) {
+            sessionStorage.setItem(RELOAD_NUKED_GUARD_KEY, remoteBuildId);
+          }
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.allSettled(regs.map((r) => r.unregister()));
+          await clearAllBrowserCaches();
+        } catch {
+          // ignore
+        }
+        reloadingForUpdate = true;
+        window.location.reload();
+        return true;
       }
-      triggerControlledReloadOnce(remoteBuildId || undefined);
+
+      await waitForServiceWorkerActivation(swRegistrationRef);
+      return triggerControlledReloadOnce(remoteBuildId || undefined);
     }
   } catch {
     // Ignore update check failures when offline or server restarting
   }
+  return false;
 }
 
 async function warmOfflineAppShellCache() {
@@ -101,9 +172,7 @@ async function warmOfflineAppShellCache() {
       await navigator.serviceWorker.ready.catch(() => {});
     }
     const cacheNames = await window.caches.keys();
-    const activeCacheName = cacheNames.find(
-      (name) => name.startsWith('ams-runtime-v14-') || name.startsWith('ams-runtime-v13-')
-    );
+    const activeCacheName = cacheNames.find((name) => name.startsWith('ams-runtime-v'));
     if (!activeCacheName) return;
     const cache = await window.caches.open(activeCacheName);
     const urlsToWarm = new Set<string>([
@@ -134,7 +203,7 @@ async function warmOfflineAppShellCache() {
     await Promise.allSettled(
       Array.from(urlsToWarm).map(async (url) => {
         const res = await fetch(url, { cache: 'no-store' });
-        if (res && res.ok) {
+        if (res && res.ok && !res.redirected && !String(res.url || '').includes('__cookie_check')) {
           await cache.put(url, res.clone());
         }
       })
@@ -184,8 +253,12 @@ if (typeof window !== 'undefined') {
   }
 
   window.addEventListener('load', () => {
-    void checkForPublishedUpdate();
-    void warmOfflineAppShellCache();
+    void (async () => {
+      const triggeredUpdate = await checkForPublishedUpdate();
+      if (!triggeredUpdate) {
+        await warmOfflineAppShellCache();
+      }
+    })();
   });
 
   window.addEventListener('focus', () => {
