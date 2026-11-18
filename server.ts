@@ -97,7 +97,7 @@ async function startServer() {
     res.status(404).json({ success: false, error: 'API endpoint not found.' });
   });
 
-  // Prevent browser/proxy HTTP caching on HTML shell and Service Worker scripts
+  // Prevent browser/proxy/CDN HTTP caching on HTML shell, Service Worker scripts, and version check
   app.use((req, res, next) => {
     if (
       req.path === '/' ||
@@ -107,13 +107,16 @@ async function startServer() {
       req.path === '/sw.js' ||
       req.path === '/dev-sw.js' ||
       req.path === '/registerSW.js' ||
+      req.path === '/version.json' ||
       req.path === '/manifest.json' ||
       req.path === '/salesman-manifest.json' ||
       req.path === '/manifest.webmanifest'
     ) {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
+      res.setHeader('Surrogate-Control', 'no-store');
+      res.setHeader('CDN-Cache-Control', 'no-store');
     }
     next();
   });
@@ -199,8 +202,43 @@ async function startServer() {
     res.json(salesmanManifestPayload);
   });
 
+  function computeSwBuildHash(input: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function getBuildMetadata(): { buildHash: string; assetUrls: string[] } {
+    const assetUrls: string[] = [];
+    let indexHtmlContent = '';
+    try {
+      const assetsDir = path.join(distPath, 'assets');
+      if (fs.existsSync(assetsDir)) {
+        for (const file of fs.readdirSync(assetsDir).sort()) {
+          if (/\.(js|css|woff2?|ttf|svg|png)$/i.test(file)) {
+            assetUrls.push(`/assets/${file}`);
+          }
+        }
+      }
+      if (fs.existsSync(distIndexHtml)) {
+        indexHtmlContent = fs.readFileSync(distIndexHtml, 'utf8');
+      }
+    } catch {
+      // ignore
+    }
+    const buildHash =
+      serveStaticDist && (assetUrls.length > 0 || indexHtmlContent.length > 0)
+        ? computeSwBuildHash(`${assetUrls.join('|')}::${indexHtmlContent}`)
+        : `dev-${process.pid}`;
+    return { buildHash, assetUrls };
+  }
+
   // Dynamically build the Service Worker script including all compiled /assets/* bundles if dist/assets exists
   function getDynamicSwScript(): string {
+    const { buildHash, assetUrls } = getBuildMetadata();
     const baseUrls = [
       '/',
       '/index.html',
@@ -212,24 +250,13 @@ async function startServer() {
       '/pwa-maskable-512x512.png',
       '/apple-touch-icon.png',
       '/icon.svg',
+      ...assetUrls,
     ];
-    try {
-      const assetsDir = path.join(distPath, 'assets');
-      if (fs.existsSync(assetsDir)) {
-        for (const file of fs.readdirSync(assetsDir)) {
-          if (/\.(js|css|woff2?|ttf|svg|png)$/i.test(file)) {
-            baseUrls.push(`/assets/${file}`);
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
     const uniqueUrls = Array.from(new Set(baseUrls));
 
-    return `// AMS Service Worker v11 (Complete Offline-First App Shell + Simple Sync)
-const SW_VERSION = 'ams-sw-v11-simple-sync';
-const RUNTIME_CACHE = 'ams-runtime-v11';
+    return `// AMS Service Worker v12 (Build ${buildHash} - Auto-Updating Offline-First App Shell)
+const SW_VERSION = 'ams-sw-v12-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v12-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {
@@ -239,7 +266,7 @@ self.addEventListener('install', (event) => {
       await Promise.allSettled(
         PRECACHE_URLS.map(async (url) => {
           try {
-            const req = new Request(url, { cache: 'reload' });
+            const req = new Request(url, { cache: 'no-store' });
             const res = await fetch(req);
             if (res && res.status === 200) {
               await cache.put(url, res.clone());
@@ -255,28 +282,16 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     try {
-      const targetCache = await caches.open(RUNTIME_CACHE);
       const keys = await caches.keys();
       for (const key of keys) {
-        if (key !== RUNTIME_CACHE && key.startsWith('ams-runtime-')) {
-          try {
-            const oldCache = await caches.open(key);
-            const oldReqs = await oldCache.keys();
-            for (const oldReq of oldReqs) {
-              const existing = await targetCache.match(oldReq);
-              if (!existing) {
-                const oldRes = await oldCache.match(oldReq);
-                if (oldRes) await targetCache.put(oldReq, oldRes.clone());
-              }
-            }
-          } catch (e) {}
+        if (key !== RUNTIME_CACHE) {
           await caches.delete(key);
         }
       }
       await self.clients.claim();
       const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of windowClients) {
-        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, deletedLegacy: false });
+        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, buildHash: '${buildHash}' });
       }
     } catch (err) {}
   })());
@@ -293,7 +308,14 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname === '/sw.js' || url.pathname === '/dev-sw.js' || url.pathname === '/registerSW.js') return;
+  if (
+    url.pathname === '/sw.js' ||
+    url.pathname === '/dev-sw.js' ||
+    url.pathname === '/registerSW.js' ||
+    url.pathname === '/version.json'
+  ) {
+    return;
+  }
   if (url.pathname.startsWith('/api/')) return;
 
   const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
@@ -301,8 +323,15 @@ self.addEventListener('fetch', (event) => {
     event.respondWith((async () => {
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 3500);
-        const networkResponse = await fetch(req, { signal: controller.signal });
+        const timer = setTimeout(() => controller.abort(), 15000);
+        const networkRequest = new Request(req.url, {
+          method: 'GET',
+          headers: req.headers,
+          cache: 'no-store',
+          credentials: req.credentials,
+          redirect: req.redirect,
+        });
+        const networkResponse = await fetch(networkRequest, { signal: controller.signal });
         clearTimeout(timer);
         if (networkResponse && networkResponse.status === 200) {
           const cache = await caches.open(RUNTIME_CACHE);
@@ -312,38 +341,31 @@ self.addEventListener('fetch', (event) => {
           return networkResponse;
         }
       } catch (err) {}
-      const cachedExact = await caches.match(req, { ignoreSearch: true });
+      const cache = await caches.open(RUNTIME_CACHE);
+      const cachedExact = await cache.match(req, { ignoreSearch: true });
       if (cachedExact) return cachedExact;
       if (url.pathname.startsWith('/salesman')) {
-        const cachedSalesman = await caches.match('/salesman', { ignoreSearch: true });
+        const cachedSalesman = await cache.match('/salesman', { ignoreSearch: true });
         if (cachedSalesman) return cachedSalesman;
       }
-      const cachedIndex = await caches.match('/index.html', { ignoreSearch: true });
+      const cachedIndex = await cache.match('/index.html', { ignoreSearch: true });
       if (cachedIndex) return cachedIndex;
-      const cachedRoot = await caches.match('/', { ignoreSearch: true });
+      const cachedRoot = await cache.match('/', { ignoreSearch: true });
       if (cachedRoot) return cachedRoot;
       return new Response('Offline - App Shell Not Cached Yet', { status: 503, headers: { 'Content-Type': 'text/plain' } });
     })());
     return;
   }
 
-  if (url.pathname.startsWith('/assets/') || /\\.(png|svg|ico|woff2?|ttf)$/i.test(url.pathname)) {
+  if (url.pathname.startsWith('/assets/') || /\.(png|svg|ico|woff2?|ttf)$/i.test(url.pathname)) {
     event.respondWith((async () => {
-      const cached = (await caches.match(req)) || (await caches.match(req, { ignoreSearch: true }));
+      const cache = await caches.open(RUNTIME_CACHE);
+      const cached = (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true }));
       if (cached) {
-        fetch(req)
-          .then(async (netRes) => {
-            if (netRes && netRes.status === 200) {
-              const cache = await caches.open(RUNTIME_CACHE);
-              await cache.put(req, netRes.clone());
-            }
-          })
-          .catch(() => {});
         return cached;
       }
       const netRes = await fetch(req);
       if (netRes && netRes.status === 200) {
-        const cache = await caches.open(RUNTIME_CACHE);
         cache.put(req, netRes.clone()).catch(() => {});
       }
       return netRes;
@@ -352,15 +374,15 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith((async () => {
+    const cache = await caches.open(RUNTIME_CACHE);
     try {
-      const networkResponse = await fetch(req);
+      const networkResponse = await fetch(new Request(req, { cache: 'no-store' }));
       if (networkResponse && networkResponse.status === 200) {
-        const cache = await caches.open(RUNTIME_CACHE);
         cache.put(req, networkResponse.clone()).catch(() => {});
       }
       return networkResponse;
     } catch (err) {
-      const cached = (await caches.match(req)) || (await caches.match(req, { ignoreSearch: true }));
+      const cached = (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true }));
       if (cached) return cached;
       throw err;
     }
@@ -369,9 +391,16 @@ self.addEventListener('fetch', (event) => {
 `;
   }
 
+  app.get('/version.json', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    const { buildHash, assetUrls } = getBuildMetadata();
+    res.json({ buildHash, assets: assetUrls });
+  });
+
   app.get(['/sw.js', '/dev-sw.js'], (_req, res) => {
     res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
     res.send(getDynamicSwScript());
   });
 
@@ -386,15 +415,33 @@ self.addEventListener('fetch', (event) => {
   } else {
     app.use(
       express.static(distPath, {
+        etag: false,
+        lastModified: false,
         setHeaders: (res, filePath) => {
-          if (filePath.endsWith('.html') || filePath.endsWith('sw.js') || filePath.endsWith('.webmanifest')) {
-            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          if (
+            filePath.endsWith('.html') ||
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('version.json') ||
+            filePath.endsWith('.webmanifest') ||
+            filePath.endsWith('manifest.json')
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+            res.setHeader('Surrogate-Control', 'no-store');
+            res.setHeader('CDN-Cache-Control', 'no-store');
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           }
         },
       })
     );
     app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('Surrogate-Control', 'no-store');
+      res.setHeader('CDN-Cache-Control', 'no-store');
       res.sendFile(distIndexHtml);
     });
   }

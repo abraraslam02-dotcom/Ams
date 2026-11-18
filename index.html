@@ -30,11 +30,6 @@
               manifestEl.setAttribute('href', '/salesman-manifest.json');
             }
           }
-          if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function () {
-              navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () {});
-            });
-          }
         } catch (e) {}
       })();
     </script>
