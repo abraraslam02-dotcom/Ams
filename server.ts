@@ -33,6 +33,7 @@ import {
   startCloudPersistenceBackgroundLoop,
 } from './server/services/cloudPersistenceService.ts';
 import { handleServeProductImage } from './server/services/productMediaService.ts';
+import { getBuildMetadata } from './server/utils/buildInfo.ts';
 
 async function startServer() {
   const app = express();
@@ -42,12 +43,17 @@ async function startServer() {
   const distPath = path.resolve(process.cwd(), 'dist');
   const distIndexHtml = path.resolve(distPath, 'index.html');
   const isProductionRuntime =
-    process.env.NODE_ENV === 'production' || process.env.npm_lifecycle_event === 'start';
+    process.env.NODE_ENV === 'production' ||
+    process.env.npm_lifecycle_event === 'start' ||
+    config.isPublishedCloudRun;
   const serveStaticDist = isProductionRuntime && fs.existsSync(distIndexHtml);
 
+  const bootMeta = getBuildMetadata(serveStaticDist);
   console.log('----------------------------------------------------');
   console.log(' [AMS] Abrar Medical Store - System Initializing...');
-  console.log(` [AMS] Environment: ${config.nodeEnv} (Static Dist: ${serveStaticDist ? 'YES' : 'NO'})`);
+  console.log(
+    ` [AMS] Environment: ${config.nodeEnv} (DB Scope: ${config.envScope}, Static Dist: ${serveStaticDist ? 'YES' : 'NO'}, Version: ${bootMeta.version}, Build: ${bootMeta.buildId} [${bootMeta.buildHash}])`
+  );
   console.log(` [AMS] Port: ${config.port}`);
   console.log(` [AMS] Currency: ${config.appCurrency} (${config.appCurrencySymbol})`);
   console.log(` [AMS] Timezone: ${config.appTimezone} (${config.appTimezoneOffset})`);
@@ -77,69 +83,8 @@ async function startServer() {
     res.setHeader('CDN-Cache-Control', 'no-store');
   }
 
-  function computeSwBuildHash(input: string): string {
-    let hash = 2166136261;
-    for (let i = 0; i < input.length; i++) {
-      hash ^= input.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return (hash >>> 0).toString(16).padStart(8, '0');
-  }
-
-  function getBuildMetadata(): { buildId: string; buildHash: string; builtAt: string | null; assetUrls: string[] } {
-    if (serveStaticDist) {
-      const distVersionFile = path.join(distPath, 'version.json');
-      try {
-        if (fs.existsSync(distVersionFile)) {
-          const parsed = JSON.parse(fs.readFileSync(distVersionFile, 'utf8'));
-          if (parsed && typeof parsed.buildHash === 'string' && Array.isArray(parsed.assets)) {
-            const validAssets = parsed.assets.filter((assetUrl: unknown) => {
-              if (typeof assetUrl !== 'string' || !assetUrl.startsWith('/')) return false;
-              const absAsset = path.join(distPath, assetUrl.slice(1));
-              return fs.existsSync(absAsset);
-            });
-            if (validAssets.length > 0) {
-              return {
-                buildId: String(parsed.buildId || parsed.buildHash),
-                buildHash: parsed.buildHash,
-                builtAt: typeof parsed.builtAt === 'string' ? parsed.builtAt : null,
-                assetUrls: validAssets,
-              };
-            }
-          }
-        }
-      } catch {
-        // fallback below
-      }
-    }
-    const assetUrls: string[] = [];
-    let indexHtmlContent = '';
-    let builtAt: string | null = null;
-    try {
-      const assetsDir = path.join(distPath, 'assets');
-      if (fs.existsSync(assetsDir)) {
-        for (const file of fs.readdirSync(assetsDir).sort()) {
-          if (/\.(js|css|woff2?|ttf|svg|png)$/i.test(file)) {
-            assetUrls.push(`/assets/${file}`);
-          }
-        }
-      }
-      if (fs.existsSync(distIndexHtml)) {
-        indexHtmlContent = fs.readFileSync(distIndexHtml, 'utf8');
-        builtAt = fs.statSync(distIndexHtml).mtime.toISOString();
-      }
-    } catch {
-      // ignore
-    }
-    const buildHash =
-      serveStaticDist && (assetUrls.length > 0 || indexHtmlContent.length > 0)
-        ? computeSwBuildHash(`${assetUrls.join('|')}::${indexHtmlContent}`)
-        : `dev-${process.pid}`;
-    return { buildId: buildHash, buildHash, builtAt, assetUrls };
-  }
-
   function getDynamicSwScript(): string {
-    const { buildHash, assetUrls } = getBuildMetadata();
+    const { buildHash, assetUrls } = getBuildMetadata(serveStaticDist);
     const baseUrls = [
       '/',
       '/index.html',
@@ -309,14 +254,16 @@ self.addEventListener('fetch', (event) => {
     res.removeHeader('ETag');
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     applyNoStoreHeaders(res);
-    const { buildId, buildHash, builtAt, assetUrls } = getBuildMetadata();
+    const { version, buildId, buildHash, builtAt, assetUrls } = getBuildMetadata(serveStaticDist);
     res.status(200).end(
       JSON.stringify({
         success: true,
+        version,
         buildId,
         buildHash,
         builtAt,
         environment: config.nodeEnv,
+        dbScope: config.envScope,
         assets: assetUrls,
       })
     );

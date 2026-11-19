@@ -25,10 +25,11 @@ import {
   syncDatabaseToCloudSQL,
   reconnectToCurrentDatabase,
 } from '../services/cloudPersistenceService.ts';
+import { APP_VERSION as SHARED_APP_VERSION, getBuildMetadata } from '../utils/buildInfo.ts';
 
 export const systemRouter = Router();
 
-export const APP_VERSION = '2.12.0-ERP';
+export const APP_VERSION = SHARED_APP_VERSION;
 export const APP_RELEASE_PHASE = 'Phase 12 — Independent Permanent SQLite Central DB & Simple Incremental Sync';
 
 function canAdministerSystem(req: Request): boolean {
@@ -1216,11 +1217,16 @@ systemRouter.get('/info', authenticateToken, (_req: Request, res: Response) => {
       ),
     };
 
+    const buildMeta = getBuildMetadata();
+
     return res.json({
       success: true,
       appInfo: {
         name: 'ABRAR MEDICAL STORE — Enterprise Pharmacy & Accounting ERP',
         version: APP_VERSION,
+        buildId: buildMeta.buildId,
+        buildHash: buildMeta.buildHash,
+        builtAt: buildMeta.builtAt,
         releasePhase: APP_RELEASE_PHASE,
         architecture: 'Centralized Node.js + Express + SQLite (WAL Mode) Single-Source-of-Truth Server',
         nodeVersion: process.version,

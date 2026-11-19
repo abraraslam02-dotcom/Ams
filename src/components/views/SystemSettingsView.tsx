@@ -31,6 +31,7 @@ import { offlineStorage } from '../../services/offlineStorage';
 import { offlineSyncManager } from '../../services/offlineSyncManager';
 import { MasterResetAndLocalBackupPanel } from '../admin/MasterResetAndLocalBackupPanel';
 import { FirebaseCloudPanel } from '../firebase/FirebaseCloudPanel';
+import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
 
 export type AdminSubTab = 'store-printing' | 'backup-restore' | 'system-admin';
 
@@ -1470,8 +1471,17 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </div>
               <div className="space-y-1 font-mono text-[11px]">
                 <div>
-                  Version: <strong>{sysInfo?.appInfo?.version || '2.10.0-ERP'}</strong>
+                  Version: <strong>{sysInfo?.appInfo?.version || APP_VERSION}</strong>
                 </div>
+                <div>
+                  Client Build: <strong>{CLIENT_BUILD_ID}</strong>
+                  {sysInfo?.appInfo?.buildHash ? ` (Server Hash: ${sysInfo.appInfo.buildHash})` : ''}
+                </div>
+                {sysInfo?.appInfo?.builtAt && (
+                  <div>
+                    Built At: <strong>{new Date(sysInfo.appInfo.builtAt).toLocaleString()}</strong>
+                  </div>
+                )}
                 <div>
                   Node Runtime: <strong>{sysInfo?.appInfo?.nodeVersion || 'v22+'}</strong> (
                   {sysInfo?.appInfo?.platform || 'linux'})

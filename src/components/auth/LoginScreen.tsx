@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Lock,
   User,
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
+import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
 
 export const LoginScreen: React.FC = () => {
   const { login } = useAuth();
@@ -23,6 +24,22 @@ export const LoginScreen: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [showForgotModal, setShowForgotModal] = useState(false);
   const [passwordResetSuccess, setPasswordResetSuccess] = useState(false);
+  const [serverBuildInfo, setServerBuildInfo] = useState<{ buildId?: string; buildHash?: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data && typeof data.buildId === 'string') {
+          setServerBuildInfo({ buildId: data.buildId, buildHash: data.buildHash });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,6 +195,14 @@ export const LoginScreen: React.FC = () => {
               </button>
             </div>
           </form>
+
+          <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400 font-mono">
+            <span>v{APP_VERSION}</span>
+            <span>
+              Build: {CLIENT_BUILD_ID}
+              {serverBuildInfo?.buildHash ? ` (${serverBuildInfo.buildHash})` : ''}
+            </span>
+          </div>
         </div>
       </div>
 

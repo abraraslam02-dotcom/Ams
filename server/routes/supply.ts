@@ -1075,6 +1075,21 @@ supplyRouter.put('/towns/:id', (req: Request, res: Response) => {
   }
 });
 
+supplyRouter.get('/areas', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const townId = req.query.town_id ? Number(req.query.town_id) : null;
+    const areas = townId
+      ? db
+          .prepare('SELECT * FROM town_areas WHERE town_id = ? ORDER BY town_name ASC, area_name ASC')
+          .all(townId)
+      : db.prepare('SELECT * FROM town_areas ORDER BY town_name ASC, area_name ASC').all();
+    res.json({ success: true, areas });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 supplyRouter.post('/areas', (req: Request, res: Response) => {
   try {
     const db = getDatabase();

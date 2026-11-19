@@ -5,24 +5,32 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const workspaceRoot = path.resolve(process.cwd());
-const rawNodeEnv = String(process.env.NODE_ENV || 'development').toLowerCase();
+const kService = String(process.env.K_SERVICE || '').toLowerCase();
+const isPublishedCloudRun = kService.startsWith('ais-pre-');
+const isStartScript = process.env.npm_lifecycle_event === 'start';
+const explicitDbEnv = process.env.AMS_DB_ENV;
+const inferredProduction =
+  String(process.env.NODE_ENV || '').toLowerCase() === 'production' ||
+  isPublishedCloudRun ||
+  isStartScript;
+
+const rawNodeEnv = String(
+  process.env.NODE_ENV || (inferredProduction ? 'production' : 'development')
+).toLowerCase();
+
 const envScope: 'production' | 'development' | 'test' =
-  process.env.AMS_DB_ENV === 'production' ||
-  process.env.AMS_DB_ENV === 'development' ||
-  process.env.AMS_DB_ENV === 'test'
-    ? process.env.AMS_DB_ENV
+  explicitDbEnv === 'production' ||
+  explicitDbEnv === 'development' ||
+  explicitDbEnv === 'test'
+    ? explicitDbEnv
     : rawNodeEnv === 'test'
     ? 'test'
-    : rawNodeEnv === 'production'
+    : inferredProduction
     ? 'production'
     : 'development';
 
 const defaultDbFilename =
-  envScope === 'production'
-    ? 'ams_medical.prod.db'
-    : envScope === 'test'
-    ? 'ams_medical.test.db'
-    : 'ams_medical.db';
+  envScope === 'test' ? 'ams_medical.test.db' : 'ams_medical.db';
 
 const rawEnvDbPath = process.env.DATABASE_PATH
   ? path.resolve(workspaceRoot, process.env.DATABASE_PATH)
@@ -32,8 +40,9 @@ const permanentDatabasePath =
 
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
-  nodeEnv: rawNodeEnv,
+  nodeEnv: envScope === 'production' ? 'production' : rawNodeEnv,
   envScope,
+  isPublishedCloudRun,
   seedDatabasePath: path.resolve(workspaceRoot, 'data', 'ams_medical.db'),
   databasePath: permanentDatabasePath,
   appTimezone: process.env.APP_TIMEZONE || 'Asia/Karachi',

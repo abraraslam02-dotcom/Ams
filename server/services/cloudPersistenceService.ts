@@ -85,12 +85,7 @@ const VAULT_COLLECTION = 'ams_vault_e5f2831c';
 const VAULT_SERVER_KEY = 'ams_srv_vault_e5f2831c_4daf_499d_a38b_45adc902ab45';
 const MAX_CHUNK_CHARS = 650000; // Safely below Firestore 1 MiB document limit
 
-const ENV_SCOPE_PREFIX =
-  config.envScope === 'production'
-    ? 'prod'
-    : config.envScope === 'test'
-    ? 'test'
-    : 'dev';
+const ENV_SCOPE_PREFIX = config.envScope === 'test' ? 'test' : 'prod';
 const MANIFEST_DOC_ID = `${ENV_SCOPE_PREFIX}_manifest`;
 
 const FIRESTORE_PROJECT_ID = String(firebaseConfig.projectId || 'chromatic-concord-0pz3c');
@@ -100,7 +95,7 @@ const FIRESTORE_DATABASE_ID = String(
 );
 const FIRESTORE_API_KEY = String(firebaseConfig.apiKey || '');
 
-const EXTERNAL_DB_LOCATION = `projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/${VAULT_COLLECTION} [${config.envScope.toUpperCase()}: ${MANIFEST_DOC_ID}]`;
+const EXTERNAL_DB_LOCATION = `projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/${VAULT_COLLECTION} [${ENV_SCOPE_PREFIX.toUpperCase()}: ${MANIFEST_DOC_ID}]`;
 
 // Deterministic 32-byte AES-256-GCM key derived from project & vault constants
 const VAULT_AES_KEY = crypto
@@ -131,6 +126,8 @@ let cachedManifest: ManifestMetadata | null = null;
 let dbConnectionBlocked = false;
 let dbConnectionErrorMessage: string | null = null;
 let lastReconnectAttemptAt = 0;
+let hasHydratedFromCloudThisProcess = false;
+let hasLocalMutationsSinceBoot = false;
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -889,8 +886,14 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
 
     try {
       const freshlyBootedContainerDb = getWasDatabaseCreatedOnBoot();
-      if ((localScore === 0 || freshlyBootedContainerDb) && cloudScore > 0) {
-        // Freshly deployed/republished container (or empty DB) -> Full authoritative restoration from Firestore!
+      const shouldAuthoritativelyRestoreFromVault =
+        config.envScope !== 'test' &&
+        !hasHydratedFromCloudThisProcess &&
+        !hasLocalMutationsSinceBoot &&
+        cloudScore > 0;
+
+      if ((localScore === 0 || freshlyBootedContainerDb || shouldAuthoritativelyRestoreFromVault) && cloudScore > 0) {
+        // Freshly booted server (or empty DB) -> Full authoritative restoration from live Firestore vault!
         const backupDir = path.join(dataDir, 'backups');
         if (!fs.existsSync(backupDir)) {
           fs.mkdirSync(backupDir, { recursive: true });
@@ -921,6 +924,7 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
           syncRuntimeToSeedDatabase();
         }
         markDatabaseHydratedFromCloud();
+        hasHydratedFromCloudThisProcess = true;
 
         lastVersionSeq = manifest.versionSeq;
         lastSha256 = manifest.sha256Hash;
@@ -937,6 +941,7 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
       // Both local and cloud have data -> Non-destructive union merge!
       const mergedCount = mergeMissingRowsFromCloudDb(stagedCloudPath, reason);
       markDatabaseHydratedFromCloud();
+      hasHydratedFromCloudThisProcess = true;
       if (manifest.versionSeq > lastVersionSeq) {
         lastVersionSeq = manifest.versionSeq;
       }
@@ -968,6 +973,23 @@ async function uploadLocalDbToCloud(
   reason: string,
   options?: { forceOverwrite?: boolean }
 ): Promise<boolean> {
+  // Safety guard: never allow an un-hydrated server process to overwrite the live Firestore vault
+  // before verifying/hydrating against Firestore first.
+  if (
+    config.envScope !== 'test' &&
+    !hasHydratedFromCloudThisProcess &&
+    !options?.forceOverwrite &&
+    reason !== 'initial_vault_bootstrap'
+  ) {
+    console.warn(
+      `[AMS Cloud Persistence] Blocked pre-hydration upload (${reason}); hydrating from live Firestore vault first.`
+    );
+    await syncOrBlockAgainstCurrentDatabase(`pre_upload_hydrate:${reason}`);
+    if (!hasHydratedFromCloudThisProcess) {
+      return false;
+    }
+  }
+
   if (isSyncInFlight) {
     pendingUploadAfterInFlight = true;
     pendingUploadReason = reason;
@@ -1212,12 +1234,14 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
   if (manifestRes.status === 'unreachable') {
     isConnected = false;
     lastError = manifestRes.error;
-    // Never fall back to an empty, backup, seed, or cached database when active remote vault is unreachable on a blank container!
-    if (localScore === 0 || getWasDatabaseCreatedOnBoot()) {
+    // Never fall back to an empty, backup, seed, or stale container-bundled database when active remote vault is unreachable on boot!
+    const unhydratedProdContainer =
+      config.envScope === 'production' && !hasHydratedFromCloudThisProcess;
+    if (localScore === 0 || getWasDatabaseCreatedOnBoot() || unhydratedProdContainer) {
       dbConnectionBlocked = true;
       dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${manifestRes.error}. Database switching is disabled to protect your data. Restore network and reconnect to resume using the same database.`;
     } else {
-      // Existing verified local active database for this exact container — keep using THIS database without switching, and surface clear connectivity error
+      // Existing verified local active database already hydrated for this container — keep using THIS database without switching
       dbConnectionBlocked = false;
       dbConnectionErrorMessage = null;
     }
@@ -1240,6 +1264,7 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     // Fast SHA-256 verification: if local active DB already matches cloud hash byte-for-byte, skip downloading chunks
     const localHash = !getWasDatabaseCreatedOnBoot() && localScore > 0 ? computeLocalSqliteSha256() : null;
     if (localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) {
+      hasHydratedFromCloudThisProcess = true;
       lastVersionSeq = manifest.versionSeq;
       lastSha256 = manifest.sha256Hash;
       lastError = null;
@@ -1247,12 +1272,28 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     }
 
     if (cloudScore > 0 || manifest.versionSeq > lastVersionSeq) {
-      await restoreOrMergeFromCloud(reason);
+      const restored = await restoreOrMergeFromCloud(reason);
+      if (
+        !restored &&
+        config.envScope === 'production' &&
+        !hasHydratedFromCloudThisProcess &&
+        cloudScore > 0
+      ) {
+        // Downloading/verifying authoritative production chunks failed — block serving stale bundled file & auto-retry
+        dbConnectionBlocked = true;
+        dbConnectionErrorMessage = `Failed to load latest production database v${manifest.versionSeq} from ${EXTERNAL_DB_LOCATION}${lastError ? `: ${lastError}` : ''}. Retrying automatically so stale data is never shown.`;
+        return;
+      }
+    } else {
+      hasHydratedFromCloudThisProcess = true;
     }
 
     const afterInspect = inspectSqliteSnapshot(config.databasePath);
     const afterScore = getBusinessRecordScore(afterInspect.counts);
-    if (afterScore > cloudScore) {
+    if (
+      afterScore > cloudScore &&
+      (config.envScope !== 'production' || hasLocalMutationsSinceBoot)
+    ) {
       await uploadLocalDbToCloud(`${reason}_superset_sync`);
     } else {
       lastVersionSeq = manifest.versionSeq;
@@ -1264,6 +1305,7 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     console.log(
       `[AMS Cloud Persistence] Confirmed new Firestore vault (${MANIFEST_DOC_ID}). Initializing with current ${config.envScope} database...`
     );
+    hasHydratedFromCloudThisProcess = true;
     await uploadLocalDbToCloud('initial_vault_bootstrap');
     lastError = null;
   }
@@ -1517,6 +1559,15 @@ const NON_MUTATING_SYNC_ROUTES = new Set([
   '/api/sync/register-terminal',
   '/api/sync/rehydrate',
   '/api/sync/pull',
+  '/api/enhancements/calculate-line',
+  '/api/enhancements/fifo/allocate',
+  '/api/enhancements/booking-imports/preview',
+  '/api/enhancements/local-backup/upload-verify',
+  '/api/enhancements/mobile/login',
+  '/api/system/backups/verify',
+  '/api/system/integrity-check',
+  '/api/system/reconnect-db',
+  '/api/system/cloud-sync-now',
 ]);
 
 /**
@@ -1576,6 +1627,7 @@ export async function cloudPersistenceMiddleware(
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
         if (!NON_MUTATING_SYNC_ROUTES.has(routeLabel)) {
+          hasLocalMutationsSinceBoot = true;
           scheduleCloudUpload(`http:${method}:${routeLabel}`);
         }
       }

@@ -7,6 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useFirebase } from '../../context/FirebaseContext';
 import { DatabaseDiagnostics } from '../../types/database';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
+import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
 
 interface TopHeaderProps {
   currentViewTitle: string;
@@ -276,6 +277,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             <div className="px-3 py-2 border-b border-slate-100 mb-1">
               <div className="text-xs font-bold text-slate-900">{name}</div>
               <div className="text-[11px] text-slate-500 font-mono">@{user?.username} • {user?.role}</div>
+              <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                v{APP_VERSION} • Build {CLIENT_BUILD_ID}
+              </div>
             </div>
 
             {isSuperAdmin && onNavigateToUsers && item(<Users2 className="w-4 h-4 text-purple-600" />, 'User Management', onNavigateToUsers)}

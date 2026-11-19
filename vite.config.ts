@@ -217,7 +217,13 @@ export default defineConfig(() => {
               );
               fs.writeFileSync(
                 path.join(outDir, 'version.json'),
-                JSON.stringify({ buildId: BUILD_ID, buildHash, builtAt: new Date().toISOString(), assets: assetUrls }),
+                JSON.stringify({
+                  version: '2.12.0-ERP',
+                  buildId: BUILD_ID,
+                  buildHash,
+                  builtAt: new Date().toISOString(),
+                  assets: assetUrls,
+                }),
                 'utf8'
               );
             }
