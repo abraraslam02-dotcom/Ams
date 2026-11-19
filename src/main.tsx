@@ -1,3 +1,4 @@
+import React from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
@@ -9,6 +10,8 @@ const RELOAD_GUARD_KEY = 'ams_last_sw_auto_reload_at';
 const RELOAD_BUILD_GUARD_KEY = 'ams_reloaded_for_build_v2';
 const RELOAD_NUKED_GUARD_KEY = 'ams_sw_nuked_for_build_v1';
 let swRegistrationRef: ServiceWorkerRegistration | null = null;
+let swRegisterPromise: Promise<ServiceWorkerRegistration | null> | null = null;
+let latestRemoteBuildId: string | null = null;
 let reloadingForUpdate = false;
 
 function triggerControlledReloadOnce(targetBuildId?: string): boolean {
@@ -51,13 +54,21 @@ function getCurrentMainAssetPath(): string | null {
 }
 
 async function waitForServiceWorkerActivation(reg: ServiceWorkerRegistration | null, timeoutMs = 2200): Promise<void> {
-  if (!reg || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  let activeReg = reg;
+  if (!activeReg && swRegisterPromise) {
+    activeReg = await Promise.race([
+      swRegisterPromise.catch(() => null),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 1200)),
+    ]);
+  }
+  if (!activeReg) return;
   try {
-    await reg.update().catch(() => {});
-    if (reg.waiting) {
-      reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+    await activeReg.update().catch(() => {});
+    if (activeReg.waiting) {
+      activeReg.waiting.postMessage({ type: 'SKIP_WAITING' });
     }
-    const pendingWorker = reg.installing || reg.waiting;
+    const pendingWorker = activeReg.installing || activeReg.waiting;
     if (!pendingWorker) return;
 
     await new Promise<void>((resolve) => {
@@ -114,6 +125,9 @@ async function checkForPublishedUpdate(): Promise<boolean> {
     if (!res.ok) return false;
     const data = (await res.json()) as { buildId?: string; buildHash?: string; assets?: string[] };
     const remoteBuildId = String(data?.buildId || data?.buildHash || '');
+    if (remoteBuildId && !remoteBuildId.startsWith('dev-')) {
+      latestRemoteBuildId = remoteBuildId;
+    }
     const buildIdMismatch =
       Boolean(data?.buildId) &&
       CLIENT_BUILD_ID !== 'dev' &&
@@ -219,17 +233,17 @@ if (typeof window !== 'undefined') {
 
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (hadController) {
-        triggerControlledReloadOnce();
+        triggerControlledReloadOnce(latestRemoteBuildId || undefined);
       }
     });
 
     navigator.serviceWorker.addEventListener('message', (event) => {
       if (event.data?.type === 'AMS_SW_ACTIVATED' && hadController) {
-        triggerControlledReloadOnce();
+        triggerControlledReloadOnce(latestRemoteBuildId || undefined);
       }
     });
 
-    navigator.serviceWorker
+    swRegisterPromise = navigator.serviceWorker
       .register('/sw.js', { scope: '/', updateViaCache: 'none' })
       .then((reg) => {
         swRegistrationRef = reg;
@@ -248,8 +262,9 @@ if (typeof window !== 'undefined') {
         if (navigator.onLine) {
           reg.update().catch(() => {});
         }
+        return reg;
       })
-      .catch(() => {});
+      .catch(() => null);
   }
 
   window.addEventListener('load', () => {
@@ -276,5 +291,77 @@ if (typeof window !== 'undefined') {
   }, 5 * 60 * 1000);
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('[AMS UI ErrorBoundary]', error);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen w-screen bg-slate-950 text-white flex items-center justify-center p-6 font-sans">
+          <div className="max-w-lg w-full bg-slate-900 border border-rose-500/40 rounded-2xl p-6 shadow-2xl space-y-4">
+            <div className="text-lg font-bold text-rose-400">
+              Abrar Medical Store — Screen Recovery
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              An unexpected display error occurred. Your business database and records are completely safe.
+            </p>
+            <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono text-rose-300 break-words">
+              {this.state.error.message || 'Unknown UI error'}
+            </div>
+            <div className="flex flex-wrap gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
+              >
+                Reload App
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      if ('serviceWorker' in navigator) {
+                        const regs = await navigator.serviceWorker.getRegistrations();
+                        await Promise.allSettled(regs.map((r) => r.unregister()));
+                      }
+                      await clearAllBrowserCaches();
+                    } catch {
+                      // ignore
+                    }
+                    window.location.reload();
+                  })();
+                }}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold cursor-pointer"
+              >
+                Clear App Cache &amp; Load Latest Version
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+createRoot(document.getElementById('root')!).render(
+  <AppErrorBoundary>
+    <App />
+  </AppErrorBoundary>
+);
 

@@ -29,9 +29,9 @@ function buildOfflineFirstSwScript(assetUrls: string[], buildHash: string): stri
   ];
   const uniqueUrls = Array.from(new Set(baseUrls));
 
-  return `// AMS Service Worker v15 (Build ${buildHash} - Network-First Auto-Updating App Shell)
-const SW_VERSION = 'ams-sw-v15-${buildHash}';
-const RUNTIME_CACHE = 'ams-runtime-v15-${buildHash}';
+  return `// AMS Service Worker v16 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v16-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v16-${buildHash}';
 const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
 
 self.addEventListener('install', (event) => {

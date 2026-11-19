@@ -32,6 +32,7 @@ import {
   runPreDeploymentSafetyChecks,
   startCloudPersistenceBackgroundLoop,
 } from './server/services/cloudPersistenceService.ts';
+import { handleServeProductImage } from './server/services/productMediaService.ts';
 
 async function startServer() {
   const app = express();
@@ -68,8 +69,271 @@ async function startServer() {
     console.error(`[AMS DB ERROR] Migration or connection failed: ${errorMsg}`);
   }
 
+  function applyNoStoreHeaders(res: express.Response) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+  }
+
+  function computeSwBuildHash(input: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function getBuildMetadata(): { buildId: string; buildHash: string; builtAt: string | null; assetUrls: string[] } {
+    if (serveStaticDist) {
+      const distVersionFile = path.join(distPath, 'version.json');
+      try {
+        if (fs.existsSync(distVersionFile)) {
+          const parsed = JSON.parse(fs.readFileSync(distVersionFile, 'utf8'));
+          if (parsed && typeof parsed.buildHash === 'string' && Array.isArray(parsed.assets)) {
+            const validAssets = parsed.assets.filter((assetUrl: unknown) => {
+              if (typeof assetUrl !== 'string' || !assetUrl.startsWith('/')) return false;
+              const absAsset = path.join(distPath, assetUrl.slice(1));
+              return fs.existsSync(absAsset);
+            });
+            if (validAssets.length > 0) {
+              return {
+                buildId: String(parsed.buildId || parsed.buildHash),
+                buildHash: parsed.buildHash,
+                builtAt: typeof parsed.builtAt === 'string' ? parsed.builtAt : null,
+                assetUrls: validAssets,
+              };
+            }
+          }
+        }
+      } catch {
+        // fallback below
+      }
+    }
+    const assetUrls: string[] = [];
+    let indexHtmlContent = '';
+    let builtAt: string | null = null;
+    try {
+      const assetsDir = path.join(distPath, 'assets');
+      if (fs.existsSync(assetsDir)) {
+        for (const file of fs.readdirSync(assetsDir).sort()) {
+          if (/\.(js|css|woff2?|ttf|svg|png)$/i.test(file)) {
+            assetUrls.push(`/assets/${file}`);
+          }
+        }
+      }
+      if (fs.existsSync(distIndexHtml)) {
+        indexHtmlContent = fs.readFileSync(distIndexHtml, 'utf8');
+        builtAt = fs.statSync(distIndexHtml).mtime.toISOString();
+      }
+    } catch {
+      // ignore
+    }
+    const buildHash =
+      serveStaticDist && (assetUrls.length > 0 || indexHtmlContent.length > 0)
+        ? computeSwBuildHash(`${assetUrls.join('|')}::${indexHtmlContent}`)
+        : `dev-${process.pid}`;
+    return { buildId: buildHash, buildHash, builtAt, assetUrls };
+  }
+
+  function getDynamicSwScript(): string {
+    const { buildHash, assetUrls } = getBuildMetadata();
+    const baseUrls = [
+      '/',
+      '/index.html',
+      '/salesman',
+      '/manifest.json',
+      '/salesman-manifest.json',
+      '/pwa-192x192.png',
+      '/pwa-512x512.png',
+      '/pwa-maskable-512x512.png',
+      '/apple-touch-icon.png',
+      '/icon.svg',
+      ...assetUrls,
+    ];
+    const uniqueUrls = Array.from(new Set(baseUrls));
+
+    return `// AMS Service Worker v16 (Build ${buildHash} - Network-First Auto-Updating App Shell)
+const SW_VERSION = 'ams-sw-v16-${buildHash}';
+const RUNTIME_CACHE = 'ams-runtime-v16-${buildHash}';
+const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(RUNTIME_CACHE);
+      await Promise.allSettled(
+        PRECACHE_URLS.map(async (url) => {
+          try {
+            const res = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+            if (
+              res &&
+              res.status === 200 &&
+              !res.redirected &&
+              !String(res.url || '').includes('__cookie_check')
+            ) {
+              await cache.put(url, res.clone());
+            }
+          } catch (e) {}
+        })
+      );
+    } catch (e) {}
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    let deletedLegacyCache = false;
+    try {
+      const keys = await caches.keys();
+      for (const key of keys) {
+        if (key !== RUNTIME_CACHE) {
+          deletedLegacyCache = true;
+          await caches.delete(key);
+        }
+      }
+      await self.clients.claim();
+      const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of windowClients) {
+        try {
+          client.postMessage({
+            type: 'AMS_SW_ACTIVATED',
+            version: SW_VERSION,
+            buildHash: '${buildHash}',
+            deletedLegacy: deletedLegacyCache,
+          });
+        } catch (e) {}
+        if (deletedLegacyCache && 'navigate' in client && client.url) {
+          try {
+            await client.navigate(client.url);
+          } catch (e) {}
+        }
+      }
+    } catch (err) {}
+  })());
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+  if (req.cache === 'only-if-cached' && req.mode !== 'same-origin') return;
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  if (
+    url.pathname.startsWith('/__') ||
+    url.pathname.startsWith('/api/') ||
+    url.pathname === '/sw.js' ||
+    url.pathname === '/dev-sw.js' ||
+    url.pathname === '/registerSW.js' ||
+    url.pathname === '/version.json' ||
+    url.pathname === '/version.json/'
+  ) {
+    return;
+  }
+
+  // Navigation requests (HTML app shell): pass req directly (never override RequestInit on navigate mode, which throws TypeError in Chromium/Edge)
+  // Server sends Cache-Control: no-store on all HTML responses so fetch(req) always hits the network when online.
+  const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
+  if (isNav) {
+    event.respondWith((async () => {
+      try {
+        const networkResponse = await fetch(req);
+        if (networkResponse) {
+          if (
+            networkResponse.status === 200 &&
+            !networkResponse.redirected &&
+            !String(networkResponse.url || '').includes('__cookie_check')
+          ) {
+            const cache = await caches.open(RUNTIME_CACHE);
+            cache.put(req, networkResponse.clone()).catch(() => {});
+            cache.put('/index.html', networkResponse.clone()).catch(() => {});
+            cache.put('/', networkResponse.clone()).catch(() => {});
+          }
+          return networkResponse;
+        }
+      } catch (err) {}
+      const cache = await caches.open(RUNTIME_CACHE);
+      const cachedExact = await cache.match(req, { ignoreSearch: true });
+      if (cachedExact) return cachedExact;
+      if (url.pathname.startsWith('/salesman')) {
+        const cachedSalesman = await cache.match('/salesman', { ignoreSearch: true });
+        if (cachedSalesman) return cachedSalesman;
+      }
+      const cachedIndex = await cache.match('/index.html', { ignoreSearch: true });
+      if (cachedIndex) return cachedIndex;
+      const cachedRoot = await cache.match('/', { ignoreSearch: true });
+      if (cachedRoot) return cachedRoot;
+      return new Response('Offline - App Shell Not Cached Yet', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+    })());
+    return;
+  }
+
+  // Static assets & same-origin GET requests: Network-first with no-store & offline cache fallback
+  event.respondWith((async () => {
+    const cache = await caches.open(RUNTIME_CACHE);
+    try {
+      const networkResponse = await fetch(req.url, { cache: 'no-store', credentials: 'same-origin' });
+      if (
+        networkResponse &&
+        networkResponse.status === 200 &&
+        !networkResponse.redirected &&
+        !String(networkResponse.url || '').includes('__cookie_check')
+      ) {
+        cache.put(req, networkResponse.clone()).catch(() => {});
+      }
+      return networkResponse;
+    } catch (err) {
+      const cached = (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true }));
+      if (cached) return cached;
+      throw err;
+    }
+  })());
+});
+`;
+  }
+
+  // Explicit version & service worker endpoints registered BEFORE static/Vite/SPA fallback routes
+  app.get(['/version.json', '/version.json/', '/api/version'], (_req, res) => {
+    res.removeHeader('ETag');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    applyNoStoreHeaders(res);
+    const { buildId, buildHash, builtAt, assetUrls } = getBuildMetadata();
+    res.status(200).end(
+      JSON.stringify({
+        success: true,
+        buildId,
+        buildHash,
+        builtAt,
+        environment: config.nodeEnv,
+        assets: assetUrls,
+      })
+    );
+  });
+
+  app.get(['/sw.js', '/dev-sw.js'], (_req, res) => {
+    res.removeHeader('ETag');
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    applyNoStoreHeaders(res);
+    res.status(200).end(getDynamicSwScript());
+  });
+
   // Synchronize all API operations with permanent Cloud SQL database across Dev, Published, Computer & Mobile
   app.use('/api', cloudPersistenceMiddleware);
+
+  // Serve uploaded Product & Variant pictures cleanly for <img> tags & print previews
+  app.get('/api/product-images/:imageKey', handleServeProductImage);
 
   // Mount API routes with server-side authentication and module RBAC enforcement
   app.use('/api/auth', authRouter);
@@ -95,42 +359,7 @@ async function startServer() {
     res.status(404).json({ success: false, error: 'API endpoint not found.' });
   });
 
-  // Always expose the deployed build metadata as JSON before Vite/SPA fallback.
-  // This endpoint is intentionally independent of the frontend router and service worker.
-  app.get('/version.json', (_req, res) => {
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-
-    const versionFile = path.join(distPath, 'version.json');
-    try {
-      if (!fs.existsSync(versionFile)) {
-        return res.status(503).json({
-          success: false,
-          error: 'Production build metadata is missing. Run the production build before starting AMS.',
-          buildAvailable: false,
-        });
-      }
-
-      const rawVersion = fs.readFileSync(versionFile, 'utf8');
-      const versionData = JSON.parse(rawVersion);
-      if (!versionData || typeof versionData.buildHash !== 'string' || !versionData.buildHash.trim()) {
-        return res.status(500).json({ success: false, error: 'Build metadata is invalid.' });
-      }
-
-      return res.status(200).json({
-        success: true,
-        buildHash: versionData.buildHash,
-        assets: Array.isArray(versionData.assets) ? versionData.assets : [],
-      });
-    } catch (error) {
-      console.error('[AMS Version] Could not read dist/version.json:', error);
-      return res.status(500).json({ success: false, error: 'Could not read build metadata.' });
-    }
-  });
-
-  // Prevent browser/proxy HTTP caching on HTML shell and Service Worker scripts
+  // Prevent browser/proxy/CDN HTTP caching on HTML shell, Service Worker scripts, and version check
   app.use((req, res, next) => {
     if (
       req.path === '/' ||
@@ -140,13 +369,13 @@ async function startServer() {
       req.path === '/sw.js' ||
       req.path === '/dev-sw.js' ||
       req.path === '/registerSW.js' ||
+      req.path === '/version.json' ||
+      req.path === '/version.json/' ||
       req.path === '/manifest.json' ||
       req.path === '/salesman-manifest.json' ||
       req.path === '/manifest.webmanifest'
     ) {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
+      applyNoStoreHeaders(res);
     }
     next();
   });
@@ -232,195 +461,6 @@ async function startServer() {
     res.json(salesmanManifestPayload);
   });
 
-  // Dynamically build the Service Worker script including all compiled /assets/* bundles if dist/assets exists
-  function getDynamicSwScript(): string {
-    const baseUrls = [
-      '/',
-      '/index.html',
-      '/salesman',
-      '/manifest.json',
-      '/salesman-manifest.json',
-      '/pwa-192x192.png',
-      '/pwa-512x512.png',
-      '/pwa-maskable-512x512.png',
-      '/apple-touch-icon.png',
-      '/icon.svg',
-    ];
-    try {
-      const assetsDir = path.join(distPath, 'assets');
-      if (fs.existsSync(assetsDir)) {
-        for (const file of fs.readdirSync(assetsDir)) {
-          if (/\.(js|css|woff2?|ttf|svg|png)$/i.test(file)) {
-            baseUrls.push(`/assets/${file}`);
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-    const uniqueUrls = Array.from(new Set(baseUrls));
-
-    return `// AMS Service Worker v11 (Complete Offline-First App Shell + Simple Sync)
-const SW_VERSION = 'ams-sw-v11-simple-sync';
-const RUNTIME_CACHE = 'ams-runtime-v11';
-const PRECACHE_URLS = ${JSON.stringify(uniqueUrls, null, 2)};
-
-self.addEventListener('install', (event) => {
-  event.waitUntil((async () => {
-    try {
-      const cache = await caches.open(RUNTIME_CACHE);
-      await Promise.allSettled(
-        PRECACHE_URLS.map(async (url) => {
-          try {
-            const req = new Request(url, { cache: 'reload' });
-            const res = await fetch(req);
-            if (res && res.status === 200) {
-              await cache.put(url, res.clone());
-            }
-          } catch (e) {}
-        })
-      );
-    } catch (e) {}
-    await self.skipWaiting();
-  })());
-});
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil((async () => {
-    try {
-      const targetCache = await caches.open(RUNTIME_CACHE);
-      const keys = await caches.keys();
-      for (const key of keys) {
-        if (key !== RUNTIME_CACHE && key.startsWith('ams-runtime-')) {
-          try {
-            const oldCache = await caches.open(key);
-            const oldReqs = await oldCache.keys();
-            for (const oldReq of oldReqs) {
-              const existing = await targetCache.match(oldReq);
-              if (!existing) {
-                const oldRes = await oldCache.match(oldReq);
-                if (oldRes) await targetCache.put(oldReq, oldRes.clone());
-              }
-            }
-          } catch (e) {}
-          await caches.delete(key);
-        }
-      }
-      await self.clients.claim();
-      const windowClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      for (const client of windowClients) {
-        client.postMessage({ type: 'AMS_SW_ACTIVATED', version: SW_VERSION, deletedLegacy: false });
-      }
-    } catch (err) {}
-  })());
-});
-
-self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
-    self.skipWaiting();
-  }
-});
-
-self.addEventListener('fetch', (event) => {
-  const req = event.request;
-  if (req.method !== 'GET') return;
-  const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return;
-  if (url.pathname === '/sw.js' || url.pathname === '/dev-sw.js' || url.pathname === '/registerSW.js') return;
-  if (url.pathname.startsWith('/api/')) return;
-
-  const isNav = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
-  if (isNav) {
-    event.respondWith((async () => {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 3500);
-        const networkResponse = await fetch(req, { signal: controller.signal });
-        clearTimeout(timer);
-        if (networkResponse && networkResponse.status === 200) {
-          const cache = await caches.open(RUNTIME_CACHE);
-          cache.put(req, networkResponse.clone()).catch(() => {});
-          cache.put('/index.html', networkResponse.clone()).catch(() => {});
-          cache.put('/', networkResponse.clone()).catch(() => {});
-          return networkResponse;
-        }
-      } catch (err) {}
-      const cachedExact = await caches.match(req, { ignoreSearch: true });
-      if (cachedExact) return cachedExact;
-      if (url.pathname.startsWith('/salesman')) {
-        const cachedSalesman = await caches.match('/salesman', { ignoreSearch: true });
-        if (cachedSalesman) return cachedSalesman;
-      }
-      const cachedIndex = await caches.match('/index.html', { ignoreSearch: true });
-      if (cachedIndex) return cachedIndex;
-      const cachedRoot = await caches.match('/', { ignoreSearch: true });
-      if (cachedRoot) return cachedRoot;
-      return new Response('Offline - App Shell Not Cached Yet', { status: 503, headers: { 'Content-Type': 'text/plain' } });
-    })());
-    return;
-  }
-
-  if (url.pathname.startsWith('/assets/') || /\\.(png|svg|ico|woff2?|ttf)$/i.test(url.pathname)) {
-    event.respondWith((async () => {
-      const cached = (await caches.match(req)) || (await caches.match(req, { ignoreSearch: true }));
-      if (cached) {
-        fetch(req)
-          .then(async (netRes) => {
-            if (netRes && netRes.status === 200) {
-              const cache = await caches.open(RUNTIME_CACHE);
-              await cache.put(req, netRes.clone());
-            }
-          })
-          .catch(() => {});
-        return cached;
-      }
-      const netRes = await fetch(req);
-      if (netRes && netRes.status === 200) {
-        const cache = await caches.open(RUNTIME_CACHE);
-        cache.put(req, netRes.clone()).catch(() => {});
-      }
-      return netRes;
-    })());
-    return;
-  }
-
-  event.respondWith((async () => {
-    try {
-      const networkResponse = await fetch(req);
-      if (networkResponse && networkResponse.status === 200) {
-        const cache = await caches.open(RUNTIME_CACHE);
-        cache.put(req, networkResponse.clone()).catch(() => {});
-      }
-      return networkResponse;
-    } catch (err) {
-      const cached = (await caches.match(req)) || (await caches.match(req, { ignoreSearch: true }));
-      if (cached) return cached;
-      throw err;
-    }
-  })());
-});
-`;
-  }
-
-  app.get('/sw.js', (_req, res) => {
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    const builtServiceWorker = path.join(distPath, 'sw.js');
-    if (serveStaticDist && fs.existsSync(builtServiceWorker)) {
-      return res.sendFile(builtServiceWorker);
-    }
-    if (!serveStaticDist) {
-      return res.send(getDynamicSwScript());
-    }
-    return res.status(503).type('text/plain').send('Production service worker is not built. Run npm run build.');
-  });
-
-  app.get('/dev-sw.js', (_req, res) => {
-    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    return res.send(getDynamicSwScript());
-  });
-
   // Vite integration in development, static dist serving in production
   if (!serveStaticDist) {
     const { createServer: createViteServer } = await import('vite');
@@ -430,18 +470,43 @@ self.addEventListener('fetch', (event) => {
     });
     app.use(vite.middlewares);
   } else {
+    app.get(['/', '/index.html', '/salesman', '/salesman/'], (_req, res) => {
+      applyNoStoreHeaders(res);
+      res.sendFile(distIndexHtml, { etag: false, lastModified: false });
+    });
+
     app.use(
       express.static(distPath, {
+        index: false,
+        etag: false,
+        lastModified: false,
         setHeaders: (res, filePath) => {
-          if (filePath.endsWith('.html') || filePath.endsWith('sw.js') || filePath.endsWith('.webmanifest')) {
-            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          if (
+            filePath.endsWith('.html') ||
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('version.json') ||
+            filePath.endsWith('.webmanifest') ||
+            filePath.endsWith('manifest.json')
+          ) {
+            applyNoStoreHeaders(res);
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           }
         },
       })
     );
-    app.get('*', (_req, res) => {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.sendFile(distIndexHtml);
+    app.get('*', (req, res) => {
+      if (
+        req.path === '/version.json' ||
+        req.path === '/version.json/' ||
+        req.path === '/sw.js' ||
+        req.path === '/dev-sw.js' ||
+        req.path.startsWith('/api/')
+      ) {
+        return res.status(404).json({ success: false, error: 'Resource not found.' });
+      }
+      applyNoStoreHeaders(res);
+      res.sendFile(distIndexHtml, { etag: false, lastModified: false });
     });
   }
 
