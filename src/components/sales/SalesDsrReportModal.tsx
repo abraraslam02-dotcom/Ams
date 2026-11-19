@@ -636,14 +636,14 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                 <div
                   ref={thermalPrintRef}
                   style={{ width: '80mm', maxWidth: '80mm', height: 'auto', minHeight: 0 }}
-                  className="thermal-receipt thermal-80mm bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-[1.08] w-[80mm] max-w-[80mm] h-auto min-h-0 self-start px-[1mm] py-[1mm] text-[10px] relative print:border-0 print:shadow-none print:p-[0.8mm]"
+                  className="thermal-receipt thermal-80mm bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-[1.08] w-[80mm] max-w-[80mm] h-auto min-h-0 self-start px-[1mm] py-[1mm] text-[11px] relative print:border-0 print:shadow-none print:p-[0.8mm]"
                 >
                   {/* Compact Header: Store name + report title */}
                   <div className="text-center pb-[1px]">
-                    <div className="font-black text-black tracking-tight leading-none text-[12px] uppercase truncate">
+                    <div className="font-black text-black tracking-tight leading-none text-[14px] uppercase truncate">
                       {displayStoreName}
                     </div>
-                    <div className="font-bold text-black leading-tight text-[9px]">
+                    <div className="font-bold text-black leading-tight text-[10px]">
                       DSR – Daily Stock Requisition
                     </div>
                   </div>
