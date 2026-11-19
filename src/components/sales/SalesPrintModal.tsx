@@ -31,6 +31,7 @@ import {
   FontSizeScaleOption,
 } from '../../utils/printEngine';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
+import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 
 interface SalesPrintModalProps {
   isOpen?: boolean;
@@ -998,15 +999,12 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                         )}
                         <td className="py-2 px-1.5 border border-slate-200 break-words">
                           <div className="font-bold text-[13.5px] text-slate-950 break-words">
-                            {line.item_name}
+                            {formatItemNameWithRemarks(line.item_name, line.remarks)}
                             {line.variant_name && !String(line.item_name || '').includes(line.variant_name) ? (
                               <span className="ml-1.5 text-[11.5px] font-semibold text-emerald-900">
                                 — {line.variant_name}
                               </span>
                             ) : null}
-                            {String(line.remarks || '').trim()
-                              ? ` (${String(line.remarks || '').trim()})`
-                              : ''}
                           </div>
                           {fields.showCompany && line.company_name && (
                             <div className="text-[11.5px] text-slate-600 mt-0.5">{line.company_name}</div>
@@ -1522,13 +1520,12 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                                 }`}
                               >
                                 {showItemCode && line.item_code ? `[${line.item_code}] ` : ''}
-                                {line.item_name}
-                                {line.variant_name && !String(line.item_name || '').includes(line.variant_name)
-                                  ? ` - ${line.variant_name}`
-                                  : ''}
-                                {String(line.remarks || '').trim()
-                                  ? ` (${String(line.remarks || '').trim()})`
-                                  : ''}
+                                {formatItemNameWithRemarks(
+                                  line.variant_name && !String(line.item_name || '').includes(line.variant_name)
+                                    ? `${line.item_name} - ${line.variant_name}`
+                                    : line.item_name,
+                                  line.remarks
+                                )}
                               </div>
                               {((showItemCompany && line.company_name) ||
                                 (showPacking && rawPacking) ||

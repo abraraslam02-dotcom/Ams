@@ -22,6 +22,8 @@ export interface ItemListSelectionModalProps<T extends BaseSearchableItem> {
   rateColumnLabel?: string;
   getItemRate: (item: T) => number;
   getItemStock?: (item: T) => number;
+  activeCompanyFilter?: string;
+  onClearCompanyFilter?: () => void;
   onSelectItem: (item: T) => void;
   onSwitchToAddNewLine?: () => void;
   onClose: () => void;
@@ -37,6 +39,8 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
   rateColumnLabel = 'Rate',
   getItemRate,
   getItemStock,
+  activeCompanyFilter,
+  onClearCompanyFilter,
   onSelectItem,
   onSwitchToAddNewLine,
   onClose,
@@ -169,6 +173,27 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
             </button>
           </div>
         </div>
+
+        {activeCompanyFilter && (
+          <div className="shrink-0 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-900 flex items-center justify-between gap-2 text-[11px]">
+            <div className="font-semibold">
+              Filtered by Company:{' '}
+              <span className="font-black text-emerald-950">{activeCompanyFilter}</span>{' '}
+              <span className="text-emerald-700 font-normal">
+                ({items.length} {items.length === 1 ? 'item' : 'items'})
+              </span>
+            </div>
+            {onClearCompanyFilter && (
+              <button
+                type="button"
+                onClick={onClearCompanyFilter}
+                className="px-2 py-0.5 rounded bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold text-[10px] cursor-pointer"
+              >
+                Show All Companies
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="relative shrink-0">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />

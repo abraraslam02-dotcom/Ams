@@ -50,6 +50,12 @@ import {
 import { api } from '../../services/api';
 import { formatPKR } from '../../utils/formatters';
 import { findExactBarcodeOrCodeMatch, prepareItemIndex } from '../../utils/itemSearch';
+import {
+  formatItemNameWithRemarks,
+  matchesSelectedCompany,
+  mergeCompanyMasterOptions,
+} from '../../utils/itemDisplay';
+import { useResizableColumns } from '../../hooks/useResizableColumns';
 import { PurchasePrintModal } from './PurchasePrintModal';
 import { AdvanceTaxSettingsPanel } from './AdvanceTaxSettingsPanel';
 import { BatchInventoryPanel } from './BatchInventoryPanel';
@@ -350,6 +356,78 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [rowItemSearchQuery, setRowItemSearchQuery] = useState<string>('');
   const [rowItemHighlightIndex, setRowItemHighlightIndex] = useState<number>(0);
   const purchaseSearchReqIdRef = useRef<number>(0);
+
+  // Company Master List & Active Company Filter for Item Selection
+  const [companyMasterList, setCompanyMasterList] = useState<string[]>([]);
+  const [selectedCompanyFilter, setSelectedCompanyFilter] = useState<string>('');
+
+  useEffect(() => {
+    setItemHighlightIndex(0);
+    setRowItemHighlightIndex(0);
+  }, [selectedCompanyFilter]);
+
+  // Smooth Drag-and-Drop Adjustable Column Widths for Modern POS & Classic Purchase Datasheets
+  const {
+    colWidths: purPosColWidths,
+    totalWidth: purPosTotalWidth,
+    resizingCol: purPosResizingCol,
+    handleResizeStart: handlePurPosResizeStart,
+    resetColumnWidth: handleResetPurPosColWidth,
+  } = useResizableColumns({
+    storageKey: 'ams_purchase_pos_col_widths_v1',
+    defaultWidths: {
+      selector: 34,
+      item_code: 104,
+      company: 126,
+      item_name: 245,
+      quantity: 74,
+      discount: 74,
+      bonus: 70,
+      gross_amount: 96,
+      net_amount: 96,
+      packing: 78,
+      batch_expiry: 210,
+      purchase_rate: 104,
+      mrp: 88,
+      gst: 68,
+      taxable: 92,
+      line_total: 104,
+      remarks: 130,
+      actions: 52,
+    },
+    minWidth: 36,
+  });
+
+  const {
+    colWidths: purAccessColWidths,
+    totalWidth: purAccessTotalWidth,
+    resizingCol: purAccessResizingCol,
+    handleResizeStart: handlePurAccessResizeStart,
+    resetColumnWidth: handleResetPurAccessColWidth,
+  } = useResizableColumns({
+    storageKey: 'ams_purchase_access_col_widths_v1',
+    defaultWidths: {
+      selector: 32,
+      item_code: 104,
+      company: 126,
+      item_name: 245,
+      quantity: 74,
+      discount: 74,
+      purchase_rate: 98,
+      bonus: 70,
+      net_amount: 94,
+      gross_amount: 94,
+      packing: 78,
+      batch_expiry: 210,
+      mrp: 88,
+      gst: 68,
+      taxable: 92,
+      line_total: 104,
+      remarks: 130,
+      actions: 44,
+    },
+    minWidth: 36,
+  });
 
   // Shared Item Selection List Modal State (Reuses Sales ItemListSelectionModal)
   const [showPurchaseItemListModal, setShowPurchaseItemListModal] = useState<boolean>(false);
@@ -653,6 +731,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       const [
         itemsRes,
         fastItemsRes,
+        companiesRes,
         accountsRes,
         fastSupRes,
         taxRes,
@@ -663,6 +742,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       ] = await Promise.all([
         api.getItems({ status: 'Active' }).catch(() => ({ items: [] })),
         api.fastSearchPurchaseItems('', 20000).catch(() => ({ items: [] })),
+        api.getItemCompanies().catch(() => ({ companies: [] })),
         api.getAccounts({ status: 'Active' }).catch(() => ({ accounts: [] })),
         api.fastSearchPurchaseSuppliers('', 60).catch(() => ({ suppliers: [] })),
         api.getAdvanceTaxSettings().catch(() => ({ settings: null, history: [] })),
@@ -671,6 +751,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         api.getPurchaseReturns().catch(() => ({ returns: [] })),
         api.getInventoryBatches().catch(() => ({ batches: [] })),
       ]);
+
+      setCompanyMasterList(Array.isArray(companiesRes?.companies) ? companiesRes.companies : []);
 
       // Merge items from both endpoints so catalog includes up to 20,000+ active items
       const primaryItems: Item[] = itemsRes.items || [];
@@ -946,8 +1028,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     return matches.slice(0, 50).map((m) => m.supplier);
   }, [suppliers, supplierSearchQuery, selectedSupplier]);
 
+  // Accessible Company Master options merged with loaded catalog companies
+  const companyOptions = useMemo(
+    () => mergeCompanyMasterOptions(companyMasterList, items),
+    [companyMasterList, items]
+  );
+
+  // Company-filtered Purchase item pool (shows all items when no company is selected)
+  const companyFilteredPurchaseItems = useMemo(
+    () =>
+      selectedCompanyFilter
+        ? items.filter((it) => matchesSelectedCompany(it.company_name, selectedCompanyFilter))
+        : items,
+    [items, selectedCompanyFilter]
+  );
+
   // Unified High-Performance Instant Item Search Engine (Pre-indexed, <1ms query response)
-  const indexedPurchaseItems = useMemo(() => prepareItemIndex(items), [items]);
+  const indexedPurchaseItems = useMemo(
+    () => prepareItemIndex(companyFilteredPurchaseItems),
+    [companyFilteredPurchaseItems]
+  );
 
   const stockPacksByItemId = useMemo(() => {
     const map = new Map<number, number>();
@@ -962,7 +1062,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const computeFilteredItems = useCallback(
     (queryStr: string, showDefaultWhenEmpty: boolean = true): Item[] => {
       const q = (queryStr || '').trim();
-      if (!q) return showDefaultWhenEmpty ? items.slice(0, 40) : [];
+      if (!q) return showDefaultWhenEmpty ? companyFilteredPurchaseItems.slice(0, 50) : [];
 
       // Token/partial matching across item code, name, company, packing and barcode.
       // Examples: "pan 200 mg", "pan 200", "mg tab" and "panadol200mg tab"
@@ -972,7 +1072,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       const tokens = q.split(/\s+/).map(normalize).filter(Boolean);
       if (!tokens.length) return [];
 
-      const ranked = items
+      const ranked = companyFilteredPurchaseItems
         .map((item) => {
           const variantText = Array.isArray(item.variants)
             ? item.variants
@@ -1026,7 +1126,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       return ranked.slice(0, 50).map((entry) => entry.item);
     },
-    [items]
+    [companyFilteredPurchaseItems]
   );
 
   const purchaseSearchResults = useMemo(
@@ -2424,8 +2524,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       e.preventDefault();
       const qTrim = purchaseSearchQuery.trim();
       if (qTrim) {
-        // Check exact barcode / variant code / item code scan first
-        const exactScan = findExactBarcodeOrCodeMatch(items, qTrim);
+        // Check exact barcode / variant code / item code scan first (respecting selected company filter)
+        const exactScan = findExactBarcodeOrCodeMatch(companyFilteredPurchaseItems, qTrim);
         if (exactScan) {
           handleSelectPurchaseSearchItem(exactScan.item, exactScan.variant || null);
           return;
@@ -2443,6 +2543,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           .lookupBarcodeExact(qTrim)
           .then((lookup) => {
             if (lookup?.matched && lookup.item) {
+              if (
+                selectedCompanyFilter &&
+                !matchesSelectedCompany(lookup.item.company_name, selectedCompanyFilter)
+              ) {
+                setFormError(
+                  `Item "${lookup.item.item_name}" belongs to "${lookup.item.company_name || 'another company'}", not selected company "${selectedCompanyFilter}".`
+                );
+                return;
+              }
               handleSelectPurchaseSearchItem(lookup.item, lookup.variant || null);
             }
           })
@@ -2825,7 +2934,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         // Exact Item Code / Variant Code / Barcode typed -> fill row directly (no popup)
         const typedRaw = rowItemSearchQuery.trim();
         if (field === 'item_code' && typedRaw) {
-          const exactScan = findExactBarcodeOrCodeMatch(items, typedRaw);
+          const exactScan = findExactBarcodeOrCodeMatch(companyFilteredPurchaseItems, typedRaw);
           if (exactScan) {
             populatePurchaseRowWithItem(rowIdx, exactScan.item, true, exactScan.variant || null);
             return;
@@ -4054,7 +4163,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       <div className="absolute right-0 top-full mt-1 z-[100] w-[640px] max-w-[92vw] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl overflow-hidden">
         <div className="px-3 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center">
           <span>
-            Matching Items ({purchaseSearchResults.length}) • Search by Item Name, Company, Code or Barcode
+            Matching Items ({purchaseSearchResults.length})
+            {selectedCompanyFilter
+              ? ` • Company: ${selectedCompanyFilter}`
+              : ' • Search by Item Name, Company, Code or Barcode'}
           </span>
           <span className="font-mono text-sky-700">
             ↑/↓ Navigate • Enter Select • Esc Close
@@ -4063,7 +4175,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         <div ref={itemListRef} className="max-h-[340px] overflow-y-auto">
           {purchaseSearchResults.length === 0 ? (
             <div className="p-4 text-center text-base font-bold text-slate-600">
-              No Item Found
+              No Item Found{selectedCompanyFilter ? ` in ${selectedCompanyFilter}` : ''}
             </div>
           ) : (
             <table className="w-full text-left text-[11px] border-collapse">
@@ -4186,14 +4298,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       <div className="absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl min-w-[580px] max-w-[720px] overflow-hidden">
         <div className="px-2.5 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center">
           <span>
-            Matching Items ({rowItemSearchResults.length}) • Search by Name, Company, Code or Barcode
+            Matching Items ({rowItemSearchResults.length})
+            {selectedCompanyFilter
+              ? ` • Company: ${selectedCompanyFilter}`
+              : ' • Search by Name, Company, Code or Barcode'}
           </span>
           <span className="font-mono text-sky-700">↑/↓ Navigate • Enter Select • Esc Close</span>
         </div>
         <div className="max-h-[340px] overflow-y-auto">
           {rowItemSearchResults.length === 0 ? (
             <div className="p-4 text-center text-base font-bold text-slate-600">
-              No Item Found
+              No Item Found{selectedCompanyFilter ? ` in ${selectedCompanyFilter}` : ''}
             </div>
           ) : (
             <table className="w-full text-left text-[11px] border-collapse">
@@ -4620,12 +4735,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                 </div>
 
-                {/* Header Row 2: Supplier Search, Live Previous Balance & Compact F3 Item Search */}
+                {/* Header Row 2: Supplier Search, Live Previous Balance, Company Filter & Compact F3 Item Search */}
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-1.5 pt-1 border-t border-slate-200 items-center">
                   {/* Searchable Supplier Input + Add New Supplier */}
                   <div
                     ref={purchaseViewMode === 'pos' ? supplierDropdownContainerRef : undefined}
-                    className="md:col-span-5 flex items-center gap-1 relative"
+                    className="md:col-span-4 flex items-center gap-1 relative"
                   >
                     <label className="font-bold text-slate-600 shrink-0">Supplier:</label>
                     <div className="relative flex-1">
@@ -4693,7 +4808,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
 
                   {/* Live Supplier Previous Balance Pill */}
-                  <div className="md:col-span-3 bg-slate-900 text-white rounded px-2 py-0.5 flex items-center justify-between gap-1">
+                  <div className="md:col-span-2 bg-slate-900 text-white rounded px-2 py-0.5 flex items-center justify-between gap-1">
                     <div className="flex items-center gap-1 truncate">
                       <span className="text-slate-400 shrink-0">Prev:</span>
                       <span
@@ -4721,6 +4836,47 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     )}
                   </div>
 
+                  {/* Accessible Company Master Filter */}
+                  <div className="md:col-span-2 flex items-center gap-1">
+                    <label
+                      htmlFor="pos_purchase_company_filter"
+                      className="font-bold text-slate-600 shrink-0"
+                    >
+                      Company:
+                    </label>
+                    <div className="relative flex-1 flex items-center gap-0.5 min-w-0">
+                      <select
+                        id="pos_purchase_company_filter"
+                        aria-label="Filter items by Company"
+                        value={selectedCompanyFilter}
+                        onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                        className={`w-full px-1 py-0 font-semibold rounded border outline-none ${
+                          selectedCompanyFilter
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
+                            : 'border-slate-300 bg-slate-50 text-slate-900'
+                        }`}
+                      >
+                        <option value="">All Companies</option>
+                        {companyOptions.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedCompanyFilter && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedCompanyFilter('')}
+                          title="Clear Company Filter"
+                          aria-label="Clear Company Filter"
+                          className="px-1 py-0 rounded border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-800 font-bold text-[10px] cursor-pointer shrink-0"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
                   {/* Compact F3 Quick Barcode / Item Add inside Header */}
                   <div
                     ref={purchaseViewMode === 'pos' ? itemDropdownContainerRef : undefined}
@@ -4734,7 +4890,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         type="text"
                         value={purchaseSearchQuery}
                         onFocus={() => {
-                          if (purchaseSearchQuery.trim().length > 0) {
+                          if (purchaseSearchQuery.trim().length > 0 || selectedCompanyFilter) {
                             setShowPurchaseSearchDropdown(true);
                           }
                           setItemHighlightIndex(0);
@@ -4748,10 +4904,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           const q = e.target.value;
                           setPurchaseSearchQuery(q);
                           setItemHighlightIndex(0);
-                          setShowPurchaseSearchDropdown(q.trim().length > 0);
+                          setShowPurchaseSearchDropdown(
+                            q.trim().length > 0 || Boolean(selectedCompanyFilter)
+                          );
                         }}
                         onKeyDown={handleItemSearchKeyDown}
-                        placeholder="Barcode / Quick Search..."
+                        placeholder={
+                          selectedCompanyFilter
+                            ? `Search in ${selectedCompanyFilter}...`
+                            : 'Barcode / Quick Search...'
+                        }
                         className="w-full pl-6 pr-6 py-0 rounded border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 outline-none"
                       />
                       {purchaseSearchQuery && (
@@ -4761,7 +4923,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             e.preventDefault();
                             setPurchaseSearchQuery('');
                             setItemHighlightIndex(0);
-                            setShowPurchaseSearchDropdown(false);
+                            setShowPurchaseSearchDropdown(Boolean(selectedCompanyFilter));
                             itemSearchInputRef.current?.focus();
                           }}
                           className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
@@ -4797,26 +4959,72 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   ref={posGridViewportRef}
                   className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white"
                 >
-                  <table className="ams-compact-10-grid w-full min-w-[1680px] text-left text-[11px] border-collapse leading-none">
-                    <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
+                  <table
+                    style={{ width: `${purPosTotalWidth}px` }}
+                    className="ams-compact-10-grid table-fixed text-left text-[11px] border-collapse leading-none"
+                  >
+                    <colgroup>
+                      <col style={{ width: `${purPosColWidths.selector}px` }} />
+                      <col style={{ width: `${purPosColWidths.item_code}px` }} />
+                      <col style={{ width: `${purPosColWidths.company}px` }} />
+                      <col style={{ width: `${purPosColWidths.item_name}px` }} />
+                      <col style={{ width: `${purPosColWidths.quantity}px` }} />
+                      <col style={{ width: `${purPosColWidths.discount}px` }} />
+                      <col style={{ width: `${purPosColWidths.bonus}px` }} />
+                      <col style={{ width: `${purPosColWidths.gross_amount}px` }} />
+                      <col style={{ width: `${purPosColWidths.net_amount}px` }} />
+                      <col style={{ width: `${purPosColWidths.packing}px` }} />
+                      <col style={{ width: `${purPosColWidths.batch_expiry}px` }} />
+                      <col style={{ width: `${purPosColWidths.purchase_rate}px` }} />
+                      <col style={{ width: `${purPosColWidths.mrp}px` }} />
+                      <col style={{ width: `${purPosColWidths.gst}px` }} />
+                      <col style={{ width: `${purPosColWidths.taxable}px` }} />
+                      <col style={{ width: `${purPosColWidths.line_total}px` }} />
+                      <col style={{ width: `${purPosColWidths.remarks}px` }} />
+                      <col style={{ width: `${purPosColWidths.actions}px` }} />
+                    </colgroup>
+                    <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm select-none">
                       <tr className="h-7">
-                        <th className="py-1 px-2 w-8 text-center border-r border-slate-300 h-7">#</th>
-                        <th className="py-1 px-2 w-28 border-r border-slate-300 h-7">Item Code</th>
-                        <th className="py-1 px-2 min-w-[240px] border-r border-slate-300 h-7">Item Name</th>
-                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">Qty</th>
-                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">Discount</th>
-                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">Bonus</th>
-                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Gross Amount</th>
-                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Net Amount</th>
-                        <th className="py-1 px-2 w-20 text-center border-r border-slate-300 h-7">Packing</th>
-                        <th className="py-1 px-2 w-56 border-r border-slate-300 h-7">Batch/Expiry</th>
-                        <th className="py-1 px-2 w-28 text-right border-r border-slate-300 h-7">Purchase Rate</th>
-                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">MRP</th>
-                        <th className="py-1 px-2 w-20 text-right border-r border-slate-300 h-7">GST</th>
-                        <th className="py-1 px-2 w-24 text-right border-r border-slate-300 h-7">Taxable</th>
-                        <th className="py-1 px-2 w-28 text-right border-r border-slate-300 h-7">Line Total</th>
-                        <th className="py-1 px-2 w-32 text-left border-r border-slate-300 h-7">Remarks</th>
-                        <th className="py-1 px-2 w-10 text-center h-7"></th>
+                        {(
+                          [
+                            { key: 'selector', label: '#', cls: 'py-1 px-1.5 text-center border-r border-slate-300' },
+                            { key: 'item_code', label: 'Item Code', cls: 'py-1 px-2 border-r border-slate-300' },
+                            { key: 'company', label: 'Company', cls: 'py-1 px-2 border-r border-slate-300' },
+                            { key: 'item_name', label: 'Item Name', cls: 'py-1 px-2 border-r border-slate-300' },
+                            { key: 'quantity', label: 'Qty', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'discount', label: 'Discount', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'bonus', label: 'Bonus', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'gross_amount', label: 'Gross Amount', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'net_amount', label: 'Net Amount', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'packing', label: 'Packing', cls: 'py-1 px-2 text-center border-r border-slate-300' },
+                            { key: 'batch_expiry', label: 'Batch/Expiry', cls: 'py-1 px-2 border-r border-slate-300' },
+                            { key: 'purchase_rate', label: 'Purchase Rate', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'mrp', label: 'MRP', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'gst', label: 'GST', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'taxable', label: 'Taxable', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'line_total', label: 'Line Total', cls: 'py-1 px-2 text-right border-r border-slate-300' },
+                            { key: 'remarks', label: 'Remarks', cls: 'py-1 px-2 text-left border-r border-slate-300' },
+                            { key: 'actions', label: '', cls: 'py-1 px-1 text-center' },
+                          ] as const
+                        ).map((col) => (
+                          <th
+                            key={col.key}
+                            style={{ width: `${purPosColWidths[col.key]}px` }}
+                            className={`${col.cls} h-7 relative whitespace-nowrap overflow-hidden text-ellipsis`}
+                          >
+                            <span className="truncate block">{col.label}</span>
+                            <div
+                              onMouseDown={(e) => handlePurPosResizeStart(col.key, e)}
+                              onDoubleClick={(e) => handleResetPurPosColWidth(col.key, e)}
+                              title="Drag border to resize column (double-click to reset)"
+                              className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                                purPosResizingCol === col.key
+                                  ? 'bg-emerald-600'
+                                  : 'hover:bg-emerald-500/80'
+                              }`}
+                            />
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
@@ -4827,7 +5035,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               <td className="py-0 px-1 text-center font-mono text-slate-300 text-[10px] h-[16px] align-middle">
                                 {rIdx + 1}
                               </td>
-                              <td colSpan={16} />
+                              <td colSpan={17} />
                             </tr>
                           );
                         }
@@ -4961,7 +5169,38 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 className="w-full px-1 py-0 font-mono font-bold text-[11px] text-emerald-800 bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
                               />
                             </td>
-                            <td className="p-0 h-[16px] align-middle relative min-w-[200px]">
+                            {/* Company (Displays item company on populated rows; accessible Company Master filter on blank rows) */}
+                            <td
+                              className="p-0 h-[16px] align-middle overflow-hidden text-slate-700"
+                              title={hasItem ? line.company_name : selectedCompanyFilter || 'All Companies'}
+                            >
+                              {hasItem ? (
+                                <div className="px-1 truncate text-[10.5px] font-medium">
+                                  {line.company_name || ''}
+                                </div>
+                              ) : (
+                                <select
+                                  aria-label={`Purchase Row ${rIdx + 1} Company Filter`}
+                                  value={selectedCompanyFilter}
+                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                  onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                                  className={`w-full h-[15px] px-1 py-0 text-[10.5px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 outline-none truncate ${
+                                    selectedCompanyFilter
+                                      ? 'text-emerald-900 bg-emerald-50/60'
+                                      : 'text-slate-600'
+                                  }`}
+                                >
+                                  <option value="">All Companies</option>
+                                  {companyOptions.map((c) => (
+                                    <option key={c} value={c}>
+                                      {c}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </td>
+
+                            <td className="p-0 h-[16px] align-middle relative">
                               <div className="flex items-center gap-1 h-[15px] px-0.5">
                                 {line.item_id > 0 && line.thumbnail_url && (
                                   <ProductThumb
@@ -4978,13 +5217,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     activeRowItemSearchIdx === rIdx &&
                                     activeRowItemSearchField === 'item_name'
                                       ? rowItemSearchQuery
-                                      : line.item_name
-                                      ? `${line.item_name}${line.company_name ? ` (${line.company_name})` : ''}`
-                                      : ''
+                                      : formatItemNameWithRemarks(line.item_name, line.remarks)
                                   }
                                   onFocus={() => {
                                     setSelectedPurchaseLineIndex(rIdx);
-                                    if (
+                                    if (!line.item_id && selectedCompanyFilter) {
+                                      setActiveRowItemSearchIdx(rIdx);
+                                      setActiveRowItemSearchField('item_name');
+                                      setRowItemSearchQuery('');
+                                      setRowItemHighlightIndex(0);
+                                    } else if (
                                       activeRowItemSearchIdx !== rIdx ||
                                       activeRowItemSearchField !== 'item_name'
                                     ) {
@@ -5015,7 +5257,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                       returnFocusId: `pos_row_${rIdx}_item_name`,
                                     });
                                   }}
-                                  title={line.item_id ? `${line.item_name}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
+                                  title={
+                                    line.item_id
+                                      ? `${formatItemNameWithRemarks(line.item_name, line.remarks)}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                      : selectedCompanyFilter
+                                      ? `Type Item Name or Code in ${selectedCompanyFilter}`
+                                      : 'Type Item Name or Code'
+                                  }
                                   onBlur={() => {
                                     setTimeout(() => {
                                       setActiveRowItemSearchIdx((prev) =>
@@ -5030,8 +5278,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     setSelectedPurchaseLineIndex(rIdx);
                                     setRowItemSearchQuery(v);
                                     setRowItemHighlightIndex(0);
-                                    setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
-                                    setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
+                                    const keepOpen = v.trim().length > 0 || Boolean(selectedCompanyFilter);
+                                    setActiveRowItemSearchField(keepOpen ? 'item_name' : null);
+                                    setActiveRowItemSearchIdx(keepOpen ? rIdx : null);
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
@@ -5214,7 +5463,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   onKeyDown={(e) =>
                                     handlePurchaseCellKeyDown(e, rIdx, 'batch_number', 'pos_row')
                                   }
-                                  className="w-24 px-1 py-0 font-mono text-[10px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                  className="flex-1 min-w-0 px-1 py-0 font-mono text-[10px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                                 />
                                 <input
                                   id={`pos_row_${rIdx}_expiry_date`}
@@ -5227,7 +5476,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   onKeyDown={(e) =>
                                     handlePurchaseCellKeyDown(e, rIdx, 'expiry_date', 'pos_row')
                                   }
-                                  className="w-28 px-1 py-0 font-mono text-[10px] text-slate-700 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                  className="flex-1 min-w-0 px-1 py-0 font-mono text-[10px] text-slate-700 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
                                 />
                               </div>
                             </td>
@@ -5881,7 +6130,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                 </div>
 
-                {/* Row 2: FBR Filer, Remarks, Quick Item Search (F3) & Row Actions */}
+                {/* Row 2: FBR Filer, A/C, Company Filter, Note, Quick Item Search (F3) & Row Actions */}
                 <div className="grid grid-cols-12 gap-1.5 items-center pt-1 border-t border-slate-200">
                   <div className="col-span-2 flex items-center gap-1">
                     <label className="font-bold text-slate-600 whitespace-nowrap">FBR:</label>
@@ -5913,6 +6162,45 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </select>
                   </div>
                   <div className="col-span-2 flex items-center gap-1">
+                    <label
+                      htmlFor="access_purchase_company_filter"
+                      className="font-bold text-slate-600 whitespace-nowrap"
+                    >
+                      Company:
+                    </label>
+                    <div className="flex-1 flex items-center gap-0.5 min-w-0">
+                      <select
+                        id="access_purchase_company_filter"
+                        aria-label="Filter items by Company"
+                        value={selectedCompanyFilter}
+                        onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                        className={`w-full px-1 py-0 font-semibold rounded border outline-none ${
+                          selectedCompanyFilter
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
+                            : 'border-slate-300 bg-white text-slate-900'
+                        }`}
+                      >
+                        <option value="">All Companies</option>
+                        {companyOptions.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedCompanyFilter && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedCompanyFilter('')}
+                          title="Clear Company Filter"
+                          aria-label="Clear Company Filter"
+                          className="px-1 py-0 rounded border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-800 font-bold text-[10px] cursor-pointer shrink-0"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="col-span-2 flex items-center gap-1">
                     <label className="font-bold text-slate-600 whitespace-nowrap">Note:</label>
                     <input
                       type="text"
@@ -5924,7 +6212,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                   <div
                     ref={purchaseViewMode === 'access' ? itemDropdownContainerRef : undefined}
-                    className="col-span-3 relative"
+                    className="col-span-2 relative"
                   >
                     <div className="flex items-center bg-white border border-slate-300 rounded px-1.5 focus-within:border-emerald-600">
                       <Search className="w-3 h-3 text-emerald-600 mr-1 shrink-0" />
@@ -5934,7 +6222,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         type="text"
                         value={purchaseSearchQuery}
                         onFocus={() => {
-                          if (purchaseSearchQuery.trim().length > 0) {
+                          if (purchaseSearchQuery.trim().length > 0 || selectedCompanyFilter) {
                             setShowPurchaseSearchDropdown(true);
                           }
                           setItemHighlightIndex(0);
@@ -5948,10 +6236,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           const q = e.target.value;
                           setPurchaseSearchQuery(q);
                           setItemHighlightIndex(0);
-                          setShowPurchaseSearchDropdown(q.trim().length > 0);
+                          setShowPurchaseSearchDropdown(
+                            q.trim().length > 0 || Boolean(selectedCompanyFilter)
+                          );
                         }}
                         onKeyDown={handleItemSearchKeyDown}
-                        placeholder="Barcode / Item Search (F3)..."
+                        placeholder={
+                          selectedCompanyFilter
+                            ? `Search in ${selectedCompanyFilter}...`
+                            : 'Barcode / Item Search (F3)...'
+                        }
                         className="w-full bg-transparent text-slate-900 placeholder-slate-400 focus:outline-none"
                       />
                       {purchaseSearchQuery && (
@@ -5961,7 +6255,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             e.preventDefault();
                             setPurchaseSearchQuery('');
                             setItemHighlightIndex(0);
-                            setShowPurchaseSearchDropdown(false);
+                            setShowPurchaseSearchDropdown(Boolean(selectedCompanyFilter));
                             itemSearchInputRef.current?.focus();
                           }}
                           className="text-slate-400 hover:text-slate-700 cursor-pointer"
@@ -5972,7 +6266,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </div>
                     {renderTopItemSearchDropdown()}
                   </div>
-                  <div className="col-span-3 flex flex-wrap items-center justify-end gap-1">
+                  <div className="col-span-2 flex flex-wrap items-center justify-end gap-1">
                     <button
                       type="button"
                       onClick={() =>
@@ -6011,64 +6305,78 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               </div>
 
-              {/* SECTION B (CENTER): MS ACCESS DATASHEET ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS) */}
+              {/* SECTION B (CENTER): MS ACCESS DATASHEET ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS, ADJUSTABLE COLUMNS) */}
               <div className="ams-pos-item-grid-card flex flex-col flex-1 min-h-[356px] bg-white overflow-hidden select-none border-b border-slate-400 relative z-10">
                 <div
                   ref={accessGridViewportRef}
                   className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white"
                 >
-                  <table className="ams-compact-10-grid w-full min-w-[1680px] border-collapse text-[11px] font-sans leading-none">
+                  <table
+                    style={{ width: `${purAccessTotalWidth}px` }}
+                    className="ams-compact-10-grid table-fixed border-collapse text-[11px] font-sans leading-none"
+                  >
+                    <colgroup>
+                      <col style={{ width: `${purAccessColWidths.selector}px` }} />
+                      <col style={{ width: `${purAccessColWidths.item_code}px` }} />
+                      <col style={{ width: `${purAccessColWidths.company}px` }} />
+                      <col style={{ width: `${purAccessColWidths.item_name}px` }} />
+                      <col style={{ width: `${purAccessColWidths.quantity}px` }} />
+                      <col style={{ width: `${purAccessColWidths.discount}px` }} />
+                      <col style={{ width: `${purAccessColWidths.purchase_rate}px` }} />
+                      <col style={{ width: `${purAccessColWidths.bonus}px` }} />
+                      <col style={{ width: `${purAccessColWidths.net_amount}px` }} />
+                      <col style={{ width: `${purAccessColWidths.gross_amount}px` }} />
+                      <col style={{ width: `${purAccessColWidths.packing}px` }} />
+                      <col style={{ width: `${purAccessColWidths.batch_expiry}px` }} />
+                      <col style={{ width: `${purAccessColWidths.mrp}px` }} />
+                      <col style={{ width: `${purAccessColWidths.gst}px` }} />
+                      <col style={{ width: `${purAccessColWidths.taxable}px` }} />
+                      <col style={{ width: `${purAccessColWidths.line_total}px` }} />
+                      <col style={{ width: `${purAccessColWidths.remarks}px` }} />
+                      <col style={{ width: `${purAccessColWidths.actions}px` }} />
+                    </colgroup>
                     <thead className="sticky top-0 z-20 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                       <tr className="h-6">
-                        <th className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 w-7 text-center font-mono h-6">
-                          #
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-28 text-left h-6">
-                          Item Code
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 min-w-[240px] text-left h-6">
-                          Item Name
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-right bg-emerald-100/60 text-emerald-950 h-6">
-                          Qty
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-right h-6">
-                          Discount
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
-                          Purchase Rate
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-right bg-emerald-100/70 text-emerald-950 h-6">
-                          Bonus
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
-                          Net Amount
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
-                          Gross Amount
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-center h-6">
-                          Packing
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-56 text-left h-6">
-                          Batch/Expiry
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
-                          MRP
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-20 text-right h-6">
-                          GST
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-24 text-right h-6">
-                          Taxable
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-28 text-right bg-slate-300/60 font-black h-6">
-                          Line Total
-                        </th>
-                        <th className="border-r border-slate-300 px-1 py-0 w-32 text-left h-6">
-                          Remarks
-                        </th>
-                        <th className="px-1 py-0 w-8 text-center h-6">Del</th>
+                        {(
+                          [
+                            { key: 'selector', label: '#', cls: 'bg-slate-300/80 border-r border-slate-400 px-1 py-0 text-center font-mono' },
+                            { key: 'item_code', label: 'Item Code', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+                            { key: 'company', label: 'Company', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+                            { key: 'item_name', label: 'Item Name', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+                            { key: 'quantity', label: 'Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950' },
+                            { key: 'discount', label: 'Discount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'purchase_rate', label: 'Purchase Rate', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'bonus', label: 'Bonus', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950' },
+                            { key: 'net_amount', label: 'Net Amount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'gross_amount', label: 'Gross Amount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'packing', label: 'Packing', cls: 'border-r border-slate-300 px-1 py-0 text-center' },
+                            { key: 'batch_expiry', label: 'Batch/Expiry', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+                            { key: 'mrp', label: 'MRP', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'gst', label: 'GST', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'taxable', label: 'Taxable', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+                            { key: 'line_total', label: 'Line Total', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-slate-300/60 font-black' },
+                            { key: 'remarks', label: 'Remarks', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+                            { key: 'actions', label: 'Del', cls: 'px-1 py-0 text-center' },
+                          ] as const
+                        ).map((col) => (
+                          <th
+                            key={col.key}
+                            style={{ width: `${purAccessColWidths[col.key]}px` }}
+                            className={`${col.cls} h-6 relative whitespace-nowrap overflow-hidden text-ellipsis`}
+                          >
+                            <span className="truncate block">{col.label}</span>
+                            <div
+                              onMouseDown={(e) => handlePurAccessResizeStart(col.key, e)}
+                              onDoubleClick={(e) => handleResetPurAccessColWidth(col.key, e)}
+                              title="Drag border to resize column (double-click to reset)"
+                              className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                                purAccessResizingCol === col.key
+                                  ? 'bg-emerald-600'
+                                  : 'hover:bg-emerald-500/80'
+                              }`}
+                            />
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -6079,7 +6387,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                                 {idx + 1}
                               </td>
-                              <td colSpan={16} />
+                              <td colSpan={17} />
                             </tr>
                           );
                         }
@@ -6220,6 +6528,37 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
 
+                            {/* Company (Displays item company on populated rows; accessible Company Master filter on blank rows) */}
+                            <td
+                              className="border-r border-slate-300 p-0 h-[16px] align-middle overflow-hidden text-slate-700"
+                              title={hasItem ? line.company_name : selectedCompanyFilter || 'All Companies'}
+                            >
+                              {hasItem ? (
+                                <div className="px-1 truncate text-[10.5px] font-medium">
+                                  {line.company_name || ''}
+                                </div>
+                              ) : (
+                                <select
+                                  aria-label={`Classic Purchase Row ${idx + 1} Company Filter`}
+                                  value={selectedCompanyFilter}
+                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                  onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                                  className={`w-full h-[15px] px-1 py-0 text-[10.5px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-blue-600 outline-none truncate ${
+                                    selectedCompanyFilter
+                                      ? 'text-emerald-900 bg-emerald-50/60'
+                                      : 'text-slate-600'
+                                  }`}
+                                >
+                                  <option value="">All Companies</option>
+                                  {companyOptions.map((c) => (
+                                    <option key={c} value={c}>
+                                      {c}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </td>
+
                             {/* 2. Item Name (Direct typing + inline search; Enter on blank opens Item List) */}
                             <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                               <div className="flex items-center gap-1 h-[15px] px-0.5">
@@ -6238,11 +6577,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     activeRowItemSearchIdx === idx &&
                                     activeRowItemSearchField === 'item_name'
                                       ? rowItemSearchQuery
-                                      : line.item_name
+                                      : formatItemNameWithRemarks(line.item_name, line.remarks)
                                   }
                                   onFocus={() => {
                                     setSelectedPurchaseLineIndex(idx);
-                                    if (
+                                    if (!line.item_id && selectedCompanyFilter) {
+                                      setActiveRowItemSearchIdx(idx);
+                                      setActiveRowItemSearchField('item_name');
+                                      setRowItemSearchQuery('');
+                                      setRowItemHighlightIndex(0);
+                                    } else if (
                                       activeRowItemSearchIdx !== idx ||
                                       activeRowItemSearchField !== 'item_name'
                                     ) {
@@ -6273,7 +6617,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                       returnFocusId: `pur_cell_${idx}_item_name`,
                                     });
                                   }}
-                                  title={line.item_id ? `${line.item_name}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
+                                  title={
+                                    line.item_id
+                                      ? `${formatItemNameWithRemarks(line.item_name, line.remarks)}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                      : selectedCompanyFilter
+                                      ? `Type Item Name or Code in ${selectedCompanyFilter}`
+                                      : 'Type Item Name or Code'
+                                  }
                                   onBlur={() => {
                                     setTimeout(() => {
                                       setActiveRowItemSearchIdx((prev) =>
@@ -6288,8 +6638,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     setSelectedPurchaseLineIndex(idx);
                                     setRowItemSearchQuery(v);
                                     setRowItemHighlightIndex(0);
-                                    setActiveRowItemSearchField(v.trim().length > 0 ? 'item_name' : null);
-                                    setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
+                                    const keepOpen = v.trim().length > 0 || Boolean(selectedCompanyFilter);
+                                    setActiveRowItemSearchField(keepOpen ? 'item_name' : null);
+                                    setActiveRowItemSearchIdx(keepOpen ? idx : null);
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
@@ -6499,7 +6850,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   onKeyDown={(e) =>
                                     handlePurchaseCellKeyDown(e, idx, 'batch_number')
                                   }
-                                  className="w-24 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
+                                  className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
                                 />
                                 <input
                                   id={`pur_cell_${idx}_expiry_date`}
@@ -6510,7 +6861,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     handleLineChange(idx, 'expiry_date', e.target.value)
                                   }
                                   onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'expiry_date')}
-                                  className="w-28 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
+                                  className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
                                 />
                               </div>
                             </td>
@@ -7833,8 +8184,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       {/* Shared Item Selection List Modal (Reused from Sales Module) */}
       <ItemListSelectionModal
         isOpen={showPurchaseItemListModal}
-        items={items}
+        items={companyFilteredPurchaseItems}
         indexedItems={indexedPurchaseItems}
+        activeCompanyFilter={selectedCompanyFilter}
+        onClearCompanyFilter={() => setSelectedCompanyFilter('')}
         targetRowIndex={purchaseItemListTargetRowIdx}
         targetRowItem={
           purchaseItemListTargetRowIdx !== null

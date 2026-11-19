@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { formatItemNameWithRemarks } from './itemDisplay';
 
 function toNum(val: unknown): number {
   const n = Number(val);
@@ -269,7 +270,7 @@ export function exportSalesInvoicesToExcel(
         'Invoice Date': invDate,
         'Account / Party Name': partyName,
         'Item Code': String(item.item_code || ''),
-        'Item Name': String(item.item_name || ''),
+        'Item Name': formatItemNameWithRemarks(item.item_name, item.remarks),
         Company: String(item.company_name || item.company || ''),
         Packing: String(item.packing || ''),
         'Batch Number': String(item.batch_number || ''),
@@ -572,7 +573,7 @@ export function exportPurchaseInvoicesToExcel(
         'Invoice Date': invDate,
         'Account / Party Name': partyName,
         'Item Code': String(item.item_code || ''),
-        'Item Name': String(item.item_name || ''),
+        'Item Name': formatItemNameWithRemarks(item.item_name, item.remarks),
         Qty: qty,
         Discount: discAmt,
         Bonus: bonus,
@@ -736,7 +737,7 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
     label: 'Item Name',
     category: 'Item Information',
     format: 'text',
-    getValue: (_inv, item) => String(item.item_name || ''),
+    getValue: (_inv, item) => formatItemNameWithRemarks(item.item_name, item.remarks),
   },
   {
     key: 'company_name',
@@ -1031,7 +1032,7 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
     label: 'Item Name',
     category: 'Item Information',
     format: 'text',
-    getValue: (_pur, item) => String(item.item_name || ''),
+    getValue: (_pur, item) => formatItemNameWithRemarks(item.item_name, item.remarks),
   },
   {
     key: 'company_name',

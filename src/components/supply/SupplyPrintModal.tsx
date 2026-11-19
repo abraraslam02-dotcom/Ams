@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import { Printer, X, Columns, FileText, Filter } from 'lucide-react';
 import type { OrderFormPrintLayout } from '../../types/supply';
 import { executePrintElement } from '../../utils/printEngine';
+import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 export type SupplyDocumentPrintType =
@@ -404,7 +405,7 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
                                 </td>
                               )}
                               <td className="border border-slate-300 px-1.5 py-1 font-semibold">
-                                {it.item_name}
+                                {formatItemNameWithRemarks(it.item_name, it.remarks)}
                               </td>
                               <td className="border border-slate-300 px-1.5 py-1 text-right font-mono">
                                 {it.trade_price.toFixed(2)}
@@ -435,7 +436,9 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
                           >
                             <div className="truncate flex-1">
                               <span className="font-mono text-slate-500 mr-1">{it.sNo}.</span>
-                              <span className="font-bold text-slate-900">{it.item_name}</span>
+                              <span className="font-bold text-slate-900">
+                                {formatItemNameWithRemarks(it.item_name, it.remarks)}
+                              </span>
                             </div>
                             <div className="flex items-center gap-1.5 shrink-0">
                               <span className="font-mono text-slate-700">

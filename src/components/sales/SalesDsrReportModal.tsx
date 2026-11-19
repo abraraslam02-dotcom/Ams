@@ -3,6 +3,7 @@ import { Printer, Receipt, FileText, X, ClipboardList, AlertCircle } from 'lucid
 import { DatasheetRow, FastSearchItem } from '../../types/sales';
 import { api } from '../../services/api';
 import { executePrintElement, buildInvoicePdfTitle } from '../../utils/printEngine';
+import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 export interface SalesDsrReportModalProps {
@@ -27,6 +28,7 @@ export interface DsrItemEntry {
   qty: number;
   bonusQty: number;
   looseQty: number;
+  remarks?: string;
 }
 
 export interface DsrCompanyGroup {
@@ -156,6 +158,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         qty: number;
         bonusQty: number;
         looseQty: number;
+        remarks: string;
       }>
     >();
 
@@ -197,6 +200,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         qty,
         bonusQty,
         looseQty,
+        remarks: String(r.remarks || '').trim(),
       });
     }
 
@@ -261,17 +265,25 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
     displayInvoiceDate
   );
 
+  const a4FontScaleClass =
+    printOpts.fontSizeScale === 'small'
+      ? 'text-[12.5px]'
+      : printOpts.fontSizeScale === 'large'
+      ? 'text-[16px]'
+      : 'text-[14px]';
+
   const handlePrintA4 = () => {
     setActiveLayout('a4');
     setTimeout(() => {
       executePrintElement(a4PrintRef.current, {
         title: pdfDocumentTitle,
         paperSize: 'a4',
-        profileId: 'a4-report',
+        profileId: 'a4-sales-invoice',
         orientation: 'portrait',
-        margin: 'none',
-        fontSizeScale: 'normal',
+        margin: printOpts.margin,
+        fontSizeScale: printOpts.fontSizeScale,
         copies: 1,
+        selectedPrinter: printOpts.selectedPrinter,
         showPageNumbers: true,
       });
     }, 40);
@@ -285,10 +297,11 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         paperSize: '80mm',
         profileId: 'thermal-80mm',
         orientation: 'portrait',
-        margin: 'none',
-        fontSizeScale: 'normal',
+        margin: printOpts.margin,
+        fontSizeScale: printOpts.fontSizeScale,
         copies: 1,
         selectedPrinter: printOpts.selectedPrinter,
+        showPageNumbers: false,
       });
     }, 40);
   };
@@ -440,7 +453,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
               >
                 <div
                   ref={a4PrintRef}
-                  className="bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] w-[210mm] max-w-[210mm] min-h-[297mm] p-2 text-slate-900 text-[11px] leading-tight relative print:border-0 print:shadow-none print:p-0 print:w-full print:max-w-none print:min-h-0"
+                  className={`bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] w-[210mm] max-w-[210mm] min-h-[297mm] p-4 text-slate-900 ${a4FontScaleClass} leading-snug relative print:border-0 print:shadow-none print:p-1.5 print:w-full print:max-w-none print:min-h-0`}
                 >
                   <style>{`
                     @media print {
@@ -468,86 +481,64 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     }
                   `}</style>
 
-                  {/* Compact Top Report Header */}
-                  <div className="border-b border-slate-900 pb-0.5 mb-1 flex items-baseline justify-between gap-2">
-                    <h1 className="text-[14px] font-black tracking-tight text-slate-950 uppercase">
+                  {/* Professional Top Report Header (exact A4 Sales Bill typography, tight spacing) */}
+                  <div className="border-b-2 border-slate-900 pb-2 mb-2.5 flex items-center justify-between gap-4">
+                    <h1 className="text-3xl font-black tracking-tight text-slate-950 uppercase leading-none">
                       {displayStoreName}
                     </h1>
-                    <h2 className="text-[11px] font-bold tracking-wide text-slate-800 uppercase">
+                    <div className="inline-block px-3 py-1 rounded bg-slate-900 text-white text-sm font-black tracking-wider uppercase shrink-0">
                       DSR – Daily Stock Requisition
-                    </h2>
+                    </div>
                   </div>
 
-                  {/* Compact Single-Strip Invoice Metadata Box */}
-                  <div className="mb-1 px-1.5 py-0.5 rounded-xs bg-slate-50 border border-slate-400 text-[10px] leading-tight flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
-                    <div>
-                      <span className="font-semibold text-slate-600">Inv No: </span>
-                      <span className="font-mono font-black text-slate-950">
-                        {displayInvoiceNumber}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="font-semibold text-slate-600">Date: </span>
-                      <span className="font-mono font-bold text-slate-950">
-                        {displayInvoiceDate}
-                      </span>
-                    </div>
-                    <div className="min-w-[120px]">
-                      <span className="font-semibold text-slate-600">Party: </span>
-                      <span className="font-bold text-slate-950 break-words">
+                  {/* Professional Party & Invoice Info Bar (exact A4 Sales Bill typography) */}
+                  <div className="mb-2.5 px-3 py-2 rounded-lg bg-slate-50 border border-slate-300 flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                        Customer / Party
+                      </div>
+                      <div className="text-lg font-black text-slate-950 leading-snug break-words">
                         {displayCustomerName}
-                      </span>
+                      </div>
+                      {(displayCustomerPhone || displayCustomerAddress) && (
+                        <div className="text-[13px] text-slate-700 mt-0.5 break-words">
+                          {displayCustomerPhone ? `Contact: ${displayCustomerPhone}` : ''}
+                          {displayCustomerPhone && displayCustomerAddress ? ' · ' : ''}
+                          {displayCustomerAddress ? `Address: ${displayCustomerAddress}` : ''}
+                        </div>
+                      )}
                     </div>
-                    {displayCustomerPhone && (
-                      <div>
-                        <span className="font-semibold text-slate-600">Ph: </span>
-                        <span className="font-mono font-bold text-slate-950">
-                          {displayCustomerPhone}
+                    <div className="text-right shrink-0">
+                      <div className="text-lg font-black font-mono text-slate-950 leading-snug">
+                        Invoice #: {displayInvoiceNumber}
+                      </div>
+                      <div className="text-sm text-slate-700 mt-0.5">
+                        Date:{' '}
+                        <span className="font-bold text-slate-950">
+                          {formatDateDMY(displayInvoiceDate)}
                         </span>
                       </div>
-                    )}
-                    {displayCustomerAddress && (
-                      <div className="truncate max-w-[260px]">
-                        <span className="font-semibold text-slate-600">Addr: </span>
-                        <span className="font-medium text-slate-900">
-                          {displayCustomerAddress}
-                        </span>
-                      </div>
-                    )}
+                    </div>
                   </div>
 
-                  {/* Company-wise Grouped Table with Compact Repeating Multi-Page Header */}
-                  <table className="dsr-a4-table w-full border-collapse border border-slate-400 mb-1">
+                  {/* Company-wise Grouped Items Table (exact A4 Sales Bill typography, compact rows) */}
+                  <table className="dsr-a4-table w-full border-collapse border border-slate-300 mb-2.5 tabular-nums">
                     <thead>
-                      {/* Repeating Page Header Row for Multi-Page A4 Printouts */}
-                      <tr className="bg-slate-100 border-b border-slate-400 text-[9.5px] text-slate-700 leading-tight">
-                        <th colSpan={5} className="py-0 px-1 text-left font-bold">
-                          <div className="flex items-center justify-between">
-                            <span>
-                              {displayStoreName} — DSR
-                            </span>
-                            <span className="font-mono">
-                              Inv: {displayInvoiceNumber} · Date: {displayInvoiceDate} · Party:{' '}
-                              {displayCustomerName}
-                            </span>
-                          </div>
-                        </th>
-                      </tr>
-                      {/* Exact Required Column Order: S.No | Item Name | Qty | Bonus Qty | Loose Qty */}
-                      <tr className="bg-slate-900 text-white text-[10px] uppercase tracking-wider leading-tight">
-                        <th className="py-0.5 px-1 text-center border border-slate-700 w-9">
+                      {/* Exact Required Column Order: S.No | Item Name | Qty | Bonus | Loose */}
+                      <tr className="bg-slate-900 text-white text-xs font-bold uppercase tracking-wide">
+                        <th className="py-1.5 px-2 text-center border border-slate-700 w-12">
                           S.No
                         </th>
-                        <th className="py-0.5 px-1.5 text-left border border-slate-700">
+                        <th className="py-1.5 px-2 text-left border border-slate-700">
                           Item Name
                         </th>
-                        <th className="py-0.5 px-1.5 text-right border border-slate-700 w-14">
+                        <th className="py-1.5 px-2 text-right border border-slate-700 w-20">
                           Qty
                         </th>
-                        <th className="py-0.5 px-1.5 text-right border border-slate-700 w-14">
+                        <th className="py-1.5 px-2 text-right border border-slate-700 w-20">
                           Bonus
                         </th>
-                        <th className="py-0.5 px-1.5 text-right border border-slate-700 w-14">
+                        <th className="py-1.5 px-2 text-right border border-slate-700 w-20">
                           Loose
                         </th>
                       </tr>
@@ -555,11 +546,11 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     <tbody>
                       {dsrData.groups.map((group) => (
                         <React.Fragment key={group.companyName}>
-                          {/* Compact Company Group Heading Row */}
-                          <tr className="dsr-a4-company-row bg-slate-200/80 border-t border-b border-slate-400">
+                          {/* Company Group Heading Row (matched to Item Name 13.5px size) */}
+                          <tr className="dsr-a4-company-row bg-slate-200/90">
                             <td
                               colSpan={5}
-                              className="py-0 px-1 font-bold text-slate-900 text-[9.5px] uppercase tracking-wide leading-tight"
+                              className="py-1 px-2 border border-slate-300 font-black text-slate-950 text-[13.5px] uppercase tracking-wide leading-snug"
                             >
                               {group.companyName}
                             </td>
@@ -568,21 +559,21 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                           {group.items.map((item) => (
                             <tr
                               key={item.rowId}
-                              className="dsr-a4-item-row border-b border-slate-300 text-[10px] leading-tight hover:bg-slate-50/70"
+                              className="dsr-a4-item-row text-[13px] leading-snug hover:bg-slate-50/70"
                             >
-                              <td className="py-0 px-1 border-r border-slate-300 text-center font-mono tabular-nums text-slate-700 text-[9.5px]">
+                              <td className="py-1 px-2 border border-slate-300 text-center font-mono tabular-nums text-slate-600 font-semibold text-[13px]">
                                 {item.sNo}
                               </td>
-                              <td className="py-0 px-1.5 border-r border-slate-300 font-medium text-[10px] leading-tight text-slate-950 break-words">
-                                {item.itemName}
+                              <td className="py-1 px-2 border border-slate-300 font-bold text-[13.5px] leading-snug text-slate-950 break-words">
+                                {formatItemNameWithRemarks(item.itemName, item.remarks)}
                               </td>
-                              <td className="py-0 px-1.5 border-r border-slate-300 text-right font-mono tabular-nums font-bold text-[10px] text-slate-950">
+                              <td className="py-1 px-2 border border-slate-300 text-right font-mono tabular-nums font-bold text-[13.5px] text-slate-950">
                                 {formatQtyValue(item.qty)}
                               </td>
-                              <td className="py-0 px-1.5 border-r border-slate-300 text-right font-mono tabular-nums font-bold text-[10px] text-slate-950">
+                              <td className="py-1 px-2 border border-slate-300 text-right font-mono tabular-nums font-bold text-[13px] text-slate-950">
                                 {formatQtyValue(item.bonusQty)}
                               </td>
-                              <td className="py-0 px-1.5 text-right font-mono tabular-nums font-bold text-[10px] text-slate-950">
+                              <td className="py-1 px-2 border border-slate-300 text-right font-mono tabular-nums font-bold text-[13px] text-slate-950">
                                 {formatQtyValue(item.looseQty)}
                               </td>
                             </tr>
@@ -592,33 +583,33 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     </tbody>
                   </table>
 
-                  {/* Compact Final Totals Strip */}
-                  <div className="dsr-a4-totals-block border border-slate-800 rounded-xs px-1.5 py-0.5 bg-slate-50 flex flex-wrap items-center justify-between gap-2 text-[10px] leading-tight">
-                    <span className="font-bold uppercase tracking-wider text-slate-700 text-[9.5px]">
-                      Totals:
+                  {/* Clean Final Totals Strip (exact A4 Sales Bill summary typography) */}
+                  <div className="dsr-a4-totals-block border-2 border-slate-900 rounded-lg px-3.5 py-2 bg-slate-50 flex flex-wrap items-center justify-between gap-4 text-sm tabular-nums">
+                    <span className="font-black uppercase tracking-wider text-slate-900 text-sm">
+                      Totals
                     </span>
-                    <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-6">
                       <div>
-                        <span className="text-slate-600 font-semibold">Items: </span>
-                        <span className="font-mono tabular-nums font-black text-slate-950">
+                        <span className="text-slate-700 font-semibold">Items: </span>
+                        <span className="font-mono tabular-nums font-black text-[15px] text-slate-950">
                           {dsrData.totalItems}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-600 font-semibold">Total Qty: </span>
-                        <span className="font-mono tabular-nums font-black text-slate-950">
+                        <span className="text-slate-700 font-semibold">Total Qty: </span>
+                        <span className="font-mono tabular-nums font-black text-[15px] text-slate-950">
                           {formatQtyValue(dsrData.totalQty)}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-600 font-semibold">Bonus: </span>
-                        <span className="font-mono tabular-nums font-black text-slate-950">
+                        <span className="text-slate-700 font-semibold">Bonus: </span>
+                        <span className="font-mono tabular-nums font-black text-[15px] text-slate-950">
                           {formatQtyValue(dsrData.totalBonusQty)}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-600 font-semibold">Loose: </span>
-                        <span className="font-mono tabular-nums font-black text-slate-950">
+                        <span className="text-slate-700 font-semibold">Loose: </span>
+                        <span className="font-mono tabular-nums font-black text-[15px] text-slate-950">
                           {formatQtyValue(dsrData.totalLooseQty)}
                         </span>
                       </div>
@@ -636,60 +627,54 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                 <div
                   ref={thermalPrintRef}
                   style={{ width: '80mm', maxWidth: '80mm', height: 'auto', minHeight: 0 }}
-                  className="thermal-receipt thermal-80mm bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-[1.08] w-[80mm] max-w-[80mm] h-auto min-h-0 self-start px-[1mm] py-[1mm] text-[11px] relative print:border-0 print:shadow-none print:p-[0.8mm]"
+                  className="thermal-receipt bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-tight self-start h-auto min-h-0 thermal-80mm w-[80mm] max-w-[80mm] px-[2.5mm] py-[2.5mm] text-[12px] relative print:border-0 print:shadow-none print:p-1"
                 >
-                  {/* Compact Header: Store name + report title */}
-                  <div className="text-center pb-[1px]">
-                    <div className="font-black text-black tracking-tight leading-none text-[14px] uppercase truncate">
+                  {/* Centered Store Header (exact 80mm Sales Bill typography) */}
+                  <div className="text-center pb-1.5">
+                    <div className="font-black text-black tracking-tight leading-tight text-[18px]">
                       {displayStoreName}
                     </div>
-                    <div className="font-bold text-black leading-tight text-[10px]">
+                    <div className="font-semibold text-black leading-snug mt-0.5 text-[11.5px]">
                       DSR – Daily Stock Requisition
                     </div>
                   </div>
 
-                  {/* Compact Boxed meta: Customer, Date, Invoice No */}
-                  <table className="w-full table-fixed border-collapse border border-black text-black text-[9.5px] leading-[1.12]">
-                    <colgroup>
-                      <col style={{ width: '16%' }} />
-                      <col style={{ width: '36%' }} />
-                      <col style={{ width: '14%' }} />
-                      <col style={{ width: '34%' }} />
-                    </colgroup>
+                  {/* Boxed Metadata Table (exact 80mm Sales Bill typography) */}
+                  <table className="w-full border-collapse border border-black text-black text-[11.5px]">
                     <tbody>
                       <tr className="break-inside-avoid">
-                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
                           Party
                         </td>
                         <td
                           colSpan={3}
-                          className="border border-black px-1 py-[0.5px] font-bold break-words text-[9.5px]"
+                          className="border border-black px-1.5 py-0.5 font-black break-words text-[13px]"
                         >
                           {displayCustomerName}
                         </td>
                       </tr>
                       <tr className="break-inside-avoid">
-                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
                           Inv#
                         </td>
-                        <td className="border border-black px-1 py-[0.5px] font-bold font-mono text-[9.5px] truncate">
+                        <td className="border border-black px-1.5 py-0.5 font-black font-mono text-[12.5px] break-all">
                           {displayInvoiceNumber}
                         </td>
-                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
+                        <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
                           Date
                         </td>
-                        <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap text-[9px]">
+                        <td className="border border-black px-1.5 py-0.5 font-semibold text-left whitespace-nowrap">
                           {formatDateDMY(displayInvoiceDate)}
                         </td>
                       </tr>
                       {(displayCustomerPhone || displayCustomerAddress) && (
                         <tr className="break-inside-avoid">
-                          <td className="border border-black px-0.5 py-[0.5px] font-semibold whitespace-nowrap">
+                          <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap align-top">
                             Info
                           </td>
                           <td
                             colSpan={3}
-                            className="border border-black px-1 py-[0.5px] font-medium break-words text-[9px]"
+                            className="border border-black px-1.5 py-0.5 font-semibold break-words"
                           >
                             {[displayCustomerPhone, displayCustomerAddress]
                               .filter(Boolean)
@@ -700,30 +685,23 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     </tbody>
                   </table>
 
-                  {/* Compact Boxed items table: # | Item Name | Qty | LQty | Bonus (company-wise A-Z) */}
-                  <table className="w-full table-fixed border-collapse border border-black border-t-0 text-black text-[9.5px] leading-[1.12]">
-                    <colgroup>
-                      <col style={{ width: '16px' }} />
-                      <col />
-                      <col style={{ width: '24px' }} />
-                      <col style={{ width: '22px' }} />
-                      <col style={{ width: '22px' }} />
-                    </colgroup>
+                  {/* Compact Boxed items table: # | Item Name | Qty | LQ | Bon (company-wise A-Z, exact 80mm Sales Bill typography) */}
+                  <table className="w-full border-collapse border border-black border-t-0 text-black text-[11.5px]">
                     <thead>
-                      <tr className="font-bold text-black bg-white text-[9px]">
-                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold">
+                      <tr className="font-black text-black bg-white">
+                        <th className="border border-black px-1 py-0.5 text-center font-black w-[20px]">
                           #
                         </th>
-                        <th className="border border-black px-1 py-[0.5px] text-left font-bold">
+                        <th className="border border-black px-1.5 py-0.5 text-left font-black">
                           Item Name
                         </th>
-                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold whitespace-nowrap">
+                        <th className="border border-black px-0.5 py-0.5 text-center font-black whitespace-nowrap text-[10.5px]">
                           Qty
                         </th>
-                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold whitespace-nowrap">
+                        <th className="border border-black px-0.5 py-0.5 text-center font-black whitespace-nowrap text-[10.5px]">
                           LQ
                         </th>
-                        <th className="border border-black px-0.5 py-[0.5px] text-center font-bold whitespace-nowrap">
+                        <th className="border border-black px-0.5 py-0.5 text-center font-black whitespace-nowrap text-[10.5px]">
                           Bon
                         </th>
                       </tr>
@@ -735,26 +713,26 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                             <td
                               colSpan={5}
                               title={group.companyName}
-                              className="border border-black px-1 py-[0.5px] bg-slate-100 font-bold uppercase text-[9px] leading-[1.05] truncate overflow-hidden whitespace-nowrap"
+                              className="border border-black px-1.5 py-0.5 bg-slate-100 font-black uppercase text-[12px] leading-snug break-words"
                             >
                               {formatThermalCompanyName(group.companyName)}
                             </td>
                           </tr>
                           {group.items.map((item) => (
-                            <tr key={item.rowId} className="align-middle leading-[1.12] break-inside-avoid">
-                              <td className="border border-black px-0.5 py-[0.5px] text-center font-semibold text-[9px] whitespace-nowrap">
+                            <tr key={item.rowId} className="align-middle break-inside-avoid">
+                              <td className="border border-black px-1 py-0.5 text-center font-bold w-[20px] whitespace-nowrap">
                                 {item.sNo}
                               </td>
-                              <td className="border border-black px-1 py-[0.5px] font-semibold break-words leading-[1.08] text-[9.5px]">
-                                {item.itemName}
+                              <td className="border border-black px-1.5 py-0.5 font-bold text-black leading-snug break-words text-[12px]">
+                                {formatItemNameWithRemarks(item.itemName, item.remarks)}
                               </td>
-                              <td className="border border-black px-0.5 py-[0.5px] text-center font-mono font-bold whitespace-nowrap overflow-hidden text-[9.5px]">
+                              <td className="border border-black px-0.5 py-0.5 text-center font-black whitespace-nowrap text-[12px]">
                                 {formatQtyValue(item.qty)}
                               </td>
-                              <td className="border border-black px-0.5 py-[0.5px] text-center font-mono font-semibold whitespace-nowrap overflow-hidden text-[9px]">
+                              <td className="border border-black px-0.5 py-0.5 text-center font-mono font-bold whitespace-nowrap text-[11px]">
                                 {item.looseQty > 0 ? formatQtyValue(item.looseQty) : '-'}
                               </td>
-                              <td className="border border-black px-0.5 py-[0.5px] text-center font-mono font-semibold whitespace-nowrap overflow-hidden text-[9px]">
+                              <td className="border border-black px-0.5 py-0.5 text-center font-mono font-bold whitespace-nowrap text-[11px]">
                                 {item.bonusQty > 0 ? formatQtyValue(item.bonusQty) : '-'}
                               </td>
                             </tr>
@@ -764,19 +742,20 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                     </tbody>
                   </table>
 
-                  {/* Compact Last line: Total Items */}
-                  <table className="w-full table-fixed border-collapse border border-black border-t-0 text-black">
-                    <tbody>
-                      <tr className="font-bold text-[9.5px] leading-[1.1] break-inside-avoid">
-                        <td className="border border-black px-1 py-[0.5px] text-left font-bold uppercase">
-                          Items: {dsrData.totalItems}
-                        </td>
-                        <td className="border border-black px-1 py-[0.5px] text-right font-mono font-bold whitespace-nowrap">
-                          Qty: {formatQtyValue(dsrData.totalQty)}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
+                  {/* Bottom Summary Line: Total Items & Qty (exact 80mm Sales Bill typography) */}
+                  <div className="border border-black border-t-0 text-black text-[12px]">
+                    <div className="flex items-baseline justify-between gap-2 px-2 py-[3px] font-bold break-inside-avoid">
+                      <span>
+                        Items: <span className="font-mono font-black">{dsrData.totalItems}</span>
+                      </span>
+                      <span>
+                        Qty:{' '}
+                        <span className="font-mono font-black">
+                          {formatQtyValue(dsrData.totalQty)}
+                        </span>
+                      </span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

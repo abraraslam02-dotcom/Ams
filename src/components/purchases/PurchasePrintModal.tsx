@@ -28,6 +28,7 @@ import {
   FontSizeScaleOption,
 } from '../../utils/printEngine';
 import { buildCompanyGroupedPurchaseData } from '../../utils/purchaseCompanyGrouping';
+import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 interface PurchasePrintModalProps {
@@ -789,13 +790,12 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                               </td>
                               <td className="py-1.5 px-1.5 text-left border-r border-slate-200 align-top break-words">
                                 <div className="font-bold text-slate-900 break-words">
-                                  {line.itemName}
-                                  {line.variantName && !String(line.itemName || '').includes(line.variantName)
-                                    ? ` — ${line.variantName}`
-                                    : ''}
-                                  {String(line.remarks || '').trim()
-                                    ? ` (${String(line.remarks || '').trim()})`
-                                    : ''}
+                                  {formatItemNameWithRemarks(
+                                    line.variantName && !String(line.itemName || '').includes(line.variantName)
+                                      ? `${line.itemName} — ${line.variantName}`
+                                      : line.itemName,
+                                    line.remarks
+                                  )}
                                 </div>
                                 {line.packing ? (
                                   <div className="text-[8.5px] text-slate-500">{line.packing}</div>
@@ -927,13 +927,12 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                         )}
                         <td className="py-1.5 px-2 break-words">
                           <div className="font-bold text-slate-900 break-words">
-                            {item.item_name}
-                            {item.variant_name && !String(item.item_name || '').includes(item.variant_name)
-                              ? ` — ${item.variant_name}`
-                              : ''}
-                            {String(item.remarks || '').trim()
-                              ? ` (${String(item.remarks || '').trim()})`
-                              : ''}
+                            {formatItemNameWithRemarks(
+                              item.variant_name && !String(item.item_name || '').includes(item.variant_name)
+                                ? `${item.item_name} — ${item.variant_name}`
+                                : item.item_name,
+                              item.remarks
+                            )}
                           </div>
                           {fields.showCompany && (
                             <div className="text-[10px] text-slate-500">{item.company_name}</div>

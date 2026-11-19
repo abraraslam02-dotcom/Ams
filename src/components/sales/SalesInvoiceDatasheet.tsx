@@ -13,6 +13,12 @@ import {
   SalesPaymentMode,
 } from '../../types/sales';
 import { formatPKR } from '../../utils/formatters';
+import {
+  formatItemNameWithRemarks,
+  matchesSelectedCompany,
+  mergeCompanyMasterOptions,
+} from '../../utils/itemDisplay';
+import { useResizableColumns } from '../../hooks/useResizableColumns';
 import { SalesPrintModal } from './SalesPrintModal';
 import { SalesDsrReportModal } from './SalesDsrReportModal';
 import { NumericInput } from '../common/NumericInput';
@@ -413,7 +419,42 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [financialAccounts, setFinancialAccounts] = useState<Array<Record<string, any>>>([]);
   const [taxSettings, setTaxSettings] = useState<Record<string, any> | null>(null);
   const [catalogItems, setCatalogItems] = useState<FastSearchItem[]>([]);
+  const [companyMasterList, setCompanyMasterList] = useState<string[]>([]);
+  const [selectedCompanyFilter, setSelectedCompanyFilter] = useState<string>('');
   const [heldInvoices, setHeldInvoices] = useState<SalesInvoiceRecord[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getItemCompanies()
+      .then((res) => {
+        if (!active) return;
+        if (Array.isArray(res?.companies)) {
+          setCompanyMasterList(res.companies);
+        }
+      })
+      .catch(() => {
+        // Fallback derives companies from catalogItems
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const companyOptions = useMemo(
+    () => mergeCompanyMasterOptions(companyMasterList, catalogItems),
+    [companyMasterList, catalogItems]
+  );
+
+  const companyFilteredCatalogItems = useMemo(
+    () =>
+      selectedCompanyFilter
+        ? catalogItems.filter((it) =>
+            matchesSelectedCompany(it.company_name, selectedCompanyFilter)
+          )
+        : catalogItems,
+    [catalogItems, selectedCompanyFilter]
+  );
 
   // Fast Item Search Bar & Explicit Item List Picker
   const [quickSearchQuery, setQuickSearchQuery] = useState<string>('');
@@ -1417,14 +1458,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setInvoiceType(newType);
   };
 
-  // Pre-indexed catalog for sub-millisecond local search across 10,000+ items
-  const indexedCatalog = useMemo(() => prepareItemIndex(catalogItems), [catalogItems]);
+  // Pre-indexed catalog (respecting selected Company Master filter) for sub-millisecond local search
+  const indexedCatalog = useMemo(
+    () => prepareItemIndex(companyFilteredCatalogItems),
+    [companyFilteredCatalogItems]
+  );
 
-  // Fast Item Search Handler - Instant in-memory search + race-guarded live DB query for 10,000+ items
+  // Fast Item Search Handler - Instant in-memory search + race-guarded live DB query (company-filtered when active)
   const runFastSearch = useCallback(
     (query: string) => {
       const cleanQuery = String(query || '').trim();
-      const results = searchItems(indexedCatalog, cleanQuery, 50);
+      const results = cleanQuery
+        ? searchItems(indexedCatalog, cleanQuery, 50)
+        : selectedCompanyFilter
+        ? companyFilteredCatalogItems.slice(0, 50)
+        : [];
       setSearchResults(results);
       setSearchHighlightIdx(0);
 
@@ -1434,6 +1482,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
       if (!cleanQuery) return;
 
+      const activeCompany = selectedCompanyFilter;
       const reqId = ++searchRequestIdRef.current;
       searchDebounceRef.current = setTimeout(() => {
         api
@@ -1458,8 +1507,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               return changed ? merged : prev;
             });
 
+            const companyFetched = activeCompany
+              ? fetched.filter((f) => matchesSelectedCompany(f.company_name, activeCompany))
+              : fetched;
             const combinedMap = new Map<number, FastSearchItem>();
-            for (const f of fetched) combinedMap.set(Number(f.id), f);
+            for (const f of companyFetched) combinedMap.set(Number(f.id), f);
             for (const r of results) {
               if (!combinedMap.has(Number(r.id))) combinedMap.set(Number(r.id), r);
             }
@@ -1474,8 +1526,29 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           });
       }, 90);
     },
-    [indexedCatalog]
+    [indexedCatalog, selectedCompanyFilter, companyFilteredCatalogItems]
   );
+
+  // Immediately refresh item search results whenever the selected company changes
+  useEffect(() => {
+    const activeQuery =
+      activeSearchRowIdx !== null
+        ? editingItemName?.rowIdx === activeSearchRowIdx
+          ? editingItemName.value
+          : editingItemCode?.rowIdx === activeSearchRowIdx
+          ? editingItemCode.value
+          : ''
+        : quickSearchQuery;
+
+    if (showSearchDropdown || activeQuery.trim().length > 0) {
+      runFastSearch(activeQuery);
+    } else if (selectedCompanyFilter) {
+      setSearchResults(companyFilteredCatalogItems.slice(0, 50));
+      setSearchHighlightIdx(0);
+    } else {
+      setSearchResults([]);
+    }
+  }, [selectedCompanyFilter, runFastSearch]);
 
   useEffect(() => {
     return () => {
@@ -1798,7 +1871,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       return false;
     }
 
-    const exact = findExactBarcodeOrCodeMatch(catalogItems, trimmed);
+    const exact = findExactBarcodeOrCodeMatch(companyFilteredCatalogItems, trimmed);
     const matched = exact?.item || null;
     const matchedVariant = exact?.variant || null;
 
@@ -1820,6 +1893,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               setCatalogItems((prev) =>
                 prev.some((c) => Number(c.id) === Number(hydrated.id)) ? prev : [...prev, hydrated]
               );
+              if (selectedCompanyFilter && !matchesSelectedCompany(hydrated.company_name, selectedCompanyFilter)) {
+                setErrorMsg(
+                  `Item "${hydrated.item_name}" belongs to "${hydrated.company_name || 'another company'}", not selected company "${selectedCompanyFilter}".`
+                );
+                return;
+              }
               const resolvedVar = res.variant
                 ? hydrated.variants?.find((v) => Number(v.id) === Number(res.variant!.id)) ||
                   res.variant
@@ -1832,6 +1911,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           setErrorMsg(
             currentRow?.item_id
               ? `Item Code "${trimmed}" not found. Existing item [${existingCode}] was preserved.`
+              : selectedCompanyFilter
+              ? `Item Code "${trimmed}" not found in company "${selectedCompanyFilter}".`
               : `Item Code "${trimmed}" not found in catalog.`
           );
         })
@@ -1979,11 +2060,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             : 'absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl min-w-[560px] max-w-[720px] overflow-hidden'
         }
       >
-        <div className="px-2.5 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center">
-          <span>
-            Matching Items ({searchResults.length}) • Search by Name, Company, Code, Variant or Barcode
+        <div className="px-2.5 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center gap-2">
+          <span className="truncate">
+            Matching Items ({searchResults.length})
+            {selectedCompanyFilter ? ` • Company: ${selectedCompanyFilter}` : ' • Search by Name, Company, Code, Variant or Barcode'}
           </span>
-          <span className="font-mono text-emerald-700">↑/↓ Navigate • Enter Select • Esc Close</span>
+          <span className="font-mono text-emerald-700 shrink-0">↑/↓ Navigate • Enter Select • Esc Close</span>
         </div>
         <div className="max-h-[340px] overflow-y-auto">
           {searchResults.length === 0 ? (
@@ -2992,47 +3074,61 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
-  // Column Widths for Microsoft Access-Style Resizable Datasheet Grid (Item Name kept strictly at 330px; all other columns sized compactly to fit headings)
-  const [colWidths, setColWidths] = useState<Record<string, number>>({
-    selector: 34,
-    item_code: 86,
-    item_name: 330,
-    quantity: 58,
-    discount: 76,
-    unit_price: 76,
-    loose_quantity: 84,
-    loose_rate: 90,
-    bonus_quantity: 64,
-    amount: 96,
-    last_purchase_price: 154,
-    company: 125,
-    gross_amount: 106,
-    remarks: 120,
-    actions: 112,
+  // Smooth Drag-and-Drop Adjustable Column Widths for Classic & Modern POS Sales Datasheets (no fixed width locks)
+  const {
+    colWidths,
+    totalWidth: accessTotalWidth,
+    resizingCol: accessResizingCol,
+    handleResizeStart: handleColResizeMouseDown,
+    resetColumnWidth: handleResetAccessColWidth,
+  } = useResizableColumns({
+    storageKey: 'ams_sales_access_col_widths_v1',
+    defaultWidths: {
+      selector: 34,
+      item_code: 86,
+      item_name: 330,
+      quantity: 58,
+      discount: 76,
+      unit_price: 76,
+      loose_quantity: 84,
+      loose_rate: 90,
+      bonus_quantity: 64,
+      amount: 96,
+      last_purchase_price: 154,
+      company: 125,
+      gross_amount: 106,
+      remarks: 120,
+      actions: 112,
+    },
+    minWidth: 36,
   });
 
-  const handleColResizeMouseDown = (colKey: string, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const startX = e.clientX;
-    const startWidth = colWidths[colKey] || 100;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      const diff = moveEvent.clientX - startX;
-      setColWidths((prev) => ({
-        ...prev,
-        [colKey]: Math.max(40, startWidth + diff),
-      }));
-    };
-
-    const onMouseUp = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
+  const {
+    colWidths: posColWidths,
+    totalWidth: posTotalWidth,
+    resizingCol: posResizingCol,
+    handleResizeStart: handlePosColResizeMouseDown,
+    resetColumnWidth: handleResetPosColWidth,
+  } = useResizableColumns({
+    storageKey: 'ams_sales_pos_col_widths_v1',
+    defaultWidths: {
+      selector: 36,
+      item_code: 96,
+      company: 130,
+      item_name: 260,
+      quantity: 74,
+      discount: 76,
+      loose_quantity: 84,
+      unit_price: 84,
+      bonus_quantity: 70,
+      loose_rate: 84,
+      gross_amount: 98,
+      amount: 106,
+      remarks: 130,
+      actions: 58,
+    },
+    minWidth: 36,
+  });
 
   // Keyboard Navigation in Access Datasheet Grid (matches exact visual column order)
   const colOrder = [
@@ -4501,14 +4597,40 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
 
               <div className="md:col-span-2 flex items-center gap-1">
-                <span className="font-bold text-slate-600 shrink-0">Ref:</span>
-                <input
-                  type="text"
-                  value={remarks}
-                  onChange={(e) => setRemarks(e.target.value)}
-                  placeholder="Dr. / Patient note..."
-                  className="w-full px-1.5 py-0 rounded border border-slate-300 bg-slate-50"
-                />
+                <label htmlFor="pos_sales_company_filter" className="font-bold text-slate-600 shrink-0">
+                  Company:
+                </label>
+                <div className="relative flex-1 flex items-center gap-0.5 min-w-0">
+                  <select
+                    id="pos_sales_company_filter"
+                    aria-label="Filter items by Company"
+                    value={selectedCompanyFilter}
+                    onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                    className={`w-full px-1 py-0 font-semibold rounded border outline-none ${
+                      selectedCompanyFilter
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
+                        : 'border-slate-300 bg-slate-50 text-slate-900'
+                    }`}
+                  >
+                    <option value="">All Companies</option>
+                    {companyOptions.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedCompanyFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCompanyFilter('')}
+                      title="Clear Company Filter"
+                      aria-label="Clear Company Filter"
+                      className="px-1 py-0 rounded border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-800 font-bold text-[10px] cursor-pointer shrink-0"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Compact F3 Quick Barcode / Item Add inside Header */}
@@ -4522,7 +4644,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     value={quickSearchQuery}
                     onFocus={() => {
                       setActiveSearchRowIdx(null);
-                      if (quickSearchQuery.trim().length > 0) {
+                      if (quickSearchQuery.trim().length > 0 || selectedCompanyFilter) {
                         setShowSearchDropdown(true);
                         runFastSearch(quickSearchQuery);
                       } else {
@@ -4538,7 +4660,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       const q = e.target.value;
                       setActiveSearchRowIdx(null);
                       setQuickSearchQuery(q);
-                      if (q.trim().length > 0) {
+                      if (q.trim().length > 0 || selectedCompanyFilter) {
                         setShowSearchDropdown(true);
                         runFastSearch(q);
                       } else {
@@ -4548,7 +4670,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'ArrowDown') {
-                        if (quickSearchQuery.trim().length === 0) return;
+                        if (quickSearchQuery.trim().length === 0 && !selectedCompanyFilter) return;
                         e.preventDefault();
                         if (!showSearchDropdown) {
                           setShowSearchDropdown(true);
@@ -4557,14 +4679,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         }
                         setSearchHighlightIdx((prev) => Math.min(searchResults.length - 1, prev + 1));
                       } else if (e.key === 'ArrowUp') {
-                        if (quickSearchQuery.trim().length === 0) return;
+                        if (quickSearchQuery.trim().length === 0 && !selectedCompanyFilter) return;
                         e.preventDefault();
                         setSearchHighlightIdx((prev) => Math.max(0, prev - 1));
                       } else if (e.key === 'Enter') {
                         e.preventDefault();
                         const qTrim = quickSearchQuery.trim();
                         if (qTrim.length > 0) {
-                          const exactLocal = findExactBarcodeOrCodeMatch(catalogItems, qTrim);
+                          const exactLocal = findExactBarcodeOrCodeMatch(companyFilteredCatalogItems, qTrim);
                           if (exactLocal && (exactLocal.matchType === 'variant' || exactLocal.item.barcode?.toLowerCase() === qTrim.toLowerCase())) {
                             handleSelectFromTopSearch(exactLocal.item, undefined, exactLocal.variant || null);
                             return;
@@ -4595,6 +4717,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                       ? prev
                                       : [...prev, hydrated]
                                   );
+                                  if (
+                                    selectedCompanyFilter &&
+                                    !matchesSelectedCompany(hydrated.company_name, selectedCompanyFilter)
+                                  ) {
+                                    setErrorMsg(
+                                      `Item "${hydrated.item_name}" belongs to "${hydrated.company_name || 'another company'}", not selected company "${selectedCompanyFilter}".`
+                                    );
+                                    return;
+                                  }
                                   const resolvedVar = res.variant
                                     ? hydrated.variants?.find((v) => Number(v.id) === Number(res.variant!.id)) ||
                                       res.variant
@@ -4612,7 +4743,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         setShowSearchDropdown(false);
                       }
                     }}
-                    placeholder="Barcode / Quick Search (F3)..."
+                    placeholder={
+                      selectedCompanyFilter
+                        ? `Search in ${selectedCompanyFilter} (F3)...`
+                        : 'Barcode / Quick Search (F3)...'
+                    }
                     className="w-full pl-6 pr-2 py-0 rounded border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 outline-none"
                   />
                   {renderSalesExcelItemCombobox('top')}
@@ -4630,26 +4765,65 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           </div>
 
-          {/* SECTION B (CENTER): INVOICE ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS) */}
+          {/* SECTION B (CENTER): INVOICE ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS, ADJUSTABLE COLUMNS) */}
           <div className="ams-pos-item-grid-card bg-white rounded-md border border-slate-300 shadow-xs overflow-hidden flex flex-col flex-1 min-h-[356px] relative z-10">
             <div className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white">
-              <table className="ams-compact-10-grid w-full text-left text-xs border-collapse leading-normal min-w-[1150px]">
-                <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[11px] font-bold uppercase tracking-wider leading-normal shadow-sm">
+              <table
+                style={{ width: `${posTotalWidth}px` }}
+                className="ams-compact-10-grid table-fixed text-left text-xs border-collapse leading-normal"
+              >
+                <colgroup>
+                  <col style={{ width: `${posColWidths.selector}px` }} />
+                  <col style={{ width: `${posColWidths.item_code}px` }} />
+                  <col style={{ width: `${posColWidths.company}px` }} />
+                  <col style={{ width: `${posColWidths.item_name}px` }} />
+                  <col style={{ width: `${posColWidths.quantity}px` }} />
+                  <col style={{ width: `${posColWidths.discount}px` }} />
+                  <col style={{ width: `${posColWidths.loose_quantity}px` }} />
+                  <col style={{ width: `${posColWidths.unit_price}px` }} />
+                  <col style={{ width: `${posColWidths.bonus_quantity}px` }} />
+                  <col style={{ width: `${posColWidths.loose_rate}px` }} />
+                  <col style={{ width: `${posColWidths.gross_amount}px` }} />
+                  <col style={{ width: `${posColWidths.amount}px` }} />
+                  <col style={{ width: `${posColWidths.remarks}px` }} />
+                  <col style={{ width: `${posColWidths.actions}px` }} />
+                </colgroup>
+                <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[11px] font-bold uppercase tracking-wider leading-normal shadow-sm select-none">
                   <tr className="h-8">
-                    <th className="py-1 px-1.5 w-9 text-center border-r border-slate-300 h-8">#</th>
-                    <th className="py-1 px-1.5 w-28 border-r border-slate-300 h-8">Item Code</th>
-                    <th className="py-1 px-1.5 w-32 border-r border-slate-300 h-8">Company</th>
-                    <th className="py-1 px-1.5 min-w-[220px] border-r border-slate-300 h-8">Item Name</th>
-                    <th className="py-1 px-1.5 w-20 text-center bg-emerald-100/70 text-emerald-950 border-r border-slate-300 h-8">Quantity</th>
-                    <th className="py-1 px-1.5 w-20 text-right border-r border-slate-300 h-8">Discount</th>
-                    <th className="py-1 px-1.5 w-24 text-center bg-teal-100/70 text-teal-950 border-r border-slate-300 h-8">Loose Qty</th>
-                    <th className="py-1 px-1.5 w-24 text-right border-r border-slate-300 h-8">Price</th>
-                    <th className="py-1 px-1.5 w-20 text-center bg-emerald-100/80 text-emerald-950 border-r border-slate-300 h-8">Bonus</th>
-                    <th className="py-1 px-1.5 w-24 text-right bg-blue-100/70 text-blue-950 border-r border-slate-300 h-8">Loose Rate</th>
-                    <th className="py-1 px-1.5 w-26 text-right border-r border-slate-300 h-8">Gross Amount</th>
-                    <th className="py-1 px-1.5 w-28 text-right bg-slate-300/70 font-black border-r border-slate-300 h-8">Amount</th>
-                    <th className="py-1 px-1.5 w-32 border-r border-slate-300 h-8">Remarks</th>
-                    <th className="py-1 px-1 w-14 text-center h-8">Act</th>
+                    {(
+                      [
+                        { key: 'selector', label: '#', cls: 'py-1 px-1.5 text-center border-r border-slate-300' },
+                        { key: 'item_code', label: 'Item Code', cls: 'py-1 px-1.5 border-r border-slate-300' },
+                        { key: 'company', label: 'Company', cls: 'py-1 px-1.5 border-r border-slate-300' },
+                        { key: 'item_name', label: 'Item Name', cls: 'py-1 px-1.5 border-r border-slate-300' },
+                        { key: 'quantity', label: 'Quantity', cls: 'py-1 px-1.5 text-center bg-emerald-100/70 text-emerald-950 border-r border-slate-300' },
+                        { key: 'discount', label: 'Discount', cls: 'py-1 px-1.5 text-right border-r border-slate-300' },
+                        { key: 'loose_quantity', label: 'Loose Qty', cls: 'py-1 px-1.5 text-center bg-teal-100/70 text-teal-950 border-r border-slate-300' },
+                        { key: 'unit_price', label: 'Price', cls: 'py-1 px-1.5 text-right border-r border-slate-300' },
+                        { key: 'bonus_quantity', label: 'Bonus', cls: 'py-1 px-1.5 text-center bg-emerald-100/80 text-emerald-950 border-r border-slate-300' },
+                        { key: 'loose_rate', label: 'Loose Rate', cls: 'py-1 px-1.5 text-right bg-blue-100/70 text-blue-950 border-r border-slate-300' },
+                        { key: 'gross_amount', label: 'Gross Amount', cls: 'py-1 px-1.5 text-right border-r border-slate-300' },
+                        { key: 'amount', label: 'Amount', cls: 'py-1 px-1.5 text-right bg-slate-300/70 font-black border-r border-slate-300' },
+                        { key: 'remarks', label: 'Remarks', cls: 'py-1 px-1.5 border-r border-slate-300' },
+                        { key: 'actions', label: 'Act', cls: 'py-1 px-1 text-center' },
+                      ] as const
+                    ).map((col) => (
+                      <th
+                        key={col.key}
+                        style={{ width: `${posColWidths[col.key]}px` }}
+                        className={`${col.cls} h-8 relative whitespace-nowrap overflow-hidden text-ellipsis`}
+                      >
+                        <span className="truncate block">{col.label}</span>
+                        <div
+                          onMouseDown={(e) => handlePosColResizeMouseDown(col.key, e)}
+                          onDoubleClick={(e) => handleResetPosColWidth(col.key, e)}
+                          title="Drag border to resize column (double-click to reset)"
+                          className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                            posResizingCol === col.key ? 'bg-emerald-600' : 'hover:bg-emerald-500/80'
+                          }`}
+                        />
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -4803,13 +4977,35 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           />
                         </td>
 
-                        {/* 2. Company */}
-                        <td className="py-0 px-1.5 text-slate-700 border-r border-slate-200 h-9 align-middle truncate max-w-[140px]" title={row.company_name}>
-                          {row.company_name || ''}
+                        {/* 2. Company (Shows item company for populated rows; accessible Company Master filter on blank entry rows) */}
+                        <td
+                          className="p-0 text-slate-700 border-r border-slate-200 h-9 align-middle overflow-hidden"
+                          title={hasItem ? row.company_name : selectedCompanyFilter || 'All Companies'}
+                        >
+                          {hasItem ? (
+                            <div className="px-1.5 truncate">{row.company_name || ''}</div>
+                          ) : (
+                            <select
+                              aria-label={`Row ${rIdx + 1} Company Filter`}
+                              value={selectedCompanyFilter}
+                              onFocus={() => setSelectedRowIndex(rIdx)}
+                              onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                              className={`w-full h-full px-1 py-0 text-[11px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 outline-none truncate ${
+                                selectedCompanyFilter ? 'text-emerald-900 bg-emerald-50/60' : 'text-slate-600'
+                              }`}
+                            >
+                              <option value="">All Companies</option>
+                              {companyOptions.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         </td>
 
                         {/* 3. Item Name (Continuous MS Access data entry: type to search, Enter selects -> Qty; F2 for full Item List) */}
-                        <td className="p-0 border-r border-slate-200 h-9 align-middle relative min-w-[220px]">
+                        <td className="p-0 border-r border-slate-200 h-9 align-middle relative">
                           <div className="flex items-center gap-1.5 h-full px-1">
                             {row.item_id !== null && row.variant_thumbnail_url && (
                               <ProductThumb
@@ -4825,13 +5021,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               value={
                                 editingItemName?.rowIdx === rIdx
                                   ? editingItemName.value
-                                  : row.item_name
-                                  ? `${row.item_name}${row.packing ? ` (${row.packing})` : ''}`
-                                  : ''
+                                  : formatItemNameWithRemarks(row.item_name, row.remarks)
                               }
                               onFocus={() => {
                                 setSelectedRowIndex(rIdx);
-                                setShowSearchDropdown(false);
+                                if (!row.item_id && selectedCompanyFilter) {
+                                  setActiveSearchRowIdx(rIdx);
+                                  setShowSearchDropdown(true);
+                                  runFastSearch('');
+                                } else {
+                                  setShowSearchDropdown(false);
+                                }
                                 if (row.item_code || row.item_id) {
                                   fetchAndApplyItemHistory(
                                     rIdx,
@@ -4860,14 +5060,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               }}
                               title={
                                 row.item_id
-                                  ? `${row.item_name}${row.variant_name ? ` — ${row.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                  ? `${formatItemNameWithRemarks(row.item_name, row.remarks)}${row.variant_name ? ` — ${row.variant_name}` : ''}${row.packing ? ` [${row.packing}]` : ''} — Double-click to open Complete ITEM LOG`
+                                  : selectedCompanyFilter
+                                  ? `Type Item Name / Code in ${selectedCompanyFilter} (or F2)`
                                   : 'Type Item Name / Code (or F2)'
                               }
                               onChange={(e) => {
                                 const val = e.target.value;
                                 setSelectedRowIndex(rIdx);
                                 setEditingItemName({ rowIdx: rIdx, value: val });
-                                if (val.trim().length > 0) {
+                                if (val.trim().length > 0 || selectedCompanyFilter) {
                                   setActiveSearchRowIdx(rIdx);
                                   setShowSearchDropdown(true);
                                   runFastSearch(val);
@@ -5715,17 +5917,40 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </select>
               </div>
               <div className="col-span-2 flex items-center gap-1">
-                <label htmlFor="access_buyer_name_input" className="font-bold text-slate-600 whitespace-nowrap">
-                  Buyer:
+                <label htmlFor="access_sales_company_filter" className="font-bold text-slate-600 whitespace-nowrap">
+                  Company:
                 </label>
-                <input
-                  id="access_buyer_name_input"
-                  type="text"
-                  value={buyerName}
-                  onChange={(e) => setBuyerName(e.target.value)}
-                  placeholder="Buyer name..."
-                  className="w-full px-1.5 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white focus:outline-none focus:border-emerald-600"
-                />
+                <div className="relative flex-1 flex items-center gap-0.5 min-w-0">
+                  <select
+                    id="access_sales_company_filter"
+                    aria-label="Filter items by Company"
+                    value={selectedCompanyFilter}
+                    onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                    className={`w-full px-1 py-0 rounded border font-semibold focus:outline-none ${
+                      selectedCompanyFilter
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
+                        : 'border-slate-300 bg-white text-slate-900'
+                    }`}
+                  >
+                    <option value="">All Companies</option>
+                    {companyOptions.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedCompanyFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCompanyFilter('')}
+                      title="Clear Company Filter"
+                      aria-label="Clear Company Filter"
+                      className="px-1 py-0 rounded border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-800 font-bold text-[10px] cursor-pointer shrink-0"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="col-span-3 relative">
                 <div className="flex items-center bg-white border border-slate-300 rounded px-1.5 focus-within:border-emerald-600">
@@ -5736,7 +5961,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     value={quickSearchQuery}
                     onFocus={() => {
                       setActiveSearchRowIdx(null);
-                      if (quickSearchQuery.trim().length > 0) {
+                      if (quickSearchQuery.trim().length > 0 || selectedCompanyFilter) {
                         setShowSearchDropdown(true);
                         runFastSearch(quickSearchQuery);
                       } else {
@@ -5752,7 +5977,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       const val = e.target.value;
                       setActiveSearchRowIdx(null);
                       setQuickSearchQuery(val);
-                      if (val.trim().length > 0) {
+                      if (val.trim().length > 0 || selectedCompanyFilter) {
                         setShowSearchDropdown(true);
                         runFastSearch(val);
                       } else {
@@ -5762,7 +5987,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'ArrowDown') {
-                        if (quickSearchQuery.trim().length === 0) return;
+                        if (quickSearchQuery.trim().length === 0 && !selectedCompanyFilter) return;
                         e.preventDefault();
                         if (!showSearchDropdown) {
                           setShowSearchDropdown(true);
@@ -5771,14 +5996,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         }
                         setSearchHighlightIdx((prev) => Math.min(searchResults.length - 1, prev + 1));
                       } else if (e.key === 'ArrowUp') {
-                        if (quickSearchQuery.trim().length === 0) return;
+                        if (quickSearchQuery.trim().length === 0 && !selectedCompanyFilter) return;
                         e.preventDefault();
                         setSearchHighlightIdx((prev) => Math.max(0, prev - 1));
                       } else if (e.key === 'Enter') {
                         e.preventDefault();
                         const qTrim = quickSearchQuery.trim();
                         if (qTrim.length > 0) {
-                          const exactLocal = findExactBarcodeOrCodeMatch(catalogItems, qTrim);
+                          const exactLocal = findExactBarcodeOrCodeMatch(companyFilteredCatalogItems, qTrim);
                           if (exactLocal && (exactLocal.matchType === 'variant' || exactLocal.item.barcode?.toLowerCase() === qTrim.toLowerCase())) {
                             handleSelectFromTopSearch(exactLocal.item, undefined, exactLocal.variant || null);
                             return;
@@ -5809,6 +6034,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                       ? prev
                                       : [...prev, hydrated]
                                   );
+                                  if (
+                                    selectedCompanyFilter &&
+                                    !matchesSelectedCompany(hydrated.company_name, selectedCompanyFilter)
+                                  ) {
+                                    setErrorMsg(
+                                      `Item "${hydrated.item_name}" belongs to "${hydrated.company_name || 'another company'}", not selected company "${selectedCompanyFilter}".`
+                                    );
+                                    return;
+                                  }
                                   const resolvedVar = res.variant
                                     ? hydrated.variants?.find((v) => Number(v.id) === Number(res.variant!.id)) ||
                                       res.variant
@@ -5826,7 +6060,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         setShowSearchDropdown(false);
                       }
                     }}
-                    placeholder="Barcode / Item Search (F3)..."
+                    placeholder={
+                      selectedCompanyFilter
+                        ? `Search in ${selectedCompanyFilter} (F3)...`
+                        : 'Barcode / Item Search (F3)...'
+                    }
                     className="w-full bg-transparent text-slate-900 placeholder-slate-400 focus:outline-none"
                   />
                 </div>
@@ -5886,215 +6124,63 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             {/* Vertical & horizontal scrolling inside the item grid, sticky column headers */}
             <div className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative">
               <table
-                style={{
-                  width: `${
-                    colWidths.selector +
-                    colWidths.item_code +
-                    colWidths.item_name +
-                    colWidths.quantity +
-                    colWidths.discount +
-                    colWidths.unit_price +
-                    colWidths.loose_quantity +
-                    colWidths.loose_rate +
-                    colWidths.bonus_quantity +
-                    colWidths.amount +
-                    colWidths.last_purchase_price +
-                    colWidths.company +
-                    colWidths.gross_amount +
-                    colWidths.remarks +
-                    colWidths.actions
-                  }px`,
-                }}
+                style={{ width: `${accessTotalWidth}px` }}
                 className="ams-compact-10-grid table-fixed border-collapse text-[11px] font-sans leading-none"
               >
+                <colgroup>
+                  <col style={{ width: `${colWidths.selector}px` }} />
+                  <col style={{ width: `${colWidths.item_code}px` }} />
+                  <col style={{ width: `${colWidths.item_name}px` }} />
+                  <col style={{ width: `${colWidths.quantity}px` }} />
+                  <col style={{ width: `${colWidths.discount}px` }} />
+                  <col style={{ width: `${colWidths.unit_price}px` }} />
+                  <col style={{ width: `${colWidths.loose_quantity}px` }} />
+                  <col style={{ width: `${colWidths.loose_rate}px` }} />
+                  <col style={{ width: `${colWidths.bonus_quantity}px` }} />
+                  <col style={{ width: `${colWidths.amount}px` }} />
+                  <col style={{ width: `${colWidths.last_purchase_price}px` }} />
+                  <col style={{ width: `${colWidths.company}px` }} />
+                  <col style={{ width: `${colWidths.gross_amount}px` }} />
+                  <col style={{ width: `${colWidths.remarks}px` }} />
+                  <col style={{ width: `${colWidths.actions}px` }} />
+                </colgroup>
                 <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                   <tr className="h-6">
-                    {/* Access Row Selector column */}
-                    <th
-                      style={{ width: `${colWidths.selector}px`, minWidth: `${colWidths.selector}px` }}
-                      className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 text-center font-mono relative h-6 whitespace-nowrap"
-                    >
-                      #
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('selector', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 1. Item Code */}
-                    <th
-                      style={{ width: `${colWidths.item_code}px`, minWidth: `${colWidths.item_code}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
-                    >
-                      Item Code
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('item_code', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 2. Item Name (fixed width: 330px, wider than all other columns) */}
-                    <th
-                      style={{
-                        width: `${colWidths.item_name}px`,
-                        minWidth: `${colWidths.item_name}px`,
-                        maxWidth: `${colWidths.item_name}px`,
-                      }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
-                    >
-                      Item Name
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('item_name', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 3. Qty */}
-                    <th
-                      style={{ width: `${colWidths.quantity}px`, minWidth: `${colWidths.quantity}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950 relative h-6 whitespace-nowrap"
-                    >
-                      Qty
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('quantity', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 4. Discount */}
-                    <th
-                      style={{ width: `${colWidths.discount}px`, minWidth: `${colWidths.discount}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right relative h-6 whitespace-nowrap"
-                    >
-                      Discount
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('discount', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 5. Price */}
-                    <th
-                      style={{ width: `${colWidths.unit_price}px`, minWidth: `${colWidths.unit_price}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right relative h-6 whitespace-nowrap"
-                    >
-                      Price
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('unit_price', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 6. Loose Qty */}
-                    <th
-                      style={{ width: `${colWidths.loose_quantity}px`, minWidth: `${colWidths.loose_quantity}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-teal-100/60 text-teal-950 relative h-6 whitespace-nowrap"
-                    >
-                      Loose Qty
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('loose_quantity', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 7. Loose Rate */}
-                    <th
-                      style={{ width: `${colWidths.loose_rate}px`, minWidth: `${colWidths.loose_rate}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-blue-100/60 text-blue-950 relative h-6 whitespace-nowrap"
-                    >
-                      Loose Rate
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('loose_rate', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 8. Bonus */}
-                    <th
-                      style={{ width: `${colWidths.bonus_quantity}px`, minWidth: `${colWidths.bonus_quantity}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950 relative h-6 whitespace-nowrap"
-                    >
-                      Bonus
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('bonus_quantity', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 9. Net Amount */}
-                    <th
-                      style={{ width: `${colWidths.amount}px`, minWidth: `${colWidths.amount}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-slate-300/60 font-black relative h-6 whitespace-nowrap"
-                    >
-                      Net Amount
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('amount', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 10. Last Purchase Price */}
-                    <th
-                      style={{
-                        width: `${colWidths.last_purchase_price}px`,
-                        minWidth: `${colWidths.last_purchase_price}px`,
-                      }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-amber-50/70 text-amber-950 relative h-6 whitespace-nowrap"
-                    >
-                      Last Purchase Price
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('last_purchase_price', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 11. Company */}
-                    <th
-                      style={{ width: `${colWidths.company}px`, minWidth: `${colWidths.company}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
-                    >
-                      Company
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('company', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 12. Gross Amount */}
-                    <th
-                      style={{ width: `${colWidths.gross_amount}px`, minWidth: `${colWidths.gross_amount}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-slate-200/70 relative h-6 whitespace-nowrap"
-                    >
-                      Gross Amount
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('gross_amount', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 13. Remarks */}
-                    <th
-                      style={{ width: `${colWidths.remarks}px`, minWidth: `${colWidths.remarks}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
-                    >
-                      Remarks
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('remarks', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 14. Batch / Del */}
-                    <th
-                      style={{ width: `${colWidths.actions}px`, minWidth: `${colWidths.actions}px` }}
-                      className="px-1 py-0 text-center relative h-6 whitespace-nowrap"
-                    >
-                      Batch / Del
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('actions', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
+                    {(
+                      [
+                        { key: 'selector', label: '#', cls: 'bg-slate-300/80 border-r border-slate-400 text-center font-mono' },
+                        { key: 'item_code', label: 'Item Code', cls: 'border-r border-slate-300 text-left' },
+                        { key: 'item_name', label: 'Item Name', cls: 'border-r border-slate-300 text-left' },
+                        { key: 'quantity', label: 'Qty', cls: 'border-r border-slate-300 text-right bg-emerald-100/60 text-emerald-950' },
+                        { key: 'discount', label: 'Discount', cls: 'border-r border-slate-300 text-right' },
+                        { key: 'unit_price', label: 'Price', cls: 'border-r border-slate-300 text-right' },
+                        { key: 'loose_quantity', label: 'Loose Qty', cls: 'border-r border-slate-300 text-right bg-teal-100/60 text-teal-950' },
+                        { key: 'loose_rate', label: 'Loose Rate', cls: 'border-r border-slate-300 text-right bg-blue-100/60 text-blue-950' },
+                        { key: 'bonus_quantity', label: 'Bonus', cls: 'border-r border-slate-300 text-right bg-emerald-100/70 text-emerald-950' },
+                        { key: 'amount', label: 'Net Amount', cls: 'border-r border-slate-300 text-right bg-slate-300/60 font-black' },
+                        { key: 'last_purchase_price', label: 'Last Purchase Price', cls: 'border-r border-slate-300 text-right bg-amber-50/70 text-amber-950' },
+                        { key: 'company', label: 'Company', cls: 'border-r border-slate-300 text-left' },
+                        { key: 'gross_amount', label: 'Gross Amount', cls: 'border-r border-slate-300 text-right bg-slate-200/70' },
+                        { key: 'remarks', label: 'Remarks', cls: 'border-r border-slate-300 text-left' },
+                        { key: 'actions', label: 'Batch / Del', cls: 'text-center' },
+                      ] as const
+                    ).map((col) => (
+                      <th
+                        key={col.key}
+                        style={{ width: `${colWidths[col.key]}px` }}
+                        className={`${col.cls} px-1 py-0 relative h-6 whitespace-nowrap overflow-hidden text-ellipsis`}
+                      >
+                        <span className="truncate block">{col.label}</span>
+                        <div
+                          onMouseDown={(e) => handleColResizeMouseDown(col.key, e)}
+                          onDoubleClick={(e) => handleResetAccessColWidth(col.key, e)}
+                          title="Drag border to resize column (double-click to reset)"
+                          className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                            accessResizingCol === col.key ? 'bg-emerald-600' : 'hover:bg-emerald-500/80'
+                          }`}
+                        />
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -6230,11 +6316,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               value={
                                 editingItemName?.rowIdx === rIdx
                                   ? editingItemName.value
-                                  : row.item_name
+                                  : formatItemNameWithRemarks(row.item_name, row.remarks)
                               }
                               onFocus={() => {
                                 setSelectedRowIndex(rIdx);
-                                setShowSearchDropdown(false);
+                                if (!row.item_id && selectedCompanyFilter) {
+                                  setActiveSearchRowIdx(rIdx);
+                                  setShowSearchDropdown(true);
+                                  runFastSearch('');
+                                } else {
+                                  setShowSearchDropdown(false);
+                                }
                                 if (row.item_code || row.item_id) {
                                   fetchAndApplyItemHistory(
                                     rIdx,
@@ -6272,7 +6364,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 const val = e.target.value;
                                 setSelectedRowIndex(rIdx);
                                 setEditingItemName({ rowIdx: rIdx, value: val });
-                                if (val.trim().length > 0) {
+                                if (val.trim().length > 0 || selectedCompanyFilter) {
                                   setActiveSearchRowIdx(rIdx);
                                   setShowSearchDropdown(true);
                                   runFastSearch(val);
@@ -6283,10 +6375,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 }
                               }}
                               onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_name')}
-                              placeholder="Type Item Name / Code (or F2)..."
+                              placeholder={
+                                selectedCompanyFilter
+                                  ? `Type Item Name in ${selectedCompanyFilter} (or F2)...`
+                                  : 'Type Item Name / Code (or F2)...'
+                              }
                               title={
                                 row.item_id
-                                  ? `${row.item_name}${row.variant_name ? ` — ${row.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                  ? `${formatItemNameWithRemarks(row.item_name, row.remarks)}${row.variant_name ? ` — ${row.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                  : selectedCompanyFilter
+                                  ? `Type Item Name / Code in ${selectedCompanyFilter} (or F2)`
                                   : 'Type Item Name / Code (or F2)'
                               }
                               className="w-full min-w-0 flex-1 px-0.5 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none truncate"
@@ -6443,10 +6541,29 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
                         {/* 11. Company */}
                         <td
-                          className="border-r border-slate-300 px-1 py-0 text-slate-700 truncate text-[10px] h-[16px] align-middle"
-                          title={row.company_name}
+                          className="border-r border-slate-300 p-0 text-slate-700 text-[10px] h-[16px] align-middle overflow-hidden"
+                          title={hasItem ? row.company_name : selectedCompanyFilter || 'All Companies'}
                         >
-                          {row.company_name || ''}
+                          {hasItem ? (
+                            <div className="px-1 truncate">{row.company_name || ''}</div>
+                          ) : (
+                            <select
+                              aria-label={`Row ${rIdx + 1} Company Filter`}
+                              value={selectedCompanyFilter}
+                              onFocus={() => setSelectedRowIndex(rIdx)}
+                              onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                              className={`w-full h-[15px] px-0.5 py-0 text-[10px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-blue-600 outline-none truncate ${
+                                selectedCompanyFilter ? 'text-emerald-900 bg-emerald-50/60' : 'text-slate-600'
+                              }`}
+                            >
+                              <option value="">All Companies</option>
+                              {companyOptions.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         </td>
 
                         {/* 12. Gross Amount */}
@@ -7628,8 +7745,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       {/* ================= MODAL 8: EXPLICIT ITEM LIST SELECTOR ================= */}
       <ItemListSelectionModal
         isOpen={showItemListModal}
-        items={catalogItems}
+        items={companyFilteredCatalogItems}
         indexedItems={indexedCatalog}
+        activeCompanyFilter={selectedCompanyFilter}
+        onClearCompanyFilter={() => setSelectedCompanyFilter('')}
         targetRowIndex={itemListTargetRowIdx}
         targetRowItem={itemListTargetRowIdx !== null ? rows[itemListTargetRowIdx] : null}
         invoiceLabel="Sales Invoice"
