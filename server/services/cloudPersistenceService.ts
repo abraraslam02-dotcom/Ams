@@ -14,6 +14,7 @@ import {
 } from '../db/connection.ts';
 import { runMigrations } from '../db/migrations.ts';
 import { bumpDbResetEpoch } from '../db/resetState.ts';
+import { reconcileHeldAndDuplicateLedgerEntries } from './ledgerIntegrityService.ts';
 
 function loadFirebaseConfig(): { projectId?: string; firestoreDatabaseId?: string; apiKey?: string } {
   try {
@@ -832,6 +833,7 @@ function mergeMissingRowsFromCloudDb(cloudDbFilePath: string, reason: string): n
     }
 
     if (totalInsertedOrUpdated > 0) {
+      reconcileHeldAndDuplicateLedgerEntries();
       if (config.envScope === 'development') {
         syncRuntimeToSeedDatabase();
       }
@@ -920,6 +922,7 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
 
         reopenDatabaseConnection();
         runMigrations();
+        reconcileHeldAndDuplicateLedgerEntries();
         if (config.envScope === 'development') {
           syncRuntimeToSeedDatabase();
         }
@@ -2159,6 +2162,9 @@ export function hydrateSqliteFromCloudRecords(
     });
 
     tx();
+    if (restoredAccounts > 0 || restoredInvoices > 0 || restoredPurchases > 0 || restoredVouchers > 0) {
+      reconcileHeldAndDuplicateLedgerEntries();
+    }
   } catch (err) {
     console.warn('[AMS Cloud Persistence] hydrateSqliteFromCloudRecords warning:', err);
   }

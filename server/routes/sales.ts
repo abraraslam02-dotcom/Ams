@@ -1,8 +1,13 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
-import { recalculateAccountBalance } from './accounts.ts';
+import { recalculateAccountBalance, POSTED_INVOICE_JE_FILTER_SQL } from './accounts.ts';
 import { round2, parsePacking } from './purchases.ts';
+import {
+  cleanupSaleJournalEntries,
+  isHeldOrDraftStatus,
+  normalizeInvoiceStatus,
+} from '../services/ledgerIntegrityService.ts';
 import { triggerPreChangeBackupIfEnabled, logSystemError } from '../services/backupService.ts';
 import {
   peekNextInvoiceNumber,
@@ -236,7 +241,14 @@ function revertCompletedSaleEffects(saleId: number) {
     .prepare('SELECT * FROM sales WHERE id = ?')
     .get(saleId) as Record<string, unknown> | undefined;
 
-  if (!existingSale || existingSale.status !== 'completed') return;
+  if (!existingSale) return;
+
+  const existingStatus = normalizeInvoiceStatus(existingSale.status, 'held');
+  if (existingStatus !== 'completed') {
+    // Held/draft/cancelled sales must never affect stock, but always sweep any stray JEs defensively
+    cleanupSaleJournalEntries(saleId);
+    return;
+  }
 
   const existingItems = db
     .prepare('SELECT * FROM sale_items WHERE sale_id = ?')
@@ -403,39 +415,9 @@ function revertCompletedSaleEffects(saleId: number) {
     "DELETE FROM batch_stock_movements WHERE reference_type = 'SALE_INVOICE' AND reference_id = ?"
   ).run(saleId);
 
-  // Delete all linked journal entries for this sale (by stored IDs AND by reference_type='SALE' & reference_id=saleId)
+  // Delete all linked journal entries for this sale (by stored IDs AND by reference_type IN ('SALE','SALES') & reference_id=saleId)
   // so editing or cancelling an invoice reverses 100% of its accounting effect and never creates duplicate ledger entries.
-  const allSaleJournalRows = db
-    .prepare("SELECT id FROM journal_entries WHERE reference_type = 'SALE' AND reference_id = ?")
-    .all(saleId) as Array<{ id: number }>;
-
-  const journalIdSet = new Set<number>([
-    Number(existingSale.journal_entry_id || 0),
-    Number(existingSale.payment_journal_entry_id || 0),
-    ...allSaleJournalRows.map((r) => Number(r.id)),
-  ]);
-  journalIdSet.delete(0);
-
-  const affectedAccounts = new Set<number>();
-  if (existingSale.customer_account_id) affectedAccounts.add(Number(existingSale.customer_account_id));
-  if (existingSale.payment_account_id) affectedAccounts.add(Number(existingSale.payment_account_id));
-
-  for (const jId of journalIdSet) {
-    const lines = db
-      .prepare('SELECT account_id FROM journal_entry_lines WHERE journal_entry_id = ?')
-      .all(jId) as Array<{ account_id: number }>;
-    for (const l of lines) affectedAccounts.add(Number(l.account_id));
-    db.prepare('DELETE FROM journal_entry_lines WHERE journal_entry_id = ?').run(jId);
-    db.prepare('DELETE FROM journal_entries WHERE id = ?').run(jId);
-  }
-
-  db.prepare(
-    'UPDATE sales SET journal_entry_id = NULL, payment_journal_entry_id = NULL WHERE id = ?'
-  ).run(saleId);
-
-  for (const accId of affectedAccounts) {
-    recalculateAccountBalance(accId);
-  }
+  cleanupSaleJournalEntries(saleId);
 }
 
 /**
@@ -1601,16 +1583,11 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       revertCompletedSaleEffects(saleId);
     }
 
-    const rawSaleStatus = String(body.status || 'completed').trim().toLowerCase();
-    const status =
-      rawSaleStatus === 'confirmed' || rawSaleStatus === 'posted'
-        ? 'completed'
-        : ['on_hold', 'on hold', 'hold'].includes(rawSaleStatus)
-        ? 'held'
-        : rawSaleStatus;
-    if (!['draft', 'held', 'completed'].includes(status)) {
+    const normalizedSaleStatus = normalizeInvoiceStatus(body.status, 'completed');
+    if (!['draft', 'held', 'completed'].includes(normalizedSaleStatus)) {
       throw new Error('Invalid invoice status. Must be draft, held, or completed.');
     }
+    const status = normalizedSaleStatus as 'draft' | 'held' | 'completed';
 
     const invoiceDate = String(body.invoice_date || new Date().toISOString().slice(0, 10)).trim();
 
@@ -2874,6 +2851,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       status === 'completed' &&
       (netTotal !== 0 || grossTotal !== 0 || totalCostOfGoodsSold !== 0 || paidAmount > 0)
     ) {
+      // Defensive idempotency: ensure no prior JE exists for finalSaleId before posting
+      cleanupSaleJournalEntries(finalSaleId!);
       const salesIncomeAccountId = getSystemAccountId('INC-4010');
       const salesReturnAccountId = getSystemAccountId('SAL-4015');
       const salesDiscountAccountId = getSystemAccountId('DIS-5015');
@@ -3113,6 +3092,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       for (const accId of affectedAccounts) {
         recalculateAccountBalance(accId);
       }
+    } else {
+      // Held, draft, or zero-effect invoices must never retain any journal entries
+      cleanupSaleJournalEntries(finalSaleId!);
     }
 
     return finalSaleId!;
@@ -3228,8 +3210,14 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
       });
     }
 
-    // Protect posted (completed) invoices from unauthorized editing
+    // Protect posted (completed) invoices from unauthorized editing or reverting to held/draft
     if (existingStatus === 'completed') {
+      if (isHeldOrDraftStatus(req.body?.status)) {
+        return res.status(400).json({
+          success: false,
+          error: 'A posted Sales Invoice cannot be downgraded back to Hold or Draft. Use Sales Return or Cancel instead.',
+        });
+      }
       const role = req.user?.role || '';
       if (role !== 'Super Admin' && role !== 'Administrator') {
         return res.status(403).json({
@@ -3368,6 +3356,7 @@ function handleCancelOrDeleteSale(req: Request, res: Response) {
           `Cancelled posted Sales Invoice ${existing.invoice_number} (Reason: ${cancelReason})`
         );
       } else {
+        cleanupSaleJournalEntries(saleId);
         db.prepare('DELETE FROM sale_items WHERE sale_id = ?').run(saleId);
         db.prepare('DELETE FROM sales WHERE id = ?').run(saleId);
       }
@@ -4240,7 +4229,7 @@ salesRouter.get('/ledgers', (req: Request, res: Response) => {
 
     if (ledgerType === 'general' && !accountId) {
       // Return General Ledger across all accounts
-      let glWhere = " WHERE je.status = 'posted' ";
+      let glWhere = ` WHERE je.status = 'posted' AND ${POSTED_INVOICE_JE_FILTER_SQL} `;
       const glParams: Array<string | number> = [];
       if (startDate) {
         glWhere += ' AND je.entry_date >= ? ';
@@ -4332,6 +4321,7 @@ salesRouter.get('/ledgers', (req: Request, res: Response) => {
           JOIN journal_entries je ON jel.journal_entry_id = je.id
           WHERE jel.account_id = ?
             AND je.status = 'posted'
+            AND ${POSTED_INVOICE_JE_FILTER_SQL}
             AND je.entry_date < ?
         `)
         .get(selectedAccountId, String(startDate)) as { priorDebit: number; priorCredit: number };
@@ -4342,7 +4332,7 @@ salesRouter.get('/ledgers', (req: Request, res: Response) => {
     const effectiveOpeningBalance = round2(Math.abs(runningSigned));
     const effectiveOpeningType: 'Debit' | 'Credit' = runningSigned >= 0 ? 'Debit' : 'Credit';
 
-    let entryWhere = " WHERE jel.account_id = ? AND je.status = 'posted' ";
+    let entryWhere = ` WHERE jel.account_id = ? AND je.status = 'posted' AND ${POSTED_INVOICE_JE_FILTER_SQL} `;
     const entryParams: Array<string | number> = [selectedAccountId];
 
     if (startDate) {

@@ -107,6 +107,28 @@ export interface AccountRow {
   updated_at: string;
 }
 
+export const POSTED_INVOICE_JE_FILTER_SQL = `
+  (
+    je.reference_type NOT IN ('SALE', 'SALES', 'PURCHASE')
+    OR (
+      je.reference_type IN ('SALE', 'SALES')
+      AND EXISTS (
+        SELECT 1 FROM sales s_chk
+        WHERE s_chk.id = je.reference_id
+          AND LOWER(TRIM(COALESCE(s_chk.status, ''))) = 'completed'
+      )
+    )
+    OR (
+      je.reference_type = 'PURCHASE'
+      AND EXISTS (
+        SELECT 1 FROM purchases p_chk
+        WHERE p_chk.id = je.reference_id
+          AND LOWER(TRIM(COALESCE(p_chk.status, ''))) = 'completed'
+      )
+    )
+  )
+`;
+
 /**
  * Helper to recalculate an account's accurate Debit, Credit, Net Balance,
  * and separate Customer vs. Supplier ledger balances from Opening Balance + Journal Lines.
@@ -125,7 +147,7 @@ export function recalculateAccountBalance(accountId: number): void {
   const openDebit = openType === 'Debit' ? openBal : 0;
   const openCredit = openType === 'Credit' ? openBal : 0;
 
-  // Sum posted journal entry lines for this account
+  // Sum posted journal entry lines for this account (strictly excluding any non-completed invoice references)
   const lineSums = db
     .prepare(`
       SELECT
@@ -138,6 +160,7 @@ export function recalculateAccountBalance(accountId: number): void {
       FROM journal_entry_lines jl
       INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
       WHERE jl.account_id = ? AND je.status = 'posted' AND je.reference_type != 'OPENING_BALANCE'
+        AND ${POSTED_INVOICE_JE_FILTER_SQL}
     `)
     .get(accountId) as {
     tx_debit: number;
@@ -793,6 +816,7 @@ accountsRouter.get('/:id/balance-summary', (req: Request, res: Response) => {
         WHERE jl.account_id = ?
           AND je.status = 'posted'
           AND je.reference_type != 'OPENING_BALANCE'
+          AND ${POSTED_INVOICE_JE_FILTER_SQL}
           ${excludeClause}
       `)
       .get(...params) as { tx_debit: number; tx_credit: number };

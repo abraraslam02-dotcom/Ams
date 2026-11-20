@@ -25,6 +25,7 @@ import { runMigrations } from './server/db/migrations.ts';
 import { checkDatabaseConnection, getDatabase } from './server/db/connection.ts';
 import { ensureAuthTables } from './server/services/authService.ts';
 import { ensureDailyAutomaticBackup } from './server/services/backupService.ts';
+import { reconcileHeldAndDuplicateLedgerEntries } from './server/services/ledgerIntegrityService.ts';
 import {
   initCloudPersistence,
   syncDatabaseToCloudSQL,
@@ -64,6 +65,16 @@ async function startServer() {
     const migration = runMigrations();
     console.log(`[AMS DB] ${migration.message}`);
     ensureAuthTables(getDatabase());
+    const auditReport = reconcileHeldAndDuplicateLedgerEntries();
+    if (
+      auditReport.removedNonPostedSaleJEs > 0 ||
+      auditReport.removedNonPostedPurchaseJEs > 0 ||
+      auditReport.removedDuplicateSaleJEs > 0 ||
+      auditReport.removedDuplicatePurchaseJEs > 0 ||
+      auditReport.recalculatedAccounts > 0
+    ) {
+      console.log('[AMS Ledger Audit]', auditReport);
+    }
 
     const connectionTest = checkDatabaseConnection();
     console.log(`[AMS DB] Connection verification: ${connectionTest.connected ? 'SUCCESS' : 'FAILED'}`);

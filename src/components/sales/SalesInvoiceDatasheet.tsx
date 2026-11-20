@@ -2549,7 +2549,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       setSubmitting(true);
 
-      const clientRequestId = `SAL-${invoiceNumber}-${Date.now()}`;
+      const clientRequestId = `SAL-${invoiceNumber}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const payload = {
         client_request_id: clientRequestId,
         invoice_number: invoiceNumber,

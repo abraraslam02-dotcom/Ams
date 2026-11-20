@@ -1158,6 +1158,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [clientRequestId, setClientRequestId] = useState<string>(
     () => `pur-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   );
+  const savingInvoiceRef = useRef<boolean>(false);
 
   // Fetch accurate Supplier Balance from actual ledger (excluding current invoice if editing)
   useEffect(() => {
@@ -3175,6 +3176,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       setLines(ensureMinimumPurchaseRows(loadedItems, visibleRowCapacityRef.current, 0));
       setSelectedPurchaseLineIndex(0);
+      setClientRequestId(`pur-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
       setShowHeldModal(false);
       setSubTab('new-invoice');
       setFormSuccess(
@@ -3282,95 +3284,96 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     targetStatus: 'completed' | 'held' = 'completed'
   ) => {
     if (e) e.preventDefault();
-    if (savingInvoice) return;
-    setFormError(null);
-    setFormSuccess(null);
+    if (savingInvoice || savingInvoiceRef.current) return;
+    savingInvoiceRef.current = true;
+    try {
+      setFormError(null);
+      setFormSuccess(null);
 
-    const resolvedSupplierId = supplierId;
-    if (!resolvedSupplierId) {
-      setFormError('Please select or add a Supplier Account before saving or holding.');
-      supplierSearchInputRef.current?.focus();
-      return;
-    }
-    if (validLines.length === 0) {
-      setFormError('Please add at least one Medicine Item to the Purchase Invoice before saving or holding.');
-      itemSearchInputRef.current?.focus();
-      return;
-    }
-
-    if (targetStatus === 'completed') {
-      if (isTaxOverridden && !taxOverrideReason.trim()) {
-        setFormError('Please enter a valid Override Reason for the Advance Tax override.');
+      const resolvedSupplierId = supplierId;
+      if (!resolvedSupplierId) {
+        setFormError('Please select or add a Supplier Account before saving or holding.');
+        supplierSearchInputRef.current?.focus();
+        return;
+      }
+      if (validLines.length === 0) {
+        setFormError('Please add at least one Medicine Item to the Purchase Invoice before saving or holding.');
+        itemSearchInputRef.current?.focus();
         return;
       }
 
-      for (let i = 0; i < validLines.length; i++) {
-        const l = validLines[i];
-        if (
-          (Number(l.quantity) || 0) <= 0 &&
-          (Number(l.bonus_quantity) || 0) <= 0 &&
-          (Number(l.loose_quantity) || 0) <= 0
-        ) {
-          const gridIdx = lines.findIndex((row) => row.item_id === l.item_id && row.batch_number === l.batch_number);
-          const focusIdx = gridIdx >= 0 ? gridIdx : i;
-          setSelectedPurchaseLineIndex(focusIdx);
-          setFormError(`Please enter a Quantity (or Loose Qty / Bonus Qty) for Row #${focusIdx + 1} (${l.item_name}).`);
-          setTimeout(() => {
-            const qtyEl =
-              purchaseViewMode === 'pos'
-                ? (document.getElementById(`pos_row_${focusIdx}_quantity`) as HTMLInputElement | null)
-                : (document.getElementById(`pur_cell_${focusIdx}_quantity`) as HTMLInputElement | null);
-            qtyEl?.focus();
-          }, 25);
+      if (targetStatus === 'completed') {
+        if (isTaxOverridden && !taxOverrideReason.trim()) {
+          setFormError('Please enter a valid Override Reason for the Advance Tax override.');
           return;
         }
+
+        for (let i = 0; i < validLines.length; i++) {
+          const l = validLines[i];
+          if (
+            (Number(l.quantity) || 0) <= 0 &&
+            (Number(l.bonus_quantity) || 0) <= 0 &&
+            (Number(l.loose_quantity) || 0) <= 0
+          ) {
+            const gridIdx = lines.findIndex((row) => row.item_id === l.item_id && row.batch_number === l.batch_number);
+            const focusIdx = gridIdx >= 0 ? gridIdx : i;
+            setSelectedPurchaseLineIndex(focusIdx);
+            setFormError(`Please enter a Quantity (or Loose Qty / Bonus Qty) for Row #${focusIdx + 1} (${l.item_name}).`);
+            setTimeout(() => {
+              const qtyEl =
+                purchaseViewMode === 'pos'
+                  ? (document.getElementById(`pos_row_${focusIdx}_quantity`) as HTMLInputElement | null)
+                  : (document.getElementById(`pur_cell_${focusIdx}_quantity`) as HTMLInputElement | null);
+              qtyEl?.focus();
+            }, 25);
+            return;
+          }
+        }
       }
-    }
 
-    const sanitizedItems = validLines.map((l) => ({
-      ...l,
-      variant_id: l.variant_id || null,
-      variant_code: l.variant_id ? (l.variant_code || null) : null,
-      variant_name: l.variant_id ? (l.variant_name || null) : null,
-      batch_number: l.batch_number?.trim() || `B-${l.variant_code || l.item_code || l.item_id}-01`,
-      expiry_date: l.expiry_date || '2028-12-31',
-      quantity: Number(l.quantity) || 0,
-      loose_quantity: Number(l.loose_quantity) || 0,
-      bonus_quantity: Number(l.bonus_quantity) || 0,
-      loose_rate: Number(l.loose_rate) || 0,
-      remarks: String(l.remarks || '').trim(),
-      ...(targetStatus === 'held'
-        ? { update_master_purchase_price: false, update_master_retail_price: false }
-        : {}),
-    }));
+      const sanitizedItems = validLines.map((l) => ({
+        ...l,
+        variant_id: l.variant_id || null,
+        variant_code: l.variant_id ? (l.variant_code || null) : null,
+        variant_name: l.variant_id ? (l.variant_name || null) : null,
+        batch_number: l.batch_number?.trim() || `B-${l.variant_code || l.item_code || l.item_id}-01`,
+        expiry_date: l.expiry_date || '2028-12-31',
+        quantity: Number(l.quantity) || 0,
+        loose_quantity: Number(l.loose_quantity) || 0,
+        bonus_quantity: Number(l.bonus_quantity) || 0,
+        loose_rate: Number(l.loose_rate) || 0,
+        remarks: String(l.remarks || '').trim(),
+        ...(targetStatus === 'held'
+          ? { update_master_purchase_price: false, update_master_retail_price: false }
+          : {}),
+      }));
 
-    const payload = {
-      bill_number: billNumber,
-      supplier_invoice_number: supplierInvoiceNumber.trim() || billNumber,
-      bill_date: billDate,
-      supplier_account_id: parseInt(resolvedSupplierId, 10),
-      supplier_filer_status: supplierFilerStatus,
-      invoice_discount_percent: invoiceDiscountPercent,
-      invoice_discount_amount: computedInvoiceDiscAmt,
-      is_tax_overridden: isTaxOverridden,
-      advance_tax_rate: appliedAdvanceTaxRate,
-      tax_override_reason: taxOverrideReason,
-      tax_override_authorized_by: taxOverrideAuthorizedBy,
-      payment_mode: paymentMode,
-      payment_account_id: paymentAccountId ? parseInt(paymentAccountId, 10) : null,
-      paid_amount: round2(paidAmount),
-      remarks: notes,
-      status: targetStatus,
-      from_hold_conversion: Boolean(
-        editingPurchaseId &&
-          String(editingPurchaseStatus || '').trim().toLowerCase() !== 'completed' &&
-          targetStatus === 'completed'
-      ),
-      client_request_id: clientRequestId,
-      items: sanitizedItems,
-    };
+      const payload = {
+        bill_number: billNumber,
+        supplier_invoice_number: supplierInvoiceNumber.trim() || billNumber,
+        bill_date: billDate,
+        supplier_account_id: parseInt(resolvedSupplierId, 10),
+        supplier_filer_status: supplierFilerStatus,
+        invoice_discount_percent: invoiceDiscountPercent,
+        invoice_discount_amount: computedInvoiceDiscAmt,
+        is_tax_overridden: isTaxOverridden,
+        advance_tax_rate: appliedAdvanceTaxRate,
+        tax_override_reason: taxOverrideReason,
+        tax_override_authorized_by: taxOverrideAuthorizedBy,
+        payment_mode: paymentMode,
+        payment_account_id: paymentAccountId ? parseInt(paymentAccountId, 10) : null,
+        paid_amount: round2(paidAmount),
+        remarks: notes,
+        status: targetStatus,
+        from_hold_conversion: Boolean(
+          editingPurchaseId &&
+            String(editingPurchaseStatus || '').trim().toLowerCase() !== 'completed' &&
+            targetStatus === 'completed'
+        ),
+        client_request_id: clientRequestId,
+        items: sanitizedItems,
+      };
 
-    try {
       setSavingInvoice(true);
       if (editingPurchaseId) {
         const postedPurId = editingPurchaseId;
@@ -3440,6 +3443,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
+      savingInvoiceRef.current = false;
       setSavingInvoice(false);
     }
   };
@@ -3973,6 +3977,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       });
       setLines(ensureMinimumPurchaseRows(normalizedItems, visibleRowCapacityRef.current, 0));
       setSelectedPurchaseLineIndex(0);
+      setClientRequestId(`pur-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`);
       setSubTab('new-invoice');
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : String(err));

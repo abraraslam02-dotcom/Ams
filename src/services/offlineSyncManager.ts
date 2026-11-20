@@ -1069,11 +1069,15 @@ class OfflineSyncManager {
       (crypto.randomUUID
         ? crypto.randomUUID()
         : `TX-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
-    const isHeldOrDraft =
-      payload.status === 'held' ||
-      payload.status === 'draft' ||
-      payload.status === 'Held' ||
-      payload.status === 'Draft';
+    const isHeldOrDraft = [
+      'held',
+      'hold',
+      'on_hold',
+      'on hold',
+      'draft',
+      'temp',
+      'temporary',
+    ].includes(String(payload.status || '').trim().toLowerCase());
 
     const now = new Date();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
@@ -1222,11 +1226,15 @@ class OfflineSyncManager {
       (crypto.randomUUID
         ? crypto.randomUUID()
         : `PUR-TX-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
-    const isHeldOrDraft =
-      payload.status === 'Held' ||
-      payload.status === 'Draft' ||
-      payload.status === 'held' ||
-      payload.status === 'draft';
+    const isHeldOrDraft = [
+      'held',
+      'hold',
+      'on_hold',
+      'on hold',
+      'draft',
+      'temp',
+      'temporary',
+    ].includes(String(payload.status || '').trim().toLowerCase());
 
     const now = new Date();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
@@ -1253,7 +1261,7 @@ class OfflineSyncManager {
       bill_number: localInvNo,
       invoice_number: localInvNo,
       bill_date: payload.bill_date || now.toISOString().slice(0, 10),
-      status: isHeldOrDraft ? 'Held' : 'Completed',
+      status: isHeldOrDraft ? 'held' : 'completed',
       sync_status: 'pending',
       created_at: now.toISOString(),
     };

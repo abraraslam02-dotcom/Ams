@@ -37,6 +37,22 @@ const WORKSTATION_AUTHORIZED_KEY = 'ams_workstation_authorized_v2';
 const DEVICE_ID_KEY = 'ams_registered_device_id';
 const DEVICE_NAME_KEY = 'ams_registered_device_name';
 
+function isNonPostedInvoiceStatus(status: unknown): boolean {
+  const s = String(status ?? '').trim().toLowerCase();
+  return (
+    s === 'cancelled' ||
+    s === 'canceled' ||
+    s === 'held' ||
+    s === 'hold' ||
+    s === 'on_hold' ||
+    s === 'on hold' ||
+    s === 'draft' ||
+    s === 'void' ||
+    s === 'voided' ||
+    s === 'preview'
+  );
+}
+
 function purgeLegacyAuthStorage(): void {
   try {
     localStorage.removeItem(LEGACY_TOKEN_KEY);
@@ -2855,7 +2871,23 @@ export const api = {
             await offlineStorage.delete('purchases', String(loc.client_tx_id)).catch(() => {});
           }
         }
-        offlineStorage.put('purchases', purRecord).catch(() => {});
+        // Purge any queued sync operations referencing this held/updated purchase so old held states never replay
+        const queuedPurOps = await offlineStorage.getAll<any>('sync_queue').catch(() => []);
+        for (const qItem of queuedPurOps) {
+          if (qItem?.entity !== 'purchases') continue;
+          const qLocalId = String(qItem?.local_id || '');
+          const qPayloadId = String(qItem?.payload?.id || '');
+          const matchesQueuedPur =
+            qLocalId === String(canonicalId) ||
+            qLocalId === String(id) ||
+            qPayloadId === String(canonicalId) ||
+            qPayloadId === String(id);
+          if (matchesQueuedPur && qItem?.client_tx_id) {
+            await offlineStorage.delete('sync_queue', String(qItem.client_tx_id)).catch(() => {});
+          }
+        }
+        await offlineStorage.put('purchases', purRecord).catch(() => {});
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
         return data;
       }
       if (res.status >= 400 && res.status < 500 && data.error) {
@@ -5352,7 +5384,7 @@ export const api = {
     let totalOut = 0;
 
     for (const p of purchases) {
-      if (p.status === 'cancelled' || p.status === 'draft') continue;
+      if (isNonPostedInvoiceStatus(p.status)) continue;
       for (const line of p.items || []) {
         if (params.item_id && Number(line.item_id) !== Number(params.item_id)) continue;
         const packs = Number(line.quantity || line.pack_qty || 0) + Number(line.bonus_quantity || line.bonus_qty || 0);
@@ -5376,7 +5408,7 @@ export const api = {
     }
 
     for (const s of sales) {
-      if (s.status === 'cancelled' || s.status === 'draft' || s.status === 'held') continue;
+      if (isNonPostedInvoiceStatus(s.status)) continue;
       for (const line of s.items || []) {
         if (params.item_id && Number(line.item_id) !== Number(params.item_id)) continue;
         const packs = Number(line.pack_qty || line.quantity || 0) + Number(line.bonus_qty || 0);
@@ -5875,7 +5907,7 @@ export const api = {
     let totalCredit = 0;
 
     for (const s of localSales) {
-      if (s.status === 'cancelled' || s.status === 'held' || s.status === 'draft') continue;
+      if (isNonPostedInvoiceStatus(s.status)) continue;
       if (params?.accountId && String(s.customer_account_id) !== String(params.accountId)) continue;
       const amt = Number(s.net_total ?? s.total_amount ?? 0);
       const rcv = Number(s.paid_amount ?? s.received_amount ?? 0);
@@ -5969,7 +6001,7 @@ export const api = {
     let totalCredit = 0;
 
     for (const p of localPurchases) {
-      if (p.status === 'cancelled' || p.status === 'held' || p.status === 'draft') continue;
+      if (isNonPostedInvoiceStatus(p.status)) continue;
       if (params?.accountId && String(p.supplier_account_id) !== String(params.accountId)) continue;
       const amt = Number(p.total_payable ?? p.net_total ?? p.net_amount ?? p.total_amount ?? 0);
       const paid = Number(p.paid_amount ?? 0);

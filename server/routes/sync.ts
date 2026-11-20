@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
-import { executePurchasePosting } from './purchases.ts';
+import { executePurchasePosting, reverseExistingPurchase } from './purchases.ts';
 import { processSaleUpsert } from './sales.ts';
 import { recalculateAccountBalance } from './accounts.ts';
+import { isHeldOrDraftStatus, normalizeInvoiceStatus } from '../services/ledgerIntegrityService.ts';
 import { allocateNextAccountCode } from '../utils/accountCodeGenerator.ts';
 import { ensureAuthTables, getOfflineAuthVaultProfiles } from '../services/authService.ts';
 import { authenticateToken } from '../middleware/authMiddleware.ts';
@@ -821,7 +822,42 @@ syncRouter.post('/push', (req: Request, res: Response) => {
             invoice_number: saleRow?.invoice_number || null,
           });
         } else if (action === 'CREATE_PURCHASE' || action === 'HOLD_PURCHASE') {
-          const targetStatus = action === 'HOLD_PURCHASE' ? 'held' : 'completed';
+          const incomingBillNo = String(payload.bill_number || '').trim();
+          const existingPur =
+            (db
+              .prepare('SELECT id, bill_number, status FROM purchases WHERE client_request_id = ? LIMIT 1')
+              .get(client_tx_id) as { id: number; bill_number: string; status: string } | undefined) ||
+            (incomingBillNo && action === 'HOLD_PURCHASE'
+              ? (db
+                  .prepare('SELECT id, bill_number, status FROM purchases WHERE bill_number = ? LIMIT 1')
+                  .get(incomingBillNo) as { id: number; bill_number: string; status: string } | undefined)
+              : undefined);
+
+          if (existingPur) {
+            db.prepare(`
+              INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
+              VALUES (?, ?, ?, 'purchases', ?, ?, 'synced', ?)
+            `).run(
+              client_tx_id,
+              deviceId,
+              action,
+              existingPur.id,
+              existingPur.bill_number,
+              JSON.stringify(payload)
+            );
+            results.push({
+              client_tx_id,
+              status: 'synced',
+              server_id: existingPur.id,
+              invoice_number: existingPur.bill_number,
+            });
+            continue;
+          }
+
+          const targetStatus =
+            action === 'HOLD_PURCHASE'
+              ? 'held'
+              : normalizeInvoiceStatus(payload.status, 'completed');
           const rawPurItems = Array.isArray(payload.items)
             ? payload.items
             : Array.isArray(payload.lines)
@@ -833,17 +869,20 @@ syncRouter.post('/push', (req: Request, res: Response) => {
             bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
             loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
           }));
-          const purchaseId = executePurchasePosting({
-            ...payload,
-            items: normalizedPurItems,
-            status: targetStatus,
-            client_request_id: client_tx_id,
-          });
-          try {
-            db.prepare('UPDATE purchases SET client_request_id = ? WHERE id = ?').run(client_tx_id, purchaseId);
-          } catch {
-            // ignore
-          }
+          const purchaseId = db.transaction(() => {
+            const pId = executePurchasePosting({
+              ...payload,
+              items: normalizedPurItems,
+              status: targetStatus,
+              client_request_id: client_tx_id,
+            });
+            db.prepare('UPDATE purchases SET client_request_id = ?, updated_at = ? WHERE id = ?').run(
+              client_tx_id,
+              new Date().toISOString(),
+              pId
+            );
+            return pId;
+          })();
 
           const purRow = db
             .prepare('SELECT bill_number FROM purchases WHERE id = ?')
@@ -866,10 +905,14 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           const existingPurRow = targetId > 0
             ? (db.prepare('SELECT id, bill_number, status, created_at, updated_at FROM purchases WHERE id = ?').get(targetId) as any)
             : undefined;
-          const incomingPurSt = String(payload.status || '').trim().toLowerCase();
-          const isIncomingHeldPur = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(incomingPurSt);
+          const isIncomingHeldPur = isHeldOrDraftStatus(payload.status);
           const isExistingCompletedPur = ['completed', 'posted'].includes(String(existingPurRow?.status || '').trim().toLowerCase());
-          if (existingPurRow && (isIncomingStale(existingPurRow, payload) || (isExistingCompletedPur && isIncomingHeldPur))) {
+          const isDuplicateHoldConversion = Boolean(payload.from_hold_conversion) && isExistingCompletedPur;
+          if (existingPurRow && (isIncomingStale(existingPurRow, payload) || (isExistingCompletedPur && isIncomingHeldPur) || isDuplicateHoldConversion)) {
+            db.prepare(`
+              INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
+              VALUES (?, ?, 'UPDATE_PURCHASE', 'purchases', ?, ?, 'synced', ?)
+            `).run(client_tx_id, deviceId, targetId, existingPurRow.bill_number || '', JSON.stringify(payload));
             results.push({
               client_tx_id,
               status: 'synced',
@@ -883,18 +926,30 @@ syncRouter.post('/push', (req: Request, res: Response) => {
             : Array.isArray(payload.lines)
             ? payload.lines
             : [];
-          const purchaseId = executePurchasePosting(
-            {
-              ...payload,
-              items: rawUpdatePurItems.map((line: any) => ({
-                ...line,
-                quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
-                bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
-                loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
-              })),
-            },
-            targetId > 0 ? targetId : undefined
-          );
+          const normalizedUpdateItems = rawUpdatePurItems.map((line: any) => ({
+            ...line,
+            quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
+            bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
+            loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
+          }));
+          const purchaseId = db.transaction(() => {
+            if (targetId > 0 && existingPurRow) {
+              reverseExistingPurchase(targetId, 'Offline Sync Edit & Re-posting', 'edit');
+              db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(targetId);
+            }
+            const pId = executePurchasePosting(
+              {
+                ...payload,
+                items: normalizedUpdateItems,
+              },
+              targetId > 0 && existingPurRow ? targetId : undefined
+            );
+            db.prepare('UPDATE purchases SET updated_at = ? WHERE id = ?').run(
+              new Date().toISOString(),
+              pId
+            );
+            return pId;
+          })();
           const purRow = db
             .prepare('SELECT bill_number FROM purchases WHERE id = ?')
             .get(purchaseId) as { bill_number: string } | undefined;

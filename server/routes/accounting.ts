@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
-import { recalculateAccountBalance } from './accounts.ts';
+import { recalculateAccountBalance, POSTED_INVOICE_JE_FILTER_SQL } from './accounts.ts';
 import { round2 } from './purchases.ts';
 
 export const accountingRouter = Router();
@@ -149,6 +149,7 @@ function computeAccountSignedOpeningAsOf(accountId: number, startDate?: string):
          INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
          WHERE jl.account_id = ?
            AND je.status = 'posted'
+           AND ${POSTED_INVOICE_JE_FILTER_SQL}
            AND DATE(je.entry_date) < DATE(?)`
       )
       .get(accountId, startDate.trim()) as { dr: number; cr: number };
@@ -1140,7 +1141,7 @@ function buildDetailedAccountLedger(
   const openInfo = computeAccountSignedOpeningAsOf(accountId, startDate);
   const acc = openInfo.account;
 
-  const conds: string[] = ['jl.account_id = ?', "je.status = 'posted'"];
+  const conds: string[] = ['jl.account_id = ?', "je.status = 'posted'", POSTED_INVOICE_JE_FILTER_SQL];
   const params: unknown[] = [accountId];
 
   if (startDate && startDate.trim()) {
@@ -1813,6 +1814,7 @@ function computeAllAccountPeriodBalances(startDate?: string, endDate?: string) {
          FROM journal_entry_lines jl
          INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
          WHERE je.status = 'posted'
+           AND ${POSTED_INVOICE_JE_FILTER_SQL}
            AND DATE(je.entry_date) < DATE(?)
          GROUP BY jl.account_id`
       )
@@ -1822,7 +1824,7 @@ function computeAllAccountPeriodBalances(startDate?: string, endDate?: string) {
     }
   }
 
-  const periodConds: string[] = ["je.status = 'posted'"];
+  const periodConds: string[] = ["je.status = 'posted'", POSTED_INVOICE_JE_FILTER_SQL];
   const periodParams: unknown[] = [];
   if (startDate && startDate.trim()) {
     periodConds.push('DATE(je.entry_date) >= DATE(?)');
@@ -2102,6 +2104,7 @@ accountingRouter.get('/reports/:reportType', (req: Request, res: Response) => {
           const conds: string[] = [
             `jl.account_id IN (${cashIds.join(',')})`,
             "je.status = 'posted'",
+            POSTED_INVOICE_JE_FILTER_SQL,
           ];
           const params: unknown[] = [];
           if (startDate && startDate.trim()) {
@@ -2160,7 +2163,7 @@ accountingRouter.get('/reports/:reportType', (req: Request, res: Response) => {
       }
 
       case 'day-book': {
-        const conds: string[] = ["je.status = 'posted'"];
+        const conds: string[] = ["je.status = 'posted'", POSTED_INVOICE_JE_FILTER_SQL];
         const params: unknown[] = [];
         if (startDate && startDate.trim()) {
           conds.push('DATE(je.entry_date) >= DATE(?)');

@@ -13,6 +13,11 @@ import {
 import { recordBatchStockMovement } from '../services/fifoAndOfferEngine.ts';
 import { getEnrichedVariants, type EnrichedVariantRecord } from '../services/itemVariantService.ts';
 import { assertPeriodOpen } from '../utils/periodLock.ts';
+import {
+  cleanupPurchaseJournalEntries,
+  isHeldOrDraftStatus,
+  normalizeInvoiceStatus,
+} from '../services/ledgerIntegrityService.ts';
 
 export const purchasesRouter = Router();
 
@@ -1772,13 +1777,11 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     throw new Error('Selected Supplier Account does not exist.');
   }
 
-  const rawStatusLower = String(payload.status || 'completed').trim().toLowerCase();
-  const targetStatus: 'draft' | 'held' | 'completed' =
-    ['held', 'on_hold', 'on hold', 'hold'].includes(rawStatusLower)
-      ? 'held'
-      : rawStatusLower === 'draft'
-      ? 'draft'
-      : 'completed';
+  const normalizedStatus = normalizeInvoiceStatus(payload.status, 'completed');
+  if (!['draft', 'held', 'completed'].includes(normalizedStatus)) {
+    throw new Error('Invalid purchase invoice status. Must be draft, held, or completed.');
+  }
+  const targetStatus = normalizedStatus as 'draft' | 'held' | 'completed';
 
   const companySettingsRow = db
     .prepare('SELECT batch_wise_purchase FROM company_settings ORDER BY id ASC LIMIT 1')
@@ -2603,6 +2606,10 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
   // Post Balanced Double-Entry Accounting Entries (strictly for completed purchases)
   if (targetStatus === 'completed') {
+    // Defensive idempotency: remove any pre-existing PURCHASE / edit-reversal JE for this invoice
+    // so editing/re-posting always results in strictly ONE active ledger entry.
+    cleanupPurchaseJournalEntries(purchaseId, { includeEditReversalAdjustments: true });
+
     const purchaseAccId = getSystemAccountId('PUR-5001');
     const purchaseDiscountAccId = getSystemAccountId('INC-4020');
     const inventoryAssetAccId = getSystemAccountId('INV-1030');
@@ -2754,8 +2761,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     // Recalculate all touched account balances
     touchedAccounts.forEach((accId) => recalculateAccountBalance(accId));
   } else {
-    // If held/draft, ensure no journal entry is bound
-    db.prepare('UPDATE purchases SET journal_entry_id = NULL WHERE id = ?').run(purchaseId);
+    // Held or draft invoices must NEVER create or retain any journal entry
+    cleanupPurchaseJournalEntries(purchaseId, { includeEditReversalAdjustments: true });
   }
 
   return purchaseId;
@@ -2763,9 +2770,14 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
 /**
  * Internal helper to reverse stock and accounting entries of an existing Purchase Invoice
- * (used for safe cancellation and safe editing via reversal entries)
+ * - When mode === 'edit', cleans previous stock movements and JEs so the updated invoice posts as one clean entry.
+ * - When mode === 'cancel', posts a formal double-entry Reversal JE so the cancelled invoice remains audited.
  */
-function reverseExistingPurchase(purchaseId: number, reason: string): void {
+export function reverseExistingPurchase(
+  purchaseId: number,
+  reason: string,
+  mode: 'edit' | 'cancel' = 'cancel'
+): void {
   const db = getDatabase();
   const existing = db
     .prepare('SELECT * FROM purchases WHERE id = ?')
@@ -2778,9 +2790,10 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
     throw new Error(`Purchase Invoice "${existing.bill_number}" is already cancelled.`);
   }
 
-  // Held and draft purchase invoices never updated stock or accounting ledgers
-  const existingStLower = String(existing.status || '').trim().toLowerCase();
-  if (['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(existingStLower)) {
+  // Held and draft purchase invoices never updated stock or accounting ledgers;
+  // defensively ensure no stray JEs remain bound and return cleanly.
+  if (isHeldOrDraftStatus(existing.status)) {
+    cleanupPurchaseJournalEntries(purchaseId, { includeEditReversalAdjustments: true });
     return;
   }
 
@@ -2849,7 +2862,16 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
     }
   }
 
-  // 2. Post formal Double-Entry Reversal Journal Entry (swapping Debits & Credits of original entry)
+  // Remove previous batch stock movement logs recorded for this purchase invoice when editing
+  if (mode === 'edit') {
+    db.prepare(
+      "DELETE FROM batch_stock_movements WHERE reference_type = 'PURCHASE_INVOICE' AND reference_id = ?"
+    ).run(purchaseId);
+    cleanupPurchaseJournalEntries(purchaseId, { includeEditReversalAdjustments: true });
+    return;
+  }
+
+  // 2. For permanent cancellation, post formal Double-Entry Reversal Journal Entry (swapping Debits & Credits of original entry)
   const touchedAccounts = new Set<number>([Number(existing.supplier_account_id)]);
   if (existing.journal_entry_id) {
     const origEntry = db
@@ -2898,7 +2920,7 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
     }
   }
 
-  // Recalculate all touched account balances after reversal
+  // Recalculate all touched account balances after cancellation reversal
   touchedAccounts.forEach((accId) => recalculateAccountBalance(accId));
 }
 
@@ -3026,10 +3048,10 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
     }
 
     const reqClientId = req.body?.client_request_id ? String(req.body.client_request_id).trim() : '';
+    const isFromHoldConversion = Boolean(req.body?.from_hold_conversion);
     if (
       existingStatus === 'completed' &&
-      reqClientId &&
-      existing.client_request_id === reqClientId
+      (isFromHoldConversion || (reqClientId && existing.client_request_id === reqClientId))
     ) {
       return res.status(409).json({
         success: false,
@@ -3039,6 +3061,12 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
     }
 
     if (existingStatus === 'completed') {
+      if (isHeldOrDraftStatus(req.body?.status)) {
+        return res.status(400).json({
+          success: false,
+          error: 'A posted Purchase Invoice cannot be downgraded back to Hold or Draft. Use Purchase Return or Cancel instead.',
+        });
+      }
       const role = req.user?.role || '';
       if (role !== 'Super Admin' && role !== 'Administrator') {
         return res.status(403).json({
@@ -3063,7 +3091,7 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
 
     const username = req.user?.username || 'Super Admin';
     const editTx = db.transaction(() => {
-      reverseExistingPurchase(id, 'Invoice Edit & Re-posting');
+      reverseExistingPurchase(id, 'Invoice Edit & Re-posting', 'edit');
       db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(id);
       executePurchasePosting(req.body, id);
       db.prepare('UPDATE purchases SET updated_by = ?, client_request_id = COALESCE(?, client_request_id) WHERE id = ?').run(
@@ -3131,8 +3159,9 @@ function handleCancelOrDeletePurchase(req: Request, res: Response) {
     assertPeriodOpen(String(existing.bill_date || ''), 'cancel or delete a purchase invoice');
 
     // Held or draft purchases never affected stock or ledgers; allow clean discarding
-    if (['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(String(existing.status || '').trim().toLowerCase())) {
+    if (isHeldOrDraftStatus(existing.status)) {
       const discardTx = db.transaction(() => {
+        cleanupPurchaseJournalEntries(id, { includeEditReversalAdjustments: true });
         db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(id);
         db.prepare('DELETE FROM purchases WHERE id = ?').run(id);
       });
@@ -3161,7 +3190,7 @@ function handleCancelOrDeletePurchase(req: Request, res: Response) {
     );
 
     const cancelTx = db.transaction(() => {
-      reverseExistingPurchase(id, String(reason).trim());
+      reverseExistingPurchase(id, String(reason).trim(), 'cancel');
       db.prepare(`
         UPDATE purchases SET
           status = 'cancelled',
