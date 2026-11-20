@@ -184,7 +184,7 @@ export function ensureMinimumPurchaseRows(
 }
 
 // Enable inline item suggestions while typing in the Item Code / Item Name cells.
-const ROW_SUGGESTIONS_ENABLED = true;
+const ROW_SUGGESTIONS_ENABLED = false;
 
 export function findNextBlankPurchaseRowIndex(
   inputLines: PurchaseLineItem[],
