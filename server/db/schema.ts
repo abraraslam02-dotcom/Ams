@@ -1145,6 +1145,41 @@ CREATE INDEX IF NOT EXISTS idx_closing_acc_snap_acc ON closing_account_snapshots
 CREATE INDEX IF NOT EXISTS idx_closing_stk_snap_cid ON closing_stock_snapshots(closing_id);
 CREATE INDEX IF NOT EXISTS idx_closing_stk_snap_item ON closing_stock_snapshots(item_id);
 CREATE INDEX IF NOT EXISTS idx_closing_audit_cid ON closing_audit_logs(closing_id);
+
+-- 39. Item Multi-Level Packing Hierarchy (Carton -> Box -> Strip -> Tablet)
+CREATE TABLE IF NOT EXISTS item_packing_levels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    variant_id INTEGER DEFAULT NULL,
+    packing_level INTEGER NOT NULL DEFAULT 1,
+    packing_unit TEXT NOT NULL,
+    parent_unit TEXT DEFAULT NULL,
+    quantity_per_parent REAL NOT NULL DEFAULT 1,
+    base_unit_conversion REAL NOT NULL DEFAULT 1,
+    packing_barcode TEXT DEFAULT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE
+);
+
+-- 40. Item Multiple Purchase Units Configuration
+CREATE TABLE IF NOT EXISTS item_purchase_units (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    variant_id INTEGER DEFAULT NULL,
+    purchase_unit TEXT NOT NULL,
+    purchase_unit_conversion REAL NOT NULL DEFAULT 1,
+    purchase_unit_rate REAL NOT NULL DEFAULT 0.0,
+    is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+    allow_fractional INTEGER NOT NULL DEFAULT 0 CHECK(allow_fractional IN (0, 1)),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_packing_levels_item ON item_packing_levels(item_id, packing_level);
+CREATE INDEX IF NOT EXISTS idx_item_packing_levels_barcode ON item_packing_levels(packing_barcode COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_item_purchase_units_item ON item_purchase_units(item_id, is_default DESC);
 `;
 
 

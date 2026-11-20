@@ -163,6 +163,39 @@
   }
 
   /* 10. Thermal printer specific overrides when element has .thermal-receipt */
+  html:has(.thermal-80mm),
+  body:has(.thermal-80mm) {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  html:has(.thermal-58mm),
+  body:has(.thermal-58mm) {
+    width: 58mm !important;
+    max-width: 58mm !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .print-modal-container:has(.thermal-receipt),
+  .print-modal-container:has(.thermal-receipt) > div,
+  .print-modal-container:has(.thermal-receipt) .overflow-auto,
+  .ams-screen-zoom-wrapper:has(.thermal-receipt) {
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: flex-start !important;
+    align-items: flex-start !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+  }
   .thermal-receipt,
   .thermal-80mm {
     page: thermal-80-page !important;
@@ -170,8 +203,9 @@
     width: 80mm !important;
     height: auto !important;
     min-height: 0 !important;
-    margin: 0 auto !important;
-    padding: 1.5mm 2mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    align-self: flex-start !important;
     font-size: 12px !important;
     line-height: 1.28 !important;
   }
@@ -181,8 +215,9 @@
     width: 58mm !important;
     height: auto !important;
     min-height: 0 !important;
-    margin: 0 auto !important;
-    padding: 1mm 1.5mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    align-self: flex-start !important;
     font-size: 10.5px !important;
     line-height: 1.25 !important;
   }

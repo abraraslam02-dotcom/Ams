@@ -17,6 +17,7 @@ export interface ItemVariant {
   category?: string;
   variant_code: string;
   variant_name: string;
+  variant_group?: string;
   colour: string;
   flavour: string;
   variant_type: string;
@@ -71,6 +72,29 @@ export interface ItemVariant {
 
 export type ItemPurchaseUnit = 'Carton' | 'Box' | 'Strip' | 'Tablet';
 
+export interface ItemPackingLevel {
+  id?: number;
+  item_id?: number;
+  variant_id?: number | null;
+  packing_level: number;
+  packing_unit: string;
+  parent_unit?: string | null;
+  quantity_per_parent: number;
+  base_unit_conversion: number;
+  packing_barcode?: string | null;
+}
+
+export interface ItemPurchaseUnitConfig {
+  id?: number;
+  item_id?: number;
+  variant_id?: number | null;
+  purchase_unit: string;
+  purchase_unit_conversion: number;
+  purchase_unit_rate: number;
+  is_default: number | boolean;
+  allow_fractional: number | boolean;
+}
+
 export interface Item {
   id: number;
   item_code: string;
@@ -105,6 +129,8 @@ export interface Item {
   active_variant_count?: number;
   consolidated_stock_packs?: number;
   variants?: ItemVariant[];
+  packing_levels?: ItemPackingLevel[];
+  purchase_units?: ItemPurchaseUnitConfig[];
   status: 'Active' | 'Inactive';
   created_at: string;
   updated_at: string;

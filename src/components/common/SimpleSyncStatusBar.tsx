@@ -6,12 +6,14 @@ interface SimpleSyncStatusBarProps {
   compact?: boolean;
   dark?: boolean;
   onSyncCompleted?: () => void;
+  onManualSyncCompleted?: () => void;
 }
 
 export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
   compact = false,
   dark = false,
   onSyncCompleted,
+  onManualSyncCompleted,
 }) => {
   const [syncState, setSyncState] = useState<SyncState>(() => offlineSyncManager.getState());
 
@@ -30,7 +32,7 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
   const handleSyncNow = async () => {
     const ok = await offlineSyncManager.syncNow();
     if (ok) {
-      onSyncCompleted?.();
+      onManualSyncCompleted?.();
     }
   };
 

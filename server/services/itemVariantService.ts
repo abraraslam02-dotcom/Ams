@@ -44,6 +44,7 @@ export interface EnrichedVariantRecord {
   category: string;
   variant_code: string;
   variant_name: string;
+  variant_group: string;
   colour: string;
   flavour: string;
   variant_type: string;
@@ -385,6 +386,7 @@ export function getEnrichedVariants(filters?: {
       category: String(r.parent_category || ''),
       variant_code: String(r.variant_code || ''),
       variant_name: String(r.variant_name || ''),
+      variant_group: String(r.variant_group || ''),
       colour: String(r.colour || ''),
       flavour: String(r.flavour || ''),
       variant_type: String(r.variant_type || ''),

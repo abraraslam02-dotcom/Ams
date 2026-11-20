@@ -60,10 +60,43 @@ async function startServer() {
   console.log(` [AMS] Timezone: ${config.appTimezone} (${config.appTimezoneOffset})`);
   console.log('----------------------------------------------------');
 
-  // Verify local SQLite database synchronously (<15ms) so server starts immediately
+  // Verify local SQLite database synchronously (<15ms) with strict record-count protection across boot & migrations
+  const captureCoreTableCounts = (database: ReturnType<typeof getDatabase>): Record<string, number> => {
+    const coreTables = ['items', 'accounts', 'sales', 'purchases', 'inventory', 'journal_entries', 'users'];
+    const existing = new Set(
+      (
+        database
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name)
+    );
+    const counts: Record<string, number> = {};
+    for (const tbl of coreTables) {
+      if (existing.has(tbl)) {
+        const row = database.prepare(`SELECT COUNT(*) as cnt FROM "${tbl}"`).get() as { cnt: number };
+        counts[tbl] = Number(row?.cnt || 0);
+      } else {
+        counts[tbl] = 0;
+      }
+    }
+    return counts;
+  };
+
   try {
+    const preBootCounts = captureCoreTableCounts(getDatabase());
     const migration = runMigrations();
     console.log(`[AMS DB] ${migration.message}`);
+
+    const postBootCounts = captureCoreTableCounts(getDatabase());
+    const droppedTables = Object.keys(preBootCounts).filter(
+      (tbl) => preBootCounts[tbl] > 0 && postBootCounts[tbl] < preBootCounts[tbl]
+    );
+    if (droppedTables.length > 0) {
+      throw new Error(
+        `[AMS Publish Guard] Aborted boot because migration caused unexpected record drop in [${droppedTables.join(', ')}] (${JSON.stringify(preBootCounts)} -> ${JSON.stringify(postBootCounts)}).`
+      );
+    }
+
     ensureAuthTables(getDatabase());
     const auditReport = reconcileHeldAndDuplicateLedgerEntries();
     if (
@@ -76,6 +109,11 @@ async function startServer() {
       console.log('[AMS Ledger Audit]', auditReport);
     }
 
+    const verifiedCounts = captureCoreTableCounts(getDatabase());
+    console.log(
+      `[AMS Publish Guard] Record count verification passed: items=${verifiedCounts.items}, accounts=${verifiedCounts.accounts}, sales=${verifiedCounts.sales}, purchases=${verifiedCounts.purchases}, inventory=${verifiedCounts.inventory}, users=${verifiedCounts.users}`
+    );
+
     const connectionTest = checkDatabaseConnection();
     console.log(`[AMS DB] Connection verification: ${connectionTest.connected ? 'SUCCESS' : 'FAILED'}`);
     console.log(`[AMS DB] Storage: ${connectionTest.databasePath} (${connectionTest.fileSizeBytes} bytes)`);
@@ -84,6 +122,9 @@ async function startServer() {
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error(`[AMS DB ERROR] Migration or connection failed: ${errorMsg}`);
+    if (errorMsg.includes('[AMS Publish Guard]') || errorMsg.includes('pre-migration safety backup')) {
+      throw err;
+    }
   }
 
   function applyNoStoreHeaders(res: express.Response) {

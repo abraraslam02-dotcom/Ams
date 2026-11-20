@@ -297,7 +297,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         paperSize: '80mm',
         profileId: 'thermal-80mm',
         orientation: 'portrait',
-        margin: printOpts.margin,
+        margin: 'none',
         fontSizeScale: printOpts.fontSizeScale,
         copies: 1,
         selectedPrinter: printOpts.selectedPrinter,
@@ -310,7 +310,9 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
     <div
       className={`print-modal-container fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center ${
         zoomState.isFullScreen ? 'p-0' : 'p-2 lg:p-3'
-      } overflow-hidden print:static print:bg-white print:p-0`}
+      } overflow-hidden print:static print:bg-white print:p-0 print:m-0 ${
+        activeLayout === 'thermal' ? 'print:block print:justify-start print:items-start' : ''
+      }`}
     >
       <div
         className={`bg-white shadow-2xl border border-slate-300 w-full flex flex-col overflow-hidden print:shadow-none print:border-0 print:max-w-none print:max-h-none ${
@@ -414,7 +416,9 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         <div
           ref={zoomState.viewportRef}
           onWheel={zoomState.handleWheelZoom}
-          className="flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:bg-white print:overflow-visible"
+          className={`flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:m-0 print:bg-white print:overflow-visible ${
+            activeLayout === 'thermal' ? 'print:block print:justify-start print:items-start' : ''
+          }`}
         >
           {!dsrData.hasItems ? (
             <div className="bg-white rounded-xl border border-slate-200 p-8 max-w-md w-full text-center my-auto space-y-3">
@@ -443,7 +447,11 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
             <div
               ref={zoomState.contentRef}
               style={{ zoom: `${zoomState.zoom}%` } as React.CSSProperties}
-              className="ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75"
+              className={`ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75 ${
+                activeLayout === 'thermal'
+                  ? 'print:flex print:flex-col print:justify-start print:items-start print:m-0 print:p-0'
+                  : ''
+              }`}
             >
               {/* =========================================================================
                  1. STANDARD A4 PORTRAIT (210mm x 297mm) DSR REPORT LAYOUT (COMPACT PAGE-SAVER)
@@ -622,12 +630,18 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                  2. 80MM THERMAL RECEIPT DSR REPORT LAYOUT (COMPACT PAPER-SAVER)
                  ========================================================================= */}
               <div
-                className={activeLayout === 'thermal' ? 'inline-flex justify-center items-start' : 'hidden'}
+                className={
+                  activeLayout === 'thermal'
+                    ? 'inline-flex justify-center items-start print:flex print:flex-col print:justify-start print:items-start print:m-0 print:p-0'
+                    : 'hidden'
+                }
               >
                 <div
                   ref={thermalPrintRef}
                   style={{ width: '80mm', maxWidth: '80mm', height: 'auto', minHeight: 0 }}
-                  className="thermal-receipt bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-tight self-start h-auto min-h-0 thermal-80mm w-[80mm] max-w-[80mm] px-[2.5mm] py-[2.5mm] text-[12px] relative print:border-0 print:shadow-none print:p-1"
+                  className={`${
+                    activeLayout === 'thermal' ? 'thermal-receipt thermal-80mm' : ''
+                  } bg-white border border-slate-400 shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-black font-sans tabular-nums leading-tight self-start h-auto min-h-0 w-[80mm] max-w-[80mm] px-[2.5mm] py-[2.5mm] text-[12px] relative print:border-0 print:shadow-none print:p-0 print:m-0`}
                 >
                   {/* Centered Store Header (exact 80mm Sales Bill typography) */}
                   <div className="text-center pb-1.5">

@@ -104,6 +104,20 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         minimum_stock: r.minimum_stock,
         rack_number: r.rack_number,
         status: r.status,
+        variant_group: r.variant_group,
+        variant_name: r.variant_name,
+        variant_code: r.variant_code,
+        variant_attributes: r.variant_attributes,
+        packing_level: r.packing_level,
+        packing_unit: r.packing_unit,
+        quantity_per_parent: r.quantity_per_parent,
+        base_unit_conversion: r.base_unit_conversion,
+        packing_barcode: r.packing_barcode,
+        purchase_unit: r.purchase_unit,
+        purchase_unit_conversion: r.purchase_unit_conversion,
+        purchase_unit_rate: r.purchase_unit_rate,
+        default_purchase_unit: r.default_purchase_unit,
+        allow_fractional_purchase: r.allow_fractional_purchase,
       }));
 
       const res = await api.bulkImportItems(payload, updateExisting);
@@ -153,7 +167,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                 <span>Spreadsheet Format Specification</span>
               </span>
               <p className="text-xs text-slate-600">
-                Download the standardized template containing all 17 Items Master columns.
+                Download the standardized template containing all 31 Items Master columns (including Variants, Multi-Level Packing, and Purchase Units).
               </p>
             </div>
             <button
@@ -286,6 +300,9 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                         <th className="py-2 px-2.5">Company</th>
                         <th className="py-2 px-2.5">Category</th>
                         <th className="py-2 px-2.5">Packing</th>
+                        <th className="py-2 px-2.5">Variant</th>
+                        <th className="py-2 px-2.5">Packing Level</th>
+                        <th className="py-2 px-2.5">Purchase Unit</th>
                         <th className="py-2 px-2.5">Retail Price</th>
                         <th className="py-2 px-2.5">Opening Stock</th>
                         <th className="py-2 px-2.5">Validation Notes</th>
@@ -314,6 +331,25 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                           <td className="py-1.5 px-2.5">{row.company_name}</td>
                           <td className="py-1.5 px-2.5">{row.category}</td>
                           <td className="py-1.5 px-2.5 font-mono">{row.packing}</td>
+                          <td className="py-1.5 px-2.5 text-[11px]">
+                            {row.variant_name || row.variant_code
+                              ? `${row.variant_code ? `[${row.variant_code}] ` : ''}${row.variant_name}`
+                              : '—'}
+                          </td>
+                          <td className="py-1.5 px-2.5 text-[11px] font-mono">
+                            {row.packing_unit
+                              ? `L${row.packing_level || '?'}: ${row.packing_unit}${
+                                  row.base_unit_conversion ? ` (${row.base_unit_conversion}x)` : ''
+                                }`
+                              : '—'}
+                          </td>
+                          <td className="py-1.5 px-2.5 text-[11px]">
+                            {row.purchase_unit
+                              ? `${row.purchase_unit}${
+                                  row.default_purchase_unit ? ' ★' : ''
+                                }`
+                              : '—'}
+                          </td>
                           <td className="py-1.5 px-2.5 font-mono font-bold">Rs. {row.retail_price.toFixed(2)}</td>
                           <td className="py-1.5 px-2.5 font-mono">{row.opening_stock}</td>
                           <td className="py-1.5 px-2.5 text-[11px]">

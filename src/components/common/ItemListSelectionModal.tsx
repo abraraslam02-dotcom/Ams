@@ -49,6 +49,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
   const [highlightIdx, setHighlightIdx] = useState<number>(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const tableContainerRef = useRef<HTMLDivElement | null>(null);
+  const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -89,11 +90,25 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
   const hasTargetItem = Boolean(targetRowIndex !== null && targetRowItem?.item_id);
 
   const scrollRowIntoView = (nextIdx: number) => {
-    window.setTimeout(() => {
-      tableContainerRef.current
-        ?.querySelector(`[data-item-list-modal-idx="${nextIdx}"]`)
-        ?.scrollIntoView({ block: 'nearest' });
-    }, 0);
+    window.requestAnimationFrame(() => {
+      const container = tableContainerRef.current;
+      if (!container) return;
+      const rowEl = container.querySelector(
+        `[data-item-list-modal-idx="${nextIdx}"]`
+      ) as HTMLElement | null;
+      if (!rowEl) return;
+      const theadEl = container.querySelector('thead') as HTMLElement | null;
+      const stickyHeaderHeight = theadEl ? theadEl.offsetHeight : 0;
+      const rowTop = rowEl.offsetTop;
+      const rowBottom = rowTop + rowEl.offsetHeight;
+      const viewTop = container.scrollTop;
+      const viewBottom = viewTop + container.clientHeight;
+      if (rowTop - stickyHeaderHeight < viewTop) {
+        container.scrollTop = Math.max(0, rowTop - stickyHeaderHeight);
+      } else if (rowBottom > viewBottom) {
+        container.scrollTop = rowBottom - container.clientHeight;
+      }
+    });
   };
 
   const handleModalKeyDown = (e: React.KeyboardEvent) => {
@@ -253,7 +268,14 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                       key={it.id}
                       data-item-list-modal-idx={idx}
                       tabIndex={-1}
-                      onMouseEnter={() => setHighlightIdx(idx)}
+                      onMouseMove={(e) => {
+                        const last = lastPointerPosRef.current;
+                        if (last && last.x === e.clientX && last.y === e.clientY) return;
+                        lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+                        if (highlightIdx !== idx) {
+                          setHighlightIdx(idx);
+                        }
+                      }}
                       onClick={() => onSelectItem(it)}
                       className={`cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400 ${
                         isHighlighted

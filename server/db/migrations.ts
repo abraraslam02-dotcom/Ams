@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import Database from 'better-sqlite3';
 import { getDatabase } from './connection.ts';
 import { SCHEMA_SQL } from './schema.ts';
 import { config } from '../config.ts';
@@ -12,7 +15,57 @@ export interface MigrationResult {
   appliedMigration: string;
   tablesVerified: number;
   newlyAppliedCount: number;
+  preMigrationBackupPath?: string | null;
   message: string;
+}
+
+function createVerifiedPreMigrationBackup(db: Database.Database): string {
+  const runtimeDir = path.dirname(config.databasePath);
+  const backupDir = path.resolve(runtimeDir, 'backups');
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true });
+  }
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}-${String(now.getMilliseconds()).padStart(3, '0')}`;
+  const filename = `Pre_Migration_${stamp}.db`;
+  const backupPath = path.join(backupDir, filename);
+
+  try {
+    db.pragma('wal_checkpoint(PASSIVE)');
+  } catch {
+    // ignore passive checkpoint warning
+  }
+
+  try {
+    const escaped = backupPath.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${escaped}';`);
+  } catch {
+    fs.copyFileSync(config.databasePath, backupPath);
+  }
+
+  if (!fs.existsSync(backupPath) || fs.statSync(backupPath).size < 4096) {
+    throw new Error(`Pre-migration backup file invalid or missing at ${backupPath}`);
+  }
+
+  let verifyDb: Database.Database | null = null;
+  try {
+    verifyDb = new Database(backupPath, { readonly: true, fileMustExist: true });
+    const integrity = String(verifyDb.pragma('integrity_check', { simple: true }) || '');
+    if (integrity.toLowerCase() !== 'ok') {
+      throw new Error(`Pre-migration backup failed integrity_check: ${integrity}`);
+    }
+  } finally {
+    if (verifyDb) {
+      try {
+        verifyDb.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return backupPath;
 }
 
 /**
@@ -63,6 +116,78 @@ export function runMigrations(): MigrationResult {
   const migrationName29 = '029_item_companies_master';
   const migrationName30 = '030_buyer_field_and_lookup_indexes';
   const migrationName31 = '031_item_variant_management_and_product_pictures';
+  const expectedMigrationNames = [
+    migrationName1,
+    migrationName2,
+    migrationName3,
+    migrationName4,
+    migrationName5,
+    migrationName6,
+    migrationName7,
+    migrationName8,
+    migrationName9,
+    migrationName10,
+    migrationName11,
+    migrationName12,
+    migrationName13,
+    migrationName14,
+    migrationName15,
+    migrationName16,
+    migrationName17,
+    migrationName18,
+    migrationName19,
+    migrationName20,
+    migrationName21,
+    migrationName22,
+    migrationName23,
+    migrationName24,
+    migrationName25,
+    migrationName26,
+    migrationName27,
+    migrationName28,
+    migrationName29,
+    migrationName30,
+    migrationName31,
+    '032_nullable_variant_columns',
+    '033_invoice_line_remarks',
+    '034_item_packing_configuration',
+    '035_item_variant_group_and_packing_purchase_units',
+  ];
+
+  // CRITICAL DB PROTECTION: Before executing any pending migration on an existing database,
+  // take a verified atomic SQLite backup (VACUUM INTO + PRAGMA integrity_check).
+  let preMigrationBackupPath: string | null = null;
+  try {
+    const existingTables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('items', 'accounts', 'database_migrations')")
+      .all() as Array<{ name: string }>;
+    const existingTableSet = new Set(existingTables.map((t) => t.name));
+    const hasExistingBusinessTables = existingTableSet.has('items') || existingTableSet.has('accounts');
+
+    if (
+      hasExistingBusinessTables &&
+      fs.existsSync(config.databasePath) &&
+      fs.statSync(config.databasePath).size >= 4096
+    ) {
+      let appliedSet = new Set<string>();
+      if (existingTableSet.has('database_migrations')) {
+        const appliedRows = db
+          .prepare('SELECT migration_name FROM database_migrations')
+          .all() as Array<{ migration_name: string }>;
+        appliedSet = new Set(appliedRows.map((r) => String(r.migration_name)));
+      }
+      const pendingMigrations = expectedMigrationNames.filter((m) => !appliedSet.has(m));
+      if (pendingMigrations.length > 0) {
+        preMigrationBackupPath = createVerifiedPreMigrationBackup(db);
+        console.log(
+          `[AMS Migration Guard] Verified pre-migration backup created before applying ${pendingMigrations.length} pending migration(s): ${preMigrationBackupPath}`
+        );
+      }
+    }
+  } catch (backupErr: unknown) {
+    const errText = backupErr instanceof Error ? backupErr.message : String(backupErr);
+    throw new Error(`Aborting migration because pre-migration safety backup failed: ${errText}`);
+  }
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -4527,6 +4652,63 @@ export function runMigrations(): MigrationResult {
       );
     }
 
+    // Migration 35: Add variant_group on item_variants + item_packing_levels + item_purchase_units (non-destructive)
+    const migrationName35 = '035_item_variant_group_and_packing_purchase_units';
+    const applied35 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName35);
+
+    const variantCols35 = (
+      db.prepare('PRAGMA table_info(item_variants)').all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (variantCols35.length > 0 && !variantCols35.includes('variant_group')) {
+      db.exec("ALTER TABLE item_variants ADD COLUMN variant_group TEXT NOT NULL DEFAULT '';");
+    }
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS item_packing_levels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL,
+        variant_id INTEGER DEFAULT NULL,
+        packing_level INTEGER NOT NULL DEFAULT 1,
+        packing_unit TEXT NOT NULL,
+        parent_unit TEXT DEFAULT NULL,
+        quantity_per_parent REAL NOT NULL DEFAULT 1,
+        base_unit_conversion REAL NOT NULL DEFAULT 1,
+        packing_barcode TEXT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE,
+        FOREIGN KEY (variant_id) REFERENCES item_variants (id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS item_purchase_units (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL,
+        variant_id INTEGER DEFAULT NULL,
+        purchase_unit TEXT NOT NULL,
+        purchase_unit_conversion REAL NOT NULL DEFAULT 1,
+        purchase_unit_rate REAL NOT NULL DEFAULT 0.0,
+        is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+        allow_fractional INTEGER NOT NULL DEFAULT 0 CHECK(allow_fractional IN (0, 1)),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE,
+        FOREIGN KEY (variant_id) REFERENCES item_variants (id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_item_packing_levels_item ON item_packing_levels(item_id, packing_level);
+      CREATE INDEX IF NOT EXISTS idx_item_packing_levels_barcode ON item_packing_levels(packing_barcode COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_item_purchase_units_item ON item_purchase_units(item_id, is_default DESC);
+    `);
+
+    if (!applied35) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+        migrationName35,
+        35
+      );
+    }
+
     const tables = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
@@ -4540,10 +4722,11 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}, ${migrationName35}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
-      message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,
+      preMigrationBackupPath,
+      message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.${preMigrationBackupPath ? ` Pre-migration backup: ${path.basename(preMigrationBackupPath)}` : ''}`,
     };
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);

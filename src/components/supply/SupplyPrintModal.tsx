@@ -171,9 +171,11 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 ${
+      className={`print-modal-container fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 ${
         zoomState.isFullScreen ? 'p-0' : 'p-2 sm:p-3'
-      } overflow-hidden print:bg-white print:p-0`}
+      } overflow-hidden print:bg-white print:p-0 print:m-0 ${
+        isThermal ? 'print:block print:justify-start print:items-start' : ''
+      }`}
     >
       <div
         className={`bg-white shadow-2xl w-full flex flex-col overflow-hidden print:shadow-none print:max-h-none print:rounded-none ${
@@ -314,12 +316,16 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
         <div
           ref={zoomState.viewportRef}
           onWheel={zoomState.handleWheelZoom}
-          className="flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:bg-white print:p-0 print:overflow-visible"
+          className={`flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:bg-white print:p-0 print:m-0 print:overflow-visible ${
+            isThermal ? 'print:block print:justify-start print:items-start' : ''
+          }`}
         >
           <div
             ref={zoomState.contentRef}
             style={{ zoom: `${zoomState.zoom}%` } as React.CSSProperties}
-            className="ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75"
+            className={`ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75 ${
+              isThermal ? 'print:flex print:flex-col print:justify-start print:items-start print:m-0 print:p-0' : ''
+            }`}
           >
             <div
               ref={printAreaRef}
@@ -333,7 +339,9 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
                     }
                   : undefined
               }
-              className={`bg-white text-slate-950 shadow-[0_12px_32px_rgba(0,0,0,0.45)] border border-slate-400 relative print:shadow-none print:border-none print:p-1 ${containerWidthClass}`}
+              className={`bg-white text-slate-950 shadow-[0_12px_32px_rgba(0,0,0,0.45)] border border-slate-400 relative print:shadow-none print:border-none ${
+                isThermal ? 'print:p-0 print:m-0' : 'print:p-1'
+              } ${containerWidthClass}`}
             >
             {/* Store & Document Header */}
             <div className="text-center border-b-2 border-slate-900 pb-2.5 mb-3">

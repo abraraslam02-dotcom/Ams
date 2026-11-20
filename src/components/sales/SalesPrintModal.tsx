@@ -235,7 +235,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
           ? 'thermal-58mm'
           : 'a4-sales-invoice',
       orientation,
-      margin,
+      margin: format === '80mm' || format === '58mm' ? 'none' : margin,
       fontSizeScale,
       copies,
       selectedPrinter,
@@ -392,7 +392,9 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
     <div
       className={`print-modal-container fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center ${
         zoomState.isFullScreen ? 'p-0' : 'p-1.5 lg:p-3'
-      } overflow-hidden print:static print:bg-white print:p-0`}
+      } overflow-hidden print:static print:bg-white print:p-0 print:m-0 ${
+        isThermal ? 'print:block print:justify-start print:items-start' : ''
+      }`}
     >
       <div
         className={`bg-white shadow-2xl border border-slate-300 w-full flex flex-col overflow-hidden print:shadow-none print:border-0 print:max-w-none print:max-h-none ${
@@ -517,6 +519,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   paidAmount: savedPaidAmount,
                   remainingBalance: savedRemainingBalance,
                   items,
+                  paperSize: format === '58mm' ? '58mm' : '80mm',
                 }}
                 label="Send via WhatsApp"
               />
@@ -755,12 +758,16 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
         <div
           ref={zoomState.viewportRef}
           onWheel={zoomState.handleWheelZoom}
-          className="flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:bg-white print:overflow-visible"
+          className={`flex-1 overflow-auto p-6 lg:p-8 bg-[#525659] flex justify-center items-start print:p-0 print:m-0 print:bg-white print:overflow-visible ${
+            isThermal ? 'print:block print:justify-start print:items-start' : ''
+          }`}
         >
           <div
             ref={zoomState.contentRef}
             style={{ zoom: `${zoomState.zoom}%` } as React.CSSProperties}
-            className="ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75"
+            className={`ams-screen-zoom-wrapper inline-flex justify-center items-start h-auto min-h-0 transition-all duration-75 ${
+              isThermal ? 'print:flex print:flex-col print:justify-start print:items-start print:m-0 print:p-0' : ''
+            }`}
           >
           {isFullPage ? (
             /* =========================================================
@@ -1268,7 +1275,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                 format === '80mm'
                   ? 'thermal-80mm w-[80mm] max-w-[80mm] px-[2.5mm] py-[2.5mm] text-[12px]'
                   : 'thermal-58mm w-[58mm] max-w-[58mm] px-[1.5mm] py-[2mm] text-[10px]'
-              } relative print:border-0 print:shadow-none print:p-1`}
+              } relative print:border-0 print:shadow-none print:p-0 print:m-0`}
             >
               {isCancelled && (
                 <div className="mb-1.5 py-1 px-2 border-2 border-black text-center font-black uppercase tracking-widest text-black">

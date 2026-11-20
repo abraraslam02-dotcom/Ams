@@ -79,6 +79,7 @@ export interface CloudPersistenceStatus {
   protectionLockActive: boolean;
   connectionBlocked?: boolean;
   connectionError?: string | null;
+  offlineWarning?: string | null;
   databaseIdentity?: string;
 }
 
@@ -531,6 +532,10 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
     protectionLockActive: true,
     connectionBlocked: dbConnectionBlocked,
     connectionError: dbConnectionErrorMessage,
+    offlineWarning: !isConnected
+      ? lastError ||
+        'Cloud database server is unreachable. Existing local data remains safe and unchanged without switching or resetting.'
+      : null,
     databaseIdentity: EXTERNAL_DB_LOCATION,
   };
 }
@@ -1070,16 +1075,27 @@ async function uploadLocalDbToCloud(
         return false;
       }
 
-      // CRITICAL PROTECTION #2: If cloud has more business records than local without new local tombstones,
-      // merge cloud records into local FIRST so no records from cloud are ever lost!
+      // CRITICAL PROTECTION #2: If cloud has more business records than local across ANY core table
+      // without new local tombstones, merge cloud records into local FIRST so no records from cloud are ever lost!
       const localTombstones = Number(localInspection.counts.tombstonesTotal || 0);
       const cloudTombstones = Number(existingManifest.counts?.tombstonesTotal || 0);
-      const hasMissingCloudItems =
-        Number(existingManifest.counts?.items || 0) > Number(localInspection.counts.items || 0) ||
-        Number(existingManifest.counts?.sales || 0) > Number(localInspection.counts.sales || 0) ||
-        Number(existingManifest.counts?.purchases || 0) > Number(localInspection.counts.purchases || 0) ||
-        Number(existingManifest.counts?.customAccounts || 0) >
-          Number(localInspection.counts.customAccounts || 0);
+      const coreCountKeys: Array<keyof CloudRecordCounts> = [
+        'items',
+        'accounts',
+        'customAccounts',
+        'purchases',
+        'sales',
+        'inventoryBatches',
+        'journalEntries',
+        'cashBookEntries',
+        'users',
+        'saleReturns',
+        'purchaseReturns',
+        'supplySheets',
+      ];
+      const hasMissingCloudItems = coreCountKeys.some(
+        (k) => Number(existingManifest.counts?.[k] || 0) > Number(localInspection.counts[k] || 0)
+      );
 
       if (hasMissingCloudItems && localTombstones <= cloudTombstones && Date.now() >= readCooldownUntil) {
         try {
@@ -1103,6 +1119,34 @@ async function uploadLocalDbToCloud(
     }
 
     const finalInspection = inspectSqliteSnapshot(tempSnapPath);
+
+    // CRITICAL PROTECTION #3: Even after pre-upload reconcile, NEVER overwrite a larger cloud vault
+    // with fewer core records unless explicit forceOverwrite or matching sync tombstones exist.
+    if (existingManifest && !options?.forceOverwrite) {
+      const finalTombstones = Number(finalInspection.counts.tombstonesTotal || 0);
+      const cloudTombstones = Number(existingManifest.counts?.tombstonesTotal || 0);
+      const guardedKeys: Array<keyof CloudRecordCounts> = [
+        'items',
+        'accounts',
+        'customAccounts',
+        'purchases',
+        'sales',
+        'inventoryBatches',
+        'journalEntries',
+        'cashBookEntries',
+        'users',
+      ];
+      const shrunkTables = guardedKeys.filter(
+        (k) => Number(finalInspection.counts[k] || 0) < Number(existingManifest.counts?.[k] || 0)
+      );
+      if (shrunkTables.length > 0 && finalTombstones <= cloudTombstones) {
+        console.warn(
+          `[AMS Cloud Persistence] SAFETY LOCK ENGAGED: Blocked upload (${reason}) because local table(s) [${shrunkTables.join(', ')}] have fewer records than cloud vault without tombstones.`
+        );
+        return false;
+      }
+    }
+
     const rawBuffer = fs.readFileSync(tempSnapPath);
     const sha256Hash = crypto.createHash('sha256').update(rawBuffer).digest('hex');
 
@@ -1247,8 +1291,9 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
       // Existing verified local active database already hydrated for this container — keep using THIS database without switching
       dbConnectionBlocked = false;
       dbConnectionErrorMessage = null;
+      lastError = `Offline protection active: cloud server unreachable (${manifestRes.error}). Keeping existing local data intact without initializing an empty or old database.`;
     }
-    console.warn(`[AMS Cloud Persistence] Active database check (${reason}) unreachable: ${manifestRes.error}`);
+    console.warn(`[AMS Offline Protection] Active database check (${reason}) unreachable: ${manifestRes.error}`);
     return;
   }
 

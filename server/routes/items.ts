@@ -201,6 +201,90 @@ function enrichItemWithPacking(it: ItemRow) {
   };
 }
 
+function parseVariantAttributesInput(raw: unknown): {
+  colour: string;
+  flavour: string;
+  variant_type: string;
+  other_attributes: string;
+} {
+  const clean = String(raw || '').trim();
+  if (!clean) {
+    return { colour: '', flavour: '', variant_type: '', other_attributes: '' };
+  }
+
+  let colour = '';
+  let flavour = '';
+  let variant_type = '';
+  const extraParts: string[] = [];
+
+  const tokens = clean
+    .split(/[;|]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  let matchedStructured = false;
+  for (const token of tokens) {
+    const kv = token.match(/^([^:=]+)\s*[:=]\s*(.+)$/);
+    if (kv) {
+      matchedStructured = true;
+      const key = kv[1].trim().toLowerCase();
+      const val = kv[2].trim();
+      if (!val) continue;
+      if (key === 'colour' || key === 'color') {
+        colour = val;
+      } else if (key === 'flavour' || key === 'flavor') {
+        flavour = val;
+      } else if (key === 'type' || key === 'variant type' || key === 'variant_type') {
+        variant_type = val;
+      } else {
+        extraParts.push(`${kv[1].trim()}: ${val}`);
+      }
+    } else {
+      extraParts.push(token);
+    }
+  }
+
+  if (!matchedStructured) {
+    return { colour: '', flavour: '', variant_type: '', other_attributes: clean };
+  }
+
+  return {
+    colour,
+    flavour,
+    variant_type,
+    other_attributes: extraParts.join('; '),
+  };
+}
+
+function inferPackingLevelOrder(unitName: string, fallbackOrder: number): number {
+  const lower = String(unitName || '').trim().toLowerCase();
+  if (lower.includes('carton') || lower === 'ctn') return 1;
+  if (lower.includes('box')) return 2;
+  if (lower.includes('strip') || lower.includes('blister')) return 3;
+  if (
+    lower.includes('tablet') ||
+    lower.includes('tab') ||
+    lower.includes('cap') ||
+    lower.includes('sachet') ||
+    lower.includes('unit') ||
+    lower.includes('piece') ||
+    lower.includes('pc')
+  ) {
+    return 4;
+  }
+  return fallbackOrder;
+}
+
+function parseOptionalBoolInput(val: unknown): boolean | null {
+  if (val === undefined || val === null || String(val).trim() === '') return null;
+  if (typeof val === 'boolean') return val;
+  if (typeof val === 'number') return val !== 0;
+  const clean = String(val).trim().toLowerCase();
+  if (['yes', 'y', 'true', '1', 'default'].includes(clean)) return true;
+  if (['no', 'n', 'false', '0'].includes(clean)) return false;
+  return null;
+}
+
 export function calculateRetailPriceFromPurchase(purchasePrice: number): {
   retailBase: number;
   roundedRetailPrice: number;
@@ -296,9 +380,11 @@ itemsRouter.get('/', (req: Request, res: Response) => {
 
     const rawItems = db.prepare(sql).all(...params) as ItemRow[];
 
-    // Attach variants & consolidated non-double-counted inventory stock in batch
+    // Attach variants, packing levels, purchase units & consolidated non-double-counted inventory stock in batch
     const itemIds = rawItems.map((it) => Number(it.id));
     const variantsByItem = new Map<number, ReturnType<typeof getEnrichedVariants>>();
+    const packingLevelsByItem = new Map<number, Array<Record<string, unknown>>>();
+    const purchaseUnitsByItem = new Map<number, Array<Record<string, unknown>>>();
     const nonVariantStockByItem = new Map<number, { packs: number; hasBatches: boolean }>();
 
     if (itemIds.length > 0) {
@@ -311,6 +397,44 @@ itemsRouter.get('/', (req: Request, res: Response) => {
       }
 
       const ph = itemIds.map(() => '?').join(',');
+      try {
+        const plRows = db
+          .prepare(
+            `SELECT id, item_id, variant_id, packing_level, packing_unit, parent_unit,
+                    quantity_per_parent, base_unit_conversion, packing_barcode
+             FROM item_packing_levels
+             WHERE item_id IN (${ph}) AND variant_id IS NULL
+             ORDER BY packing_level ASC, id ASC`
+          )
+          .all(...itemIds) as Array<Record<string, unknown>>;
+        for (const r of plRows) {
+          const iid = Number(r.item_id);
+          if (!packingLevelsByItem.has(iid)) packingLevelsByItem.set(iid, []);
+          packingLevelsByItem.get(iid)!.push(r);
+        }
+      } catch {
+        // table may not exist yet before migration
+      }
+
+      try {
+        const puRows = db
+          .prepare(
+            `SELECT id, item_id, variant_id, purchase_unit, purchase_unit_conversion,
+                    purchase_unit_rate, is_default, allow_fractional
+             FROM item_purchase_units
+             WHERE item_id IN (${ph}) AND variant_id IS NULL
+             ORDER BY is_default DESC, purchase_unit_conversion DESC, id ASC`
+          )
+          .all(...itemIds) as Array<Record<string, unknown>>;
+        for (const r of puRows) {
+          const iid = Number(r.item_id);
+          if (!purchaseUnitsByItem.has(iid)) purchaseUnitsByItem.set(iid, []);
+          purchaseUnitsByItem.get(iid)!.push(r);
+        }
+      } catch {
+        // table may not exist yet before migration
+      }
+
       const invSums = db
         .prepare(
           `SELECT item_id, COALESCE(SUM(current_pack_qty), 0) AS packs, COUNT(*) AS batch_count
@@ -354,6 +478,8 @@ itemsRouter.get('/', (req: Request, res: Response) => {
         active_variant_count: activeVariants.length,
         consolidated_stock_packs: consolidatedStockPacks,
         variants: itemVariants,
+        packing_levels: packingLevelsByItem.get(itemId) || [],
+        purchase_units: purchaseUnitsByItem.get(itemId) || [],
       };
     });
 
@@ -859,20 +985,22 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
         db.prepare('UPDATE items SET has_variants = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(parentItemId);
       }
 
+      const variantGroupVal = safeStr(body.variant_group);
       const ins = db
         .prepare(
           `INSERT INTO item_variants (
-            parent_item_id, variant_code, variant_name, colour, flavour, variant_type, other_attributes,
+            parent_item_id, variant_code, variant_name, variant_group, colour, flavour, variant_type, other_attributes,
             barcode, packing, use_parent_pricing,
             purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
             opening_stock, minimum_stock, rack_number,
             image_id, image_url, thumbnail_url, status, created_by
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           parentItemId,
           variantCode,
           variantName,
+          variantGroupVal,
           colourVal,
           flavourVal,
           typeVal,
@@ -1026,9 +1154,12 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
       const oldImgId = existing.image_id ? Number(existing.image_id) : null;
       const oldImgUrl = safeStr(existing.image_url);
 
+      const nextVariantGroup =
+        body.variant_group !== undefined ? safeStr(body.variant_group) : safeStr(existing.variant_group);
+
       db.prepare(
         `UPDATE item_variants SET
-          variant_code = ?, variant_name = ?, colour = ?, flavour = ?, variant_type = ?, other_attributes = ?,
+          variant_code = ?, variant_name = ?, variant_group = ?, colour = ?, flavour = ?, variant_type = ?, other_attributes = ?,
           barcode = ?, packing = ?, use_parent_pricing = ?,
           purchase_price = ?, trade_price = ?, wholesale_price = ?, retail_price = ?, loose_rate = ?,
           discount_percent = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
@@ -1037,6 +1168,7 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
       ).run(
         nextCode,
         nextName,
+        nextVariantGroup,
         nextColour,
         nextFlavour,
         nextType,
@@ -1308,6 +1440,35 @@ itemsRouter.get('/:id', (req: Request, res: Response) => {
           : round2(Number(item.opening_stock || 0));
     }
 
+    let packingLevels: Array<Record<string, unknown>> = [];
+    let purchaseUnits: Array<Record<string, unknown>> = [];
+    try {
+      packingLevels = db
+        .prepare(
+          `SELECT id, item_id, variant_id, packing_level, packing_unit, parent_unit,
+                  quantity_per_parent, base_unit_conversion, packing_barcode
+           FROM item_packing_levels
+           WHERE item_id = ? AND variant_id IS NULL
+           ORDER BY packing_level ASC, id ASC`
+        )
+        .all(id) as Array<Record<string, unknown>>;
+    } catch {
+      packingLevels = [];
+    }
+    try {
+      purchaseUnits = db
+        .prepare(
+          `SELECT id, item_id, variant_id, purchase_unit, purchase_unit_conversion,
+                  purchase_unit_rate, is_default, allow_fractional
+           FROM item_purchase_units
+           WHERE item_id = ? AND variant_id IS NULL
+           ORDER BY is_default DESC, purchase_unit_conversion DESC, id ASC`
+        )
+        .all(id) as Array<Record<string, unknown>>;
+    } catch {
+      purchaseUnits = [];
+    }
+
     return res.json({
       success: true,
       item: {
@@ -1319,6 +1480,8 @@ itemsRouter.get('/:id', (req: Request, res: Response) => {
         active_variant_count: activeVariants.length,
         consolidated_stock_packs: consolidatedStockPacks,
         variants,
+        packing_levels: packingLevels,
+        purchase_units: purchaseUnits,
       },
     });
   } catch (error: unknown) {
@@ -1879,7 +2042,8 @@ itemsRouter.delete('/:id', (req: Request, res: Response) => {
 
 /**
  * POST /api/items/bulk-import
- * Excel import endpoint: validates rows, detects duplicates, inserts/updates permanently
+ * Excel import endpoint: validates rows, supports Variants, Multi-Level Packing (Carton -> Box -> Strip -> Tablet),
+ * and Multiple Purchase Units while staying 100% compatible with legacy 17-column spreadsheets.
  */
 itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
   try {
@@ -1891,42 +2055,134 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
     }
 
     const errors: string[] = [];
-    const seenCodesInBatch = new Set<string>();
+    const firstRowInfoByCode = new Map<string, { company_name: string; item_name: string }>();
+    const seenPlainCodesInBatch = new Set<string>();
+    const seenVariantCodesInBatch = new Set<string>();
+    const groupedRows = new Map<string, Array<{ raw: Record<string, any>; rowNum: number }>>();
 
-    // 1. Validation pass
-    items.forEach((item, index) => {
+    // 1. Validation & Grouping pass
+    items.forEach((rawItem: Record<string, any>, index: number) => {
       const rowNum = index + 2; // header is row 1
-      const code = item.item_code ? String(item.item_code).trim() : '';
+      const code = rawItem?.item_code ? String(rawItem.item_code).trim() : '';
+      const upperCode = code.toUpperCase();
+
+      const variantGroup = String(rawItem?.variant_group || '').trim();
+      const variantName = String(rawItem?.variant_name || '').trim();
+      const variantCode = String(rawItem?.variant_code || '').trim();
+      const variantAttrs = String(rawItem?.variant_attributes || '').trim();
+      const packingLevelRaw = rawItem?.packing_level;
+      const packingLevelNum =
+        packingLevelRaw !== undefined && packingLevelRaw !== null && String(packingLevelRaw).trim() !== ''
+          ? Math.round(Number(packingLevelRaw))
+          : null;
+      const packingUnit = String(rawItem?.packing_unit || '').trim();
+      const packingBarcode = String(rawItem?.packing_barcode || '').trim();
+      const purchaseUnit = String(rawItem?.purchase_unit || '').trim();
+
+      const hasVariantInfo = Boolean(variantName || variantCode);
+      const hasPackingLevelInfo = Boolean(packingUnit || packingLevelNum !== null || packingBarcode);
+      const hasPurchaseUnitInfo = Boolean(purchaseUnit);
+      const isExtensionRow = hasVariantInfo || hasPackingLevelInfo || hasPurchaseUnitInfo;
 
       if (!code) {
         errors.push(`Row ${rowNum}: Item Code is missing.`);
       } else {
-        const upperCode = code.toUpperCase();
-        if (seenCodesInBatch.has(upperCode)) {
-          errors.push(`Row ${rowNum}: Duplicate Item Code "${code}" appears multiple times in this spreadsheet.`);
-        } else {
-          seenCodesInBatch.add(upperCode);
+        const firstInfo = firstRowInfoByCode.get(upperCode);
+        const companyVal = String(rawItem?.company_name || firstInfo?.company_name || '').trim();
+        const itemNameVal = String(rawItem?.item_name || firstInfo?.item_name || '').trim();
+
+        if (!firstInfo) {
+          firstRowInfoByCode.set(upperCode, {
+            company_name: companyVal,
+            item_name: itemNameVal,
+          });
+          if (!isExtensionRow) {
+            seenPlainCodesInBatch.add(upperCode);
+          }
+        } else if (!isExtensionRow) {
+          if (seenPlainCodesInBatch.has(upperCode)) {
+            errors.push(`Row ${rowNum}: Duplicate Item Code "${code}" appears multiple times in this spreadsheet.`);
+          } else {
+            errors.push(
+              `Row ${rowNum}: Duplicate Item Code "${code}" appears multiple times without a Variant, Packing Level, or Purchase Unit.`
+            );
+          }
         }
+
+        if (!companyVal) {
+          errors.push(`Row ${rowNum}: Company Name is missing.`);
+        }
+        if (!itemNameVal) {
+          errors.push(`Row ${rowNum}: Item Name is missing.`);
+        }
+
+        if (!groupedRows.has(upperCode)) {
+          groupedRows.set(upperCode, []);
+        }
+        groupedRows.get(upperCode)!.push({ raw: rawItem, rowNum });
       }
 
-      if (!item.company_name || String(item.company_name).trim().length === 0) {
-        errors.push(`Row ${rowNum}: Company Name is missing.`);
+      if (variantCode) {
+        const upperVarCode = variantCode.toUpperCase();
+        if (seenVariantCodesInBatch.has(upperVarCode) && !hasPackingLevelInfo && !hasPurchaseUnitInfo) {
+          errors.push(`Row ${rowNum}: Duplicate Variant Code "${variantCode}" inside this spreadsheet.`);
+        } else {
+          seenVariantCodesInBatch.add(upperVarCode);
+        }
       }
-      if (!item.item_name || String(item.item_name).trim().length === 0) {
-        errors.push(`Row ${rowNum}: Item Name is missing.`);
+      if ((variantGroup || variantAttrs) && !variantName && !variantCode) {
+        errors.push(`Row ${rowNum}: Variant Name or Variant Code is required when Variant Group/Attributes is provided.`);
+      }
+
+      if (packingLevelNum !== null && (!Number.isFinite(packingLevelNum) || packingLevelNum < 1)) {
+        errors.push(`Row ${rowNum}: Packing Level must be 1 or greater.`);
+      }
+      if (packingLevelNum !== null && !packingUnit) {
+        errors.push(`Row ${rowNum}: Packing Unit is required when Packing Level is specified.`);
+      }
+      if (
+        rawItem?.quantity_per_parent !== undefined &&
+        rawItem?.quantity_per_parent !== null &&
+        String(rawItem.quantity_per_parent).trim() !== '' &&
+        !(Number(rawItem.quantity_per_parent) > 0)
+      ) {
+        errors.push(`Row ${rowNum}: Quantity per Parent Unit must be greater than 0.`);
+      }
+      if (
+        rawItem?.base_unit_conversion !== undefined &&
+        rawItem?.base_unit_conversion !== null &&
+        String(rawItem.base_unit_conversion).trim() !== '' &&
+        !(Number(rawItem.base_unit_conversion) > 0)
+      ) {
+        errors.push(`Row ${rowNum}: Base Unit Conversion must be greater than 0.`);
+      }
+      if (
+        rawItem?.purchase_unit_conversion !== undefined &&
+        rawItem?.purchase_unit_conversion !== null &&
+        String(rawItem.purchase_unit_conversion).trim() !== '' &&
+        !(Number(rawItem.purchase_unit_conversion) > 0)
+      ) {
+        errors.push(`Row ${rowNum}: Purchase Unit Conversion must be greater than 0.`);
+      }
+      if (
+        rawItem?.purchase_unit_rate !== undefined &&
+        rawItem?.purchase_unit_rate !== null &&
+        String(rawItem.purchase_unit_rate).trim() !== '' &&
+        Number(rawItem.purchase_unit_rate) < 0
+      ) {
+        errors.push(`Row ${rowNum}: Purchase Unit Rate cannot be negative.`);
       }
     });
 
-    if (errors.length > 0 && !updateExisting) {
-      // Check existing database codes
+    if (errors.length === 0 && !updateExisting) {
       const existingCodes = (
         db.prepare('SELECT item_code FROM items').all() as Array<{ item_code: string }>
       ).map((r) => r.item_code.toUpperCase());
 
       const dbDuplicates: string[] = [];
-      seenCodesInBatch.forEach((code) => {
-        if (existingCodes.includes(code)) {
-          dbDuplicates.push(code);
+      groupedRows.forEach((_rows, upperCode) => {
+        if (existingCodes.includes(upperCode)) {
+          dbDuplicates.push(upperCode);
         }
       });
 
@@ -1954,15 +2210,19 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
     // 3. Execution in a transaction
     let insertedCount = 0;
     let updatedCount = 0;
+    let variantsProcessed = 0;
+    let packingLevelsProcessed = 0;
+    let purchaseUnitsProcessed = 0;
 
     const insertOrUpdate = db.transaction(() => {
-      const checkStmt = db.prepare('SELECT id FROM items WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))');
+      const checkStmt = db.prepare('SELECT * FROM items WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))');
       const insertStmt = db.prepare(`
         INSERT INTO items (
-          item_code, company_name, item_name, generic_name, category, packing, barcode,
-          purchase_price, trade_price, wholesale_price, retail_price, discount_percent, tax_percent,
-          opening_stock, minimum_stock, rack_number, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          item_code, company_name, item_name, generic_name, category, packing,
+          carton, boxes_per_carton, strips_per_box, tablets_per_strip, units_per_strip, units_per_pack, purchase_unit,
+          barcode, purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+          opening_stock, minimum_stock, rack_number, has_variants, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const updateStmt = db.prepare(`
         UPDATE items SET
@@ -1971,86 +2231,603 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
           generic_name = ?,
           category = ?,
           packing = ?,
+          carton = ?,
+          boxes_per_carton = ?,
+          strips_per_box = ?,
+          tablets_per_strip = ?,
+          units_per_strip = ?,
+          units_per_pack = ?,
+          purchase_unit = ?,
           barcode = ?,
           purchase_price = ?,
           trade_price = ?,
           wholesale_price = ?,
           retail_price = ?,
+          loose_rate = ?,
           discount_percent = ?,
           tax_percent = ?,
           opening_stock = ?,
           minimum_stock = ?,
           rack_number = ?,
+          has_variants = ?,
           status = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `);
 
-      for (const item of items) {
-        const code = String(item.item_code).trim();
-        const existing = checkStmt.get(code) as { id: number } | undefined;
+      for (const [_upperCode, group] of groupedRows.entries()) {
+        const primaryRow = group[0].raw;
+        const code = String(primaryRow.item_code).trim();
+        const existing = checkStmt.get(code) as ItemRow | undefined;
 
-        const company = String(item.company_name || '').trim();
-        const name = String(item.item_name || '').trim();
-        const generic = item.generic_name ? String(item.generic_name).trim() : null;
-        const category = String(item.category || 'Tablet').trim();
-        const packing = String(item.packing || '1x1').trim();
-        const barcode = item.barcode ? String(item.barcode).trim() : null;
-        const pPrice = Math.round((parseFloat(item.purchase_price) || 0.0) * 100) / 100;
-        const tPrice = Math.round((parseFloat(item.trade_price) || 0.0) * 100) / 100;
-        const wPrice = Math.round((parseFloat(item.wholesale_price) || 0.0) * 100) / 100;
-        const rPrice = Math.round((parseFloat(item.retail_price) || 0.0) * 100) / 100;
-        const dPercent = Math.round((parseFloat(item.discount_percent) || 0.0) * 100) / 100;
-        const tPercent = Math.round((parseFloat(item.tax_percent) || 0.0) * 100) / 100;
-        const oStock = Math.round((parseFloat(item.opening_stock) || 0.0) * 100) / 100;
-        const mStock = Math.round((parseFloat(item.minimum_stock) || 0.0) * 100) / 100;
-        const rack = item.rack_number ? String(item.rack_number).trim() : null;
-        const status = String(item.status).toLowerCase() === 'inactive' ? 'Inactive' : 'Active';
+        const rawCompany =
+          group.map((g) => String(g.raw.company_name || '').trim()).find(Boolean) ||
+          existing?.company_name ||
+          '';
+        const canonicalCompany = registerItemCompanyIfNew(db, rawCompany) || normalizeCompanyName(rawCompany);
+        const name =
+          group.map((g) => String(g.raw.item_name || '').trim()).find(Boolean) ||
+          existing?.item_name ||
+          '';
+        const genericRaw = group.map((g) => String(g.raw.generic_name || '').trim()).find(Boolean);
+        const generic = genericRaw ? genericRaw : existing?.generic_name ?? null;
+        const category =
+          group.map((g) => String(g.raw.category || '').trim()).find(Boolean) ||
+          existing?.category ||
+          'Tablet';
+        const rawPackingText =
+          group.map((g) => String(g.raw.packing || '').trim()).find(Boolean) ||
+          existing?.packing ||
+          '1x1';
 
+        const pPrice = round2(parseFloat(primaryRow.purchase_price) || 0.0);
+        const tPrice = round2(parseFloat(primaryRow.trade_price) || 0.0);
+        const wPrice = round2(parseFloat(primaryRow.wholesale_price) || 0.0);
+        const rPrice = round2(parseFloat(primaryRow.retail_price) || 0.0);
+        const dPercent = round2(parseFloat(primaryRow.discount_percent) || 0.0);
+        const tPercent = round2(parseFloat(primaryRow.tax_percent) || 0.0);
+        const oStock = round2(parseFloat(primaryRow.opening_stock) || 0.0);
+        const mStock = round2(parseFloat(primaryRow.minimum_stock) || 0.0);
+        const rack = primaryRow.rack_number
+          ? String(primaryRow.rack_number).trim()
+          : existing?.rack_number ?? null;
+        const status: 'Active' | 'Inactive' =
+          String(primaryRow.status || '').toLowerCase() === 'inactive' ? 'Inactive' : 'Active';
+
+        // Collect Multi-Level Packing entries
+        interface NormalizedPackingLevel {
+          packing_level: number;
+          packing_unit: string;
+          quantity_per_parent: number;
+          base_unit_conversion: number | null;
+          packing_barcode: string | null;
+        }
+        const packingLevelMap = new Map<string, NormalizedPackingLevel>();
+        let fallbackSeq = 1;
+        for (const entry of group) {
+          const r = entry.raw;
+          const pUnit = String(r.packing_unit || '').trim();
+          const pLvlRaw =
+            r.packing_level !== undefined && r.packing_level !== null && String(r.packing_level).trim() !== ''
+              ? Math.max(1, Math.round(Number(r.packing_level)))
+              : null;
+          const pBarcode = String(r.packing_barcode || '').trim() || null;
+
+          if (!pUnit && pLvlRaw === null && !pBarcode) continue;
+
+          const effectiveUnit = pUnit || `Level ${pLvlRaw || fallbackSeq}`;
+          const effectiveLevel = pLvlRaw ?? inferPackingLevelOrder(effectiveUnit, fallbackSeq);
+          const qtyPerParent =
+            r.quantity_per_parent !== undefined &&
+            r.quantity_per_parent !== null &&
+            String(r.quantity_per_parent).trim() !== '' &&
+            Number(r.quantity_per_parent) > 0
+              ? Math.round(Number(r.quantity_per_parent) * 10000) / 10000
+              : 1;
+          const baseConv =
+            r.base_unit_conversion !== undefined &&
+            r.base_unit_conversion !== null &&
+            String(r.base_unit_conversion).trim() !== '' &&
+            Number(r.base_unit_conversion) > 0
+              ? Math.round(Number(r.base_unit_conversion) * 10000) / 10000
+              : null;
+
+          const dedupeKey = `${effectiveLevel}::${effectiveUnit.toLowerCase()}`;
+          packingLevelMap.set(dedupeKey, {
+            packing_level: effectiveLevel,
+            packing_unit: effectiveUnit,
+            quantity_per_parent: qtyPerParent,
+            base_unit_conversion: baseConv,
+            packing_barcode: pBarcode,
+          });
+          fallbackSeq = Math.max(fallbackSeq + 1, effectiveLevel + 1);
+        }
+
+        const sortedPackingLevels = Array.from(packingLevelMap.values()).sort(
+          (a, b) => a.packing_level - b.packing_level
+        );
+        // Compute missing base_unit_conversion bottom-up if needed
+        if (sortedPackingLevels.length > 0) {
+          for (let i = sortedPackingLevels.length - 1; i >= 0; i--) {
+            if (sortedPackingLevels[i].base_unit_conversion === null) {
+              if (i === sortedPackingLevels.length - 1) {
+                sortedPackingLevels[i].base_unit_conversion = 1;
+              } else {
+                const child = sortedPackingLevels[i + 1];
+                sortedPackingLevels[i].base_unit_conversion =
+                  Math.round(Number(child.quantity_per_parent || 1) * Number(child.base_unit_conversion || 1) * 10000) /
+                  10000;
+              }
+            }
+          }
+        }
+
+        // Map Multi-Level Packing levels into existing items flat columns
+        let derivedCarton = existing?.carton ?? null;
+        let derivedBoxesPerCarton = existing?.boxes_per_carton ?? null;
+        let derivedStripsPerBox = existing?.strips_per_box ?? null;
+        let derivedTabletsPerStrip = existing?.tablets_per_strip ?? null;
+
+        if (sortedPackingLevels.length > 0) {
+          const cartonLvl = sortedPackingLevels.find((l) => l.packing_unit.toLowerCase().includes('carton'));
+          const boxLvl = sortedPackingLevels.find((l) => l.packing_unit.toLowerCase().includes('box'));
+          const stripLvl = sortedPackingLevels.find((l) => l.packing_unit.toLowerCase().includes('strip'));
+          const tabletLvl = sortedPackingLevels.find((l) =>
+            /tablet|tab|cap|sachet|unit|piece|pc/i.test(l.packing_unit)
+          );
+
+          if (cartonLvl) {
+            derivedCarton = cartonLvl.quantity_per_parent || 1;
+          }
+          if (boxLvl && cartonLvl && boxLvl.quantity_per_parent > 0) {
+            derivedBoxesPerCarton = Math.max(1, Math.round(boxLvl.quantity_per_parent));
+          }
+          if (stripLvl && stripLvl.quantity_per_parent > 0) {
+            derivedStripsPerBox = Math.max(1, Math.round(stripLvl.quantity_per_parent));
+          }
+          if (tabletLvl && tabletLvl.quantity_per_parent > 0) {
+            derivedTabletsPerStrip = Math.max(1, Math.round(tabletLvl.quantity_per_parent));
+          }
+        }
+
+        // Collect Purchase Units
+        interface NormalizedPurchaseUnit {
+          purchase_unit: string;
+          purchase_unit_conversion: number;
+          purchase_unit_rate: number;
+          is_default: number;
+          allow_fractional: number;
+        }
+        const purchaseUnitMap = new Map<string, NormalizedPurchaseUnit>();
+        let explicitDefaultUnitKey: string | null = null;
+        for (const entry of group) {
+          const r = entry.raw;
+          const puName = String(r.purchase_unit || '').trim();
+          if (!puName) continue;
+
+          const puKey = puName.toLowerCase();
+          const matchingLevel = sortedPackingLevels.find(
+            (l) => l.packing_unit.toLowerCase() === puKey
+          );
+          const conv =
+            r.purchase_unit_conversion !== undefined &&
+            r.purchase_unit_conversion !== null &&
+            String(r.purchase_unit_conversion).trim() !== '' &&
+            Number(r.purchase_unit_conversion) > 0
+              ? Math.round(Number(r.purchase_unit_conversion) * 10000) / 10000
+              : matchingLevel?.base_unit_conversion && Number(matchingLevel.base_unit_conversion) > 0
+              ? Number(matchingLevel.base_unit_conversion)
+              : 1;
+          const rate =
+            r.purchase_unit_rate !== undefined &&
+            r.purchase_unit_rate !== null &&
+            String(r.purchase_unit_rate).trim() !== ''
+              ? round2(Number(r.purchase_unit_rate))
+              : pPrice;
+          const isDef = parseOptionalBoolInput(r.default_purchase_unit) === true ? 1 : 0;
+          const allowFrac = parseOptionalBoolInput(r.allow_fractional_purchase) === true ? 1 : 0;
+
+          if (isDef === 1) {
+            explicitDefaultUnitKey = puKey;
+          }
+
+          purchaseUnitMap.set(puKey, {
+            purchase_unit: puName,
+            purchase_unit_conversion: conv,
+            purchase_unit_rate: rate,
+            is_default: isDef,
+            allow_fractional: allowFrac,
+          });
+        }
+
+        const purchaseUnitsList = Array.from(purchaseUnitMap.values());
+        if (purchaseUnitsList.length > 0) {
+          if (explicitDefaultUnitKey) {
+            for (const pu of purchaseUnitsList) {
+              pu.is_default = pu.purchase_unit.toLowerCase() === explicitDefaultUnitKey ? 1 : 0;
+            }
+          } else {
+            const boxMatch = purchaseUnitsList.find((pu) => pu.purchase_unit.toLowerCase() === 'box');
+            const target = boxMatch || purchaseUnitsList[0];
+            for (const pu of purchaseUnitsList) {
+              pu.is_default = pu === target ? 1 : 0;
+            }
+          }
+        }
+
+        const defaultPurchaseUnitRecord = purchaseUnitsList.find((pu) => pu.is_default === 1) || purchaseUnitsList[0];
+        const rawStandardPurchaseUnit = defaultPurchaseUnitRecord
+          ? defaultPurchaseUnitRecord.purchase_unit
+          : primaryRow.purchase_unit || existing?.purchase_unit || 'Box';
+
+        const packingConfig = resolveMultiLevelPackingConfig(
+          {
+            packing: rawPackingText,
+            carton: derivedCarton,
+            boxes_per_carton: derivedBoxesPerCarton,
+            strips_per_box: derivedStripsPerBox,
+            tablets_per_strip: derivedTabletsPerStrip,
+            purchase_unit: rawStandardPurchaseUnit,
+          },
+          existing
+        );
+
+        // Collect Variant entries
+        const variantEntries = group.filter(
+          (g) => String(g.raw.variant_name || '').trim() || String(g.raw.variant_code || '').trim()
+        );
+        const hasVariantsFlag =
+          variantEntries.length > 0 ? 1 : existing ? Number(existing.has_variants || 0) : 0;
+
+        // If the first row itself defines a variant, its Barcode belongs to that variant rather than parent item.barcode
+        const firstRowHasVariant = Boolean(
+          String(primaryRow.variant_name || '').trim() || String(primaryRow.variant_code || '').trim()
+        );
+        const nonVariantRow = group.find(
+          (g) => !String(g.raw.variant_name || '').trim() && !String(g.raw.variant_code || '').trim()
+        );
+        const rawItemBarcode = nonVariantRow
+          ? String(nonVariantRow.raw.barcode || '').trim() || null
+          : firstRowHasVariant
+          ? existing?.barcode ?? null
+          : String(primaryRow.barcode || '').trim() || null;
+
+        if (rawItemBarcode) {
+          const bcConflict = findBarcodeConflict(rawItemBarcode, { excludeItemId: existing?.id ?? null });
+          if (bcConflict) {
+            throw new Error(
+              `Item "${code}" Barcode "${rawItemBarcode}" is already assigned to ${bcConflict.ownerLabel}. Duplicate barcodes are not allowed.`
+            );
+          }
+        }
+
+        const looseRate = round2(rPrice / Math.max(1, packingConfig.units_per_pack));
+
+        let itemId: number;
         if (existing) {
           if (updateExisting) {
             updateStmt.run(
-              company,
+              canonicalCompany,
               name,
               generic,
               category,
-              packing,
-              barcode,
+              packingConfig.packing,
+              packingConfig.carton,
+              packingConfig.boxes_per_carton,
+              packingConfig.strips_per_box,
+              packingConfig.tablets_per_strip,
+              packingConfig.units_per_strip,
+              packingConfig.units_per_pack,
+              packingConfig.purchase_unit,
+              rawItemBarcode,
               pPrice,
               tPrice,
               wPrice,
               rPrice,
+              looseRate,
               dPercent,
               tPercent,
               oStock,
               mStock,
               rack,
+              hasVariantsFlag,
               status,
               existing.id
             );
             updatedCount++;
           }
+          itemId = Number(existing.id);
         } else {
-          insertStmt.run(
+          const insRes = insertStmt.run(
             code,
-            company,
+            canonicalCompany,
             name,
             generic,
             category,
-            packing,
-            barcode,
+            packingConfig.packing,
+            packingConfig.carton,
+            packingConfig.boxes_per_carton,
+            packingConfig.strips_per_box,
+            packingConfig.tablets_per_strip,
+            packingConfig.units_per_strip,
+            packingConfig.units_per_pack,
+            packingConfig.purchase_unit,
+            rawItemBarcode,
             pPrice,
             tPrice,
             wPrice,
             rPrice,
+            looseRate,
             dPercent,
             tPercent,
             oStock,
             mStock,
             rack,
+            hasVariantsFlag,
             status
           );
+          itemId = Number(insRes.lastInsertRowid);
           insertedCount++;
+        }
+
+        // Process Variants under this item
+        if (variantEntries.length > 0 && (!existing || updateExisting)) {
+          const seenVariantsInGroup = new Set<string>();
+          for (const vEntry of variantEntries) {
+            const vr = vEntry.raw;
+            const vGroup = String(vr.variant_group || '').trim();
+            const parsedAttrs = parseVariantAttributesInput(vr.variant_attributes);
+            const vName =
+              String(vr.variant_name || '').trim() ||
+              [parsedAttrs.colour, parsedAttrs.flavour, parsedAttrs.variant_type, parsedAttrs.other_attributes]
+                .filter(Boolean)
+                .join(' / ');
+            const rawVCode = String(vr.variant_code || '').trim();
+            const dedupeVarKey = (rawVCode || vName).toLowerCase();
+            if (!dedupeVarKey || seenVariantsInGroup.has(dedupeVarKey)) continue;
+            seenVariantsInGroup.add(dedupeVarKey);
+
+            // Look up existing variant by variant_code or by parent_item_id + variant_name
+            let existingVariant = rawVCode
+              ? (db
+                  .prepare('SELECT * FROM item_variants WHERE UPPER(TRIM(variant_code)) = UPPER(TRIM(?))')
+                  .get(rawVCode) as Record<string, any> | undefined)
+              : (db
+                  .prepare(
+                    'SELECT * FROM item_variants WHERE parent_item_id = ? AND LOWER(TRIM(variant_name)) = LOWER(TRIM(?))'
+                  )
+                  .get(itemId, vName) as Record<string, any> | undefined);
+
+            if (existingVariant && Number(existingVariant.parent_item_id) !== itemId) {
+              throw new Error(
+                `Row ${vEntry.rowNum}: Variant Code "${rawVCode}" already belongs to another item.`
+              );
+            }
+            if (rawVCode) {
+              const collidingItem = db
+                .prepare('SELECT id, item_code FROM items WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))')
+                .get(rawVCode) as { id: number; item_code: string } | undefined;
+              if (collidingItem) {
+                throw new Error(
+                  `Row ${vEntry.rowNum}: Variant Code "${rawVCode}" conflicts with existing Item Code "${collidingItem.item_code}".`
+                );
+              }
+            }
+
+            const finalVCode =
+              rawVCode ||
+              (existingVariant ? String(existingVariant.variant_code) : getNextVariantCodeForItem(itemId));
+            const vBarcode = String(vr.barcode || '').trim();
+            if (vBarcode) {
+              const conflict = findBarcodeConflict(vBarcode, {
+                excludeVariantId: existingVariant ? Number(existingVariant.id) : null,
+              });
+              if (conflict) {
+                throw new Error(
+                  `Row ${vEntry.rowNum}: Variant Barcode "${vBarcode}" is already assigned to ${conflict.ownerLabel}.`
+                );
+              }
+            }
+
+            const vPacking = String(vr.packing || '').trim() || packingConfig.packing;
+            const vPPrice = round2(parseFloat(vr.purchase_price) || pPrice);
+            const vTPrice = round2(parseFloat(vr.trade_price) || tPrice);
+            const vWPrice = round2(parseFloat(vr.wholesale_price) || wPrice);
+            const vRPrice = round2(parseFloat(vr.retail_price) || rPrice);
+            const vUnits = Math.max(1, parseUnitsFromPacking(vPacking));
+            const vLooseRate = round2(vRPrice / vUnits);
+            const vDisc = round2(parseFloat(vr.discount_percent) || dPercent);
+            const vTax = round2(parseFloat(vr.tax_percent) || tPercent);
+            const vOStock = round2(parseFloat(vr.opening_stock) || 0);
+            const vMStock = round2(parseFloat(vr.minimum_stock) || mStock);
+            const vRack = String(vr.rack_number || '').trim() || String(rack || '');
+            const vStatus: 'Active' | 'Inactive' =
+              String(vr.status || '').toLowerCase() === 'inactive' ? 'Inactive' : 'Active';
+            const useParentPricing =
+              vPPrice === pPrice &&
+              vTPrice === tPrice &&
+              vWPrice === wPrice &&
+              vRPrice === rPrice &&
+              vDisc === dPercent &&
+              vTax === tPercent
+                ? 1
+                : 0;
+
+            let variantId: number;
+            if (existingVariant) {
+              variantId = Number(existingVariant.id);
+              db.prepare(
+                `UPDATE item_variants SET
+                  variant_code = ?, variant_name = ?, variant_group = ?, colour = ?, flavour = ?,
+                  variant_type = ?, other_attributes = ?, barcode = ?, packing = ?, use_parent_pricing = ?,
+                  purchase_price = ?, trade_price = ?, wholesale_price = ?, retail_price = ?, loose_rate = ?,
+                  discount_percent = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
+                  status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?`
+              ).run(
+                finalVCode,
+                vName,
+                vGroup,
+                parsedAttrs.colour,
+                parsedAttrs.flavour,
+                parsedAttrs.variant_type,
+                parsedAttrs.other_attributes,
+                vBarcode,
+                vPacking,
+                useParentPricing,
+                vPPrice,
+                vTPrice,
+                vWPrice,
+                vRPrice,
+                vLooseRate,
+                vDisc,
+                vTax,
+                vOStock,
+                vMStock,
+                vRack,
+                vStatus,
+                variantId
+              );
+            } else {
+              const vIns = db
+                .prepare(
+                  `INSERT INTO item_variants (
+                    parent_item_id, variant_code, variant_name, variant_group, colour, flavour, variant_type, other_attributes,
+                    barcode, packing, use_parent_pricing, purchase_price, trade_price, wholesale_price, retail_price,
+                    loose_rate, discount_percent, tax_percent, opening_stock, minimum_stock, rack_number, status, created_by
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                )
+                .run(
+                  itemId,
+                  finalVCode,
+                  vName,
+                  vGroup,
+                  parsedAttrs.colour,
+                  parsedAttrs.flavour,
+                  parsedAttrs.variant_type,
+                  parsedAttrs.other_attributes,
+                  vBarcode,
+                  vPacking,
+                  useParentPricing,
+                  vPPrice,
+                  vTPrice,
+                  vWPrice,
+                  vRPrice,
+                  vLooseRate,
+                  vDisc,
+                  vTax,
+                  vOStock,
+                  vMStock,
+                  vRack,
+                  vStatus,
+                  req.user?.username || 'Administrator'
+                );
+              variantId = Number(vIns.lastInsertRowid);
+            }
+
+            if (vBarcode) {
+              const existsInMulti = db
+                .prepare(
+                  'SELECT id FROM item_variant_barcodes WHERE variant_id = ? AND LOWER(TRIM(barcode)) = LOWER(TRIM(?))'
+                )
+                .get(variantId, vBarcode) as { id: number } | undefined;
+              db.prepare('UPDATE item_variant_barcodes SET is_primary = 0 WHERE variant_id = ?').run(variantId);
+              if (existsInMulti) {
+                db.prepare('UPDATE item_variant_barcodes SET is_primary = 1 WHERE id = ?').run(existsInMulti.id);
+              } else {
+                db.prepare(
+                  `INSERT INTO item_variant_barcodes (item_id, variant_id, barcode, barcode_type, is_primary)
+                   VALUES (?, ?, ?, 'manufacturer', 1)`
+                ).run(itemId, variantId, vBarcode);
+              }
+            }
+            variantsProcessed++;
+          }
+        }
+
+        // Process Multi-Level Packing levels
+        if (sortedPackingLevels.length > 0 && (!existing || updateExisting)) {
+          // Remove previous packing-level-only barcodes belonging to this item before replacing levels
+          const prevPackingBarcodes = db
+            .prepare(
+              `SELECT packing_barcode FROM item_packing_levels
+               WHERE item_id = ? AND variant_id IS NULL AND packing_barcode IS NOT NULL AND TRIM(packing_barcode) != ''`
+            )
+            .all(itemId) as Array<{ packing_barcode: string }>;
+          for (const prevBc of prevPackingBarcodes) {
+            db.prepare(
+              'DELETE FROM item_variant_barcodes WHERE item_id = ? AND variant_id IS NULL AND LOWER(TRIM(barcode)) = LOWER(TRIM(?))'
+            ).run(itemId, prevBc.packing_barcode);
+          }
+
+          db.prepare('DELETE FROM item_packing_levels WHERE item_id = ? AND variant_id IS NULL').run(itemId);
+
+          const insertLevelStmt = db.prepare(`
+            INSERT INTO item_packing_levels (
+              item_id, variant_id, packing_level, packing_unit, parent_unit,
+              quantity_per_parent, base_unit_conversion, packing_barcode
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+          `);
+
+          for (let i = 0; i < sortedPackingLevels.length; i++) {
+            const lvl = sortedPackingLevels[i];
+            const parentUnit = i > 0 ? sortedPackingLevels[i - 1].packing_unit : null;
+
+            if (lvl.packing_barcode) {
+              const conflict = findBarcodeConflict(lvl.packing_barcode, { excludeItemId: itemId });
+              if (conflict) {
+                throw new Error(
+                  `Item "${code}" Packing Barcode "${lvl.packing_barcode}" (${lvl.packing_unit}) is already assigned to ${conflict.ownerLabel}.`
+                );
+              }
+              // Register non-primary item-level packing barcode in item_variant_barcodes if not already present on items.barcode or item_variant_barcodes
+              const alreadyOnItem = rawItemBarcode && rawItemBarcode.toLowerCase() === lvl.packing_barcode.toLowerCase();
+              const alreadyInTable = db
+                .prepare('SELECT id FROM item_variant_barcodes WHERE LOWER(TRIM(barcode)) = LOWER(TRIM(?))')
+                .get(lvl.packing_barcode);
+              if (!alreadyOnItem && !alreadyInTable) {
+                db.prepare(
+                  `INSERT INTO item_variant_barcodes (item_id, variant_id, barcode, barcode_type, is_primary)
+                   VALUES (?, NULL, ?, 'manufacturer', 0)`
+                ).run(itemId, lvl.packing_barcode);
+              }
+            }
+
+            insertLevelStmt.run(
+              itemId,
+              lvl.packing_level,
+              lvl.packing_unit,
+              parentUnit,
+              lvl.quantity_per_parent,
+              Number(lvl.base_unit_conversion || 1),
+              lvl.packing_barcode
+            );
+            packingLevelsProcessed++;
+          }
+        }
+
+        // Process Purchase Units
+        if (purchaseUnitsList.length > 0 && (!existing || updateExisting)) {
+          db.prepare('DELETE FROM item_purchase_units WHERE item_id = ? AND variant_id IS NULL').run(itemId);
+
+          const insertPuStmt = db.prepare(`
+            INSERT INTO item_purchase_units (
+              item_id, variant_id, purchase_unit, purchase_unit_conversion,
+              purchase_unit_rate, is_default, allow_fractional
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?)
+          `);
+
+          for (const pu of purchaseUnitsList) {
+            insertPuStmt.run(
+              itemId,
+              pu.purchase_unit,
+              pu.purchase_unit_conversion,
+              pu.purchase_unit_rate,
+              pu.is_default,
+              pu.allow_fractional
+            );
+            purchaseUnitsProcessed++;
+          }
         }
       }
     });
@@ -2060,9 +2837,12 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      message: `Excel import processed successfully. Added: ${insertedCount}, Updated: ${updatedCount}.`,
+      message: `Excel import processed successfully. Added: ${insertedCount}, Updated: ${updatedCount}, Variants: ${variantsProcessed}, Packing Levels: ${packingLevelsProcessed}, Purchase Units: ${purchaseUnitsProcessed}.`,
       insertedCount,
       updatedCount,
+      variantsProcessed,
+      packingLevelsProcessed,
+      purchaseUnitsProcessed,
       totalProcessed: items.length,
     });
   } catch (error: unknown) {

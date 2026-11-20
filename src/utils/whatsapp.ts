@@ -101,6 +101,7 @@ export interface WhatsAppDocumentPayload {
     line_total?: number;
   }>;
   extraNotes?: string;
+  paperSize?: '80mm' | '58mm';
 }
 
 /**
@@ -372,8 +373,9 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
     payload.documentDate
   );
 
-  const PAGE_W = 226.77; // 80mm
-  const ML = 8;
+  const is58 = payload.paperSize === '58mm';
+  const PAGE_W = is58 ? 164.41 : 226.77; // 58mm or 80mm exact thermal width
+  const ML = 1;
   const CW = PAGE_W - ML * 2;
   const cmds: PdfCmd[] = [];
 
@@ -437,14 +439,14 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
     cmds.push({ t: 'rect', x, y, w, h, lw });
   const money = (n: unknown) => formatPKR(Number(n || 0), false);
 
-  let y = 10;
+  let y = 2;
 
   // 1. Header: store name
-  wrap(storeName, CW, 14, true).forEach((ln) => {
-    putText(ln, ML, y, 14, true, 'c', CW);
-    y += 17;
+  wrap(storeName, CW, is58 ? 11 : 14, true).forEach((ln) => {
+    putText(ln, ML, y, is58 ? 11 : 14, true, 'c', CW);
+    y += is58 ? 13 : 17;
   });
-  y += 3;
+  y += 2;
 
   // 2. Meta table: Bill No, Date, Account, Mobile No, Address
   const labW = CW * 0.27;
@@ -619,12 +621,12 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
   box(ML, sumTop, CW, y - sumTop);
 
   // 5. Footer
-  y += 8;
+  y += 4;
   wrap(`Thank you for choosing ${storeName}!`, CW, 8.5, true).forEach((ln) => {
     putText(ln, ML, y, 8.5, true, 'c', CW);
-    y += 11;
+    y += 10;
   });
-  const PAGE_H = Math.max(200, y + 12);
+  const PAGE_H = Math.max(40, y + 2);
 
   // Build the PDF (single tall page, like a receipt roll)
   const f2 = (n: number) => n.toFixed(2);
