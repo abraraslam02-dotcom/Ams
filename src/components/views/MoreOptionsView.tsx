@@ -72,9 +72,9 @@ export const MoreOptionsView: React.FC = () => {
   const [storeName, setStoreName] = useState('ABRAR MEDICAL STORE');
   const [invoiceTitle, setInvoiceTitle] = useState('TAX / COMMERCIAL INVOICE');
   const [invoiceSubtitle, setInvoiceSubtitle] = useState('Retail & Wholesale Pharmacy Solutions');
-  const [address, setAddress] = useState('Main Bazar, Mandi Ahmad Abad');
-  const [phone, setPhone] = useState('0300-1234567');
-  const [ntnStrn, setNtnStrn] = useState('1234567-8');
+  const [address, setAddress] = useState('DaulatPur ');
+  const [phone, setPhone] = useState('0300-3234323');
+  const [ntnStrn, setNtnStrn] = useState('73943087');
   const [customHeading, setCustomHeading] = useState('');
 
   // B. Sales Invoice Footer Note
@@ -394,7 +394,7 @@ export const MoreOptionsView: React.FC = () => {
                   type="text"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
-                  placeholder="e.g. 0300-1234567, 042-35789000"
+                  placeholder="e.g. 03003234323, 03003234323"
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
                 />
               </div>
@@ -407,7 +407,7 @@ export const MoreOptionsView: React.FC = () => {
                   type="text"
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
-                  placeholder="e.g. Main Bazar, Mandi Ahmad Abad"
+                  placeholder="e.g. Daulatpur"
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
                 />
               </div>
@@ -418,7 +418,7 @@ export const MoreOptionsView: React.FC = () => {
                   type="text"
                   value={ntnStrn}
                   onChange={(e) => setNtnStrn(e.target.value)}
-                  placeholder="e.g. NTN: 1234567-8 / STRN: 3277876"
+                  placeholder="e.g. NTN: 73943087 / STRN: 73943087"
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-600"
                 />
               </div>
