@@ -5149,7 +5149,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               </span>
                             )}
                           </div>
-                          
+                          {renderSalesExcelItemCombobox('row', rIdx)}
                         </td>
 
                         {/* 4. Qty */}
