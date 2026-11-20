@@ -56,12 +56,12 @@ export const PrintDocumentHeader: React.FC<PrintDocumentHeaderProps> = ({
   }, [propSettings]);
 
   const storeName = settings?.store_name || 'ABRAR MEDICAL STORE';
-  const legalName = settings?.legal_name || 'Retail & Wholesale Chemists & Pharmacists';
-  const drugLicense = settings?.drug_license_number || 'DL-PK-LHR-2026-0891';
-  const ntnNumber = settings?.ntn_tax_number || 'NTN-PK-9812450-7';
-  const address = settings?.address || 'Main Commercial Market, Lahore, Punjab, Pakistan';
-  const phone = settings?.phone || '+92 42 35789000';
-  const mobile = settings?.mobile || '';
+  const legalName = settings?.legal_name || 'Retail & Wholesale';
+  const drugLicense = settings?.drug_license_number || 'DHO/SBA/230';
+  const ntnNumber = settings?.ntn_tax_number || 'NTN-PK-73943087';
+  const address = settings?.address || 'Daulatpur ';
+  const phone = settings?.phone || '+92 3003234323';
+  const mobile = settings?.mobile || '+92 3003234323';
   const logoUrl = settings?.logo_data_url || '';
 
   const nowFormatted = new Date().toLocaleString('en-PK', {
