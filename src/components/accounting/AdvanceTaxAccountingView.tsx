@@ -15,6 +15,7 @@ import { api } from '../../services/api';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate, formatDateRange } from '../../utils/formatters';
 
 interface AdvanceTaxAccountingViewProps {
   onOpenTaxSettings?: () => void;
@@ -75,7 +76,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
       headers.join(','),
       ...data.register.map((r: any) =>
         [
-          `"${r.tx_date}"`,
+          `"${formatAppDate(r.tx_date, '')}"`,
           `"${r.tx_type}"`,
           `"${r.document_number}"`,
           `"${r.party_code || ''}"`,
@@ -273,7 +274,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
           metaItems={[
             { label: 'Tax Register View', value: subTab.toUpperCase() },
             { label: 'Filer Status Filter', value: filerStatus },
-            { label: 'Date Period', value: `${startDate || 'Opening'} to ${endDate || 'Current'}` },
+            { label: 'Date Period', value: formatDateRange(startDate, endDate, 'Opening', 'Current') },
           ]}
         />
 
@@ -379,7 +380,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
                 ) : (
                   data.register.map((r: any, idx: number) => (
                     <tr key={idx} className="border-b border-slate-200 hover:bg-slate-50">
-                      <td className="px-3 py-1.5 font-mono">{r.tx_date}</td>
+                      <td className="px-3 py-1.5 font-mono">{formatAppDate(r.tx_date)}</td>
                       <td className="px-3 py-1.5">
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 font-mono">
                           {r.tx_type}
@@ -485,7 +486,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
                     ) : (
                       panel.ledger.entries.map((e: any) => (
                         <tr key={e.id} className="border-b border-slate-200">
-                          <td className="px-2.5 py-1.5 font-mono">{e.entry_date}</td>
+                          <td className="px-2.5 py-1.5 font-mono">{formatAppDate(e.entry_date)}</td>
                           <td className="px-2.5 py-1.5 font-mono font-bold">
                             {e.document_number}
                           </td>
@@ -607,7 +608,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
               <tbody>
                 {(data?.history || []).map((h: any) => (
                   <tr key={h.id} className="border-b border-slate-200 hover:bg-slate-50">
-                    <td className="px-3 py-1.5 font-mono font-bold">{h.effective_from}</td>
+                    <td className="px-3 py-1.5 font-mono font-bold">{formatAppDate(h.effective_from)}</td>
                     <td className="px-3 py-1.5 font-semibold">{h.tax_name}</td>
                     <td className="px-3 py-1.5 text-center font-mono text-emerald-700 font-bold">
                       {Number(h.filer_rate).toFixed(2)}%

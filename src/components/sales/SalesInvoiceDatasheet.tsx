@@ -12,7 +12,8 @@ import {
   SalesmanRecord,
   SalesPaymentMode,
 } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { calculateLineTax, resolveItemTaxConfig } from '../../utils/taxCalculation';
 import {
   formatItemNameWithRemarks,
   matchesSelectedCompany,
@@ -126,6 +127,8 @@ export function createEmptyRow(): DatasheetRow {
     total_units: 0,
     gross_amount: 0,
     taxable_amount: 0,
+    tax_type: 'percentage',
+    tax_value: 0,
     tax_percent: 0,
     tax_amount: 0,
     line_total: 0,
@@ -259,9 +262,22 @@ function recalcRow(row: DatasheetRow): DatasheetRow {
   const discPct = Math.max(0, Math.min(100, Number(row.discount_percent || 0)));
   const discAmt = round2((gross * discPct) / 100);
   const taxable = round2(gross - discAmt);
-  const taxPct = Math.max(0, Number(row.tax_percent || 0));
-  const taxAmt = round2((taxable * taxPct) / 100);
-  const lineTotal = round2(taxable + taxAmt);
+  const resolvedTax = resolveItemTaxConfig({
+    tax_type: row.tax_type,
+    tax_value: row.tax_value,
+    tax_percent: row.tax_percent,
+  });
+  // CRITICAL TAX RULE: Tax is ALWAYS calculated on ORIGINAL gross BEFORE discounts (normal, loose, and mixed quantities)
+  const taxAmt = calculateLineTax({
+    grossAmount: gross,
+    quantity,
+    looseQuantity: isSyrup ? 0 : looseQty,
+    unitsPerPack,
+    taxType: resolvedTax.tax_type,
+    taxValue: resolvedTax.tax_value,
+    taxPercent: resolvedTax.tax_percent,
+  });
+  const lineTotal = round2(gross + taxAmt - discAmt);
 
   return {
     ...row,
@@ -275,7 +291,9 @@ function recalcRow(row: DatasheetRow): DatasheetRow {
     discount_percent: discPct,
     discount_amount: discAmt,
     taxable_amount: taxable,
-    tax_percent: taxPct,
+    tax_type: resolvedTax.tax_type,
+    tax_value: resolvedTax.tax_value,
+    tax_percent: resolvedTax.tax_percent,
     tax_amount: taxAmt,
     line_total: lineTotal,
   };
@@ -552,6 +570,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     null | 'ledger' | 'receive_payment' | 'add_customer' | 'account_details'
   >(null);
   const [customerLedgerData, setCustomerLedgerData] = useState<Record<string, any> | null>(null);
+  const [customerLedgerLoading, setCustomerLedgerLoading] = useState<boolean>(false);
+  const [customerLedgerPeriod, setCustomerLedgerPeriod] = useState<'all' | 'last30'>('all');
+  const [showCustomerLedgerChoicePopup, setShowCustomerLedgerChoicePopup] = useState<boolean>(false);
+  const customerLedgerReqIdRef = useRef<number>(0);
   const [showHeldDrawer, setShowHeldDrawer] = useState<boolean>(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState<boolean>(false);
 
@@ -1367,7 +1389,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               total_units: Number(line.total_units || 0),
               gross_amount: Number(line.gross_amount || 0),
               taxable_amount: Number(line.taxable_amount || 0),
-              tax_percent: Number(line.tax_percent || 0),
+              ...resolveItemTaxConfig({
+                tax_type: line.tax_type ?? catVariant?.effective_tax_type ?? catMatch?.tax_type,
+                tax_value: line.tax_value ?? line.tax_percent ?? catVariant?.effective_tax_value ?? catMatch?.tax_value ?? 0,
+                tax_percent: line.tax_percent ?? catVariant?.effective_tax_percent ?? catMatch?.tax_percent ?? 0,
+              }),
               tax_amount: Number(line.tax_amount || 0),
               line_total: Number(line.line_total || 0),
               remarks: String(line.remarks || ''),
@@ -1754,9 +1780,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     const effPurchasePrice = chosenVariant
       ? Number(chosenVariant.effective_purchase_price ?? item.purchase_price ?? 0)
       : Number(item.purchase_price || 0);
-    const effTaxPct = chosenVariant
-      ? Number(chosenVariant.effective_tax_percent ?? item.tax_percent ?? 0)
-      : Number(item.tax_percent || 0);
+    const effTaxCfg = chosenVariant
+      ? resolveItemTaxConfig({
+          tax_type: chosenVariant.effective_tax_type ?? chosenVariant.tax_type ?? item.tax_type,
+          tax_value:
+            chosenVariant.effective_tax_value ??
+            chosenVariant.effective_tax_percent ??
+            item.tax_value ??
+            item.tax_percent ??
+            0,
+          tax_percent: chosenVariant.effective_tax_percent ?? item.tax_percent ?? 0,
+        })
+      : resolveItemTaxConfig({
+          tax_type: item.tax_type,
+          tax_value: item.tax_value ?? item.tax_percent ?? 0,
+          tax_percent: item.tax_percent ?? 0,
+        });
     const effDefaultDisc = chosenVariant
       ? Number(chosenVariant.effective_discount_percent ?? item.discount_percent ?? 0)
       : Number(item.discount_percent || 0);
@@ -1823,7 +1862,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         discount_percent: preservedDiscount,
         loose_quantity: isSameItem ? targetRow.loose_quantity || 0 : 0,
         loose_rate: effectiveLoose,
-        tax_percent: effTaxPct,
+        tax_type: effTaxCfg.tax_type,
+        tax_value: effTaxCfg.tax_value,
+        tax_percent: effTaxCfg.tax_percent,
         remarks: String(targetRow.remarks || ''),
         retail_price_ref: effRetail,
         wholesale_price_ref: wholesaleRate,
@@ -2949,6 +2990,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           discount_amount: r.discount_amount,
           loose_quantity: r.loose_quantity,
           loose_rate: r.loose_rate,
+          tax_type: r.tax_type || 'percentage',
+          tax_value: Number(r.tax_value ?? r.tax_percent ?? 0),
           tax_percent: r.tax_percent,
           remarks: String(r.remarks || '').trim(),
         })),
@@ -3186,6 +3229,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         total_units: r.total_units,
         gross_amount: r.gross_amount,
         taxable_amount: r.taxable_amount,
+        tax_type: r.tax_type || 'percentage',
+        tax_value: Number(r.tax_value ?? r.tax_percent ?? 0),
         tax_percent: r.tax_percent,
         tax_amount: r.tax_amount,
         line_total: r.line_total,
@@ -3252,6 +3297,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         discount_percent: r.discount_percent,
         discount_amount: r.discount_amount,
         taxable_amount: r.taxable_amount,
+        tax_type: r.tax_type || 'percentage',
+        tax_value: Number(r.tax_value ?? r.tax_percent ?? 0),
         tax_percent: r.tax_percent,
         tax_amount: r.tax_amount,
         gross_amount: r.gross_amount,
@@ -3331,22 +3378,62 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
+  const fetchCustomerLedgerByRange = async (range: 'all' | 'last30') => {
+    if (!customerAccountId || customerAccountId <= 0 || !selectedCustomer) {
+      setErrorMsg('Please select a Customer first before opening the Customer Ledger.');
+      return;
+    }
+    const reqId = ++customerLedgerReqIdRef.current;
+    setShowCustomerLedgerChoicePopup(false);
+    setCustomerLedgerPeriod(range);
+    setCustomerLedgerData(null);
+    setCustomerLedgerLoading(true);
+    setActiveCustomerShortcut('ledger');
+
+    let startDate: string | undefined;
+    let endDate: string | undefined;
+    if (range === 'last30') {
+      const today = new Date();
+      const past = new Date();
+      past.setDate(today.getDate() - 30);
+      startDate = past.toISOString().slice(0, 10);
+      endDate = today.toISOString().slice(0, 10);
+    }
+
+    try {
+      const res = await api.getAccountLedger({
+        ledgerType: 'customer',
+        accountId: customerAccountId,
+        startDate,
+        endDate,
+      });
+      if (customerLedgerReqIdRef.current !== reqId) return;
+      setCustomerLedgerData(res);
+    } catch (err: unknown) {
+      if (customerLedgerReqIdRef.current !== reqId) return;
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (customerLedgerReqIdRef.current === reqId) {
+        setCustomerLedgerLoading(false);
+      }
+    }
+  };
+
   // Open Customer Shortcut Drawer
   const openCustomerShortcut = async (
     mode: 'ledger' | 'receive_payment' | 'add_customer' | 'account_details'
   ) => {
-    setActiveCustomerShortcut(mode);
-    if (mode === 'ledger' && customerAccountId) {
-      try {
-        const res = await api.getAccountLedger({
-          ledgerType: 'customer',
-          accountId: customerAccountId,
-        });
-        setCustomerLedgerData(res);
-      } catch (err: unknown) {
-        setErrorMsg(err instanceof Error ? err.message : String(err));
+    if (mode === 'ledger') {
+      if (!customerAccountId || customerAccountId <= 0 || !selectedCustomer) {
+        setErrorMsg('Please select a Customer first before opening the Customer Ledger.');
+        return;
       }
-    } else if (mode === 'add_customer') {
+      setErrorMsg(null);
+      setShowCustomerLedgerChoicePopup(true);
+      return;
+    }
+    setActiveCustomerShortcut(mode);
+    if (mode === 'add_customer') {
       try {
         const next = await api.getNextAccountCode('Customer', 'PARTY ACCOUNTS');
         setNewCustCode(next.next_code);
@@ -3973,13 +4060,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     const row = rows[rowIndex];
     const rowEditableCols = getEditableColsForRow(row, 'access');
 
-    // Clear entire Item Name field using '0' or 'Backspace' (keeps Item Code intact, never triggers search)
+    // Clear entire Item Name field using '0' (keeps Item Code intact, never triggers search)
+    // Backspace uses normal/default text-input behavior.
     if (
       colName === 'item_name' &&
       !e.ctrlKey &&
       !e.altKey &&
       !e.metaKey &&
-      (e.key === 'Backspace' || (!e.shiftKey && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')))
+      !e.shiftKey &&
+      (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
     ) {
       e.preventDefault();
       e.stopPropagation();
@@ -4334,6 +4423,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           retail_price: Number(catItem.retail_price || row.unit_price || 0),
           loose_rate: Number(catItem.loose_rate || row.loose_rate || 0),
           discount_percent: Number(catItem.discount_percent || 0),
+          tax_type: catItem.tax_type || row.tax_type || 'percentage',
+          tax_value: Number(catItem.tax_value ?? catItem.tax_percent ?? row.tax_value ?? row.tax_percent ?? 0),
           tax_percent: Number(catItem.tax_percent || row.tax_percent || 0),
           opening_stock: Number(catItem.opening_stock || 0),
           minimum_stock: Number(catItem.minimum_stock || 0),
@@ -5564,9 +5655,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                   !e.ctrlKey &&
                                   !e.altKey &&
                                   !e.metaKey &&
-                                  (e.key === 'Backspace' ||
-                                    (!e.shiftKey &&
-                                      (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')))
+                                  !e.shiftKey &&
+                                  (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
                                 ) {
                                   e.preventDefault();
                                   e.stopPropagation();
@@ -7411,7 +7501,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     <span className="text-rose-700">
                       ({Number(activeItemHistory.lastCustomerSale.discount_percent || 0)}% Disc)
                     </span>
-                    <span className="text-slate-600">{activeItemHistory.lastCustomerSale.invoice_date}</span>
+                    <span className="text-slate-600">{formatAppDate(activeItemHistory.lastCustomerSale.invoice_date)}</span>
                     <button
                       type="button"
                       onClick={() => applyCustomerLastRateToRow(selectedRowIndex)}
@@ -7829,6 +7919,56 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         </div>
       )}
 
+      {/* ================= MODAL 2A: CUSTOMER LEDGER PERIOD CHOICE POPUP ================= */}
+      {showCustomerLedgerChoicePopup && selectedCustomer && (
+        <div className="fixed inset-0 z-[60] bg-slate-900/55 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-2xl w-full max-w-sm p-5 text-xs space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
+              <div className="flex items-center gap-2">
+                <Users2 className="w-4 h-4 text-emerald-600" />
+                <h3 className="text-sm font-bold text-slate-900">Select Customer Ledger Range</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCustomerLedgerChoicePopup(false)}
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+              <div className="text-[10px] font-bold uppercase text-slate-500">Selected Customer</div>
+              <div className="text-xs font-bold text-slate-900 mt-0.5">
+                [{selectedCustomer.account_code}] {selectedCustomer.account_name}
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-2.5">
+              <button
+                type="button"
+                onClick={() => fetchCustomerLedgerByRange('all')}
+                className="w-full px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition-colors cursor-pointer"
+              >
+                All Ledger
+              </button>
+              <button
+                type="button"
+                onClick={() => fetchCustomerLedgerByRange('last30')}
+                className="w-full px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-xs transition-colors cursor-pointer"
+              >
+                Last 30 Days Ledger
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCustomerLedgerChoicePopup(false)}
+                className="w-full px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ================= MODAL 2: CUSTOMER ACCOUNT SHORTCUTS ================= */}
       {activeCustomerShortcut && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
@@ -7906,31 +8046,62 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
             {activeCustomerShortcut === 'ledger' && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between bg-slate-100 p-3 rounded-lg">
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-100 p-3 rounded-lg">
                   <div>
-                    <div className="font-bold text-slate-900">
-                      {customerLedgerData?.selectedAccount?.account_name ||
-                        selectedCustomer?.account_name}
+                    <div className="font-bold text-slate-900 flex items-center gap-2">
+                      <span>
+                        {customerLedgerData?.selectedAccount?.account_name ||
+                          selectedCustomer?.account_name}
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                        {customerLedgerPeriod === 'last30' ? 'Last 30 Days Ledger' : 'All Ledger'}
+                      </span>
                     </div>
-                    <div className="text-[11px] text-slate-500 font-mono">
+                    <div className="text-[11px] text-slate-500 font-mono mt-0.5">
                       Opening: {formatPKR(customerLedgerData?.summary?.openingBalance || 0)} (
                       {customerLedgerData?.summary?.openingBalanceType || 'Debit'})
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-[10px] uppercase text-slate-500 font-bold">
-                      Closing Ledger Balance
+                  <div className="flex items-center gap-3">
+                    <div className="inline-flex rounded-lg bg-white p-0.5 border border-slate-300 text-[10px] font-bold">
+                      <button
+                        type="button"
+                        onClick={() => fetchCustomerLedgerByRange('all')}
+                        className={`px-2 py-1 rounded cursor-pointer ${
+                          customerLedgerPeriod === 'all'
+                            ? 'bg-emerald-600 text-white'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        All Ledger
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => fetchCustomerLedgerByRange('last30')}
+                        className={`px-2 py-1 rounded cursor-pointer ${
+                          customerLedgerPeriod === 'last30'
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        Last 30 Days
+                      </button>
                     </div>
-                    <div className="font-mono font-black text-sm text-emerald-700">
-                      {formatPKR(customerLedgerData?.summary?.closingBalance || 0)} (
-                      {customerLedgerData?.summary?.closingBalanceType || 'Debit'})
+                    <div className="text-right">
+                      <div className="text-[10px] uppercase text-slate-500 font-bold">
+                        Closing Ledger Balance
+                      </div>
+                      <div className="font-mono font-black text-sm text-emerald-700">
+                        {formatPKR(customerLedgerData?.summary?.closingBalance || 0)} (
+                        {customerLedgerData?.summary?.closingBalanceType || 'Debit'})
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg">
+                <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-lg">
                   <table className="w-full text-left border-collapse text-[11px]">
-                    <thead className="bg-slate-900 text-white">
+                    <thead className="bg-slate-900 text-white sticky top-0">
                       <tr>
                         <th className="px-2.5 py-1.5">Date</th>
                         <th className="px-2.5 py-1.5">Ref #</th>
@@ -7941,16 +8112,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       </tr>
                     </thead>
                     <tbody>
-                      {(customerLedgerData?.entries || []).length === 0 ? (
+                      {customerLedgerLoading ? (
+                        <tr>
+                          <td colSpan={6} className="p-6 text-center text-slate-500 font-medium">
+                            Loading customer ledger statement...
+                          </td>
+                        </tr>
+                      ) : (customerLedgerData?.entries || []).length === 0 ? (
                         <tr>
                           <td colSpan={6} className="p-4 text-center text-slate-400">
-                            No posted ledger transactions yet for this customer.
+                            No posted ledger transactions found for this customer in the selected period.
                           </td>
                         </tr>
                       ) : (
                         (customerLedgerData?.entries || []).map((e: any) => (
                           <tr key={e.id} className="border-b border-slate-100">
-                            <td className="px-2.5 py-1.5 font-mono">{e.entry_date}</td>
+                            <td className="px-2.5 py-1.5 font-mono">{formatAppDate(e.entry_date)}</td>
                             <td className="px-2.5 py-1.5 font-mono font-semibold">
                               {e.entry_number}
                             </td>
@@ -8168,7 +8345,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         className="border-b border-slate-100 cursor-pointer hover:bg-emerald-50/70 transition-colors"
                       >
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">{h.invoice_number}</td>
-                        <td className="px-3 py-2 font-mono text-slate-700">{h.invoice_date}</td>
+                        <td className="px-3 py-2 font-mono text-slate-700">{formatAppDate(h.invoice_date)}</td>
                         <td className="px-3 py-2 font-semibold text-slate-900">
                           {h.customer_name || 'Walk-in Cash Customer'}
                         </td>
@@ -8279,7 +8456,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             {inv.invoice_type}
                           </span>
                         </td>
-                        <td className="px-3 py-2 font-mono text-slate-700">{inv.invoice_date}</td>
+                        <td className="px-3 py-2 font-mono text-slate-700">{formatAppDate(inv.invoice_date)}</td>
                         <td className="px-3 py-2 font-semibold text-slate-800">{inv.customer_name}</td>
                         <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
                           {formatPKR(inv.net_total)}
@@ -8710,6 +8887,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     retail_price: Number(updatedItem.retail_price || 0),
                     loose_rate: Number(updatedItem.loose_rate || 0),
                     discount_percent: Number(updatedItem.discount_percent || 0),
+                    tax_type: updatedItem.tax_type || 'percentage',
+                    tax_value: Number(updatedItem.tax_value ?? updatedItem.tax_percent ?? 0),
                     tax_percent: Number(updatedItem.tax_percent || 0),
                     minimum_stock: Number(updatedItem.minimum_stock || 0),
                     rack_number: String(updatedItem.rack_number || ''),
@@ -8770,6 +8949,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 units_per_pack: r.variant_id ? r.units_per_pack : newUnitsPerPack,
                 unit_price: updatedPrice,
                 loose_rate: updatedLoose,
+                tax_type: r.variant_id
+                  ? r.tax_type || 'percentage'
+                  : updatedItem.tax_type || r.tax_type || 'percentage',
+                tax_value: r.variant_id
+                  ? Number(r.tax_value ?? r.tax_percent ?? 0)
+                  : Number(updatedItem.tax_value ?? updatedItem.tax_percent ?? r.tax_value ?? r.tax_percent ?? 0),
                 tax_percent: r.variant_id
                   ? r.tax_percent
                   : Number(updatedItem.tax_percent ?? r.tax_percent ?? 0),

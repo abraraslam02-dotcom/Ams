@@ -20,7 +20,8 @@ import {
   PurchaseReturnLineItem,
 } from '../../types/purchase';
 import { api } from '../../services/api';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { calculateLineTax, resolveItemTaxConfig } from '../../utils/taxCalculation';
 import { NumericInput } from '../common/NumericInput';
 
 interface PurchaseReturnPanelProps {
@@ -150,6 +151,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
         const purchasedQty = round2(it.quantity);
         const alreadyRet = round2(it.returned_quantity || 0);
         const eligible = Math.max(0, round2(purchasedQty - alreadyRet));
+        const resolvedTax = resolveItemTaxConfig(it);
         return {
           original_purchase_item_id: it.id!,
           item_id: it.item_id,
@@ -170,6 +172,8 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
           discount_percent: round2(it.discount_percent),
           discount_amount: 0,
           taxable_amount: 0,
+          tax_type: resolvedTax.tax_type,
+          tax_value: resolvedTax.tax_value,
           tax_percent: round2(it.tax_percent),
           gst_amount: 0,
           advance_tax_rate: round2(inv.advance_tax_rate || 0),
@@ -214,7 +218,16 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
 
     const totalDisc = round2(itemDisc + invDiscShare);
     const taxable = round2(gross - totalDisc);
-    const gstAmt = round2(taxable * (gstPct / 100));
+    const resolvedTax = resolveItemTaxConfig(line);
+    const gstAmt = calculateLineTax({
+      grossAmount: gross,
+      quantity: qty,
+      looseQuantity: 0,
+      unitsPerPack: line.units_per_pack || 1,
+      taxType: resolvedTax.tax_type,
+      taxValue: resolvedTax.tax_type === 'percentage' ? gstPct : resolvedTax.tax_value,
+      taxPercent: gstPct,
+    });
 
     let advBase = round2(taxable + gstAmt);
     if (invDetails?.advance_tax_basis === 'taxable_amount') {
@@ -223,7 +236,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
       advBase = gross;
     }
     const advAmt = round2(advBase * (advPct / 100));
-    const netLine = round2(taxable + gstAmt + advAmt);
+    const netLine = round2(gross + gstAmt - totalDisc + advAmt);
 
     return {
       ...line,
@@ -545,7 +558,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
                 <option value="">— Select Purchase Invoice —</option>
                 {activeSupplierPurchases.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.bill_number} | {p.supplier_name} | {p.bill_date} | Net: {formatPKR(p.net_total)}
+                    {p.bill_number} | {p.supplier_name} | {formatAppDate(p.bill_date)} | Net: {formatPKR(p.net_total)}
                   </option>
                 ))}
               </select>
@@ -644,7 +657,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
                           </td>
                           <td className="py-2 px-2.5 font-mono">
                             <div className="font-bold text-slate-900">{line.batch_number}</div>
-                            <div className="text-[10px] text-slate-500">Exp: {line.expiry_date}</div>
+                            <div className="text-[10px] text-slate-500">Exp: {formatAppDate(line.expiry_date)}</div>
                           </td>
                           <td className="py-2 px-2.5 text-right font-mono font-semibold">
                             {line.purchased_quantity}
@@ -835,7 +848,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
                     <td className="py-2.5 px-4 font-mono font-bold text-rose-700">
                       {r.debit_note_number}
                     </td>
-                    <td className="py-2.5 px-3 font-mono">{r.return_date}</td>
+                    <td className="py-2.5 px-3 font-mono">{formatAppDate(r.return_date)}</td>
                     <td className="py-2.5 px-3 font-mono font-semibold text-slate-800">
                       {r.original_bill_number}
                     </td>

@@ -16,6 +16,7 @@ import { FinancialReportKey } from '../../types/accounting';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate, formatDateRange } from '../../utils/formatters';
 
 interface FinancialReportsViewProps {
   initialReport?: FinancialReportKey;
@@ -292,7 +293,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           title={REPORT_TABS.find((t) => t.key === activeReport)?.label?.replace(/^\d+\.\s*/, '') || 'FINANCIAL REPORT'}
           subtitle="Double-Entry ERP Verified Financial Statement"
           metaItems={[
-            { label: 'Statement Period', value: `${startDate || 'Opening'} to ${endDate || 'Current'}` },
+            { label: 'Statement Period', value: formatDateRange(startDate, endDate, 'Opening', 'Current') },
             { label: 'Report Mode', value: 'Double-Entry Complete' },
             ...(activeReport === 'account-summary' && accountId !== 'all'
               ? [{ label: 'Selected Account', value: accounts.find((a) => String(a.id) === accountId)?.account_name || accountId }]
@@ -435,7 +436,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
               <span>PROFIT & LOSS STATEMENT (INCOME STATEMENT) — ABRAR MEDICAL STORE</span>
             </div>
             <span className="font-mono text-emerald-300">
-              {startDate || 'Inception'} to {endDate || 'Current'}
+              {formatDateRange(startDate, endDate, 'Inception', 'Current')}
             </span>
           </div>
 
@@ -838,7 +839,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                         {je.entry_number}
                       </td>
                       <td className="px-3 py-2 font-mono text-slate-700 align-top">
-                        {String(je.entry_date).slice(0, 10)}
+                        {formatAppDate(je.entry_date)}
                       </td>
                       <td className="px-3 py-2 align-top">
                         <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 font-mono text-[10px] font-bold">

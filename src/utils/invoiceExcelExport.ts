@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { formatItemNameWithRemarks } from './itemDisplay';
+import { formatAppDate } from './formatters';
 
 function toNum(val: unknown): number {
   const n = Number(val);
@@ -9,11 +10,7 @@ function toNum(val: unknown): number {
 
 function cleanDate(val: unknown): string {
   if (!val) return '';
-  const str = String(val).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
-    return str.slice(0, 10);
-  }
-  return str;
+  return formatAppDate(String(val).trim(), '');
 }
 
 function applyColumnWidths(ws: XLSX.WorkSheet, headers: string[], rows: Array<Record<string, any>>) {

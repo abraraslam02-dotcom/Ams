@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   BookOpen,
   Search,
@@ -10,6 +10,7 @@ import {
   Wallet,
   Landmark,
   FileText,
+  X,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { DetailedAccountLedger } from '../../types/accounting';
@@ -17,6 +18,7 @@ import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate, formatDateRange } from '../../utils/formatters';
 
 export type LedgerWorkspaceTab =
   | 'customer'
@@ -40,6 +42,8 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
   );
   const [accountOptions, setAccountOptions] = useState<any[]>([]);
   const [accountFilterSearch, setAccountFilterSearch] = useState('');
+  const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
+  const [highlightedAccountIdx, setHighlightedAccountIdx] = useState(0);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [txSearch, setTxSearch] = useState('');
@@ -47,6 +51,9 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
   const [ledger, setLedger] = useState<DetailedAccountLedger | null>(null);
   const [dailyCashSummary, setDailyCashSummary] = useState<any[]>([]);
   const printableAreaRef = useRef<HTMLDivElement>(null);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
+  const ledgerRequestIdRef = useRef<number>(0);
+  const accountOptionsLoadedTabRef = useRef<string>('');
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -55,11 +62,75 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
   useEffect(() => {
     if (initialAccountId) {
       setSelectedAccountId(String(initialAccountId));
+      setAccountFilterSearch('');
     }
   }, [initialAccountId]);
 
+  useEffect(() => {
+    const onOutsideClick = (e: MouseEvent) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) {
+        setSearchDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onOutsideClick);
+    return () => document.removeEventListener('mousedown', onOutsideClick);
+  }, []);
+
+  const filterAccountsList = useCallback((list: any[], rawTerm: string) => {
+    const term = rawTerm.trim().toLowerCase();
+    if (!term) return list;
+    const tokens = term.split(/\s+/).filter(Boolean);
+    const matched = list.filter((a) => {
+      const hay = `${a.account_code || ''} ${a.account_name || ''} ${a.phone || ''} ${a.city || ''}`.toLowerCase();
+      return tokens.every((t) => hay.includes(t));
+    });
+    // Rank exact code/name match first, then prefix match, then contains
+    return matched.sort((a, b) => {
+      const aCode = String(a.account_code || '').toLowerCase();
+      const bCode = String(b.account_code || '').toLowerCase();
+      const aName = String(a.account_name || '').toLowerCase();
+      const bName = String(b.account_name || '').toLowerCase();
+      const aExact = aCode === term || aName === term ? 0 : aName.startsWith(term) || aCode.startsWith(term) ? 1 : 2;
+      const bExact = bCode === term || bName === term ? 0 : bName.startsWith(term) || bCode.startsWith(term) ? 1 : 2;
+      if (aExact !== bExact) return aExact - bExact;
+      return aName.localeCompare(bName);
+    });
+  }, []);
+
+  const filteredAccountOptions = useMemo(
+    () => filterAccountsList(accountOptions, accountFilterSearch),
+    [accountOptions, accountFilterSearch, filterAccountsList]
+  );
+
+  const hasSearchNoMatch =
+    accountFilterSearch.trim().length > 0 &&
+    accountOptions.length > 0 &&
+    filteredAccountOptions.length === 0;
+
   const loadLedgerData = useCallback(async () => {
+    const requestId = ++ledgerRequestIdRef.current;
+
+    // If user typed a search query that matches zero accounts, never fall back to a stale or default account
+    if (hasSearchNoMatch) {
+      setLedger(null);
+      setDailyCashSummary([]);
+      setLoading(false);
+      return;
+    }
+
+    // Immediately clear stale ledger if switching to a different account ID
+    setLedger((prev) => {
+      if (!prev) return null;
+      if (selectedAccountId && String(prev.account?.id) !== String(selectedAccountId)) {
+        return null;
+      }
+      if (!selectedAccountId && accountOptionsLoadedTabRef.current !== activeTab) {
+        return null;
+      }
+      return prev;
+    });
     setLoading(true);
+
     try {
       const params = {
         accountId: selectedAccountId || undefined,
@@ -68,68 +139,97 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
         q: txSearch || undefined,
       };
 
+      let res: any = null;
+      let optionsList: any[] = [];
+
       if (activeTab === 'customer') {
-        const res = await api.getCustomerLedger(params);
-        setAccountOptions(res.customers || []);
-        setLedger(res.ledger || null);
-        if (!selectedAccountId && res.ledger?.account?.id) {
-          setSelectedAccountId(String(res.ledger.account.id));
-        }
+        res = await api.getCustomerLedger(params);
+        optionsList = res?.customers || [];
       } else if (activeTab === 'supplier') {
-        const res = await api.getSupplierLedger(params);
-        setAccountOptions(res.suppliers || []);
-        setLedger(res.ledger || null);
-        if (!selectedAccountId && res.ledger?.account?.id) {
-          setSelectedAccountId(String(res.ledger.account.id));
-        }
+        res = await api.getSupplierLedger(params);
+        optionsList = res?.suppliers || [];
       } else if (activeTab === 'general') {
-        const res = await api.getGeneralLedger(params);
-        setAccountOptions(res.accounts || []);
-        setLedger(res.ledger || null);
-        if (!selectedAccountId && res.ledger?.account?.id) {
-          setSelectedAccountId(String(res.ledger.account.id));
-        }
+        res = await api.getGeneralLedger(params);
+        optionsList = res?.accounts || [];
       } else if (activeTab === 'cash-book') {
-        const res = await api.getCashBook(params);
-        setAccountOptions(res.cashAccounts || []);
-        setLedger(res.ledger || null);
-        setDailyCashSummary(res.dailySummary || []);
-        if (!selectedAccountId && res.ledger?.account?.id) {
-          setSelectedAccountId(String(res.ledger.account.id));
-        }
+        res = await api.getCashBook(params);
+        optionsList = res?.cashAccounts || [];
       } else if (activeTab === 'bank-book') {
-        const res = await api.getBankBook(params);
-        setAccountOptions(res.bankAccounts || []);
-        setLedger(res.ledger || null);
-        if (!selectedAccountId && res.ledger?.account?.id) {
-          setSelectedAccountId(String(res.ledger.account.id));
-        }
+        res = await api.getBankBook(params);
+        optionsList = res?.bankAccounts || [];
+      }
+
+      // Discard stale out-of-order async responses
+      if (requestId !== ledgerRequestIdRef.current) return;
+
+      accountOptionsLoadedTabRef.current = activeTab;
+      setAccountOptions(optionsList);
+      setLedger(res?.ledger || null);
+      if (activeTab === 'cash-book') {
+        setDailyCashSummary(res?.dailySummary || []);
+      } else {
+        setDailyCashSummary([]);
+      }
+      if (!selectedAccountId && res?.ledger?.account?.id) {
+        setSelectedAccountId(String(res.ledger.account.id));
       }
     } catch (err) {
+      if (requestId !== ledgerRequestIdRef.current) return;
       console.error('Error loading ledger:', err);
+      setLedger(null);
     } finally {
-      setLoading(false);
+      if (requestId === ledgerRequestIdRef.current) {
+        setLoading(false);
+      }
     }
-  }, [activeTab, selectedAccountId, startDate, endDate, txSearch]);
+  }, [activeTab, selectedAccountId, startDate, endDate, txSearch, hasSearchNoMatch]);
 
   useEffect(() => {
-    loadLedgerData();
+    const timer = window.setTimeout(() => {
+      loadLedgerData();
+    }, 80);
+    return () => window.clearTimeout(timer);
   }, [loadLedgerData]);
 
   const handleTabSwitch = (tab: LedgerWorkspaceTab) => {
+    ledgerRequestIdRef.current += 1;
     setActiveTab(tab);
     setSelectedAccountId('');
     setAccountFilterSearch('');
+    setSearchDropdownOpen(false);
+    setHighlightedAccountIdx(0);
+    setLedger(null);
+    setDailyCashSummary([]);
   };
 
-  const filteredAccountOptions = accountOptions.filter((a) => {
-    if (!accountFilterSearch.trim()) return true;
-    const term = accountFilterSearch.toLowerCase();
-    return (
-      String(a.account_code || '').toLowerCase().includes(term) ||
-      String(a.account_name || '').toLowerCase().includes(term)
-    );
-  });
+  const handleSelectAccountById = (accountIdStr: string) => {
+    if (accountIdStr !== selectedAccountId) {
+      setLedger(null);
+      setDailyCashSummary([]);
+      setSelectedAccountId(accountIdStr);
+    }
+  };
+
+  const handleAccountSearchChange = (value: string) => {
+    setAccountFilterSearch(value);
+    setSearchDropdownOpen(true);
+    setHighlightedAccountIdx(0);
+
+    const matches = filterAccountsList(accountOptions, value);
+    if (matches.length > 0) {
+      const nextId = String(matches[0].id);
+      if (nextId !== selectedAccountId) {
+        setLedger(null);
+        setDailyCashSummary([]);
+        setSelectedAccountId(nextId);
+      }
+    } else if (value.trim().length > 0) {
+      // Clear previous account ledger immediately when no account matches
+      setLedger(null);
+      setDailyCashSummary([]);
+      setSelectedAccountId('');
+    }
+  };
 
   const handleExportCSV = () => {
     if (!ledger) return;
@@ -146,7 +246,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
     const rows = [
       headers.join(','),
       [
-        `"${startDate || 'OPENING'}"`,
+        `"${startDate ? formatAppDate(startDate) : 'OPENING'}"`,
         '"OPEN-BAL"',
         '"OPENING"',
         '"Opening Balance Brought Forward (B/F)"',
@@ -157,7 +257,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
       ].join(','),
       ...ledger.entries.map((e) =>
         [
-          `"${e.entry_date}"`,
+          `"${formatAppDate(e.entry_date)}"`,
           `"${e.document_number}"`,
           `"${e.reference_type}"`,
           `"${String(e.description || '').replace(/"/g, '""')}"`,
@@ -304,20 +404,108 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
 
       {/* Account Selection & Date Filters Bar */}
       <div className="bg-white border border-slate-200 rounded-lg p-3 grid grid-cols-1 md:grid-cols-6 gap-2.5 text-xs shadow-xs print:hidden">
-        <div>
+        <div ref={searchBoxRef} className="relative">
           <label className="block font-semibold text-slate-600 mb-0.5">
             Fast Search Account / Code
           </label>
           <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={accountFilterSearch}
-              onChange={(e) => setAccountFilterSearch(e.target.value)}
-              placeholder="Filter name or code..."
-              className="w-full pl-8 pr-2 py-1.5 border border-slate-300 rounded"
+              onFocus={() => setSearchDropdownOpen(true)}
+              onChange={(e) => handleAccountSearchChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setSearchDropdownOpen(true);
+                  const nextIdx = Math.min(
+                    Math.max(filteredAccountOptions.length - 1, 0),
+                    highlightedAccountIdx + 1
+                  );
+                  setHighlightedAccountIdx(nextIdx);
+                  const opt = filteredAccountOptions[nextIdx];
+                  if (opt) handleSelectAccountById(String(opt.id));
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setSearchDropdownOpen(true);
+                  const prevIdx = Math.max(0, highlightedAccountIdx - 1);
+                  setHighlightedAccountIdx(prevIdx);
+                  const opt = filteredAccountOptions[prevIdx];
+                  if (opt) handleSelectAccountById(String(opt.id));
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const opt =
+                    filteredAccountOptions[highlightedAccountIdx] || filteredAccountOptions[0];
+                  if (opt) {
+                    handleSelectAccountById(String(opt.id));
+                  }
+                  setSearchDropdownOpen(false);
+                } else if (e.key === 'Escape') {
+                  setSearchDropdownOpen(false);
+                }
+              }}
+              placeholder="Type name or code to load..."
+              className="w-full pl-8 pr-7 py-1.5 border border-slate-300 rounded focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 outline-none"
             />
+            {accountFilterSearch && (
+              <button
+                type="button"
+                onClick={() => {
+                  handleAccountSearchChange('');
+                  setSearchDropdownOpen(false);
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
+          {searchDropdownOpen && accountFilterSearch.trim().length > 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 z-40 bg-white border border-slate-300 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+              {filteredAccountOptions.length === 0 ? (
+                <div className="px-3 py-2 text-slate-500 text-[11px]">
+                  No matching account found.
+                </div>
+              ) : (
+                filteredAccountOptions.slice(0, 40).map((a, idx) => {
+                  const isSelected = String(a.id) === String(selectedAccountId);
+                  const isHighlighted = idx === highlightedAccountIdx;
+                  return (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        handleSelectAccountById(String(a.id));
+                        setAccountFilterSearch(a.account_name || '');
+                        setSearchDropdownOpen(false);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 border-b border-slate-100 last:border-b-0 flex items-center justify-between gap-2 cursor-pointer ${
+                        isSelected
+                          ? 'bg-emerald-50 text-emerald-900 font-bold'
+                          : isHighlighted
+                          ? 'bg-slate-100 text-slate-900'
+                          : 'hover:bg-slate-50 text-slate-800'
+                      }`}
+                    >
+                      <span className="truncate">
+                        <span className="font-mono text-[10px] text-slate-500 mr-1">
+                          [{a.account_code}]
+                        </span>
+                        {a.account_name}
+                      </span>
+                      <span className="font-mono text-[10px] text-slate-600 shrink-0">
+                        Rs. {Number(a.current_balance || 0).toLocaleString('en-PK', { minimumFractionDigits: 0 })}{' '}
+                        {a.current_balance_type === 'Debit' ? 'Dr' : 'Cr'}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          )}
         </div>
 
         <div className="md:col-span-2">
@@ -326,18 +514,22 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
           </label>
           <select
             value={selectedAccountId}
-            onChange={(e) => setSelectedAccountId(e.target.value)}
+            onChange={(e) => handleSelectAccountById(e.target.value)}
             className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-semibold text-slate-900 bg-white"
           >
-            {filteredAccountOptions.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.account_code} — {a.account_name} (Bal: Rs.{' '}
-                {Number(a.current_balance || 0).toLocaleString('en-PK', {
-                  minimumFractionDigits: 2,
-                })}{' '}
-                {a.current_balance_type === 'Debit' ? 'Dr' : 'Cr'})
-              </option>
-            ))}
+            {filteredAccountOptions.length === 0 ? (
+              <option value="">No matching accounts</option>
+            ) : (
+              filteredAccountOptions.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.account_code} — {a.account_name} (Bal: Rs.{' '}
+                  {Number(a.current_balance || 0).toLocaleString('en-PK', {
+                    minimumFractionDigits: 2,
+                  })}{' '}
+                  {a.current_balance_type === 'Debit' ? 'Dr' : 'Cr'})
+                </option>
+              ))
+            )}
           </select>
         </div>
 
@@ -404,7 +596,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
           metaItems={[
             { label: 'Account Code', value: ledger?.account.account_code || '-' },
             { label: 'Account Group', value: ledger?.account.account_group || '-' },
-            { label: 'Statement Period', value: `${startDate || 'Opening'} to ${endDate || 'Current'}` },
+            { label: 'Statement Period', value: formatDateRange(startDate, endDate, 'Opening', 'Current') },
             {
               label: 'Closing Balance',
               value: ledger
@@ -581,7 +773,11 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
               {!ledger ? (
                 <tr>
                   <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
-                    {loading ? 'Loading Ledger Statement...' : 'Select an account to view its ledger.'}
+                    {loading
+                      ? 'Loading Ledger Statement...'
+                      : hasSearchNoMatch
+                      ? `No matching account found for "${accountFilterSearch.trim()}".`
+                      : 'Select an account to view its ledger.'}
                   </td>
                 </tr>
               ) : (
@@ -589,7 +785,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
                   {/* Opening Balance Row */}
                   <tr className="bg-amber-50/60 border-b border-slate-200 font-semibold">
                     <td className="px-3 py-2 font-mono text-slate-700">
-                      {startDate || 'OPENING'}
+                      {startDate ? formatAppDate(startDate) : 'OPENING'}
                     </td>
                     <td className="px-3 py-2 font-mono text-slate-700">OPEN-BAL</td>
                     <td className="px-3 py-2">
@@ -629,7 +825,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
                       className="border-b border-slate-200/80 hover:bg-slate-50 transition-colors"
                     >
                       <td className="px-3 py-1.5 font-mono text-slate-700 whitespace-nowrap">
-                        {row.entry_date}
+                        {formatAppDate(row.entry_date)}
                       </td>
                       <td className="px-3 py-1.5 font-mono font-semibold text-slate-900 whitespace-nowrap">
                         {row.document_number}
@@ -724,7 +920,9 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
               <tbody>
                 {dailyCashSummary.map((d) => (
                   <tr key={d.date} className="border-b border-slate-200 hover:bg-slate-50">
-                    <td className="px-3 py-1.5 font-mono font-bold text-slate-900">{d.date}</td>
+                    <td className="px-3 py-1.5 font-mono font-bold text-slate-900">
+                      {formatAppDate(d.date)}
+                    </td>
                     <td className="px-3 py-1.5 text-center font-mono">{d.txCount}</td>
                     <td className="px-3 py-1.5 text-right font-mono">
                       Rs. {Number(d.openingCash).toLocaleString('en-PK', { minimumFractionDigits: 2 })}

@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { X, Save, AlertCircle, CheckCircle2, Calculator, Info, Layers } from 'lucide-react';
-import { Item, ItemFormData } from '../../types/item';
+import React, { useState, useEffect, useCallback } from 'react';
+import { X, Save, AlertCircle, CheckCircle2, Calculator, Info, Layers, RotateCcw } from 'lucide-react';
+import { Item, ItemFormData, ItemTaxType } from '../../types/item';
 import { api } from '../../services/api';
 import { NumericInput } from '../common/NumericInput';
 import { ItemCompanySelect } from './ItemCompanySelect';
+import { ItemNameSelect } from './ItemNameSelect';
 import { ProductImageUploader } from '../common/ProductImageUploader';
 import {
   calculateItemPricingFromPurchase,
@@ -11,6 +12,7 @@ import {
   calculatePricesFromTradePrice,
   parsePackingUnits,
 } from '../../utils/itemPricing';
+import { resolveItemTaxConfig } from '../../utils/taxCalculation';
 
 interface ItemFormModalProps {
   isOpen: boolean;
@@ -43,7 +45,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   onCompanyCreated,
   editingItem,
 }) => {
-  const isEditing = Boolean(editingItem);
+  const [activeEditingItem, setActiveEditingItem] = useState<Item | null>(editingItem || null);
+  const isEditing = Boolean(activeEditingItem);
 
   const initialForm: ItemFormData = {
     item_code: '',
@@ -66,6 +69,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     retail_price: 0,
     loose_rate: 0,
     discount_percent: 0,
+    tax_type: 'percentage',
+    tax_value: 0,
     tax_percent: 0,
     opening_stock: 0,
     minimum_stock: 0,
@@ -87,80 +92,120 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [loadedNotice, setLoadedNotice] = useState<string | null>(null);
+
+  const hydrateFormFromItem = useCallback((source: Item) => {
+    const savedLoose =
+      source.loose_rate !== undefined && Number(source.loose_rate) > 0
+        ? Number(source.loose_rate)
+        : calculateLooseRateFromRetail(source.retail_price || 0, source.packing);
+    const matrixMatch = String(source.packing || '').match(/(\d+)\s*[xX*×]\s*(\d+)/);
+    const resolvedStripsPerBox =
+      source.strips_per_box && Number(source.strips_per_box) > 0
+        ? Number(source.strips_per_box)
+        : matrixMatch
+        ? parseInt(matrixMatch[1], 10)
+        : null;
+    const resolvedTabletsPerStrip =
+      source.tablets_per_strip && Number(source.tablets_per_strip) > 0
+        ? Number(source.tablets_per_strip)
+        : source.units_per_strip && Number(source.units_per_strip) > 0
+        ? Number(source.units_per_strip)
+        : matrixMatch
+        ? parseInt(matrixMatch[2], 10)
+        : null;
+    const taxCfg = resolveItemTaxConfig({
+      tax_type: source.tax_type,
+      tax_value: source.tax_value,
+      tax_percent: source.tax_percent,
+    });
+    setFormData({
+      item_code: source.item_code,
+      company_name: source.company_name,
+      item_name: source.item_name,
+      generic_name: source.generic_name || '',
+      category: source.category,
+      packing: source.packing,
+      carton:
+        source.carton !== undefined && source.carton !== null && Number(source.carton) > 0
+          ? Number(source.carton)
+          : null,
+      boxes_per_carton:
+        source.boxes_per_carton !== undefined &&
+        source.boxes_per_carton !== null &&
+        Number(source.boxes_per_carton) > 0
+          ? Number(source.boxes_per_carton)
+          : null,
+      strips_per_box: resolvedStripsPerBox,
+      tablets_per_strip: resolvedTabletsPerStrip,
+      units_per_strip: resolvedTabletsPerStrip || 1,
+      units_per_pack:
+        source.units_per_pack && Number(source.units_per_pack) > 0
+          ? Number(source.units_per_pack)
+          : parsePackingUnits(source.packing),
+      purchase_unit: source.purchase_unit || 'Box',
+      barcode: source.barcode || '',
+      purchase_price: source.purchase_price,
+      trade_price: source.trade_price,
+      wholesale_price: source.wholesale_price,
+      retail_price: source.retail_price,
+      loose_rate: savedLoose,
+      discount_percent: source.discount_percent,
+      tax_type: taxCfg.tax_type,
+      tax_value: taxCfg.tax_value,
+      tax_percent: taxCfg.tax_percent,
+      opening_stock: source.opening_stock,
+      minimum_stock: source.minimum_stock,
+      rack_number: source.rack_number || '',
+      has_variants: Number(source.has_variants) === 1 ? 1 : 0,
+      image_id: source.image_id ?? null,
+      image_url: source.image_url || '',
+      thumbnail_url: source.thumbnail_url || '',
+      status: source.status,
+    });
+    setTradeTouched(true);
+    setWholesaleTouched(true);
+    setRetailTouched(true);
+    setLooseRateTouched(true);
+    setCodeError(null);
+    setLoadingAutoCode(false);
+    setFormError(null);
+  }, []);
+
+  const resetToNewItemMode = useCallback(() => {
+    setActiveEditingItem(null);
+    setLoadedNotice(null);
+    setFormData(initialForm);
+    setTradeTouched(false);
+    setWholesaleTouched(false);
+    setRetailTouched(false);
+    setLooseRateTouched(false);
+    setCodeError(null);
+    setFormError(null);
+    setLoadingAutoCode(true);
+    api
+      .getNextItemCode()
+      .then((res) => {
+        if (res?.next_code) {
+          setFormData((prev) => ({
+            ...prev,
+            item_code: prev.item_code.trim() ? prev.item_code : res.next_code,
+          }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        setLoadingAutoCode(false);
+      });
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
+    setActiveEditingItem(editingItem || null);
+    setLoadedNotice(null);
     if (editingItem) {
-      const savedLoose =
-        editingItem.loose_rate !== undefined && Number(editingItem.loose_rate) > 0
-          ? Number(editingItem.loose_rate)
-          : calculateLooseRateFromRetail(editingItem.retail_price || 0, editingItem.packing);
-      const matrixMatch = String(editingItem.packing || '').match(/(\d+)\s*[xX*×]\s*(\d+)/);
-      const resolvedStripsPerBox =
-        editingItem.strips_per_box && Number(editingItem.strips_per_box) > 0
-          ? Number(editingItem.strips_per_box)
-          : matrixMatch
-          ? parseInt(matrixMatch[1], 10)
-          : null;
-      const resolvedTabletsPerStrip =
-        editingItem.tablets_per_strip && Number(editingItem.tablets_per_strip) > 0
-          ? Number(editingItem.tablets_per_strip)
-          : editingItem.units_per_strip && Number(editingItem.units_per_strip) > 0
-          ? Number(editingItem.units_per_strip)
-          : matrixMatch
-          ? parseInt(matrixMatch[2], 10)
-          : null;
-      setFormData({
-        item_code: editingItem.item_code,
-        company_name: editingItem.company_name,
-        item_name: editingItem.item_name,
-        generic_name: editingItem.generic_name || '',
-        category: editingItem.category,
-        packing: editingItem.packing,
-        carton:
-          editingItem.carton !== undefined &&
-          editingItem.carton !== null &&
-          Number(editingItem.carton) > 0
-            ? Number(editingItem.carton)
-            : null,
-        boxes_per_carton:
-          editingItem.boxes_per_carton !== undefined &&
-          editingItem.boxes_per_carton !== null &&
-          Number(editingItem.boxes_per_carton) > 0
-            ? Number(editingItem.boxes_per_carton)
-            : null,
-        strips_per_box: resolvedStripsPerBox,
-        tablets_per_strip: resolvedTabletsPerStrip,
-        units_per_strip: resolvedTabletsPerStrip || 1,
-        units_per_pack:
-          editingItem.units_per_pack && Number(editingItem.units_per_pack) > 0
-            ? Number(editingItem.units_per_pack)
-            : parsePackingUnits(editingItem.packing),
-        purchase_unit: editingItem.purchase_unit || 'Box',
-        barcode: editingItem.barcode || '',
-        purchase_price: editingItem.purchase_price,
-        trade_price: editingItem.trade_price,
-        wholesale_price: editingItem.wholesale_price,
-        retail_price: editingItem.retail_price,
-        loose_rate: savedLoose,
-        discount_percent: editingItem.discount_percent,
-        tax_percent: editingItem.tax_percent,
-        opening_stock: editingItem.opening_stock,
-        minimum_stock: editingItem.minimum_stock,
-        rack_number: editingItem.rack_number || '',
-        has_variants: Number(editingItem.has_variants) === 1 ? 1 : 0,
-        image_id: editingItem.image_id ?? null,
-        image_url: editingItem.image_url || '',
-        thumbnail_url: editingItem.thumbnail_url || '',
-        status: editingItem.status,
-      });
-      setTradeTouched(true);
-      setWholesaleTouched(true);
-      setRetailTouched(true);
-      setLooseRateTouched(true);
-      setCodeError(null);
-      setLoadingAutoCode(false);
+      hydrateFormFromItem(editingItem);
     } else {
       setFormData(initialForm);
       setTradeTouched(false);
@@ -188,7 +233,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [editingItem, isOpen]);
+  }, [editingItem, isOpen, hydrateFormFromItem]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -205,6 +250,14 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
   if (!isOpen) return null;
 
+  const handleSelectExistingItemFromDropdown = (item: Item) => {
+    setActiveEditingItem(item);
+    hydrateFormFromItem(item);
+    setLoadedNotice(
+      `Loaded existing item "${item.item_name}" (${item.item_code}) for viewing/editing. Saving will update this item instead of creating a duplicate.`
+    );
+  };
+
   // Real-time check for duplicate Item Code on blur or change
   const handleCheckCode = async (codeToTest: string) => {
     const clean = codeToTest.trim();
@@ -215,7 +268,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
     try {
       setCodeChecking(true);
-      const res = await api.checkItemCode(clean, editingItem?.id);
+      const res = await api.checkItemCode(clean, activeEditingItem?.id);
       if (res.exists) {
         setCodeError(`Item Code "${clean}" already exists. Duplicate Item Codes are strictly prevented.`);
       } else {
@@ -336,8 +389,16 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
     try {
       setSaving(true);
+      const resolvedTax = resolveItemTaxConfig({
+        tax_type: formData.tax_type,
+        tax_value: formData.tax_value,
+        tax_percent: formData.tax_percent,
+      });
       const payload = {
         ...formData,
+        tax_type: resolvedTax.tax_type,
+        tax_value: resolvedTax.tax_value,
+        tax_percent: resolvedTax.tax_percent,
         carton:
           formData.carton !== undefined && formData.carton !== null && Number(formData.carton) > 0
             ? Number(formData.carton)
@@ -356,8 +417,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         has_variants: Number(formData.has_variants) === 1 ? 1 : 0,
       };
       const res =
-        isEditing && editingItem
-          ? await api.updateItem(editingItem.id, payload)
+        isEditing && activeEditingItem
+          ? await api.updateItem(activeEditingItem.id, payload)
           : await api.createItem(payload);
       onSaved(res.item);
       onClose();
@@ -411,6 +472,23 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
             <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2.5">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
               <span className="font-medium">{formError}</span>
+            </div>
+          )}
+
+          {loadedNotice && (
+            <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-900 text-xs flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0" />
+                <span className="font-medium">{loadedNotice}</span>
+              </div>
+              <button
+                type="button"
+                onClick={resetToNewItemMode}
+                className="px-2.5 py-1 rounded-lg bg-white border border-blue-300 text-blue-800 text-[11px] font-bold hover:bg-blue-100 flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Add New Item Instead</span>
+              </button>
             </div>
           )}
 
@@ -473,18 +551,25 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                 />
               </div>
 
-              {/* Item Name */}
+              {/* Item Name (Searchable Dropdown — loads existing item to edit/update and prevents duplicates) */}
               <div className="space-y-1 sm:col-span-2">
-                <label className="block text-xs font-semibold text-slate-700">
-                  Item Name (Brand) <span className="text-rose-500">*</span>
+                <label className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                  <span>
+                    Item Name (Brand) <span className="text-rose-500">*</span>
+                  </span>
+                  {isEditing && (
+                    <span className="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">
+                      Editing Existing Record
+                    </span>
+                  )}
                 </label>
-                <input
-                  type="text"
-                  required
+                <ItemNameSelect
                   value={formData.item_name}
-                  onChange={(e) => setFormData({ ...formData, item_name: e.target.value })}
-                  placeholder="e.g. Panadol 500mg, Augmentin 625mg, Brufen 400mg"
-                  className="w-full px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  required
+                  selectedExistingItemId={activeEditingItem?.id ?? null}
+                  onChange={(name) => setFormData((prev) => ({ ...prev, item_name: name }))}
+                  onSelectExistingItem={handleSelectExistingItemFromDropdown}
+                  placeholder="Click to search existing items or type new item name..."
                 />
               </div>
 
@@ -956,18 +1041,58 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                 </div>
               </div>
 
-              {/* Tax % */}
-              <div className="space-y-1">
+              {/* Tax Configuration (Percentage % or Fixed Amount) */}
+              <div className="space-y-1 sm:col-span-2">
                 <label className="block text-xs font-semibold text-slate-700">
-                  Tax % (GST)
+                  Tax Configuration (Applied on Gross Before Discount)
                 </label>
-                <div className="relative">
-                  <NumericInput
-                    value={formData.tax_percent}
-                    onChange={(e) => setFormData({ ...formData, tax_percent: parseFloat(e.target.value) || 0 })}
-                    className="w-full px-2.5 py-1.5 text-xs font-mono rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  />
-                  <span className="absolute right-2.5 top-1.5 text-[11px] text-slate-400">%</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={formData.tax_type || 'percentage'}
+                    onChange={(e) => {
+                      const nextType = e.target.value as ItemTaxType;
+                      setFormData((prev) => {
+                        const val = Math.max(0, Number(prev.tax_value ?? prev.tax_percent ?? 0));
+                        return {
+                          ...prev,
+                          tax_type: nextType,
+                          tax_value: val,
+                          tax_percent: nextType === 'percentage' ? val : 0,
+                        };
+                      });
+                    }}
+                    className="w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  >
+                    <option value="percentage">Percentage (%)</option>
+                    <option value="amount">Amount (Fixed Tax)</option>
+                  </select>
+                  <div className="relative">
+                    {formData.tax_type === 'amount' && (
+                      <span className="absolute left-2.5 top-1.5 text-[11px] text-slate-400 font-mono">Rs.</span>
+                    )}
+                    <NumericInput
+                      value={formData.tax_value ?? formData.tax_percent ?? 0}
+                      onChange={(e) => {
+                        const nextVal = Math.max(0, parseFloat(e.target.value) || 0);
+                        setFormData((prev) => ({
+                          ...prev,
+                          tax_value: nextVal,
+                          tax_percent: (prev.tax_type || 'percentage') === 'percentage' ? nextVal : 0,
+                        }));
+                      }}
+                      className={`w-full py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500 ${
+                        formData.tax_type === 'amount' ? 'pl-8 pr-2.5' : 'px-2.5 pr-7'
+                      }`}
+                      title={
+                        formData.tax_type === 'amount'
+                          ? 'Fixed tax amount per pack/base unit (prorated for loose units)'
+                          : 'Tax percentage calculated on original gross amount before discounts'
+                      }
+                    />
+                    {formData.tax_type !== 'amount' && (
+                      <span className="absolute right-2.5 top-1.5 text-[11px] text-slate-400">%</span>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
 import { CompanySettings } from '../../types/system';
+import { formatAppDateTime, formatDateRange, replaceIsoDatesInText } from '../../utils/formatters';
 
 export interface PrintMetaItem {
   label: string;
@@ -30,7 +31,12 @@ export const PrintDocumentHeader: React.FC<PrintDocumentHeaderProps> = ({
 
   const effectiveMetaItems: PrintMetaItem[] = [
     ...(dateRange?.fromDate || dateRange?.toDate
-      ? [{ label: 'Date Range', value: `${dateRange.fromDate || 'Start'} to ${dateRange.toDate || 'Present'}` }]
+      ? [
+          {
+            label: 'Date Range',
+            value: formatDateRange(dateRange.fromDate, dateRange.toDate, 'Start', 'Present'),
+          },
+        ]
       : []),
     ...metaItems,
     ...metaFields,
@@ -64,10 +70,7 @@ export const PrintDocumentHeader: React.FC<PrintDocumentHeaderProps> = ({
   const mobile = settings?.mobile || '+92 3003234323';
   const logoUrl = settings?.logo_data_url || '';
 
-  const nowFormatted = new Date().toLocaleString('en-PK', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
+  const nowFormatted = formatAppDateTime(new Date());
 
   return (
     <div
@@ -127,7 +130,7 @@ export const PrintDocumentHeader: React.FC<PrintDocumentHeaderProps> = ({
                 {item.label}:
               </span>
               <span className="font-semibold text-slate-900 truncate block">
-                {String(item.value)}
+                {replaceIsoDatesInText(String(item.value))}
               </span>
             </div>
           ))}

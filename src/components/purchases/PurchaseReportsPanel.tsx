@@ -18,7 +18,7 @@ import { Account } from '../../types/account';
 import { Item } from '../../types/item';
 import { PurchaseReportType } from '../../types/purchase';
 import { api } from '../../services/api';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
 import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -121,7 +121,18 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
   }, [loadReport, activeReport]);
 
   const handleExportExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(rows);
+    const formattedRows = rows.map((row) => {
+      const out: Record<string, any> = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}(?:$|[T\s])/.test(v.trim())) {
+          out[k] = formatAppDate(v, '');
+        } else {
+          out[k] = v;
+        }
+      }
+      return out;
+    });
+    const ws = XLSX.utils.json_to_sheet(formattedRows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, activeReport.slice(0, 30));
     XLSX.writeFile(
@@ -303,7 +314,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
           subtitle={activeTabInfo.subtitle}
           metaItems={[
             { label: 'Report', value: activeTabInfo.label },
-            { label: 'Date Range', value: `${startDate || 'Start'} to ${endDate || 'Current'}` },
+            { label: 'Date Range', value: formatDateRange(startDate, endDate, 'Start', 'Current') },
             { label: 'Total Rows', value: rows.length },
           ]}
         />
@@ -331,7 +342,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
                 {rows.map((r) => (
                   <tr key={r.id} className="hover:bg-slate-50">
                     <td className="py-2 px-3 font-mono font-bold text-slate-900">{r.bill_number}</td>
-                    <td className="py-2 px-2.5 font-mono">{r.bill_date}</td>
+                    <td className="py-2 px-2.5 font-mono">{formatAppDate(r.bill_date)}</td>
                     <td className="py-2 px-2.5 font-semibold text-slate-900">{r.supplier_name}</td>
                     <td className="py-2 px-2.5 font-mono text-slate-600">
                       {r.supplier_invoice_number || '—'}
@@ -490,7 +501,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
                   <tr key={r.id} className="hover:bg-slate-50">
                     <td className="py-2 px-3 font-mono">
                       <div className="font-bold text-slate-900">{r.bill_number}</div>
-                      <div className="text-[10px] text-slate-500">{r.bill_date}</div>
+                      <div className="text-[10px] text-slate-500">{formatAppDate(r.bill_date)}</div>
                     </td>
                     <td className="py-2 px-2.5">
                       <div className="font-bold text-slate-900">{r.item_name}</div>
@@ -502,8 +513,8 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
                       {r.batch_number}
                     </td>
                     <td className="py-2 px-2.5 font-mono text-[10px]">
-                      <div>M: {r.manufacturing_date || '—'}</div>
-                      <div className="font-bold">E: {r.expiry_date}</div>
+                      <div>M: {formatAppDate(r.manufacturing_date)}</div>
+                      <div className="font-bold">E: {formatAppDate(r.expiry_date)}</div>
                     </td>
                     <td className="py-2 px-2.5 text-slate-700">{r.supplier_name}</td>
                     <td className="py-2 px-2.5 text-right font-mono">
@@ -548,7 +559,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
                     <td className="py-2 px-3 font-mono font-bold text-rose-700">
                       {r.debit_note_number}
                     </td>
-                    <td className="py-2 px-2.5 font-mono">{r.return_date}</td>
+                    <td className="py-2 px-2.5 font-mono">{formatAppDate(r.return_date)}</td>
                     <td className="py-2 px-2.5 font-mono font-semibold">
                       {r.original_bill_number}
                     </td>
@@ -637,7 +648,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
                   <tr key={r.id} className="hover:bg-slate-50">
                     <td className="py-2 px-3 font-mono">
                       <div className="font-bold text-slate-900">{r.bill_number}</div>
-                      <div className="text-[10px] text-slate-500">{r.bill_date}</div>
+                      <div className="text-[10px] text-slate-500">{formatAppDate(r.bill_date)}</div>
                     </td>
                     <td className="py-2 px-2.5">
                       <div className="font-bold text-slate-900">{r.supplier_name}</div>
@@ -707,7 +718,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
                 {rows.map((r) => (
                   <tr key={r.id} className="hover:bg-slate-50">
                     <td className="py-2 px-3 font-mono font-bold text-slate-900">
-                      {r.expiry_date}
+                      {formatAppDate(r.expiry_date)}
                     </td>
                     <td className="py-2 px-2.5 font-mono">
                       <span

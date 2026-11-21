@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../services/api';
 import { SalesInvoiceRecord, SaleReturnRecord } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { calculateLineTax } from '../../utils/taxCalculation';
 import { RotateCcw, CheckCircle2, AlertCircle, Eye, X, Printer } from 'lucide-react';
 import { SalesPrintModal } from './SalesPrintModal';
 import { NumericInput } from '../common/NumericInput';
@@ -165,7 +166,7 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
     }
   };
 
-  // Automatic calculation preview
+  // Automatic calculation preview (Tax strictly on original gross BEFORE discounts)
   const previewRefundTotal = (selectedSaleDetails?.items || []).reduce((sum: number, line: any) => {
     const inp = returnInputs[line.id];
     if (!inp) return sum;
@@ -173,9 +174,16 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
     const looseRate = Number(line.loose_rate || inp.returnRate / unitsPerPack);
     const gross = inp.returnPackQty * inp.returnRate + inp.returnLooseQty * looseRate;
     const disc = (gross * Number(line.discount_percent || 0)) / 100;
-    const taxable = Math.max(0, gross - disc);
-    const tax = (taxable * Number(line.tax_percent || 0)) / 100;
-    return sum + taxable + tax;
+    const tax = calculateLineTax({
+      grossAmount: gross,
+      quantity: inp.returnPackQty,
+      looseQuantity: inp.returnLooseQty,
+      unitsPerPack,
+      taxType: line.tax_type,
+      taxValue: line.tax_value,
+      taxPercent: line.tax_percent,
+    });
+    return sum + gross + tax - disc;
   }, 0);
 
   return (
@@ -491,7 +499,7 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
                     <td className="px-3 py-2 font-mono font-bold text-slate-900">
                       {sr.return_number}
                     </td>
-                    <td className="px-3 py-2 font-mono">{sr.return_date}</td>
+                    <td className="px-3 py-2 font-mono">{formatAppDate(sr.return_date)}</td>
                     <td className="px-3 py-2 font-mono font-semibold text-emerald-700">
                       {sr.original_invoice_number}
                     </td>

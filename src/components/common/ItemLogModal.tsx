@@ -16,7 +16,7 @@ import {
   ItemLogPurchaseRow,
   ItemLogSaleRow,
 } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { SalesPrintModal } from '../sales/SalesPrintModal';
 import { PurchasePrintModal } from '../purchases/PurchasePrintModal';
 
@@ -599,7 +599,7 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                       }`}
                     >
                       <td className="px-2 py-1 border-r border-slate-200 font-mono whitespace-nowrap">
-                        {row.invoice_date}
+                        {formatAppDate(row.invoice_date)}
                       </td>
                       <td className="px-2 py-1 border-r border-slate-200 font-mono font-bold text-emerald-800 whitespace-nowrap">
                         {row.invoice_number}
@@ -730,7 +730,7 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                     }`}
                   >
                     <td className="px-2 py-1 border-r border-slate-200 font-mono whitespace-nowrap">
-                      {row.purchase_date}
+                      {formatAppDate(row.purchase_date)}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 font-mono font-bold text-sky-800 whitespace-nowrap">
                       {row.invoice_number}
@@ -764,7 +764,7 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                       {row.batch_number || '—'}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 font-mono whitespace-nowrap">
-                      {row.expiry_date || '—'}
+                      {formatAppDate(row.expiry_date)}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 text-right font-mono font-bold text-sky-900">
                       {formatPKR(row.purchase_price)}

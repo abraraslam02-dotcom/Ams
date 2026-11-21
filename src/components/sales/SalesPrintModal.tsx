@@ -32,6 +32,7 @@ import {
 } from '../../utils/printEngine';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
+import { formatAppDate } from '../../utils/formatters';
 
 interface SalesPrintModalProps {
   isOpen?: boolean;
@@ -863,7 +864,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   <div className="text-sm text-slate-700 mt-0.5">
                     Date:{' '}
                     <span className="font-bold text-slate-950">
-                      {isReturn ? docRecord.return_date : docRecord.invoice_date}
+                      {formatAppDate(isReturn ? docRecord.return_date : docRecord.invoice_date)}
                     </span>
                   </div>
                   {isReturn && docRecord.original_invoice_number && (
@@ -1026,7 +1027,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                           <td className="py-2 px-1.5 border border-slate-200 font-mono text-[11.5px]">
                             <div className="font-semibold text-slate-800">{line.batch_number || '-'}</div>
                             {line.expiry_date && (
-                              <div className="text-slate-600">Exp: {line.expiry_date}</div>
+                              <div className="text-slate-600">Exp: {formatAppDate(line.expiry_date)}</div>
                             )}
                           </td>
                         )}
@@ -1344,18 +1345,6 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               {/* 2. Boxed Metadata Table (Bill No, Date, Account, Contact No) */}
               {(() => {
                 const rawDate = isReturn ? docRecord.return_date : docRecord.invoice_date;
-                const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-                const formatDateDMY = (raw: unknown): string => {
-                  const str = String(raw || '').trim();
-                  if (!str) return '';
-                  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
-                  if (m) return `${m[3]}-${MONTHS[Number(m[2]) - 1] || m[2]}-${m[1]}`;
-                  const d = new Date(str);
-                  if (!Number.isNaN(d.getTime())) {
-                    return `${String(d.getDate()).padStart(2, '0')}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;
-                  }
-                  return str;
-                };
                 const timeStr = docRecord.created_at
                   ? (() => {
                       const d = new Date(docRecord.created_at);
@@ -1369,7 +1358,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                         : '';
                     })()
                   : '';
-                const dateTimeDisplay = [formatDateDMY(rawDate), timeStr].filter(Boolean).join(' ');
+                const dateTimeDisplay = [formatAppDate(rawDate, ''), timeStr].filter(Boolean).join(' ');
 
                 return (
                   <table
@@ -1547,7 +1536,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                                   {showItemCompany && line.company_name ? `${line.company_name} ` : ''}
                                   {showPacking && rawPacking ? `${rawPacking} ` : ''}
                                   {showBatch && line.batch_number ? `B:${line.batch_number} ` : ''}
-                                  {showExpiry && line.expiry_date ? `Exp:${line.expiry_date} ` : ''}
+                                  {showExpiry && line.expiry_date ? `Exp:${formatAppDate(line.expiry_date)} ` : ''}
                                   {showTax && taxAmt > 0 ? `Tax:+${taxAmt.toFixed(0)}` : ''}
                                 </div>
                               )}

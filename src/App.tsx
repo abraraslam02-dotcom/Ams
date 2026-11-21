@@ -51,6 +51,7 @@ import {
 } from './components/payroll/PayrollHRWorkspace';
 import { api } from './services/api';
 import { offlineSyncManager } from './services/offlineSyncManager';
+import { initGlobalDateInputFormatting } from './utils/globalDateDisplay';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
 import { HealthResponse, CompanySettings } from './types/system';
 import {
@@ -1427,6 +1428,10 @@ function AppContent() {
 }
 
 export default function App() {
+  useEffect(() => {
+    return initGlobalDateInputFormatting();
+  }, []);
+
   const isStandaloneSalesmanPWA =
     typeof window !== 'undefined' &&
     (window.location.pathname.startsWith('/salesman') ||

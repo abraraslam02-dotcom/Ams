@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StockStatementResponse } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
@@ -64,7 +64,7 @@ export const CompanyStockStatementView: React.FC = () => {
     if (printRef.current) {
       printReportDocument(
         printRef.current,
-        `Abrar Medical Store - Stock Statement (${fromDate || 'Start'} to ${toDate})`,
+        `Abrar Medical Store - Stock Statement (${formatDateRange(fromDate, toDate, 'Start', 'Current')})`,
         {
           paperSize: 'legal',
           orientation: 'portrait',
@@ -286,9 +286,9 @@ export const CompanyStockStatementView: React.FC = () => {
             </div>
             <div className="text-right text-[11px] font-mono space-y-0.5">
               <div className="font-bold">
-                Period: {fromDate || 'Start'} to {toDate || todayIso}
+                Period: {formatDateRange(fromDate, toDate || todayIso, 'Start', 'Current')}
               </div>
-              <div>Print Date: {new Date().toLocaleDateString('en-PK')}</div>
+              <div>Print Date: {formatAppDate(new Date())}</div>
               <div className="text-[10px] opacity-75">
                 Page: <span className="ams-page-number">1</span> (US Legal Portrait • All Qty in Full Packs)
               </div>

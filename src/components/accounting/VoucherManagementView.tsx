@@ -23,6 +23,7 @@ import {
 import { NumericInput } from '../common/NumericInput';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate } from '../../utils/formatters';
 
 interface VoucherManagementViewProps {
   initialVoucherType?: VoucherTypeCode;
@@ -938,7 +939,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
                       </span>
                     </td>
                     <td className="px-3 py-2 font-mono text-slate-700 whitespace-nowrap">
-                      {v.voucher_date}
+                      {formatAppDate(v.voucher_date)}
                     </td>
                     <td className="px-3 py-2 font-mono text-slate-600">
                       {v.reference_number || '—'}
@@ -1099,7 +1100,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
               <div className="grid grid-cols-4 gap-3 bg-slate-50 p-3 rounded border border-slate-200">
                 <div>
                   <span className="text-slate-500 block">Voucher Date:</span>
-                  <strong className="font-mono">{printVoucher.voucher_date}</strong>
+                  <strong className="font-mono">{formatAppDate(printVoucher.voucher_date)}</strong>
                 </div>
                 <div>
                   <span className="text-slate-500 block">Reference No:</span>

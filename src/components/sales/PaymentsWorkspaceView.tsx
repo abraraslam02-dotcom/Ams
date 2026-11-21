@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../../services/api';
 import { PaymentVoucherRecord } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { Banknote, CheckCircle2, AlertCircle, Printer } from 'lucide-react';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
@@ -397,7 +397,7 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
                   <td className="px-3 py-2 font-mono font-bold text-slate-900">
                     {v.voucher_number}
                   </td>
-                  <td className="px-3 py-2 font-mono">{v.voucher_date}</td>
+                  <td className="px-3 py-2 font-mono">{formatAppDate(v.voucher_date)}</td>
                   <td className="px-3 py-2 uppercase font-bold text-[10px] text-emerald-700">
                     {v.voucher_type.replace('_', ' ')}
                   </td>

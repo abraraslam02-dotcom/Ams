@@ -23,6 +23,11 @@ import {
 } from '../services/fifoAndOfferEngine.ts';
 import { getEnrichedVariants, type EnrichedVariantRecord } from '../services/itemVariantService.ts';
 import { assertPeriodOpen } from '../utils/periodLock.ts';
+import {
+  calculateLineTax,
+  resolveItemTaxConfig,
+  type ItemTaxType,
+} from '../utils/taxCalculation.ts';
 
 export const salesRouter = Router();
 
@@ -636,8 +641,12 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
         };
       });
 
+      const itemTaxCfg = resolveItemTaxConfig(item as Record<string, any>);
       return {
         ...item,
+        tax_type: itemTaxCfg.tax_type,
+        tax_value: itemTaxCfg.tax_value,
+        tax_percent: itemTaxCfg.tax_percent,
         has_variants: hasVariants ? 1 : 0,
         active_variant_count: enrichedVariants.length,
         variants: enrichedVariants,
@@ -1754,6 +1763,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       costPricePerUnit: number;
       grossAmount: number;
       taxableAmount: number;
+      taxType: ItemTaxType;
+      taxValue: number;
       taxPercent: number;
       taxAmount: number;
       lineTotal: number;
@@ -1887,12 +1898,41 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       }
 
       const taxableAmount = round2(grossAmount - discountAmount);
-      const baseTaxPct = useVarCustom
-        ? Number(variantRow?.tax_percent ?? itemRow.tax_percent ?? 0)
-        : Number(itemRow.tax_percent ?? 0);
-      const taxPercent = round2(Math.max(0, Number(line.tax_percent ?? baseTaxPct)));
-      const taxAmount = round2((taxableAmount * taxPercent) / 100);
-      const lineTotal = round2(taxableAmount + taxAmount);
+      const baseTaxCfg = useVarCustom
+        ? resolveItemTaxConfig({
+            tax_type: (variantRow?.tax_type ?? itemRow.tax_type) as string | undefined,
+            tax_value: (variantRow?.tax_value ?? variantRow?.tax_percent ?? itemRow.tax_value ?? itemRow.tax_percent ?? 0) as number,
+            tax_percent: (variantRow?.tax_percent ?? itemRow.tax_percent ?? 0) as number,
+          })
+        : resolveItemTaxConfig({
+            tax_type: itemRow.tax_type as string | undefined,
+            tax_value: (itemRow.tax_value ?? itemRow.tax_percent ?? 0) as number,
+            tax_percent: (itemRow.tax_percent ?? 0) as number,
+          });
+      const resolvedLineTax = resolveItemTaxConfig({
+        tax_type: line.tax_type !== undefined ? String(line.tax_type) : baseTaxCfg.tax_type,
+        tax_value:
+          line.tax_value !== undefined
+            ? Number(line.tax_value)
+            : line.tax_percent !== undefined
+              ? Number(line.tax_percent)
+              : baseTaxCfg.tax_value,
+        tax_percent: line.tax_percent !== undefined ? Number(line.tax_percent) : baseTaxCfg.tax_percent,
+      });
+      const taxType = resolvedLineTax.tax_type;
+      const taxValue = resolvedLineTax.tax_value;
+      const taxPercent = resolvedLineTax.tax_percent;
+      // CRITICAL TAX RULE: Tax is ALWAYS calculated on ORIGINAL grossAmount BEFORE discounts (covers packs & loose quantities)
+      const taxAmount = calculateLineTax({
+        grossAmount,
+        quantity,
+        looseQuantity,
+        unitsPerPack: parsed.unitsPerPack,
+        taxType,
+        taxValue,
+        taxPercent,
+      });
+      const lineTotal = round2(grossAmount + taxAmount - discountAmount);
 
       // Resolve batch in inventory with strict variant_key isolation, FIFO & Expiry / Block validation
       const todayIso = new Date().toISOString().slice(0, 10);
@@ -2029,6 +2069,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         costPricePerUnit,
         grossAmount,
         taxableAmount,
+        taxType,
+        taxValue,
         taxPercent,
         taxAmount,
         lineTotal,
@@ -2382,11 +2424,11 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         available_stock_packs, available_stock_units,
         quantity, bonus_quantity, unit_price, discount_percent, discount_amount,
         loose_quantity, loose_rate, total_units, cost_price_per_unit,
-        gross_amount, taxable_amount, tax_percent, tax_amount, line_total,
+        gross_amount, taxable_amount, tax_type, tax_value, tax_percent, tax_amount, line_total,
         offer_id, offer_name, offer_discount_percent, offer_discount_amount,
         party_discount_id, party_discount_percent, party_discount_amount,
         manual_override_reason, fifo_batches_json, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const todayIso = new Date().toISOString().slice(0, 10);
@@ -2826,6 +2868,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         pLine.costPricePerUnit,
         pLine.grossAmount,
         pLine.taxableAmount,
+        pLine.taxType,
+        pLine.taxValue,
         pLine.taxPercent,
         pLine.taxAmount,
         pLine.lineTotal,
@@ -3607,9 +3651,22 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
         const discountPercent = round2(Number(origLine.discount_percent || 0));
         const lineDiscount = round2((lineGross * discountPercent) / 100);
         const lineTaxable = round2(Math.max(0, lineGross - lineDiscount));
-        const taxPercent = round2(Number(origLine.tax_percent || 0));
-        const lineTax = round2((lineTaxable * taxPercent) / 100);
-        const lineTotal = round2(lineTaxable + lineTax);
+        const origTaxCfg = resolveItemTaxConfig({
+          tax_type: origLine.tax_type as string | undefined,
+          tax_value: (origLine.tax_value ?? origLine.tax_percent ?? 0) as number,
+          tax_percent: (origLine.tax_percent ?? 0) as number,
+        });
+        const taxPercent = origTaxCfg.tax_percent;
+        const lineTax = calculateLineTax({
+          grossAmount: lineGross,
+          quantity: returnPackQty,
+          looseQuantity: returnLooseQty,
+          unitsPerPack,
+          taxType: origTaxCfg.tax_type,
+          taxValue: origTaxCfg.tax_value,
+          taxPercent: origTaxCfg.tax_percent,
+        });
+        const lineTotal = round2(lineGross + lineTax - lineDiscount);
 
         grossReturnAmount = round2(grossReturnAmount + lineGross);
         returnDiscountAmount = round2(returnDiscountAmount + lineDiscount);

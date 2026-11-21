@@ -29,6 +29,7 @@ import {
 } from '../../utils/printEngine';
 import { buildCompanyGroupedPurchaseData } from '../../utils/purchaseCompanyGrouping';
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
+import { formatAppDate } from '../../utils/formatters';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
 interface PurchasePrintModalProps {
@@ -593,7 +594,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                   <div>
                     <span className="text-slate-500 font-medium">Invoice Date:</span>{' '}
                     <span className="font-mono font-semibold text-slate-900">
-                      {mode === 'invoice' ? doc.bill_date : doc.return_date}
+                      {formatAppDate(mode === 'invoice' ? doc.bill_date : doc.return_date)}
                     </span>
                   </div>
                   {mode === 'invoice' ? (
@@ -972,8 +973,8 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                               {item.batch_number}
                             </div>
                             <div className="text-[10px] text-slate-500">
-                              {item.manufacturing_date ? `Mfg: ${item.manufacturing_date} | ` : ''}
-                              Exp: {item.expiry_date}
+                              {item.manufacturing_date ? `Mfg: ${formatAppDate(item.manufacturing_date)} | ` : ''}
+                              Exp: {formatAppDate(item.expiry_date)}
                             </div>
                           </td>
                         )}

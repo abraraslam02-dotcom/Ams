@@ -31,6 +31,7 @@ import {
   ArrowUpDown,
 } from 'lucide-react';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate } from '../../utils/formatters';
 
 export type PayrollTabId =
   | 'payroll-dashboard'
@@ -1725,7 +1726,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                     <tbody className="divide-y divide-slate-200">
                       {(ledgerEmployeeDetail.ledger || []).map((row: any) => (
                         <tr key={row.id} className="hover:bg-slate-50">
-                          <td className="py-2 px-2.5 font-mono">{row.transaction_date}</td>
+                          <td className="py-2 px-2.5 font-mono">{formatAppDate(row.transaction_date)}</td>
                           <td className="py-2 px-2.5 font-semibold">{row.transaction_type}</td>
                           <td className="py-2 px-2.5 font-mono text-emerald-700">{row.reference_code}</td>
                           <td className="py-2 px-2.5">{row.description}</td>
@@ -2139,7 +2140,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                         <td className="py-2 px-2 font-semibold">{lv.full_name}</td>
                         <td className="py-2 px-2">{lv.leave_type}</td>
                         <td className="py-2 px-2 text-center font-mono">
-                          {lv.start_date} → {lv.end_date}
+                          {formatAppDate(lv.start_date)} → {formatAppDate(lv.end_date)}
                         </td>
                         <td className="py-2 px-2 text-right font-mono font-bold">{lv.total_days}</td>
                         <td className="py-2 px-2 text-center">
@@ -3103,7 +3104,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                         <div>{sp.payment_code}</div>
                         <div className="text-[10px] text-slate-500">{sp.journal_entry_number}</div>
                       </td>
-                      <td className="py-2 px-2.5 text-center font-mono">{sp.payment_date}</td>
+                      <td className="py-2 px-2.5 text-center font-mono">{formatAppDate(sp.payment_date)}</td>
                       <td className="py-2 px-2.5">
                         <div className="font-bold text-slate-900">{sp.full_name}</div>
                         <div className="text-[11px] text-slate-500">
@@ -3392,7 +3393,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                     <tbody className="divide-y divide-slate-100">
                       {advanceRecoveries.map((rec) => (
                         <tr key={rec.id}>
-                          <td className="py-1.5 px-2 font-mono">{rec.recovery_date}</td>
+                          <td className="py-1.5 px-2 font-mono">{formatAppDate(rec.recovery_date)}</td>
                           <td className="py-1.5 px-2 font-mono font-bold">{rec.voucher_code}</td>
                           <td className="py-1.5 px-2 font-semibold">{rec.full_name}</td>
                           <td className="py-1.5 px-2">{rec.recovery_method}</td>

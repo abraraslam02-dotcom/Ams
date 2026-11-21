@@ -18,6 +18,10 @@ import {
   isHeldOrDraftStatus,
   normalizeInvoiceStatus,
 } from '../services/ledgerIntegrityService.ts';
+import {
+  calculateLineTax,
+  resolveItemTaxConfig,
+} from '../utils/taxCalculation.ts';
 
 export const purchasesRouter = Router();
 
@@ -426,8 +430,12 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
     const items = rawItems.map((it) => {
       const iid = Number(it.id);
       const itemVars = variantsByParent.get(iid) || [];
+      const itemTaxCfg = resolveItemTaxConfig(it as Record<string, any>);
       return {
         ...it,
+        tax_type: itemTaxCfg.tax_type,
+        tax_value: itemTaxCfg.tax_value,
+        tax_percent: itemTaxCfg.tax_percent,
         has_variants: Number(it.has_variants || 0),
         variants: itemVars,
         active_variant_count: itemVars.length,
@@ -858,11 +866,21 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           line.debit_unit_rate !== undefined ? round2(line.debit_unit_rate) : round2(origItem.purchase_rate);
         const discPct =
           line.discount_percent !== undefined ? round2(line.discount_percent) : round2(origItem.discount_percent);
-        const gstPct =
-          line.tax_percent !== undefined ? round2(line.tax_percent) : round2(origItem.tax_percent);
+        const origTaxCfg = resolveItemTaxConfig({
+          tax_type: line.tax_type !== undefined ? line.tax_type : origItem.tax_type,
+          tax_value:
+            line.tax_value !== undefined
+              ? line.tax_value
+              : line.tax_percent !== undefined
+                ? line.tax_percent
+                : (origItem.tax_value ?? origItem.tax_percent ?? 0),
+          tax_percent: line.tax_percent !== undefined ? line.tax_percent : origItem.tax_percent,
+        });
+        const gstPct = origTaxCfg.tax_percent;
         const lineAdvTaxRate =
           line.advance_tax_rate !== undefined ? round2(line.advance_tax_rate) : invoiceAdvTaxRate;
 
+        const parsedPack = parsePacking(origItem.packing);
         const lineGross = round2(retQty * returnRate);
         const lineItemDisc = round2(lineGross * (discPct / 100));
         const lineAfterItemDisc = round2(lineGross - lineItemDisc);
@@ -872,7 +890,16 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
             : round2(lineAfterItemDisc * origInvDiscRatio);
         const lineTotalDisc = round2(lineItemDisc + Math.max(0, lineProratedInvDisc));
         const lineTaxable = round2(lineGross - lineTotalDisc);
-        const lineGst = round2(lineTaxable * (gstPct / 100));
+        // CRITICAL TAX RULE: Tax is ALWAYS calculated on ORIGINAL lineGross BEFORE discounts
+        const lineGst = calculateLineTax({
+          grossAmount: lineGross,
+          quantity: retQty,
+          looseQuantity: 0,
+          unitsPerPack: parsedPack.unitsPerPack,
+          taxType: origTaxCfg.tax_type,
+          taxValue: origTaxCfg.tax_value,
+          taxPercent: origTaxCfg.tax_percent,
+        });
 
         let lineAdvBase = round2(lineTaxable + lineGst);
         if (invoiceAdvTaxBasis === 'taxable_amount') {
@@ -881,9 +908,8 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           lineAdvBase = lineGross;
         }
         const lineAdvTax = round2(lineAdvBase * (lineAdvTaxRate / 100));
-        const lineNetTotal = round2(lineTaxable + lineGst + lineAdvTax);
+        const lineNetTotal = round2(lineGross + lineGst - lineTotalDisc + lineAdvTax);
 
-        const parsedPack = parsePacking(origItem.packing);
         const returnUnits = round2(retQty * parsedPack.unitsPerPack);
 
         grossReturnTotal = round2(grossReturnTotal + lineGross);
@@ -1963,9 +1989,17 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     const defaultRetailPrice = useVariantCustomPricing
       ? Number(dbVariant?.retail_price || dbItem.retail_price)
       : Number(dbItem.retail_price);
-    const defaultTaxPct = useVariantCustomPricing
-      ? Number(dbVariant?.tax_percent ?? dbItem.tax_percent ?? 0)
-      : Number(dbItem.tax_percent ?? 0);
+    const defaultTaxCfg = useVariantCustomPricing
+      ? resolveItemTaxConfig({
+          tax_type: dbVariant?.tax_type ?? dbItem.tax_type,
+          tax_value: dbVariant?.tax_value ?? dbVariant?.tax_percent ?? dbItem.tax_value ?? dbItem.tax_percent ?? 0,
+          tax_percent: dbVariant?.tax_percent ?? dbItem.tax_percent ?? 0,
+        })
+      : resolveItemTaxConfig({
+          tax_type: dbItem.tax_type,
+          tax_value: dbItem.tax_value ?? dbItem.tax_percent ?? 0,
+          tax_percent: dbItem.tax_percent ?? 0,
+        });
 
     const purchaseRate = Math.max(0, round2(raw.purchase_rate ?? defaultPurchasePrice));
     const defaultLooseRate = round2(purchaseRate / Math.max(1, parsedPack.unitsPerPack));
@@ -1975,7 +2009,19 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         : defaultLooseRate;
     const mrpRate = Math.max(0, round2(raw.mrp_rate ?? defaultRetailPrice));
     const discPct = Math.max(0, round2(raw.discount_percent ?? 0));
-    const taxPct = Math.max(0, round2(raw.tax_percent ?? defaultTaxPct));
+    const lineTaxCfg = resolveItemTaxConfig({
+      tax_type: raw.tax_type !== undefined ? raw.tax_type : defaultTaxCfg.tax_type,
+      tax_value:
+        raw.tax_value !== undefined
+          ? raw.tax_value
+          : raw.tax_percent !== undefined
+            ? raw.tax_percent
+            : defaultTaxCfg.tax_value,
+      tax_percent: raw.tax_percent !== undefined ? raw.tax_percent : defaultTaxCfg.tax_percent,
+    });
+    const taxType = lineTaxCfg.tax_type;
+    const taxValue = lineTaxCfg.tax_value;
+    const taxPct = lineTaxCfg.tax_percent;
 
     const lineGross = round2(qty * purchaseRate + looseQty * looseRate);
     const lineItemDisc =
@@ -2020,6 +2066,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       discPct,
       lineItemDisc,
       lineAfterItemDisc,
+      taxType,
+      taxValue,
       taxPct,
       updateMasterPurchasePrice: raw.update_master_purchase_price === true,
       updateMasterRetailPrice: raw.update_master_retail_price === true,
@@ -2037,7 +2085,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
   const totalDiscountAmount = round2(itemDiscountTotal + invoiceDiscountAmount);
   const taxableAmount = round2(grossTotal - totalDiscountAmount);
 
-  // Prorate invoice discount across lines to compute exact GST per line
+  // CRITICAL TAX RULE: Tax is ALWAYS calculated on ORIGINAL lineGross BEFORE ANY discounts (item or invoice discount).
   let gstTotal = 0;
   let allocatedTaxable = 0;
 
@@ -2053,8 +2101,16 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         allocatedTaxable = round2(allocatedTaxable + lineTaxable);
       }
     }
-    const lineTaxAmount = round2(lineTaxable * (line.taxPct / 100));
-    const lineNet = round2(lineTaxable + lineTaxAmount);
+    const lineTaxAmount = calculateLineTax({
+      grossAmount: line.lineGross,
+      quantity: line.qty,
+      looseQuantity: line.looseQty,
+      unitsPerPack: line.parsedPack.unitsPerPack,
+      taxType: line.taxType,
+      taxValue: line.taxValue,
+      taxPercent: line.taxPct,
+    });
+    const lineNet = round2(line.lineGross + lineTaxAmount - line.lineItemDisc);
 
     line.lineTaxable = lineTaxable;
     line.lineTaxAmount = lineTaxAmount;
@@ -2297,8 +2353,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       quantity, bonus_quantity, pack_quantity, loose_quantity, loose_rate, total_units,
       purchase_rate, mrp_rate, gross_amount,
       discount_percent, discount_amount, taxable_amount,
-      tax_percent, tax_amount, line_total, returned_quantity, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+      tax_type, tax_value, tax_percent, tax_amount, line_total, returned_quantity, remarks
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
   `);
 
   for (const line of processedLines) {
@@ -2597,6 +2653,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       line.discPct,
       line.lineItemDisc,
       line.lineTaxable,
+      line.taxType,
+      line.taxValue,
       line.taxPct,
       line.lineTaxAmount,
       line.lineNet,

@@ -10,7 +10,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { StockLedgerEntry, ReportMetaItem } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
@@ -131,7 +131,7 @@ export const StockLedgerView: React.FC = () => {
 
     for (const entry of ledger) {
       rows.push({
-        Date: entry.date,
+        Date: formatAppDate(entry.date, ''),
         'Transaction Type': entry.type_label,
         'Invoice / Voucher #': entry.ref_no,
         'Party Name': entry.party_name || '—',
@@ -478,7 +478,7 @@ export const StockLedgerView: React.FC = () => {
                     </td>
                     <td className="px-2 py-1.5 border-r border-slate-800">B/F</td>
                     <td colSpan={3} className="px-2.5 py-1.5 border-r border-slate-800 font-sans text-slate-400">
-                      Opening Balance prior to {fromDate}
+                      Opening Balance prior to {formatAppDate(fromDate)}
                     </td>
                     <td className="px-2 py-1.5 border-r border-slate-800 text-right font-bold">
                       {summary.opening_pack_balance}
@@ -508,7 +508,7 @@ export const StockLedgerView: React.FC = () => {
                   ledger.map((entry) => (
                     <tr key={entry.transaction_id} className="hover:bg-slate-800/60 transition-colors">
                       <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-center text-slate-300">
-                        {entry.date}
+                        {formatAppDate(entry.date)}
                       </td>
                       <td className="px-2 py-1.5 whitespace-nowrap border-r border-slate-800/80 font-sans">
                         {getTransTypeBadge(entry.type)}

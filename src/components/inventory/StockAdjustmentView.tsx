@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StockAdjustment, StockDatasheetItem } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 
 interface AdjustmentFormItem {
   inventory_id: number;
@@ -325,7 +325,7 @@ export const StockAdjustmentView: React.FC = () => {
                       {adj.adjustment_no}
                     </td>
                     <td className="px-2.5 py-2 whitespace-nowrap border-r border-slate-800/80 text-center text-slate-300">
-                      {adj.adjustment_date}
+                      {formatAppDate(adj.adjustment_date)}
                     </td>
                     <td className="px-2.5 py-2 whitespace-nowrap border-r border-slate-800/80 font-sans">
                       <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-200 border border-slate-700">
@@ -393,7 +393,7 @@ export const StockAdjustmentView: React.FC = () => {
                     Stock Adjustment Audit — {selectedAdjustment.adjustment_no}
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    Date: {selectedAdjustment.adjustment_date} | Reason: {selectedAdjustment.reason_category}
+                    Date: {formatAppDate(selectedAdjustment.adjustment_date)} | Reason: {selectedAdjustment.reason_category}
                   </p>
                 </div>
               </div>

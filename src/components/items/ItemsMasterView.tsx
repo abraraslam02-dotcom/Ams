@@ -750,10 +750,24 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
 
                       {/* Disc / Tax */}
                       <td className="py-2 px-2 text-center text-[11px] font-mono whitespace-nowrap text-slate-500">
-                        {item.discount_percent > 0 && <span className="text-emerald-700 font-bold">{item.discount_percent}%</span>}
-                        {item.discount_percent > 0 && item.tax_percent > 0 && <span> / </span>}
-                        {item.tax_percent > 0 && <span className="text-amber-700 font-bold">{item.tax_percent}%T</span>}
-                        {item.discount_percent === 0 && item.tax_percent === 0 && <span className="text-slate-300">0%</span>}
+                        {(() => {
+                          const tType = item.tax_type === 'amount' ? 'amount' : 'percentage';
+                          const tVal = Number(item.tax_value ?? item.tax_percent ?? 0);
+                          const hasTax = tVal > 0;
+                          const hasDisc = Number(item.discount_percent || 0) > 0;
+                          return (
+                            <>
+                              {hasDisc && <span className="text-emerald-700 font-bold">{item.discount_percent}%</span>}
+                              {hasDisc && hasTax && <span> / </span>}
+                              {hasTax && (
+                                <span className="text-amber-700 font-bold" title={tType === 'amount' ? 'Fixed Tax Amount per Pack' : 'Percentage Tax'}>
+                                  {tType === 'amount' ? `Rs.${tVal}T` : `${tVal}%T`}
+                                </span>
+                              )}
+                              {!hasDisc && !hasTax && <span className="text-slate-300">0%</span>}
+                            </>
+                          );
+                        })()}
                       </td>
 
                       {/* Opening / Consolidated Stock */}

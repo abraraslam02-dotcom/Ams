@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { RefreshCw, Wifi, WifiOff, Clock, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
+import { formatAppDateTime } from '../../utils/formatters';
 
 interface SimpleSyncStatusBarProps {
   compact?: boolean;
@@ -37,9 +38,7 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
   };
 
   const formattedLastSync = syncState.lastSyncedAt
-    ? `${new Date(syncState.lastSyncedAt).toLocaleDateString('en-GB')} ${new Date(
-        syncState.lastSyncedAt
-      ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    ? formatAppDateTime(syncState.lastSyncedAt)
     : 'Not synced yet';
 
   if (compact) {

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { History, RefreshCw, X } from 'lucide-react';
 import { api } from '../../services/api';
 import { SalesPriceHistoryEntry } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 
 export interface SalesPriceHistoryModalProps {
   isOpen: boolean;
@@ -268,7 +268,7 @@ export const SalesPriceHistoryModal: React.FC<SalesPriceHistoryModalProps> = ({
                       }`}
                     >
                       <td className="px-2.5 py-1.5 border-r border-slate-200 font-mono whitespace-nowrap">
-                        {entry.invoice_date}
+                        {formatAppDate(entry.invoice_date)}
                       </td>
                       <td
                         className={`px-2.5 py-1.5 border-r border-slate-200 font-mono font-bold whitespace-nowrap ${

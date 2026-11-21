@@ -21,7 +21,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { StockDatasheetItem } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
@@ -162,8 +162,8 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
         'Item Name': item.item_name,
         'Packing': item.packing,
         'Batch Number': item.batch_number,
-        'Mfg Date': item.mfg_date || '—',
-        'Expiry Date': item.expiry_date,
+        'Mfg Date': formatAppDate(item.mfg_date),
+        'Expiry Date': formatAppDate(item.expiry_date),
         'Purchase Rate (Rs)': item.purchase_rate,
         'Retail Price (Rs)': item.retail_price,
         'Opening Stock': item.opening_stock,
@@ -661,7 +661,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
 
                       {/* 6. Manufacturing Date */}
                       <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-800/80 text-center text-slate-400">
-                        {item.mfg_date || '—'}
+                        {formatAppDate(item.mfg_date)}
                       </td>
 
                       {/* 7. Expiry Date */}
@@ -675,7 +675,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
                               : 'bg-emerald-500/10 text-emerald-400'
                           }`}
                         >
-                          {item.expiry_date}
+                          {formatAppDate(item.expiry_date)}
                           {isExpired && ' (EXP)'}
                           {isNearExpiry && ` (${item.days_to_expiry}d)`}
                         </span>

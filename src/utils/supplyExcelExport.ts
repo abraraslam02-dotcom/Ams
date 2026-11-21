@@ -1,4 +1,13 @@
 import * as XLSX from 'xlsx';
+import { formatAppDate, formatAppDateTime } from './formatters';
+
+function formatSupplyCellValue(val: unknown): unknown {
+  if (typeof val === 'number') return Number(val.toFixed(2));
+  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}(?:$|[T\s])/.test(val.trim())) {
+    return formatAppDate(val, '');
+  }
+  return val ?? '';
+}
 
 export function exportSupplyTableToExcel(options: {
   title: string;
@@ -16,11 +25,7 @@ export function exportSupplyTableToExcel(options: {
 
   const headerLabels = options.columns.map((c) => c.label);
   const dataRows = options.rows.map((r) =>
-    options.columns.map((c) => {
-      const val = r[c.key];
-      if (typeof val === 'number') return Number(val.toFixed(2));
-      return val ?? '';
-    })
+    options.columns.map((c) => formatSupplyCellValue(r[c.key]))
   );
 
   if (options.grandTotals && Object.keys(options.grandTotals).length > 0) {
@@ -37,7 +42,7 @@ export function exportSupplyTableToExcel(options: {
   const wsData = [
     ['ABRAR MEDICAL STORE - SUPPLY & DISTRIBUTION SYSTEM'],
     [options.title],
-    [`Exported On: ${new Date().toLocaleString()}`],
+    [`Exported On: ${formatAppDateTime(new Date())}`],
     [],
     headerLabels,
     ...dataRows,
@@ -53,11 +58,7 @@ export function exportSupplyTableToExcel(options: {
   if (options.secondarySheet && options.secondarySheet.rows.length > 0) {
     const secHeaders = options.secondarySheet.columns.map((c) => c.label);
     const secRows = options.secondarySheet.rows.map((r) =>
-      options.secondarySheet!.columns.map((c) => {
-        const val = r[c.key];
-        if (typeof val === 'number') return Number(val.toFixed(2));
-        return val ?? '';
-      })
+      options.secondarySheet!.columns.map((c) => formatSupplyCellValue(r[c.key]))
     );
     const secWs = XLSX.utils.aoa_to_sheet([secHeaders, ...secRows]);
     secWs['!cols'] = options.secondarySheet.columns.map((c) => ({

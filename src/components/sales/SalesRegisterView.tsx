@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../services/api';
 import { SalesInvoiceRecord } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { SalesPrintModal } from './SalesPrintModal';
 import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
@@ -424,7 +424,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                         {inv.status}
                       </span>
                     </td>
-                    <td className="px-3 py-2 font-mono text-slate-700">{inv.invoice_date}</td>
+                    <td className="px-3 py-2 font-mono text-slate-700">{formatAppDate(inv.invoice_date)}</td>
                     <td className="px-3 py-2 font-semibold text-slate-900">
                       {inv.customer_name || 'Walk-in Cash Customer'}
                     </td>

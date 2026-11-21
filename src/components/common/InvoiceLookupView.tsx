@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { SalesPrintModal } from '../sales/SalesPrintModal';
 import { PurchasePrintModal } from '../purchases/PurchasePrintModal';
 
@@ -819,7 +819,7 @@ export const InvoiceLookupView: React.FC<InvoiceLookupViewProps> = ({
                         )}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap font-mono text-slate-700">
-                        {row.invoice_date}
+                        {formatAppDate(row.invoice_date)}
                       </td>
                       <td className="px-3 py-2 font-semibold text-slate-900">
                         {row.party_name || '-'}

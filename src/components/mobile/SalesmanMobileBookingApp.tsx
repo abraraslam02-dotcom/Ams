@@ -30,6 +30,7 @@ import {
   Sun,
   Moon,
 } from 'lucide-react';
+import { formatAppDateTime } from '../../utils/formatters';
 
 interface BeforeInstallPromptEvent extends Event {
   readonly platforms: string[];
@@ -395,7 +396,7 @@ export const SalesmanMobileBookingApp: React.FC<{
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Failed to sync salesman catalog');
       }
-      const nowStr = new Date().toLocaleString();
+      const nowStr = formatAppDateTime(new Date());
       const syncedTowns: CatalogTown[] = data.towns || [];
       const syncedParties: CatalogParty[] = data.parties || [];
       const syncedItems: CatalogItem[] = data.items || [];

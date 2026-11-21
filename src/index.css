@@ -452,3 +452,50 @@
     overflow-x: auto !important;
   }
 }
+
+/* ========================================================
+   GLOBAL DATE INPUT DISPLAY FORMAT (dd-MMM-yy, e.g. 21-Nov-26)
+   Displays formatted dd-MMM-yy while preserving native calendar
+   picker and ISO YYYY-MM-DD value for queries & storage.
+   ======================================================== */
+input[type="date"].ams-date-formatted:not(:focus) {
+  position: relative;
+  color: transparent !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+input[type="date"].ams-date-formatted:not(:focus)::-webkit-datetime-edit,
+input[type="date"].ams-date-formatted:not(:focus)::-webkit-datetime-edit-fields-wrapper,
+input[type="date"].ams-date-formatted:not(:focus)::-webkit-datetime-edit-text,
+input[type="date"].ams-date-formatted:not(:focus)::-webkit-datetime-edit-month-field,
+input[type="date"].ams-date-formatted:not(:focus)::-webkit-datetime-edit-day-field,
+input[type="date"].ams-date-formatted:not(:focus)::-webkit-datetime-edit-year-field {
+  color: transparent !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+input[type="date"].ams-date-formatted:not(:focus)::before {
+  content: attr(data-formatted-date);
+  position: absolute;
+  left: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ams-date-color, #0f172a) !important;
+  -webkit-text-fill-color: var(--ams-date-color, #0f172a) !important;
+  pointer-events: none;
+  white-space: nowrap;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1;
+}
+
+input[type="date"].ams-date-formatted[data-date-empty="true"]:not(:focus)::before {
+  opacity: 0.45;
+}
+
+input[type="date"].ams-date-formatted::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.75;
+}
+

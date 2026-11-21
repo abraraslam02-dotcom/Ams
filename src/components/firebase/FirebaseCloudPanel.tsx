@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useFirebase } from '../../context/FirebaseContext';
 import { BLUEPRINT_LIMITS } from '../../firebase';
+import { formatAppDate, formatAppDateTime } from '../../utils/formatters';
 
 interface FirebaseCloudPanelProps {
   totalLiveRecords?: number;
@@ -67,7 +68,7 @@ export const FirebaseCloudPanel: React.FC<FirebaseCloudPanelProps> = ({
     setSubmitting(true);
     try {
       await saveSyncNote({
-        title: title.trim() || `Checkpoint (${new Date().toLocaleDateString('en-GB')})`,
+        title: title.trim() || `Checkpoint (${formatAppDate(new Date())})`,
         note:
           note.trim() ||
           `Verified SQLite snapshot active with ${totalLiveRecords} live store records.`,
@@ -91,7 +92,7 @@ export const FirebaseCloudPanel: React.FC<FirebaseCloudPanelProps> = ({
     setSubmitting(true);
     try {
       await saveSyncNote({
-        title: `Live DB Snapshot — ${new Date().toLocaleString('en-GB')}`,
+        title: `Live DB Snapshot — ${formatAppDateTime(new Date())}`,
         note: `Primary SQLite store database intact (${totalLiveRecords} live records across catalog, accounts, invoices & batches).`,
         recordCount: totalLiveRecords,
       });
@@ -371,7 +372,7 @@ export const FirebaseCloudPanel: React.FC<FirebaseCloudPanelProps> = ({
                         <p className="text-[11px] text-slate-600 mt-0.5">{item.note}</p>
                         {item.updatedAt && (
                           <div className="text-[10px] font-mono text-slate-400 mt-0.5">
-                            Updated: {item.updatedAt.toLocaleString('en-GB')}
+                            Updated: {formatAppDateTime(item.updatedAt)}
                           </div>
                         )}
                       </div>

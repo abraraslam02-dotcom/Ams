@@ -15,6 +15,7 @@ import {
   getEnrichedVariants,
   lookupItemByBarcodeExact,
 } from '../services/itemVariantService.ts';
+import { resolveItemTaxConfig, type ItemTaxType } from '../utils/taxCalculation.ts';
 
 export const itemsRouter = Router();
 
@@ -40,6 +41,8 @@ export interface ItemRow {
   retail_price: number;
   loose_rate?: number;
   discount_percent: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   opening_stock: number;
   minimum_stock: number;
@@ -188,8 +191,12 @@ function resolveMultiLevelPackingConfig(
 
 function enrichItemWithPacking(it: ItemRow) {
   const resolved = resolveMultiLevelPackingConfig({}, it);
+  const taxCfg = resolveItemTaxConfig(it);
   return {
     ...it,
+    tax_type: taxCfg.tax_type,
+    tax_value: taxCfg.tax_value,
+    tax_percent: taxCfg.tax_percent,
     packing: resolved.packing,
     carton: resolved.carton,
     boxes_per_carton: resolved.boxes_per_carton,
@@ -975,7 +982,12 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
           ? round2(safeNum(body.loose_rate, 0))
           : round2(rPrice / units);
       const dPct = round2(safeNum(body.discount_percent, safeNum(parentItem.discount_percent, 0)));
-      const taxPct = round2(safeNum(body.tax_percent, safeNum(parentItem.tax_percent, 0)));
+      const parentTaxCfg = resolveItemTaxConfig(parentItem);
+      const varTaxCfg = resolveItemTaxConfig({
+        tax_type: body.tax_type ?? parentTaxCfg.tax_type,
+        tax_value: body.tax_value ?? body.tax_percent ?? parentTaxCfg.tax_value,
+        tax_percent: body.tax_percent ?? parentTaxCfg.tax_percent,
+      });
       const oStock = round2(safeNum(body.opening_stock, 0));
       const mStock = round2(safeNum(body.minimum_stock, safeNum(parentItem.minimum_stock, 0)));
       const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
@@ -991,10 +1003,10 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
           `INSERT INTO item_variants (
             parent_item_id, variant_code, variant_name, variant_group, colour, flavour, variant_type, other_attributes,
             barcode, packing, use_parent_pricing,
-            purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+            purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_type, tax_value, tax_percent,
             opening_stock, minimum_stock, rack_number,
             image_id, image_url, thumbnail_url, status, created_by
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           parentItemId,
@@ -1014,7 +1026,9 @@ itemsRouter.post('/:id/variants', (req: Request, res: Response) => {
           rPrice,
           lRate,
           dPct,
-          taxPct,
+          varTaxCfg.tax_type,
+          varTaxCfg.tax_value,
+          varTaxCfg.tax_percent,
           oStock,
           mStock,
           safeStr(body.rack_number),
@@ -1129,7 +1143,17 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
           ? round2(safeNum(body.loose_rate, 0))
           : round2(safeNum(existing.loose_rate, rPrice / units));
       const dPct = round2(safeNum(body.discount_percent, safeNum(existing.discount_percent, 0)));
-      const taxPct = round2(safeNum(body.tax_percent, safeNum(existing.tax_percent, 0)));
+      const existingVarTax = resolveItemTaxConfig(existing);
+      const varTaxCfg = resolveItemTaxConfig({
+        tax_type: body.tax_type !== undefined ? body.tax_type : existingVarTax.tax_type,
+        tax_value:
+          body.tax_value !== undefined
+            ? body.tax_value
+            : body.tax_percent !== undefined
+              ? body.tax_percent
+              : existingVarTax.tax_value,
+        tax_percent: body.tax_percent !== undefined ? body.tax_percent : existingVarTax.tax_percent,
+      });
       const oStock = round2(safeNum(body.opening_stock, safeNum(existing.opening_stock, 0)));
       const mStock = round2(safeNum(body.minimum_stock, safeNum(existing.minimum_stock, 0)));
       const rack = body.rack_number !== undefined ? safeStr(body.rack_number) : safeStr(existing.rack_number);
@@ -1162,7 +1186,7 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
           variant_code = ?, variant_name = ?, variant_group = ?, colour = ?, flavour = ?, variant_type = ?, other_attributes = ?,
           barcode = ?, packing = ?, use_parent_pricing = ?,
           purchase_price = ?, trade_price = ?, wholesale_price = ?, retail_price = ?, loose_rate = ?,
-          discount_percent = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
+          discount_percent = ?, tax_type = ?, tax_value = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
           image_id = ?, image_url = ?, thumbnail_url = ?, status = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`
       ).run(
@@ -1182,7 +1206,9 @@ itemsRouter.put('/variants/:variantId', (req: Request, res: Response) => {
         rPrice,
         lRate,
         dPct,
-        taxPct,
+        varTaxCfg.tax_type,
+        varTaxCfg.tax_value,
+        varTaxCfg.tax_percent,
         oStock,
         mStock,
         rack,
@@ -1518,6 +1544,8 @@ itemsRouter.post('/', (req: Request, res: Response) => {
       retail_price = 0,
       loose_rate,
       discount_percent = 0,
+      tax_type = 'percentage',
+      tax_value,
       tax_percent = 0,
       opening_stock = 0,
       minimum_stock = 0,
@@ -1579,7 +1607,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
       ? round2(parsedLoose > 0 ? parsedLoose : rPrice / Math.max(1, packingUnits))
       : round2(rPrice / Math.max(1, packingUnits));
     const dPercent = Math.round((parseFloat(discount_percent) || 0.0) * 100) / 100;
-    const tPercent = Math.round((parseFloat(tax_percent) || 0.0) * 100) / 100;
+    const itemTaxCfg = resolveItemTaxConfig({ tax_type, tax_value, tax_percent });
     const oStock = Math.round((parseFloat(opening_stock) || 0.0) * 100) / 100;
     const mStock = Math.round((parseFloat(minimum_stock) || 0.0) * 100) / 100;
     const itemHasVariants = has_variants === true || has_variants === 1 || has_variants === '1' ? 1 : 0;
@@ -1597,9 +1625,9 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         INSERT INTO items (
           item_code, company_name, item_name, generic_name, category, packing,
           carton, boxes_per_carton, strips_per_box, tablets_per_strip, units_per_strip, units_per_pack, purchase_unit,
-          barcode, purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+          barcode, purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_type, tax_value, tax_percent,
           opening_stock, minimum_stock, rack_number, has_variants, image_id, image_url, thumbnail_url, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
       const result = db.prepare(insertSql).run(
@@ -1623,7 +1651,9 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         rPrice,
         lRate,
         dPercent,
-        tPercent,
+        itemTaxCfg.tax_type,
+        itemTaxCfg.tax_value,
+        itemTaxCfg.tax_percent,
         oStock,
         mStock,
         rack_number ? String(rack_number).trim() : null,
@@ -1691,6 +1721,8 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       retail_price,
       loose_rate,
       discount_percent,
+      tax_type,
+      tax_value,
       tax_percent,
       opening_stock,
       minimum_stock,
@@ -1773,7 +1805,17 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
         ? round2(Math.max(0, parseFloat(loose_rate) || 0.0))
         : existingLoose;
     const dPercent = discount_percent !== undefined ? Math.round((parseFloat(discount_percent) || 0.0) * 100) / 100 : existingItem.discount_percent;
-    const tPercent = tax_percent !== undefined ? Math.round((parseFloat(tax_percent) || 0.0) * 100) / 100 : existingItem.tax_percent;
+    const existingTaxCfg = resolveItemTaxConfig(existingItem);
+    const updatedTaxCfg = resolveItemTaxConfig({
+      tax_type: tax_type !== undefined ? tax_type : existingTaxCfg.tax_type,
+      tax_value:
+        tax_value !== undefined
+          ? tax_value
+          : tax_percent !== undefined
+            ? tax_percent
+            : existingTaxCfg.tax_value,
+      tax_percent: tax_percent !== undefined ? tax_percent : existingTaxCfg.tax_percent,
+    });
     const oStock = opening_stock !== undefined ? Math.round((parseFloat(opening_stock) || 0.0) * 100) / 100 : existingItem.opening_stock;
     const mStock = minimum_stock !== undefined ? Math.round((parseFloat(minimum_stock) || 0.0) * 100) / 100 : existingItem.minimum_stock;
     const itemHasVariants =
@@ -1817,6 +1859,8 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
         retail_price = ?,
         loose_rate = ?,
         discount_percent = ?,
+        tax_type = ?,
+        tax_value = ?,
         tax_percent = ?,
         opening_stock = ?,
         minimum_stock = ?,
@@ -1856,7 +1900,9 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
       rPrice,
       lRate,
       dPercent,
-      tPercent,
+      updatedTaxCfg.tax_type,
+      updatedTaxCfg.tax_value,
+      updatedTaxCfg.tax_percent,
       oStock,
       mStock,
       rack_number !== undefined ? (rack_number ? String(rack_number).trim() : null) : existingItem.rack_number,
@@ -2220,9 +2266,9 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
         INSERT INTO items (
           item_code, company_name, item_name, generic_name, category, packing,
           carton, boxes_per_carton, strips_per_box, tablets_per_strip, units_per_strip, units_per_pack, purchase_unit,
-          barcode, purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_percent,
+          barcode, purchase_price, trade_price, wholesale_price, retail_price, loose_rate, discount_percent, tax_type, tax_value, tax_percent,
           opening_stock, minimum_stock, rack_number, has_variants, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const updateStmt = db.prepare(`
         UPDATE items SET
@@ -2245,6 +2291,8 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
           retail_price = ?,
           loose_rate = ?,
           discount_percent = ?,
+          tax_type = ?,
+          tax_value = ?,
           tax_percent = ?,
           opening_stock = ?,
           minimum_stock = ?,
@@ -2285,7 +2333,12 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
         const wPrice = round2(parseFloat(primaryRow.wholesale_price) || 0.0);
         const rPrice = round2(parseFloat(primaryRow.retail_price) || 0.0);
         const dPercent = round2(parseFloat(primaryRow.discount_percent) || 0.0);
-        const tPercent = round2(parseFloat(primaryRow.tax_percent) || 0.0);
+        const primaryTaxCfg = resolveItemTaxConfig({
+          tax_type: primaryRow.tax_type,
+          tax_value: primaryRow.tax_value,
+          tax_percent: primaryRow.tax_percent,
+        });
+        const tPercent = primaryTaxCfg.tax_percent;
         const oStock = round2(parseFloat(primaryRow.opening_stock) || 0.0);
         const mStock = round2(parseFloat(primaryRow.minimum_stock) || 0.0);
         const rack = primaryRow.rack_number
@@ -2526,7 +2579,9 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
               rPrice,
               looseRate,
               dPercent,
-              tPercent,
+              primaryTaxCfg.tax_type,
+              primaryTaxCfg.tax_value,
+              primaryTaxCfg.tax_percent,
               oStock,
               mStock,
               rack,
@@ -2559,7 +2614,9 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
             rPrice,
             looseRate,
             dPercent,
-            tPercent,
+            primaryTaxCfg.tax_type,
+            primaryTaxCfg.tax_value,
+            primaryTaxCfg.tax_percent,
             oStock,
             mStock,
             rack,
@@ -2637,7 +2694,19 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
             const vUnits = Math.max(1, parseUnitsFromPacking(vPacking));
             const vLooseRate = round2(vRPrice / vUnits);
             const vDisc = round2(parseFloat(vr.discount_percent) || dPercent);
-            const vTax = round2(parseFloat(vr.tax_percent) || tPercent);
+            const vTaxCfg = resolveItemTaxConfig({
+              tax_type: vr.tax_type !== undefined && vr.tax_type !== '' ? vr.tax_type : primaryTaxCfg.tax_type,
+              tax_value:
+                vr.tax_value !== undefined && vr.tax_value !== ''
+                  ? vr.tax_value
+                  : vr.tax_percent !== undefined && vr.tax_percent !== ''
+                    ? vr.tax_percent
+                    : primaryTaxCfg.tax_value,
+              tax_percent:
+                vr.tax_percent !== undefined && vr.tax_percent !== ''
+                  ? vr.tax_percent
+                  : primaryTaxCfg.tax_percent,
+            });
             const vOStock = round2(parseFloat(vr.opening_stock) || 0);
             const vMStock = round2(parseFloat(vr.minimum_stock) || mStock);
             const vRack = String(vr.rack_number || '').trim() || String(rack || '');
@@ -2649,7 +2718,8 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
               vWPrice === wPrice &&
               vRPrice === rPrice &&
               vDisc === dPercent &&
-              vTax === tPercent
+              vTaxCfg.tax_type === primaryTaxCfg.tax_type &&
+              vTaxCfg.tax_value === primaryTaxCfg.tax_value
                 ? 1
                 : 0;
 
@@ -2661,7 +2731,7 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
                   variant_code = ?, variant_name = ?, variant_group = ?, colour = ?, flavour = ?,
                   variant_type = ?, other_attributes = ?, barcode = ?, packing = ?, use_parent_pricing = ?,
                   purchase_price = ?, trade_price = ?, wholesale_price = ?, retail_price = ?, loose_rate = ?,
-                  discount_percent = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
+                  discount_percent = ?, tax_type = ?, tax_value = ?, tax_percent = ?, opening_stock = ?, minimum_stock = ?, rack_number = ?,
                   status = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?`
               ).run(
@@ -2681,7 +2751,9 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
                 vRPrice,
                 vLooseRate,
                 vDisc,
-                vTax,
+                vTaxCfg.tax_type,
+                vTaxCfg.tax_value,
+                vTaxCfg.tax_percent,
                 vOStock,
                 vMStock,
                 vRack,
@@ -2694,8 +2766,8 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
                   `INSERT INTO item_variants (
                     parent_item_id, variant_code, variant_name, variant_group, colour, flavour, variant_type, other_attributes,
                     barcode, packing, use_parent_pricing, purchase_price, trade_price, wholesale_price, retail_price,
-                    loose_rate, discount_percent, tax_percent, opening_stock, minimum_stock, rack_number, status, created_by
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                    loose_rate, discount_percent, tax_type, tax_value, tax_percent, opening_stock, minimum_stock, rack_number, status, created_by
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
                 )
                 .run(
                   itemId,
@@ -2715,7 +2787,9 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
                   vRPrice,
                   vLooseRate,
                   vDisc,
-                  vTax,
+                  vTaxCfg.tax_type,
+                  vTaxCfg.tax_value,
+                  vTaxCfg.tax_percent,
                   vOStock,
                   vMStock,
                   vRack,

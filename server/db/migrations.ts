@@ -4709,6 +4709,44 @@ export function runMigrations(): MigrationResult {
       );
     }
 
+    // Migration 36: Add tax_type ('percentage' | 'amount') and tax_value on items, item_variants, sale_items, purchase_items (safe additive only)
+    const migrationName36 = '036_item_tax_type_and_value';
+    const applied36 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName36);
+
+    const ensureTaxColumns = (tableName: string) => {
+      const cols = (
+        db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (cols.length === 0) return;
+      let addedTaxValue = false;
+      if (!cols.includes('tax_type')) {
+        db.exec(`ALTER TABLE ${tableName} ADD COLUMN tax_type TEXT NOT NULL DEFAULT 'percentage';`);
+      }
+      if (!cols.includes('tax_value')) {
+        db.exec(`ALTER TABLE ${tableName} ADD COLUMN tax_value REAL NOT NULL DEFAULT 0.0;`);
+        addedTaxValue = true;
+      }
+      if (addedTaxValue && cols.includes('tax_percent')) {
+        db.exec(
+          `UPDATE ${tableName} SET tax_value = COALESCE(tax_percent, 0.0), tax_type = 'percentage' WHERE COALESCE(tax_value, 0) = 0 AND COALESCE(tax_percent, 0) > 0;`
+        );
+      }
+    };
+
+    ensureTaxColumns('items');
+    ensureTaxColumns('item_variants');
+    ensureTaxColumns('sale_items');
+    ensureTaxColumns('purchase_items');
+
+    if (!applied36) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+        migrationName36,
+        36
+      );
+    }
+
     const tables = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
@@ -4722,7 +4760,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}, ${migrationName35}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}, ${migrationName35}, ${migrationName36}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       preMigrationBackupPath,

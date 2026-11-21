@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
-import { formatPKR, formatPKTDateTime } from '../../utils/formatters';
+import { formatPKR, formatPKTDateTime, formatAppDate } from '../../utils/formatters';
 import { BarChart3, Download, Printer, RotateCcw, AlertCircle } from 'lucide-react';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -1183,7 +1183,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
 
                             {reportKey === 'daily-sales' && (
                               <>
-                                <td className="p-2.5 font-mono font-bold">{r.sale_date}</td>
+                                <td className="p-2.5 font-mono font-bold">{formatAppDate(r.sale_date)}</td>
                                 <td className="p-2.5 text-right font-mono">{r.invoice_count}</td>
                                 <td className="p-2.5 text-right font-mono">{formatPKR(r.gross_sales)}</td>
                                 <td className="p-2.5 text-right font-mono text-rose-700">
@@ -1231,7 +1231,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                             {reportKey === 'discount-report' && (
                               <>
                                 <td className="p-2.5 font-mono font-bold">{r.invoice_number}</td>
-                                <td className="p-2.5 font-mono">{r.invoice_date}</td>
+                                <td className="p-2.5 font-mono">{formatAppDate(r.invoice_date)}</td>
                                 <td className="p-2.5 font-bold">{r.customer_name}</td>
                                 <td className="p-2.5 text-right font-mono">{formatPKR(r.gross_total)}</td>
                                 <td className="p-2.5 text-right font-mono">
@@ -1250,7 +1250,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                             {reportKey === 'sales-return-report' && (
                               <>
                                 <td className="p-2.5 font-mono font-bold">{r.return_number}</td>
-                                <td className="p-2.5 font-mono">{r.return_date}</td>
+                                <td className="p-2.5 font-mono">{formatAppDate(r.return_date)}</td>
                                 <td className="p-2.5 font-mono">{r.original_invoice_number}</td>
                                 <td className="p-2.5 font-bold">{r.customer_name}</td>
                                 <td className="p-2.5 text-slate-700">{r.company_name || 'General'}</td>

@@ -1,4 +1,5 @@
 import { getDatabase } from '../db/connection.ts';
+import { resolveItemTaxConfig, type ItemTaxType } from '../utils/taxCalculation.ts';
 
 function round2(n: unknown): number {
   const num = Number(n ?? 0);
@@ -60,6 +61,8 @@ export interface EnrichedVariantRecord {
   retail_price: number;
   loose_rate: number;
   discount_percent: number;
+  tax_type: ItemTaxType;
+  tax_value: number;
   tax_percent: number;
   effective_purchase_price: number;
   effective_trade_price: number;
@@ -67,6 +70,8 @@ export interface EnrichedVariantRecord {
   effective_retail_price: number;
   effective_loose_rate: number;
   effective_discount_percent: number;
+  effective_tax_type: ItemTaxType;
+  effective_tax_value: number;
   effective_tax_percent: number;
   opening_stock: number;
   minimum_stock: number;
@@ -305,6 +310,8 @@ export function getEnrichedVariants(filters?: {
         i.retail_price AS parent_retail_price,
         i.loose_rate AS parent_loose_rate,
         i.discount_percent AS parent_discount_percent,
+        i.tax_type AS parent_tax_type,
+        i.tax_value AS parent_tax_value,
         i.tax_percent AS parent_tax_percent,
         i.minimum_stock AS parent_minimum_stock,
         i.rack_number AS parent_rack_number,
@@ -353,7 +360,17 @@ export function getEnrichedVariants(filters?: {
         : r.loose_rate || (effRetail > 0 ? effRetail / unitsPerPack : 0)
     );
     const effDiscount = round2(useParent ? r.parent_discount_percent : r.discount_percent);
-    const effTax = round2(useParent ? r.parent_tax_percent : r.tax_percent);
+    const parentTaxCfg = resolveItemTaxConfig({
+      tax_type: r.parent_tax_type,
+      tax_value: r.parent_tax_value,
+      tax_percent: r.parent_tax_percent,
+    });
+    const ownTaxCfg = resolveItemTaxConfig({
+      tax_type: r.tax_type,
+      tax_value: r.tax_value,
+      tax_percent: r.tax_percent,
+    });
+    const effTaxCfg = useParent ? parentTaxCfg : ownTaxCfg;
 
     const ownImg = String(r.image_url || '').trim();
     const ownThumb = String(r.thumbnail_url || '').trim();
@@ -402,14 +419,18 @@ export function getEnrichedVariants(filters?: {
       retail_price: round2(r.retail_price),
       loose_rate: round2(r.loose_rate),
       discount_percent: round2(r.discount_percent),
-      tax_percent: round2(r.tax_percent),
+      tax_type: ownTaxCfg.tax_type,
+      tax_value: ownTaxCfg.tax_value,
+      tax_percent: ownTaxCfg.tax_percent,
       effective_purchase_price: effPurchase,
       effective_trade_price: effTrade,
       effective_wholesale_price: effWholesale,
       effective_retail_price: effRetail,
       effective_loose_rate: effLoose,
       effective_discount_percent: effDiscount,
-      effective_tax_percent: effTax,
+      effective_tax_type: effTaxCfg.tax_type,
+      effective_tax_value: effTaxCfg.tax_value,
+      effective_tax_percent: effTaxCfg.tax_percent,
       opening_stock: round2(r.opening_stock),
       minimum_stock: round2(r.minimum_stock),
       effective_minimum_stock: round2(Number(r.minimum_stock || 0) > 0 ? r.minimum_stock : r.parent_minimum_stock),

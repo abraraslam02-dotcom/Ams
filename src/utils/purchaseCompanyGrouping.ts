@@ -1,3 +1,6 @@
+import { calculateLineTax, resolveItemTaxConfig } from './taxCalculation';
+import { formatAppDate } from './formatters';
+
 export interface GroupedPurchaseLine {
   sNo: number;
   raw: Record<string, any>;
@@ -162,6 +165,7 @@ export function buildCompanyGroupedPurchaseData(
       String(item.company_name || item.master_company_name || 'Uncategorized Company').trim() ||
       'Uncategorized Company';
 
+    const resolvedTax = resolveItemTaxConfig(item);
     return {
       raw: item,
       companyName,
@@ -171,11 +175,12 @@ export function buildCompanyGroupedPurchaseData(
       variantCode: String(item.variant_code || '').trim(),
       itemCode: String(item.item_code || '').trim(),
       packing: String(item.packing || '').trim(),
+      unitsPerPack: Math.max(1, Number(item.units_per_pack || 1)),
       quantity,
       looseQuantity,
       bonusQuantity,
       batchNumber: String(item.batch_number || '').trim() || '—',
-      expiryDate: String(item.expiry_date || '').trim() || '—',
+      expiryDate: formatAppDate(item.expiry_date, '—'),
       tradePrice,
       discountPercent,
       grossAmount,
@@ -183,6 +188,8 @@ export function buildCompanyGroupedPurchaseData(
       rawLineAfterItemDisc,
       rawTaxable,
       rawSalesTax,
+      taxType: resolvedTax.tax_type,
+      taxValue: resolvedTax.tax_value,
       taxPercent: round2(item.tax_percent ?? 0),
       remarks: String(item.remarks || item.line_remarks || '').trim(),
     };
@@ -240,15 +247,23 @@ export function buildCompanyGroupedPurchaseData(
     lineTaxables = baseRows.map((r, i) => round2(r.grossAmount - lineDiscounts[i]));
   }
 
-  // 3. Reconcile Sales Tax (use exact saved line tax_amount unless preview differs due to invoice discount)
+  // 3. Reconcile Sales Tax (tax is calculated on original gross amount BEFORE discounts)
   let lineSalesTaxes: number[];
   if (Math.abs(sumRawSalesTax - headerSalesTax) <= 0.02) {
     lineSalesTaxes = baseRows.map((r) => r.rawSalesTax);
   } else {
-    const rawTaxAtCurrentTaxable = baseRows.map((r, i) =>
-      round2(lineTaxables[i] * (r.taxPercent / 100))
+    const rawTaxOnGross = baseRows.map((r) =>
+      calculateLineTax({
+        grossAmount: r.grossAmount,
+        quantity: r.quantity,
+        looseQuantity: r.looseQuantity,
+        unitsPerPack: r.unitsPerPack,
+        taxType: r.taxType,
+        taxValue: r.taxValue,
+        taxPercent: r.taxPercent,
+      })
     );
-    lineSalesTaxes = allocateAmountCents(headerSalesTax, rawTaxAtCurrentTaxable);
+    lineSalesTaxes = allocateAmountCents(headerSalesTax, rawTaxOnGross);
   }
 
   // 4. Prorate saved Invoice Advance Tax strictly without recalculating/duplicating tax

@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { NavTabId } from '../layout/Sidebar';
 import { api } from '../../services/api';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 
 interface DashboardViewProps {
   onSelectTab: (tab: NavTabId) => void;
@@ -1241,7 +1241,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onSelectTab }) => 
                           Batch: {batch.batch_number}
                         </div>
                       </td>
-                      <td className="py-2 px-3 font-mono text-slate-700">{batch.expiry_date}</td>
+                      <td className="py-2 px-3 font-mono text-slate-700">{formatAppDate(batch.expiry_date)}</td>
                       <td className="py-2 px-3 text-right font-mono font-semibold text-slate-800">
                         {batch.total_stock_units}
                       </td>

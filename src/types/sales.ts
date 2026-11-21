@@ -1,4 +1,4 @@
-import { ItemVariant } from './item';
+import { ItemTaxType, ItemVariant } from './item';
 
 export type SalesInvoiceType = 'Retail' | 'Wholesale';
 export type SalesPaymentMode = 'Cash' | 'Credit' | 'Partial' | 'Bank';
@@ -34,6 +34,8 @@ export interface FastSearchItem {
   wholesale_price: number;
   retail_price: number;
   discount_percent: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   opening_stock: number;
   minimum_stock: number;
@@ -98,6 +100,8 @@ export interface DatasheetRow {
   total_units: number; // quantity * units_per_pack + loose_quantity
   gross_amount: number;
   taxable_amount: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   tax_amount: number;
   line_total: number;

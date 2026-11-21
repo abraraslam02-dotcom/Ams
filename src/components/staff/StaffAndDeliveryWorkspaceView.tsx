@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { SalesmanRecord, DeliverymanRecord, DeliveryTrackingRecord } from '../../types/sales';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -1145,7 +1145,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                           <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
                             {del.invoice_number}
                           </td>
-                          <td className="py-2.5 px-2.5 font-mono">{del.invoice_date}</td>
+                          <td className="py-2.5 px-2.5 font-mono">{formatAppDate(del.invoice_date)}</td>
                           <td className="py-2.5 px-2.5">
                             <div className="font-bold text-slate-900">{del.customer_name}</div>
                             <div className="text-[10px] text-slate-500">
@@ -1176,7 +1176,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                             </span>
                           </td>
                           <td className="py-2.5 px-2.5 font-mono text-[11px]">
-                            {del.delivery_date || '—'} {del.delivery_time || ''}
+                            {formatAppDate(del.delivery_date)} {del.delivery_time || ''}
                           </td>
                           <td className="py-2.5 px-2.5 text-right font-mono font-bold">
                             {formatPKR(Number(del.net_total || 0))}

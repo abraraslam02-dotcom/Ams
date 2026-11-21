@@ -12,7 +12,7 @@ import {
 import { api } from '../../services/api';
 import { AuditLog } from '../../types/auth';
 import { SystemErrorLog } from '../../types/system';
-import { formatPKTDate, formatPKTTime } from '../../utils/formatters';
+import { formatPKTDate, formatPKTTime, formatAppDateTime } from '../../utils/formatters';
 
 interface SecurityAuditViewProps {
   onNavigateToClearDemoData?: () => void;
@@ -360,7 +360,7 @@ export const SecurityAuditView: React.FC<SecurityAuditViewProps> = ({
               ) : (
                 errorLogs.map((errLog) => (
                   <tr key={errLog.id} className="hover:bg-slate-50">
-                    <td className="py-2.5 px-4 font-mono">{errLog.created_at}</td>
+                    <td className="py-2.5 px-4 font-mono">{formatAppDateTime(errLog.created_at)}</td>
                     <td className="py-2.5 px-4 font-bold uppercase text-rose-700">{errLog.severity}</td>
                     <td className="py-2.5 px-4 font-mono">
                       {errLog.module} {errLog.operation ? `(${errLog.operation})` : ''}

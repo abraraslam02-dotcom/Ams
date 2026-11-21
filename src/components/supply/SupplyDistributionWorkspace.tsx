@@ -36,6 +36,7 @@ import { SupplyPrintModal, type SupplyDocumentPrintType } from './SupplyPrintMod
 import { SupplyReportsAndRecoverySection } from './SupplyReportsAndRecoverySection';
 import { ImportSalesmanBookingsPanel } from './ImportSalesmanBookingsPanel';
 import { exportSupplyTableToExcel } from '../../utils/supplyExcelExport';
+import { formatAppDate } from '../../utils/formatters';
 
 export type SupplySubView =
   | 'supply-dashboard'
@@ -1903,7 +1904,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                   {orderForms.map((of) => (
                     <tr key={of.id} className="hover:bg-slate-50">
                       <td className="p-2 font-mono font-bold">{of.order_number}</td>
-                      <td className="p-2">{of.order_date}</td>
+                      <td className="p-2">{formatAppDate(of.order_date)}</td>
                       <td className="p-2">{of.salesman_name || '—'}</td>
                       <td className="p-2">
                         {of.town_name || '—'} {of.area_name ? `/ ${of.area_name}` : ''}
@@ -2891,7 +2892,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                     <tr key={d.id} className="hover:bg-slate-50">
                       <td className="p-2 font-mono font-bold">{d.dispatch_number}</td>
                       <td className="p-2 font-mono">{d.supply_number}</td>
-                      <td className="p-2">{d.dispatch_date}</td>
+                      <td className="p-2">{formatAppDate(d.dispatch_date)}</td>
                       <td className="p-2 font-bold">{d.town_name}</td>
                       <td className="p-2">{d.delivery_person || d.salesman_name}</td>
                       <td className="p-2">{d.vehicle_number || '—'}</td>
@@ -3157,7 +3158,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
                   {returnsList.map((r) => (
                     <tr key={r.id}>
                       <td className="p-2 font-mono font-bold">{r.return_number}</td>
-                      <td className="p-2">{r.return_date}</td>
+                      <td className="p-2">{formatAppDate(r.return_date)}</td>
                       <td className="p-2 font-mono">{r.supply_number}</td>
                       <td className="p-2">
                         {r.town_name} / {r.salesman_name}

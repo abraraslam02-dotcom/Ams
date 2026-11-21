@@ -38,7 +38,7 @@ import {
   CashBookBreakdownResponse,
   CashBookAccountsResponse,
 } from '../../types/cashBook';
-import { formatPKR, formatPKTDate } from '../../utils/formatters';
+import { formatPKR, formatPKTDate, formatAppDate } from '../../utils/formatters';
 import { executePrintElement } from '../../utils/printEngine';
 
 interface CashBookModuleViewProps {
@@ -1404,7 +1404,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                           <td className="px-3 py-2 font-mono font-black text-slate-900">
                             #{v.voucher_number}
                           </td>
-                          <td className="px-3 py-2 font-mono text-slate-700">{v.voucher_date}</td>
+                          <td className="px-3 py-2 font-mono text-slate-700">{formatAppDate(v.voucher_date)}</td>
                           <td className="px-3 py-2">
                             <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase border ${badgeColor}`}>
                               {v.transaction_type}
@@ -1576,7 +1576,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                         idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'
                       }`}
                     >
-                      <td className="px-3 py-2 font-mono font-bold text-slate-900">{row.date}</td>
+                      <td className="px-3 py-2 font-mono font-bold text-slate-900">{formatAppDate(row.date)}</td>
                       <td className="px-3 py-2 text-right font-mono">{formatPKR(row.openingCash)}</td>
                       <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">
                         {formatPKR(row.cashIn)}
@@ -1634,7 +1634,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                     breakdownData?.whoPaidUs.map((r) => (
                       <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">#{r.voucher_number}</td>
-                        <td className="px-3 py-2 font-mono">{r.voucher_date}</td>
+                        <td className="px-3 py-2 font-mono">{formatAppDate(r.voucher_date)}</td>
                         <td className="px-3 py-2 font-bold text-slate-900">
                           {r.payer_name}
                           <span className="ml-1 text-[10px] text-slate-500 font-normal">({r.payer_code})</span>
@@ -1682,7 +1682,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                     breakdownData?.whomDidWePay.map((r) => (
                       <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">#{r.voucher_number}</td>
-                        <td className="px-3 py-2 font-mono">{r.voucher_date}</td>
+                        <td className="px-3 py-2 font-mono">{formatAppDate(r.voucher_date)}</td>
                         <td className="px-3 py-2 font-bold text-slate-900">
                           {r.payee_name}
                           <span className="ml-1 text-[10px] text-slate-500 font-normal">({r.payee_code})</span>
@@ -1824,7 +1824,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                     breakdownData?.bankContra.map((b) => (
                       <tr key={b.id} className="border-b border-purple-100 hover:bg-purple-50/50">
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">#{b.voucher_number}</td>
-                        <td className="px-3 py-2 font-mono">{b.voucher_date}</td>
+                        <td className="px-3 py-2 font-mono">{formatAppDate(b.voucher_date)}</td>
                         <td className="px-3 py-2">
                           <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-800 font-bold text-[9px] uppercase">
                             {b.category.replace(/_/g, ' ')}
@@ -2008,7 +2008,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono">
               <div>
                 <span className="text-[10px] text-slate-400 block uppercase">Date</span>
-                <strong className="text-slate-900">{viewVoucher.voucher.voucher_date}</strong>
+                <strong className="text-slate-900">{formatAppDate(viewVoucher.voucher.voucher_date)}</strong>
               </div>
               <div>
                 <span className="text-[10px] text-slate-400 block uppercase">Category</span>
@@ -2152,7 +2152,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
                 Are you sure you want to delete Voucher #{deleteModalVoucher.voucher_number}?
               </p>
               <div className="font-mono text-[11px] space-y-1 text-rose-800">
-                <div>• Date: <strong>{deleteModalVoucher.voucher_date}</strong></div>
+                <div>• Date: <strong>{formatAppDate(deleteModalVoucher.voucher_date)}</strong></div>
                 <div>• Type: <strong>{deleteModalVoucher.transaction_type}</strong></div>
                 <div>• Account: <strong>{deleteModalVoucher.head_account_name}</strong></div>
                 <div>• Amount: <strong>{formatPKR(deleteModalVoucher.net_amount)}</strong></div>
@@ -2274,7 +2274,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
 
             <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] font-mono text-slate-700 space-y-1">
               <div className="font-bold text-slate-900">Voucher #{whatsAppModalVoucher.voucher_number}</div>
-              <div>Date: {whatsAppModalVoucher.voucher_date}</div>
+              <div>Date: {formatAppDate(whatsAppModalVoucher.voucher_date)}</div>
               <div>Account: {whatsAppModalVoucher.head_account_name}</div>
               <div>Amount: {formatPKR(whatsAppModalVoucher.net_amount)}</div>
             </div>

@@ -1,3 +1,5 @@
+import { formatAppDate, replaceIsoDatesInText } from './formatters';
+
 export type PaperSizeOption = 'a4' | 'legal' | '80mm' | '58mm';
 export type PageOrientationOption = 'portrait' | 'landscape';
 export type PageMarginOption = 'none' | 'minimum' | 'compact' | 'standard';
@@ -213,49 +215,15 @@ function getFontZoomPercent(scale: FontSizeScaleOption = 'normal'): string {
   }
 }
 
-const PDF_TITLE_MONTHS = [
-  'jan',
-  'feb',
-  'mar',
-  'apr',
-  'may',
-  'jun',
-  'jul',
-  'aug',
-  'sep',
-  'oct',
-  'nov',
-  'dec',
-];
-
 /**
- * Formats an invoice date as DD-mmm-YYYY in lowercase (e.g. "2026-11-18" -> "18-nov-2026").
+ * Formats an invoice date as dd-MMM-yy (e.g. "2026-11-21" -> "21-Nov-26").
  */
 export function formatDateDMYForPdf(raw?: unknown): string {
   const str = String(raw ?? '').trim();
-  const now = new Date();
   if (!str) {
-    return `${String(now.getDate()).padStart(2, '0')}-${PDF_TITLE_MONTHS[now.getMonth()]}-${now.getFullYear()}`;
+    return formatAppDate(new Date());
   }
-  const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) {
-    const day = isoMatch[3];
-    const mon = PDF_TITLE_MONTHS[Number(isoMatch[2]) - 1] || isoMatch[2];
-    const yr = isoMatch[1];
-    return `${day}-${mon}-${yr}`;
-  }
-  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
-  if (dmyMatch) {
-    const day = String(dmyMatch[1]).padStart(2, '0');
-    const mon = PDF_TITLE_MONTHS[Number(dmyMatch[2]) - 1] || dmyMatch[2];
-    const yr = dmyMatch[3];
-    return `${day}-${mon}-${yr}`;
-  }
-  const parsed = new Date(str);
-  if (!Number.isNaN(parsed.getTime())) {
-    return `${String(parsed.getDate()).padStart(2, '0')}-${PDF_TITLE_MONTHS[parsed.getMonth()]}-${parsed.getFullYear()}`;
-  }
-  return str.toLowerCase().replace(/\s+/g, '-');
+  return formatAppDate(str, str.replace(/\s+/g, '-'));
 }
 
 /**
@@ -352,6 +320,22 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
     .map((node) => node.outerHTML)
     .join('\n');
 
+  // Clone element so we can safely standardize any remaining ISO dates inside printed text nodes to dd-MMM-yy
+  const clonedElement = element.cloneNode(true) as HTMLElement;
+  try {
+    const walker = document.createTreeWalker(clonedElement, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      if (node.nodeValue && /\d{4}-\d{2}-\d{2}/.test(node.nodeValue)) {
+        node.nodeValue = replaceIsoDatesInText(node.nodeValue);
+      }
+      node = walker.nextNode();
+    }
+  } catch {
+    // ignore walker issues
+  }
+  const printableOuterHtml = clonedElement.outerHTML;
+
   // Build copies HTML (each copy separated by a clean page break except the last)
   const copyBlocks: string[] = [];
   for (let i = 0; i < copies; i++) {
@@ -365,7 +349,7 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
               } OF ${copies}</div>`
             : ''
         }
-        ${element.outerHTML}
+        ${printableOuterHtml}
       </div>
     `);
   }

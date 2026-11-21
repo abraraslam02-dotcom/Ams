@@ -32,6 +32,7 @@ import { offlineSyncManager } from '../../services/offlineSyncManager';
 import { MasterResetAndLocalBackupPanel } from '../admin/MasterResetAndLocalBackupPanel';
 import { FirebaseCloudPanel } from '../firebase/FirebaseCloudPanel';
 import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
+import { formatAppDateTime } from '../../utils/formatters';
 
 export type AdminSubTab = 'store-printing' | 'backup-restore' | 'system-admin';
 
@@ -1136,7 +1137,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                             {b.backup_type.replace(/_/g, ' ')}
                           </span>
                         </td>
-                        <td className="py-2.5 px-2.5 font-mono">{b.created_at}</td>
+                        <td className="py-2.5 px-2.5 font-mono">{formatAppDateTime(b.created_at)}</td>
                         <td className="py-2.5 px-2.5 text-right font-mono font-semibold">
                           {formatBytes(b.file_size_bytes)}
                         </td>
@@ -1216,7 +1217,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   </div>
                   <div>
                     <span className="text-slate-500">Backup Date & Time: </span>
-                    <strong className="font-mono">{restoreTarget.created_at}</strong>
+                    <strong className="font-mono">{formatAppDateTime(restoreTarget.created_at)}</strong>
                   </div>
                   <div>
                     <span className="text-slate-500">File Size: </span>
@@ -1431,7 +1432,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   ) : (
                     errorLogs.map((log) => (
                       <tr key={log.id} className="hover:bg-slate-50">
-                        <td className="p-2.5 font-mono">{log.created_at}</td>
+                        <td className="p-2.5 font-mono">{formatAppDateTime(log.created_at)}</td>
                         <td className="p-2.5 font-bold uppercase text-rose-700">{log.severity}</td>
                         <td className="p-2.5 font-mono">
                           {log.module} {log.operation ? `(${log.operation})` : ''}

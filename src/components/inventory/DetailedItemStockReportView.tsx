@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { DetailedItemStockRow } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -113,7 +113,7 @@ export const DetailedItemStockReportView: React.FC = () => {
     if (printRef.current) {
       printReportDocument(
         printRef.current,
-        `Abrar Medical Store - Detailed Item Stock & Transaction Report (${fromDate || 'Start'} to ${toDate})`,
+        `Abrar Medical Store - Detailed Item Stock & Transaction Report (${formatDateRange(fromDate, toDate, 'Start', 'Current')})`,
         { paperSize: 'legal', orientation: 'portrait', margin: 'minimum', fontSizeScale: 'small' }
       );
     }
@@ -144,7 +144,7 @@ export const DetailedItemStockReportView: React.FC = () => {
       'Total Sales Value': r.total_sales_value,
       Discount: r.discount_amount,
       'Batch Number': r.batch_number,
-      'Expiry Date': r.expiry_date,
+      'Expiry Date': formatAppDate(r.expiry_date, ''),
       'Unit / Pack': r.packing,
       'Stock Value': r.stock_value,
     }));
@@ -365,7 +365,7 @@ export const DetailedItemStockReportView: React.FC = () => {
                               <td className="px-2 py-1.5 border-r border-slate-800/80 text-right">{formatPKR(r.total_sales_value, false)}</td>
                               <td className="px-1.5 py-1.5 border-r border-slate-800/80 text-right">{formatPKR(r.discount_amount, false)}</td>
                               <td className="px-2 py-1.5 border-r border-slate-800/80 truncate max-w-[110px]">{r.batch_number}</td>
-                              <td className="px-2 py-1.5 border-r border-slate-800/80 text-center">{r.expiry_date}</td>
+                              <td className="px-2 py-1.5 border-r border-slate-800/80 text-center">{formatAppDate(r.expiry_date)}</td>
                               <td className="px-2 py-1.5 border-r border-slate-800/80 text-center">{r.packing}</td>
                               <td className="px-2 py-1.5 text-right font-black text-amber-300">{formatPKR(r.stock_value, false)}</td>
                             </>

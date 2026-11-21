@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Boxes, Search, RefreshCw, Download, Layers, AlertTriangle } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { BatchInventoryItem } from '../../types/purchase';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate } from '../../utils/formatters';
 
 interface BatchInventoryPanelProps {
   batches: BatchInventoryItem[];
@@ -39,8 +39,8 @@ export const BatchInventoryPanel: React.FC<BatchInventoryPanelProps> = ({
       Company: b.company_name,
       Packing: b.packing,
       'Batch Number': b.batch_number,
-      'Mfg Date': b.manufacturing_date || '',
-      'Expiry Date': b.expiry_date,
+      'Mfg Date': formatAppDate(b.manufacturing_date, ''),
+      'Expiry Date': formatAppDate(b.expiry_date, ''),
       'Purchased Qty (Packs)': b.purchased_qty,
       'Bonus Qty (Packs)': b.bonus_qty,
       'Returned Qty (Packs)': b.returned_qty,
@@ -192,8 +192,8 @@ export const BatchInventoryPanel: React.FC<BatchInventoryPanelProps> = ({
                       {b.batch_number}
                     </td>
                     <td className="py-2.5 px-2.5 font-mono text-[11px]">
-                      <div className="text-slate-500">Mfg: {b.manufacturing_date || '—'}</div>
-                      <div className="font-bold text-slate-900">Exp: {b.expiry_date}</div>
+                      <div className="text-slate-500">Mfg: {formatAppDate(b.manufacturing_date)}</div>
+                      <div className="font-bold text-slate-900">Exp: {formatAppDate(b.expiry_date)}</div>
                     </td>
                     <td className="py-2.5 px-2.5">
                       <span className="font-mono font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-200">

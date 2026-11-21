@@ -1,4 +1,5 @@
 import { FilerStatus } from './account';
+import { ItemTaxType } from './item';
 
 export type AdvanceTaxBasis = 'taxable_plus_gst' | 'taxable_amount' | 'gross_amount';
 
@@ -65,6 +66,8 @@ export interface PurchaseLineItem {
   discount_percent: number;
   discount_amount: number;
   taxable_amount: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   tax_amount: number;
   line_total: number;
@@ -153,6 +156,8 @@ export interface PurchaseReturnLineItem {
   discount_percent: number;
   discount_amount: number;
   taxable_amount: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   gst_amount: number;
   advance_tax_rate: number;

@@ -26,6 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate, formatAppDateTime, replaceIsoDatesInText } from '../../utils/formatters';
 
 export type OfferWorkspaceSubTab =
   | 'trade-offers'
@@ -479,10 +480,17 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
   };
 
   const handleExportReportToExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(reportRows);
+    const formattedRows = reportRows.map((row) => {
+      const next: Record<string, any> = {};
+      for (const [k, v] of Object.entries(row)) {
+        next[k] = typeof v === 'string' ? replaceIsoDatesInText(v) : v;
+      }
+      return next;
+    });
+    const ws = XLSX.utils.json_to_sheet(formattedRows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Offer_Discount_Report');
-    XLSX.writeFile(wb, `Abrar_${activeReportKey}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(wb, `Abrar_${activeReportKey}_${formatAppDate(new Date())}.xlsx`);
   };
 
   const filteredFifoBatches = useMemo(() => {
@@ -1052,7 +1060,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                           {o.offer_type === 'slab_offer' && `Multi-Slab Scheme`}
                         </td>
                         <td className="py-2.5 px-3 text-[11px] text-slate-600">
-                          {o.start_date} → {o.end_date}
+                          {formatAppDate(o.start_date)} → {formatAppDate(o.end_date)}
                         </td>
                         <td className="py-2.5 px-3">
                           <span
@@ -1372,7 +1380,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                             {Number(pd.discount_percent || 0).toFixed(2)}%
                           </td>
                           <td className="py-2.5 px-3 text-[11px] text-slate-500">
-                            {pd.start_date || '-'} → {pd.end_date || '-'}
+                            {formatAppDate(pd.start_date, '-')} → {formatAppDate(pd.end_date, '-')}
                           </td>
                           <td className="py-2.5 px-3">
                             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
@@ -1441,7 +1449,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                     {partyDiscountHistory.map((h) => (
                       <tr key={h.id}>
                         <td className="py-2 px-3 font-mono text-[11px] text-slate-500">
-                          {h.changed_at}
+                          {formatAppDateTime(h.changed_at)}
                         </td>
                         <td className="py-2 px-3 font-bold text-slate-700">{h.action_type}</td>
                         <td className="py-2 px-3">{h.party_name}</td>
@@ -1535,7 +1543,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                       {b.batch_number}
                     </td>
                     <td className="py-2.5 px-3 text-[11px]">
-                      <div className="font-mono text-slate-800">{b.purchase_date || '-'}</div>
+                      <div className="font-mono text-slate-800">{formatAppDate(b.purchase_date, '-')}</div>
                       <div className="text-slate-400">
                         {b.purchase_invoice_number || 'Opening'} • {b.supplier_name || '-'}
                       </div>
@@ -1550,7 +1558,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                             : 'text-slate-700'
                         }
                       >
-                        {b.expiry_date || 'N/A'}
+                        {formatAppDate(b.expiry_date, 'N/A')}
                       </span>
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono">
@@ -1722,14 +1730,14 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                   fifoMovements.map((m) => (
                     <tr key={m.id} className="hover:bg-slate-50">
                       <td className="py-2 px-3 font-mono text-[11px] text-slate-500">
-                        {m.movement_date}
+                        {formatAppDateTime(m.movement_date)}
                       </td>
                       <td className="py-2 px-3 font-bold text-slate-800">{m.movement_type}</td>
                       <td className="py-2 px-3 font-mono text-indigo-600">{m.reference_number}</td>
                       <td className="py-2 px-3 font-semibold">{m.item_name}</td>
                       <td className="py-2 px-3 font-mono">
                         {m.batch_number}{' '}
-                        <span className="text-[10px] text-slate-400">({m.expiry_date || '-'})</span>
+                        <span className="text-[10px] text-slate-400">({formatAppDate(m.expiry_date, '-')})</span>
                       </td>
                       <td className="py-2 px-3 text-[11px] text-slate-600">
                         {m.party_name || '-'}{' '}
@@ -1869,7 +1877,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                 {OFFER_REPORTS_LIST.find((r) => r.key === activeReportKey)?.label}
               </div>
               <div className="text-[10px] text-slate-500">
-                Generated: {new Date().toLocaleString()}
+                Generated: {formatAppDateTime(new Date())}
               </div>
             </div>
 
@@ -1894,7 +1902,11 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                       <tr key={rIdx}>
                         {Object.keys(reportRows[0]).map((col) => (
                           <td key={col} className="py-1.5 px-2">
-                            {String(row[col] ?? '-')}
+                            {row[col] == null
+                              ? '-'
+                              : typeof row[col] === 'string'
+                              ? replaceIsoDatesInText(row[col])
+                              : String(row[col])}
                           </td>
                         ))}
                       </tr>

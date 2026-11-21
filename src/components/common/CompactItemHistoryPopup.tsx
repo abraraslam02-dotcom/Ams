@@ -7,6 +7,7 @@ import {
 } from '../../types/sales';
 
 import { ProductThumb } from './ProductThumb';
+import { formatAppDate } from '../../utils/formatters';
 
 export interface CompactItemHistoryPopupProps {
   isOpen: boolean;
@@ -253,7 +254,7 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                   {lastCustomerSale.customer_name || selectedCustomerName || 'Selected Customer'}
                 </span>
                 <span className="text-slate-600">
-                  Date: <strong className="text-slate-900">{lastCustomerSale.invoice_date}</strong>
+                  Date: <strong className="text-slate-900">{formatAppDate(lastCustomerSale.invoice_date)}</strong>
                 </span>
                 <span className="text-slate-600">
                   Inv #: <strong className="text-emerald-800">{lastCustomerSale.invoice_number}</strong>
@@ -377,7 +378,7 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                       }
                     >
                       <td className="px-2 py-0.5 border-r border-slate-200 whitespace-nowrap">
-                        {s.invoice_date}
+                        {formatAppDate(s.invoice_date)}
                       </td>
                       <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-emerald-800 whitespace-nowrap">
                         {s.invoice_number}
@@ -443,7 +444,7 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                     className="hover:bg-slate-50 text-slate-800"
                   >
                     <td className="px-2 py-0.5 border-r border-slate-200 whitespace-nowrap">
-                      {p.bill_date || p.invoice_date}
+                      {formatAppDate(p.bill_date || p.invoice_date)}
                     </td>
                     <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-sky-800 whitespace-nowrap">
                       {p.bill_number || p.invoice_number}

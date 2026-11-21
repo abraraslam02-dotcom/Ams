@@ -22,6 +22,7 @@ import type {
 } from '../../types/supply';
 import { exportSupplyTableToExcel } from '../../utils/supplyExcelExport';
 import type { SupplyDocumentPrintType } from './SupplyPrintModal';
+import { formatAppDate } from '../../utils/formatters';
 
 interface SupplyReportsAndRecoveryProps {
   activeSection: 'supply-recovery' | 'supply-settlement' | 'supply-reports';
@@ -716,7 +717,7 @@ export const SupplyReportsAndRecoverySection: React.FC<SupplyReportsAndRecoveryP
                           <td className="p-2 font-mono font-bold text-slate-900">
                             {r.recovery_receipt_number}
                           </td>
-                          <td className="p-2">{r.recovery_date}</td>
+                          <td className="p-2">{formatAppDate(r.recovery_date)}</td>
                           <td className="p-2 font-semibold">{r.party_name}</td>
                           <td className="p-2">{r.town_name || '—'}</td>
                           <td className="p-2 font-mono">{r.supply_number || 'General'}</td>
@@ -994,7 +995,7 @@ export const SupplyReportsAndRecoverySection: React.FC<SupplyReportsAndRecoveryP
                       {specialRecoveryData.rows.map((r: any) => (
                         <tr key={r.id}>
                           <td className="p-2 font-mono font-bold">{r.recovery_receipt_number}</td>
-                          <td className="p-2">{r.recovery_date}</td>
+                          <td className="p-2">{formatAppDate(r.recovery_date)}</td>
                           <td className="p-2 font-semibold">{r.party_name}</td>
                           <td className="p-2">{r.town_name}</td>
                           <td className="p-2">{r.salesman_name}</td>

@@ -8,6 +8,7 @@ import { useFirebase } from '../../context/FirebaseContext';
 import { DatabaseDiagnostics } from '../../types/database';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
 import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
+import { formatAppDate, formatAppDateTime } from '../../utils/formatters';
 
 interface TopHeaderProps {
   currentViewTitle: string;
@@ -75,7 +76,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const u: any = user;
   const name: string = u?.full_name ?? u?.fullName ?? u?.name ?? u?.username ?? 'User';
 
-  const date = now.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+  const date = formatAppDate(now);
   const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
   const getSyncBadgeInfo = () => {
@@ -116,9 +117,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
   const badgeInfo = getSyncBadgeInfo();
   const formattedLastSync = syncState.lastSyncedAt
-    ? `${new Date(syncState.lastSyncedAt).toLocaleDateString('en-GB')} ${new Date(
-        syncState.lastSyncedAt
-      ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    ? formatAppDateTime(syncState.lastSyncedAt)
     : 'Not synced yet';
 
   const item = (icon: React.ReactNode, label: string, onClick: () => void, danger = false) => (

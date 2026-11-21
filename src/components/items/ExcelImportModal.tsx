@@ -99,6 +99,8 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         wholesale_price: r.wholesale_price,
         retail_price: r.retail_price,
         discount_percent: r.discount_percent,
+        tax_type: r.tax_type,
+        tax_value: r.tax_value,
         tax_percent: r.tax_percent,
         opening_stock: r.opening_stock,
         minimum_stock: r.minimum_stock,
@@ -167,7 +169,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                 <span>Spreadsheet Format Specification</span>
               </span>
               <p className="text-xs text-slate-600">
-                Download the standardized template containing all 31 Items Master columns (including Variants, Multi-Level Packing, and Purchase Units).
+                Download the standardized template containing all 33 Items Master columns (including Tax Type, Tax Value, Variants, Multi-Level Packing, and Purchase Units).
               </p>
             </div>
             <button

@@ -1,8 +1,9 @@
 import * as XLSX from 'xlsx';
-import { Item, ItemPackingLevel, ItemPurchaseUnitConfig, ItemVariant } from '../types/item';
+import { Item, ItemPackingLevel, ItemPurchaseUnitConfig, ItemTaxType, ItemVariant } from '../types/item';
+import { resolveItemTaxConfig } from './taxCalculation';
 
 export const EXCEL_COLUMNS = [
-  // Original 17 Items Master Columns (preserved in exact order)
+  // Original 17 Items Master Columns + Tax Type & Tax Value (preserved order; NO Loose Rate column)
   { header: 'Item Code', key: 'item_code', width: 14 },
   { header: 'Company Name', key: 'company_name', width: 22 },
   { header: 'Item Name', key: 'item_name', width: 26 },
@@ -15,6 +16,8 @@ export const EXCEL_COLUMNS = [
   { header: 'Wholesale Price', key: 'wholesale_price', width: 15 },
   { header: 'Retail Price', key: 'retail_price', width: 15 },
   { header: 'Discount %', key: 'discount_percent', width: 12 },
+  { header: 'Tax Type', key: 'tax_type', width: 14 },
+  { header: 'Tax Value', key: 'tax_value', width: 12 },
   { header: 'Tax %', key: 'tax_percent', width: 10 },
   { header: 'Opening Stock', key: 'opening_stock', width: 14 },
   { header: 'Minimum Stock', key: 'minimum_stock', width: 14 },
@@ -133,12 +136,25 @@ export function exportItemsToExcel(items: Item[], filename: string = 'Abrar_Medi
             : item.discount_percent
           ).toFixed(2)
         ),
-        'Tax %': Number(
-          (variant && Number(variant.use_parent_pricing) === 0
-            ? variant.tax_percent
-            : item.tax_percent
-          ).toFixed(2)
-        ),
+        ...(() => {
+          const taxCfg =
+            variant && Number(variant.use_parent_pricing) === 0
+              ? resolveItemTaxConfig({
+                  tax_type: variant.tax_type,
+                  tax_value: variant.tax_value,
+                  tax_percent: variant.tax_percent,
+                })
+              : resolveItemTaxConfig({
+                  tax_type: item.tax_type,
+                  tax_value: item.tax_value,
+                  tax_percent: item.tax_percent,
+                });
+          return {
+            'Tax Type': taxCfg.tax_type === 'amount' ? 'Amount' : 'Percentage',
+            'Tax Value': Number(taxCfg.tax_value.toFixed(2)),
+            'Tax %': Number(taxCfg.tax_percent.toFixed(2)),
+          };
+        })(),
         'Opening Stock': variant ? variant.opening_stock : item.opening_stock,
         'Minimum Stock': variant ? variant.minimum_stock : item.minimum_stock,
         'Rack Number': (variant ? variant.rack_number : item.rack_number) || '',
@@ -185,7 +201,7 @@ export function exportItemsToExcel(items: Item[], filename: string = 'Abrar_Medi
 }
 
 /**
- * Download a standard template for bulk Excel import (all 31 columns including Variants, Multi-Level Packing, Purchase Units)
+ * Download a standard template for bulk Excel import (all 33 columns including Tax Type, Tax Value, Variants, Multi-Level Packing, Purchase Units)
  */
 export function downloadExcelTemplate() {
   const templateSampleData = [
@@ -202,7 +218,9 @@ export function downloadExcelTemplate() {
       'Wholesale Price': 315.0,
       'Retail Price': 350.0,
       'Discount %': 5.0,
-      'Tax %': 0.0,
+      'Tax Type': 'Percentage',
+      'Tax Value': 10.0,
+      'Tax %': 10.0,
       'Opening Stock': 200,
       'Minimum Stock': 50,
       'Rack Number': 'A-12',
@@ -235,6 +253,8 @@ export function downloadExcelTemplate() {
       'Wholesale Price': 295.0,
       'Retail Price': 330.0,
       'Discount %': 0.0,
+      'Tax Type': 'Amount',
+      'Tax Value': 15.0,
       'Tax %': 0.0,
       'Opening Stock': 50,
       'Minimum Stock': 15,
@@ -268,6 +288,8 @@ export function downloadExcelTemplate() {
       'Wholesale Price': 295.0,
       'Retail Price': 330.0,
       'Discount %': 0.0,
+      'Tax Type': 'Amount',
+      'Tax Value': 15.0,
       'Tax %': 0.0,
       'Opening Stock': 50,
       'Minimum Stock': 15,
@@ -301,6 +323,8 @@ export function downloadExcelTemplate() {
       'Wholesale Price': 295.0,
       'Retail Price': 330.0,
       'Discount %': 0.0,
+      'Tax Type': 'Amount',
+      'Tax Value': 15.0,
       'Tax %': 0.0,
       'Opening Stock': 0,
       'Minimum Stock': 0,
@@ -334,6 +358,8 @@ export function downloadExcelTemplate() {
       'Wholesale Price': 295.0,
       'Retail Price': 330.0,
       'Discount %': 0.0,
+      'Tax Type': 'Amount',
+      'Tax Value': 15.0,
       'Tax %': 0.0,
       'Opening Stock': 0,
       'Minimum Stock': 0,
@@ -380,6 +406,8 @@ export interface ParsedExcelRow {
   wholesale_price: number;
   retail_price: number;
   discount_percent: number;
+  tax_type: ItemTaxType;
+  tax_value: number;
   tax_percent: number;
   opening_stock: number;
   minimum_stock: number;
@@ -477,6 +505,8 @@ export async function parseExcelFile(file: File): Promise<{
             wholesale_price: number;
             retail_price: number;
             discount_percent: number;
+            tax_type: ItemTaxType;
+            tax_value: number;
             tax_percent: number;
             rack_number: string;
             status: 'Active' | 'Inactive';
@@ -619,10 +649,40 @@ export async function parseExcelFile(file: File): Promise<{
             findVal(['Discount %', 'discount_percent', 'Discount', 'Disc%']) !== ''
               ? parseNum(['Discount %', 'discount_percent', 'Discount', 'Disc%'])
               : baseSnapshot?.discount_percent ?? 0;
-          const tax_percent =
-            findVal(['Tax %', 'tax_percent', 'Tax', 'GST']) !== ''
-              ? parseNum(['Tax %', 'tax_percent', 'Tax', 'GST'])
-              : baseSnapshot?.tax_percent ?? 0;
+          const rawTaxTypeStr = findVal(['Tax Type', 'tax_type', 'TaxType']);
+          const rawTaxValueStr = findVal(['Tax Value', 'tax_value', 'TaxValue', 'Fixed Tax', 'Tax Amount']);
+          const rawTaxPctStr = findVal(['Tax %', 'tax_percent', 'Tax', 'GST']);
+
+          let tax_type: ItemTaxType = baseSnapshot?.tax_type ?? 'percentage';
+          if (rawTaxTypeStr) {
+            const lowerTaxType = rawTaxTypeStr.trim().toLowerCase();
+            if (['amount', 'fixed', 'fixed amount', 'fixed tax', 'rs', 'rs.', 'pkr', 'flat'].includes(lowerTaxType)) {
+              tax_type = 'amount';
+            } else if (['percentage', 'percent', '%', 'pct'].includes(lowerTaxType)) {
+              tax_type = 'percentage';
+            } else {
+              rowErrors.push(`Invalid Tax Type "${rawTaxTypeStr}" (use "Percentage" or "Amount")`);
+            }
+          }
+
+          const rawTaxValueNum =
+            rawTaxValueStr !== ''
+              ? parseNum(['Tax Value', 'tax_value', 'TaxValue', 'Fixed Tax', 'Tax Amount'])
+              : rawTaxPctStr !== ''
+                ? parseNum(['Tax %', 'tax_percent', 'Tax', 'GST'])
+                : baseSnapshot?.tax_value ?? 0;
+
+          if (rawTaxValueNum < 0) {
+            rowErrors.push('Tax Value cannot be negative');
+          }
+
+          const taxCfg = resolveItemTaxConfig({
+            tax_type,
+            tax_value: Math.max(0, rawTaxValueNum),
+            tax_percent: rawTaxPctStr !== '' ? Math.max(0, parseNum(['Tax %', 'tax_percent', 'Tax', 'GST'])) : undefined,
+          });
+          const tax_value = taxCfg.tax_value;
+          const tax_percent = taxCfg.tax_percent;
           const opening_stock = parseNum(['Opening Stock', 'opening_stock', 'Stock', 'Qty']);
           const minimum_stock = parseNum(['Minimum Stock', 'minimum_stock', 'Min Stock', 'Alert Qty']);
 
@@ -642,6 +702,8 @@ export async function parseExcelFile(file: File): Promise<{
                 wholesale_price,
                 retail_price,
                 discount_percent,
+                tax_type,
+                tax_value,
                 tax_percent,
                 rack_number,
                 status,
@@ -717,6 +779,8 @@ export async function parseExcelFile(file: File): Promise<{
             wholesale_price,
             retail_price,
             discount_percent,
+            tax_type,
+            tax_value,
             tax_percent,
             opening_stock,
             minimum_stock,

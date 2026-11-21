@@ -34,6 +34,7 @@ import { useAuth } from '../../context/AuthContext';
 import { printReportDocument } from '../../utils/printEngine';
 import { NavTabId } from '../layout/Sidebar';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { formatAppDate, formatAppDateTime } from '../../utils/formatters';
 
 export type ClosingTabId =
   | 'closing-daily'
@@ -410,7 +411,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
         type: 'success',
         text:
           res.message ||
-          `Yearly Closing (${res.closing_code}) completed. Annual profit/loss transferred and opening balances generated for ${res.next_financial_year?.start_date} to ${res.next_financial_year?.end_date}.`,
+          `Yearly Closing (${res.closing_code}) completed. Annual profit/loss transferred and opening balances generated for ${formatAppDate(res.next_financial_year?.start_date)} to ${formatAppDate(res.next_financial_year?.end_date)}.`,
       });
       await loadOverview();
       await loadYearlyPreview(fyStartDate, fyEndDate, fyCostingMethod);
@@ -498,9 +499,9 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
     const summaryRows = [
       ['ABRAR MEDICAL STORE - FINANCIAL CLOSING REPORT'],
       ['Report Type', labelPrefix],
-      ['Period Start Date', dataset.period_start || dataset.date || ''],
-      ['Period End Date', dataset.period_end || dataset.date || ''],
-      ['Generated At', new Date().toLocaleString()],
+      ['Period Start Date', formatAppDate(dataset.period_start || dataset.date, '')],
+      ['Period End Date', formatAppDate(dataset.period_end || dataset.date, '')],
+      ['Generated At', formatAppDateTime(new Date())],
       [],
       ['METRIC', 'AMOUNT (PKR)'],
       ['Opening Cash Balance', Number(dataset.opening_cash || 0)],
@@ -808,7 +809,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
               {canExportClosing && (
                 <>
                   <button
-                    onClick={() => handlePrintActiveSection(`Daily Closing Report - ${dailyDate}`, 'portrait')}
+                    onClick={() => handlePrintActiveSection(`Daily Closing Report - ${formatAppDate(dailyDate)}`, 'portrait')}
                     className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
                   >
                     <Printer className="w-3.5 h-3.5 text-slate-600" />
@@ -836,7 +837,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                     Daily Closing Already Recorded ({dailyData.existing_closing.closing_code})
                   </h4>
                   <p className="text-xs text-amber-700">
-                    Closed on {dailyData.existing_closing.closed_at} by{' '}
+                    Closed on {formatAppDateTime(dailyData.existing_closing.closed_at)} by{' '}
                     <strong>{dailyData.existing_closing.closed_by_username}</strong> • Actual Physical Cash:{' '}
                     <strong>{fmtCurrency(dailyData.existing_closing.actual_physical_cash)}</strong>
                   </p>
@@ -856,7 +857,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
               <p className="text-xs font-medium text-slate-500">Opening Cash Balance</p>
               <p className="text-lg font-bold text-slate-900 mt-1">{fmtCurrency(dailyData?.opening_cash)}</p>
-              <p className="text-[11px] text-slate-400 mt-1">Prior to {dailyDate}</p>
+              <p className="text-[11px] text-slate-400 mt-1">Prior to {formatAppDate(dailyDate)}</p>
             </div>
             <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
               <p className="text-xs font-medium text-slate-500">Cash Sales (Direct)</p>
@@ -1020,7 +1021,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   className="w-full py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold text-sm shadow-sm flex items-center justify-center gap-2 transition-all no-print"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>{executing ? 'Processing Daily Closing...' : `Confirm & Execute Daily Closing (${dailyDate})`}</span>
+                  <span>{executing ? 'Processing Daily Closing...' : `Confirm & Execute Daily Closing (${formatAppDate(dailyDate)})`}</span>
                 </button>
               )}
             </div>
@@ -1030,7 +1031,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
               <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Cash & Bank Account Reconciliation ({dailyDate})
+                    Cash & Bank Account Reconciliation ({formatAppDate(dailyDate)})
                   </h3>
                   <p className="text-xs text-slate-500">
                     Account-wise opening, daily inflows, daily outflows, and closing balances
@@ -1135,7 +1136,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   <button
                     onClick={() =>
                       handlePrintActiveSection(
-                        `Monthly Financial Closing Report (${monthlyStart} to ${monthlyEnd})`,
+                        `Monthly Financial Closing Report (${formatAppDate(monthlyStart)} to ${formatAppDate(monthlyEnd)})`,
                         'portrait'
                       )
                     }
@@ -1163,11 +1164,11 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                 <Lock className="w-5 h-5 text-amber-600 shrink-0" />
                 <div>
                   <h4 className="text-sm font-bold text-amber-900">
-                    Period {monthlyStart} to {monthlyEnd} is Already Closed ({monthlyData.existing_closing.closing_code})
+                    Period {formatAppDate(monthlyStart)} to {formatAppDate(monthlyEnd)} is Already Closed ({monthlyData.existing_closing.closing_code})
                   </h4>
                   <p className="text-xs text-amber-700">
                     Closed by <strong>{monthlyData.existing_closing.closed_by_username}</strong> on{' '}
-                    {monthlyData.existing_closing.closed_at}. Transactions in this period are locked. Super Admin can reopen from the Reopen tab if required.
+                    {formatAppDateTime(monthlyData.existing_closing.closed_at)}. Transactions in this period are locked. Super Admin can reopen from the Reopen tab if required.
                   </p>
                 </div>
               </div>
@@ -1272,7 +1273,11 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   <strong>{(monthlyData?.customer_carry_forward || []).length} customer balances</strong>,{' '}
                   <strong>{(monthlyData?.supplier_carry_forward || []).length} supplier balances</strong>, cash & bank balances, financial accounts, and{' '}
                   <strong>{fmtNum(monthlyData?.closing_inventory_qty)} inventory units</strong> as exact opening balances for the next month starting{' '}
-                  <strong>{monthlyData?.carry_forward_Verification?.next_period_opening_date || 'next period'}</strong>. Customer and supplier balances are never reset to zero.
+                  <strong>
+                    {monthlyData?.carry_forward_Verification?.next_period_opening_date
+                      ? formatAppDate(monthlyData.carry_forward_Verification.next_period_opening_date)
+                      : 'next period'}
+                  </strong>. Customer and supplier balances are never reset to zero.
                 </p>
                 <div className="flex flex-wrap items-center gap-4 pt-2">
                   <label className="flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
@@ -1282,7 +1287,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                       onChange={(e) => setLockMonthlyPeriod(e.target.checked)}
                       className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
                     />
-                    <span>Lock period ({monthlyStart} to {monthlyEnd}) against new/edited transactions</span>
+                    <span>Lock period ({formatAppDate(monthlyStart)} to {formatAppDate(monthlyEnd)}) against new/edited transactions</span>
                   </label>
                   <input
                     type="text"
@@ -1354,7 +1359,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   {/* Profit & Loss Statement */}
                   <div className="border border-slate-200 rounded-xl p-4 space-y-3">
                     <h4 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2">
-                      Monthly Profit & Loss Statement ({monthlyStart} to {monthlyEnd})
+                      Monthly Profit & Loss Statement ({formatAppDate(monthlyStart)} to {formatAppDate(monthlyEnd)})
                     </h4>
                     <div className="space-y-2 text-xs">
                       <div className="flex justify-between py-1">
@@ -1705,7 +1710,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   <button
                     onClick={() =>
                       handlePrintActiveSection(
-                        `Annual Financial Year Closing (${fyStartDate} to ${fyEndDate})`,
+                        `Annual Financial Year Closing (${formatAppDate(fyStartDate)} to ${formatAppDate(fyEndDate)})`,
                         'portrait'
                       )
                     }
@@ -1790,7 +1795,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                         onChange={(e) => setLockYearlyPeriod(e.target.checked)}
                         className="rounded border-slate-300 text-emerald-600"
                       />
-                      <span>Lock Closed Financial Year ({fyStartDate} → {fyEndDate})</span>
+                      <span>Lock Closed Financial Year ({formatAppDate(fyStartDate)} → {formatAppDate(fyEndDate)})</span>
                     </label>
                     <label className="flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
                       <input
@@ -1827,10 +1832,10 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                 <Lock className="w-5 h-5 text-amber-600" />
                 <div>
                   <h4 className="text-sm font-bold text-amber-900">
-                    Financial Year {fyStartDate} to {fyEndDate} is Closed ({yearlyData.existing_closing.closing_code})
+                    Financial Year {formatAppDate(fyStartDate)} to {formatAppDate(fyEndDate)} is Closed ({yearlyData.existing_closing.closing_code})
                   </h4>
                   <p className="text-xs text-amber-700">
-                    Closed by {yearlyData.existing_closing.closed_by_username} on {yearlyData.existing_closing.closed_at}.
+                    Closed by {yearlyData.existing_closing.closed_by_username} on {formatAppDateTime(yearlyData.existing_closing.closed_at)}.
                   </p>
                 </div>
               </div>
@@ -2089,7 +2094,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   <button
                     onClick={() =>
                       handlePrintActiveSection(
-                        `Stock Closing & Valuation Report (${stockStart} to ${stockEnd})`,
+                        `Stock Closing & Valuation Report (${formatAppDate(stockStart)} to ${formatAppDate(stockEnd)})`,
                         'portrait'
                       )
                     }
@@ -2171,7 +2176,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                 <Package className="w-5 h-5 text-emerald-600" />
                 <div>
                   <h4 className="text-xs font-bold text-slate-900">
-                    Record Official Stock Closing Snapshot ({stockStart} to {stockEnd})
+                    Record Official Stock Closing Snapshot ({formatAppDate(stockStart)} to {formatAppDate(stockEnd)})
                   </h4>
                   <p className="text-[11px] text-slate-500">
                     Prevents duplicate stock closing entries for the same period and preserves an immutable item-by-item valuation audit record.
@@ -2200,7 +2205,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center justify-between">
               <div className="text-xs text-amber-900">
                 <strong>Stock Closing Already Recorded ({stockData.existing_closing.closing_code})</strong> on{' '}
-                {stockData.existing_closing.closed_at} by {stockData.existing_closing.closed_by_username}. Duplicate stock closing for the same period is prevented.
+                {formatAppDateTime(stockData.existing_closing.closed_at)} by {stockData.existing_closing.closed_by_username}. Duplicate stock closing for the same period is prevented.
               </div>
               <button
                 onClick={() => handleOpenClosingDetail(stockData.existing_closing.id)}
@@ -2390,9 +2395,9 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                           {item.closing_type}
                         </span>
                       </td>
-                      <td className="py-2.5 px-3">{item.period_start}</td>
-                      <td className="py-2.5 px-3">{item.period_end}</td>
-                      <td className="py-2.5 px-3 text-slate-500">{item.closed_at}</td>
+                      <td className="py-2.5 px-3">{formatAppDate(item.period_start)}</td>
+                      <td className="py-2.5 px-3">{formatAppDate(item.period_end)}</td>
+                      <td className="py-2.5 px-3 text-slate-500">{formatAppDateTime(item.closed_at)}</td>
                       <td className="py-2.5 px-3 font-medium text-slate-800">{item.closed_by_username || 'Admin'}</td>
                       <td className="py-2.5 px-3 text-right">{fmtCurrency(item.total_sales)}</td>
                       <td className="py-2.5 px-3 text-right">{fmtCurrency(item.total_purchases)}</td>
@@ -2507,10 +2512,10 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                       <td className="py-2.5 px-3 font-mono font-bold text-slate-900">{c.closing_code}</td>
                       <td className="py-2.5 px-3 font-semibold">{c.closing_type}</td>
                       <td className="py-2.5 px-3">
-                        {c.period_start} → {c.period_end}
+                        {formatAppDate(c.period_start)} → {formatAppDate(c.period_end)}
                       </td>
                       <td className="py-2.5 px-3 text-slate-600">
-                        {c.closed_by_username} ({c.closed_at})
+                        {c.closed_by_username} ({formatAppDateTime(c.closed_at)})
                       </td>
                       <td className="py-2.5 px-3 text-center">
                         <span
@@ -2525,7 +2530,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                       </td>
                       <td className="py-2.5 px-3 text-slate-500">
                         {c.reopened_at
-                          ? `Reopened by ${c.reopened_by_username} on ${c.reopened_at}: "${c.reopen_reason}"`
+                          ? `Reopened by ${c.reopened_by_username} on ${formatAppDateTime(c.reopened_at)}: "${c.reopen_reason}"`
                           : 'Never reopened'}
                       </td>
                       <td className="py-2.5 px-3 text-right">
@@ -2620,11 +2625,11 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                 <tbody className="divide-y divide-slate-100">
                   {historyAuditLogs.map((log: any) => (
                     <tr key={log.id} className="hover:bg-slate-50">
-                      <td className="py-2 px-3 text-slate-500">{log.created_at}</td>
+                      <td className="py-2 px-3 text-slate-500">{formatAppDateTime(log.created_at)}</td>
                       <td className="py-2 px-3 font-bold text-slate-800">{log.action}</td>
                       <td className="py-2 px-3">{log.closing_type || '-'}</td>
                       <td className="py-2 px-3">
-                        {log.period_start || '-'} → {log.period_end || '-'}
+                        {formatAppDate(log.period_start, '-')} → {formatAppDate(log.period_end, '-')}
                       </td>
                       <td className="py-2 px-3 font-medium">{log.performed_by_username}</td>
                       <td className="py-2 px-3 text-slate-500">{log.performed_by_role}</td>
@@ -2659,13 +2664,13 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                     {selectedClosingDetail.closing_code}
                   </span>
                   <h3 className="text-base font-bold text-slate-900">
-                    {selectedClosingDetail.closing_type} CLOSING REPORT ({selectedClosingDetail.period_start} to{' '}
-                    {selectedClosingDetail.period_end})
+                    {selectedClosingDetail.closing_type} CLOSING REPORT ({formatAppDate(selectedClosingDetail.period_start)} to{' '}
+                    {formatAppDate(selectedClosingDetail.period_end)})
                   </h3>
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Performed by <strong>{selectedClosingDetail.closed_by_username || 'Admin'}</strong> on{' '}
-                  {selectedClosingDetail.closed_at} • Status: <strong>{selectedClosingDetail.status}</strong>
+                  {formatAppDateTime(selectedClosingDetail.closed_at)} • Status: <strong>{selectedClosingDetail.status}</strong>
                 </p>
               </div>
 
@@ -2814,8 +2819,8 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
               {detailReportTab === 'pnl' && (
                 <div className="max-w-2xl mx-auto border border-slate-200 rounded-xl p-5 space-y-2.5 text-xs">
                   <h4 className="text-sm font-bold text-slate-900 border-b pb-2">
-                    Official Profit & Loss Statement ({selectedClosingDetail.period_start} to{' '}
-                    {selectedClosingDetail.period_end})
+                    Official Profit & Loss Statement ({formatAppDate(selectedClosingDetail.period_start)} to{' '}
+                    {formatAppDate(selectedClosingDetail.period_end)})
                   </h4>
                   <div className="flex justify-between py-1">
                     <span>Total Sales</span>
@@ -3011,7 +3016,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   <tbody className="divide-y divide-slate-100">
                     {(selectedClosingDetail.audit_logs || []).map((l: any) => (
                       <tr key={l.id}>
-                        <td className="py-2 px-3">{l.created_at}</td>
+                        <td className="py-2 px-3">{formatAppDateTime(l.created_at)}</td>
                         <td className="py-2 px-3 font-bold">{l.action}</td>
                         <td className="py-2 px-3">{l.performed_by_username}</td>
                         <td className="py-2 px-3">{l.performed_by_role}</td>

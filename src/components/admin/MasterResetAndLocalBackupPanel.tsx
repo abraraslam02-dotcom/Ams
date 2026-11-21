@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { offlineStorage } from '../../services/offlineStorage';
 import { offlineSyncManager } from '../../services/offlineSyncManager';
+import { formatAppDateTime } from '../../utils/formatters';
 
 export const MasterResetAndLocalBackupPanel: React.FC<{
   initialSection?: 'backup-restore' | 'master-reset' | 'protected-logs';
@@ -584,7 +585,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                     <div>
                       <div className="font-mono font-bold text-slate-900">{bk.file_name}</div>
                       <div className="text-[10px] text-slate-500">
-                        {bk.created_at} • {(Number(bk.file_size_bytes || 0) / 1024).toFixed(1)} KB •{' '}
+                        {formatAppDateTime(bk.created_at)} • {(Number(bk.file_size_bytes || 0) / 1024).toFixed(1)} KB •{' '}
                         <span className="text-emerald-700 font-bold">Verified</span>
                       </div>
                     </div>
@@ -881,7 +882,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                 {protectedLogs.map((lg) => (
                   <tr key={lg.id} className="hover:bg-slate-50">
                     <td className="py-2 px-3 font-mono text-[11px] text-slate-500">
-                      {lg.created_at}
+                      {formatAppDateTime(lg.created_at)}
                     </td>
                     <td className="py-2 px-3 font-bold text-slate-900">{lg.event_type}</td>
                     <td className="py-2 px-3 font-mono text-[11px] text-indigo-700">

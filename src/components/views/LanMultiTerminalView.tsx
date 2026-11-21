@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
 import { offlineStorage, OfflineSyncItem } from '../../services/offlineStorage';
+import { formatAppDate } from '../../utils/formatters';
 
 interface RegisteredTerminal {
   device_id: string;
@@ -134,7 +135,7 @@ export const LanMultiTerminalView: React.FC = () => {
           device_name: window.navigator.userAgent.slice(0, 30),
           counter_name: myCounterName,
           terminal_type: myTerminalType,
-          notes: `Configured on ${new Date().toLocaleDateString()}`,
+          notes: `Configured on ${formatAppDate(new Date())}`,
         }),
       });
 

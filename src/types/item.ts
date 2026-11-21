@@ -8,6 +8,8 @@ export interface ItemVariantBarcode {
   created_at?: string;
 }
 
+export type ItemTaxType = 'percentage' | 'amount';
+
 export interface ItemVariant {
   id: number;
   parent_item_id: number;
@@ -33,6 +35,8 @@ export interface ItemVariant {
   retail_price: number;
   loose_rate: number;
   discount_percent: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   effective_purchase_price?: number;
   effective_trade_price?: number;
@@ -40,6 +44,8 @@ export interface ItemVariant {
   effective_retail_price?: number;
   effective_loose_rate?: number;
   effective_discount_percent?: number;
+  effective_tax_type?: ItemTaxType;
+  effective_tax_value?: number;
   effective_tax_percent?: number;
   opening_stock: number;
   minimum_stock: number;
@@ -117,6 +123,8 @@ export interface Item {
   retail_price: number;
   loose_rate?: number;
   discount_percent: number;
+  tax_type?: ItemTaxType;
+  tax_value?: number;
   tax_percent: number;
   opening_stock: number;
   minimum_stock: number;

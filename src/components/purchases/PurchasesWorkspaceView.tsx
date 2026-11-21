@@ -48,7 +48,7 @@ import {
   JournalEntryLineView,
 } from '../../types/purchase';
 import { api } from '../../services/api';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
 import { findExactBarcodeOrCodeMatch, prepareItemIndex } from '../../utils/itemSearch';
 import {
   formatItemNameWithRemarks,
@@ -84,6 +84,7 @@ import {
   parsePackingUnits as parseUnitsPerPack,
   round2,
 } from '../../utils/itemPricing';
+import { calculateLineTax, resolveItemTaxConfig } from '../../utils/taxCalculation';
 
 export type PurchaseSubTab =
   | 'new-invoice'
@@ -141,6 +142,8 @@ export const createBlankPurchaseLine = (): PurchaseLineItem => ({
   discount_percent: 0,
   discount_amount: 0,
   taxable_amount: 0,
+  tax_type: 'percentage',
+  tax_value: 0,
   tax_percent: 0,
   tax_amount: 0,
   line_total: 0,
@@ -1175,9 +1178,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       source: string;
     } | null;
   } | null>(null);
+  const [showSupplierLedgerChoicePopup, setShowSupplierLedgerChoicePopup] = useState(false);
+  const [supplierLedgerPeriod, setSupplierLedgerPeriod] = useState<'all' | '30days'>('all');
   const [supplierLedgerModalOpen, setSupplierLedgerModalOpen] = useState(false);
   const [supplierLedgerEntries, setSupplierLedgerEntries] = useState<any[]>([]);
+  const [supplierLedgerSummary, setSupplierLedgerSummary] = useState<{
+    openingBalance: number;
+    openingBalanceType: string;
+    totalDebit: number;
+    totalCredit: number;
+    closingBalance: number;
+    closingBalanceType: string;
+    dateLabel: string;
+  } | null>(null);
   const [loadingSupplierLedger, setLoadingSupplierLedger] = useState(false);
+  const supplierLedgerReqIdRef = useRef<number>(0);
   const [clientRequestId, setClientRequestId] = useState<string>(
     () => `pur-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
   );
@@ -1215,18 +1230,90 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     };
   }, [supplierId, editingPurchaseId, purchases.length]);
 
-  const handleOpenSupplierLedger = async () => {
+  const handleOpenSupplierLedger = () => {
     const supIdNum = parseInt(supplierId, 10);
-    if (!supIdNum) return;
+    if (!supIdNum || !selectedSupplier) {
+      setFormError('Please select a Supplier first before opening the Supplier Ledger.');
+      return;
+    }
+    setFormError(null);
+    setShowSupplierLedgerChoicePopup(true);
+  };
+
+  const handleLoadSupplierLedgerForPeriod = async (period: 'all' | '30days') => {
+    const supIdNum = parseInt(supplierId, 10);
+    if (!supIdNum || !selectedSupplier) {
+      setShowSupplierLedgerChoicePopup(false);
+      setFormError('Please select a Supplier first before opening the Supplier Ledger.');
+      return;
+    }
+
+    const reqId = ++supplierLedgerReqIdRef.current;
+    setShowSupplierLedgerChoicePopup(false);
+    setSupplierLedgerPeriod(period);
+    setSupplierLedgerModalOpen(true);
+    setLoadingSupplierLedger(true);
+    setSupplierLedgerEntries([]);
+    setSupplierLedgerSummary(null);
+
+    let startDate: string | undefined;
+    let endDate: string | undefined;
+    let dateLabel = 'All Transactions';
+
+    if (period === '30days') {
+      const today = new Date();
+      const from = new Date(today);
+      from.setDate(from.getDate() - 30);
+      startDate = from.toISOString().slice(0, 10);
+      endDate = today.toISOString().slice(0, 10);
+      dateLabel = `Last 30 Days (${formatDateRange(startDate, endDate)})`;
+    }
+
     try {
-      setSupplierLedgerModalOpen(true);
-      setLoadingSupplierLedger(true);
-      const res = await api.getSupplierLedger({ accountId: supIdNum });
-      setSupplierLedgerEntries(res.data || []);
+      const res = await api.getSupplierLedger({
+        accountId: supIdNum,
+        startDate,
+        endDate,
+      });
+      if (reqId !== supplierLedgerReqIdRef.current) return;
+
+      const detailedLedger = res?.ledger;
+      if (detailedLedger) {
+        setSupplierLedgerEntries(Array.isArray(detailedLedger.entries) ? detailedLedger.entries : []);
+        setSupplierLedgerSummary({
+          openingBalance: Number(detailedLedger.openingBalance || 0),
+          openingBalanceType: String(detailedLedger.openingBalanceType || 'Credit'),
+          totalDebit: Number(detailedLedger.totalDebit || 0),
+          totalCredit: Number(detailedLedger.totalCredit || 0),
+          closingBalance: Number(detailedLedger.closingBalance || 0),
+          closingBalanceType: String(detailedLedger.closingBalanceType || 'Credit'),
+          dateLabel,
+        });
+      } else {
+        const fallbackEntries = Array.isArray(res?.entries)
+          ? res.entries
+          : Array.isArray(res?.data)
+          ? res.data
+          : [];
+        setSupplierLedgerEntries(fallbackEntries);
+        setSupplierLedgerSummary({
+          openingBalance: Number(res?.summary?.openingBalance || 0),
+          openingBalanceType: String(res?.summary?.openingBalanceType || 'Credit'),
+          totalDebit: Number(res?.summary?.totalDebit || 0),
+          totalCredit: Number(res?.summary?.totalCredit || 0),
+          closingBalance: Number(res?.summary?.closingBalance || 0),
+          closingBalanceType: String(res?.summary?.closingBalanceType || 'Credit'),
+          dateLabel,
+        });
+      }
     } catch {
+      if (reqId !== supplierLedgerReqIdRef.current) return;
       setSupplierLedgerEntries([]);
+      setSupplierLedgerSummary(null);
     } finally {
-      setLoadingSupplierLedger(false);
+      if (reqId === supplierLedgerReqIdRef.current) {
+        setLoadingSupplierLedger(false);
+      }
     }
   };
 
@@ -1521,14 +1608,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       existingRow.loose_rate > 0
         ? round2(existingRow.loose_rate)
         : defaultLooseRate;
-    const taxPct = round2(
-      chosenVariant ? chosenVariant.effective_tax_percent ?? found.tax_percent ?? 0 : found.tax_percent || 0
-    );
+    const resolvedTax = resolveItemTaxConfig(chosenVariant || found);
+    const taxType = resolvedTax.tax_type;
+    const taxValue = resolvedTax.tax_value;
+    const taxPct = resolvedTax.tax_percent;
     const gross = round2(qty * rate + looseQty * looseRate);
     const discAmt = round2(gross * (discPct / 100));
     const taxable = round2(gross - discAmt);
-    const taxAmt = round2(taxable * (taxPct / 100));
-    const net = round2(taxable + taxAmt);
+    const taxAmt = calculateLineTax({
+      grossAmount: gross,
+      quantity: qty,
+      looseQuantity: looseQty,
+      unitsPerPack,
+      taxType,
+      taxValue,
+      taxPercent: taxPct,
+    });
+    const net = round2(gross + taxAmt - discAmt);
     const thumb = chosenVariant
       ? chosenVariant.effective_thumbnail_url ||
         chosenVariant.effective_image_url ||
@@ -1575,6 +1671,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       discount_percent: discPct,
       discount_amount: discAmt,
       taxable_amount: taxable,
+      tax_type: taxType,
+      tax_value: taxValue,
       tax_percent: taxPct,
       tax_amount: taxAmt,
       line_total: net,
@@ -2209,9 +2307,32 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
 
     const taxable = round2(gross - discAmt);
-    const taxPct = Math.max(0, round2(Number(row.tax_percent) || 0));
-    const taxAmt = round2(taxable * (taxPct / 100));
-    const net = round2(taxable + taxAmt);
+    const resolvedTax = resolveItemTaxConfig(row);
+    let taxType = resolvedTax.tax_type;
+    let taxValue = resolvedTax.tax_value;
+    let taxPct = resolvedTax.tax_percent;
+
+    if (editedField === 'tax_percent') {
+      taxPct = Math.max(0, round2(Number(row.tax_percent) || 0));
+      taxValue = taxPct;
+      if (taxType === 'amount') {
+        taxPct = 0;
+      }
+    } else if (editedField === 'tax_value') {
+      taxValue = Math.max(0, round2(Number(row.tax_value) || 0));
+      taxPct = taxType === 'percentage' ? taxValue : 0;
+    }
+
+    const taxAmt = calculateLineTax({
+      grossAmount: gross,
+      quantity: qty,
+      looseQuantity: looseQty,
+      unitsPerPack: upp,
+      taxType,
+      taxValue,
+      taxPercent: taxPct,
+    });
+    const net = round2(gross + taxAmt - discAmt);
 
     return {
       ...row,
@@ -2223,6 +2344,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       discount_percent: discPct,
       discount_amount: discAmt,
       taxable_amount: taxable,
+      tax_type: taxType,
+      tax_value: taxValue,
       tax_percent: taxPct,
       tax_amount: taxAmt,
       line_total: net,
@@ -2331,6 +2454,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         discount_amount: 0,
         gross_amount: finalNet,
         taxable_amount: finalNet,
+        tax_type: 'percentage',
+        tax_value: 0,
         tax_percent: 0,
         tax_amount: 0,
         line_total: finalNet,
@@ -2611,7 +2736,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           updated.loose_rate = 0;
         }
         if (colSet.has('mrp')) updated.mrp_rate = 0;
-        if (colSet.has('gst')) updated.tax_percent = 0;
+        if (colSet.has('gst')) {
+          updated.tax_percent = 0;
+          updated.tax_value = 0;
+        }
         if (colSet.has('remarks')) updated.remarks = '';
         return recalcPurchaseLineRow(updated);
       })
@@ -2635,15 +2763,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const totalDiscount = round2(itemDiscountTotal + computedInvoiceDiscAmt);
   const taxableAmount = round2(grossTotal - totalDiscount);
 
-  // Prorate invoice discount for GST
-  const gstTotal = round2(
-    validLines.reduce((sum, l) => {
-      const share =
-        subtotalAfterItemDisc > 0 ? l.taxable_amount / subtotalAfterItemDisc : 0;
-      const lineTaxableAfterInvDisc = round2(l.taxable_amount - computedInvoiceDiscAmt * share);
-      return sum + round2(lineTaxableAfterInvDisc * (l.tax_percent / 100));
-    }, 0)
-  );
+  // CRITICAL TAX RULE: Tax is calculated on original gross amount BEFORE discounts.
+  // Discounts (item or invoice level) NEVER reduce tax amount.
+  const gstTotal = round2(validLines.reduce((sum, l) => sum + round2(l.tax_amount), 0));
 
   const basis = taxSettings?.calculation_basis || 'taxable_plus_gst';
   const advanceTaxBase =
@@ -3443,6 +3565,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           discount_percent: Number(it.discount_percent || 0),
           discount_amount: Number(it.discount_amount || 0),
           taxable_amount: Number(it.taxable_amount || 0),
+          tax_type: resolveItemTaxConfig(it).tax_type,
+          tax_value: resolveItemTaxConfig(it).tax_value,
           tax_percent: Number(it.tax_percent || 0),
           tax_amount: Number(it.tax_amount || 0),
           line_total: Number(it.line_total || 0),
@@ -3618,6 +3742,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         loose_quantity: Number(l.loose_quantity) || 0,
         bonus_quantity: Number(l.bonus_quantity) || 0,
         loose_rate: Number(l.loose_rate) || 0,
+        tax_type: resolveItemTaxConfig(l).tax_type,
+        tax_value: resolveItemTaxConfig(l).tax_value,
+        tax_percent: resolveItemTaxConfig(l).tax_percent,
         remarks: String(l.remarks || '').trim(),
         ...(targetStatus === 'held'
           ? { update_master_purchase_price: false, update_master_retail_price: false }
@@ -3920,6 +4047,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         discount_percent: Number(l.discount_percent) || 0,
         discount_amount: Number(l.discount_amount) || 0,
         taxable_amount: Number(l.taxable_amount) || 0,
+        tax_type: resolveItemTaxConfig(l).tax_type,
+        tax_value: resolveItemTaxConfig(l).tax_value,
         tax_percent: Number(l.tax_percent) || 0,
         tax_amount: Number(l.tax_amount) || 0,
         gross_amount: Number(l.gross_amount) || 0,
@@ -4245,6 +4374,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           discount_percent: Number(it.discount_percent || 0),
           discount_amount: Number(it.discount_amount || 0),
           taxable_amount: Number(it.taxable_amount || 0),
+          tax_type: resolveItemTaxConfig(it).tax_type,
+          tax_value: resolveItemTaxConfig(it).tax_value,
           tax_percent: Number(it.tax_percent || 0),
           tax_amount: Number(it.tax_amount || 0),
           line_total: Number(it.line_total || 0),
@@ -5104,17 +5235,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         {formatPKR(Math.abs(previousSupplierBalance))} ({previousBalanceType})
                       </span>
                     </div>
-                    {selectedSupplier && (
-                      <button
-                        type="button"
-                        onClick={handleOpenSupplierLedger}
-                        className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-0.5 cursor-pointer shrink-0"
-                        title="Open Detailed Supplier Ledger"
-                      >
-                        <Scale className="w-2.5 h-2.5" />
-                        <span>Ledger</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={handleOpenSupplierLedger}
+                      className={`px-1.5 py-0 rounded font-bold flex items-center gap-0.5 cursor-pointer shrink-0 ${
+                        selectedSupplier
+                          ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                          : 'bg-slate-600 hover:bg-slate-500 text-slate-200'
+                      }`}
+                      title="Open Selected Supplier Ledger (All or Last 30 Days)"
+                    >
+                      <Scale className="w-2.5 h-2.5" />
+                      <span>Ledger</span>
+                    </button>
                   </div>
 
                   {/* Accessible Company Master Filter */}
@@ -5676,9 +5809,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                       !e.ctrlKey &&
                                       !e.altKey &&
                                       !e.metaKey &&
-                                      (e.key === 'Backspace' ||
-                                        (!e.shiftKey &&
-                                          (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')))
+                                      !e.shiftKey &&
+                                      (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
                                     ) {
                                       e.preventDefault();
                                       e.stopPropagation();
@@ -5931,24 +6063,46 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
 
-                            {/* 12. GST */}
-                            <td className={`p-0 text-right h-[16px] align-middle ${colHighlight('gst')}`}>
-                              <NumericInput
-                                id={`pos_row_${rIdx}_tax_percent`}
-                                value={line.item_id ? line.tax_percent : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    rIdx,
-                                    'tax_percent',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'tax_percent', 'pos_row')
-                                }
-                                className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
+                            {/* 12. GST / Tax */}
+                            <td
+                              className={`p-0 text-right h-[16px] align-middle ${colHighlight('gst')}`}
+                              title={
+                                line.item_id
+                                  ? line.tax_type === 'amount'
+                                    ? `Fixed Tax: Rs. ${Number(line.tax_value || 0).toFixed(2)} / unit | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                    : `Tax: ${Number(line.tax_value ?? line.tax_percent ?? 0).toFixed(2)}% on Gross | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                  : ''
+                              }
+                            >
+                              <div className="flex items-center h-[15px]">
+                                {line.item_id && line.tax_type === 'amount' && (
+                                  <span className="pl-0.5 text-[9px] font-bold text-amber-700 select-none">
+                                    Rs
+                                  </span>
+                                )}
+                                <NumericInput
+                                  id={`pos_row_${rIdx}_tax_percent`}
+                                  value={
+                                    line.item_id
+                                      ? line.tax_type === 'amount'
+                                        ? Number(line.tax_value || 0)
+                                        : Number(line.tax_value ?? line.tax_percent ?? 0)
+                                      : 0
+                                  }
+                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                  onChange={(e) =>
+                                    handleLineChange(
+                                      rIdx,
+                                      'tax_value',
+                                      parseFloat(e.target.value) || 0
+                                    )
+                                  }
+                                  onKeyDown={(e) =>
+                                    handlePurchaseCellKeyDown(e, rIdx, 'tax_percent', 'pos_row')
+                                  }
+                                  className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
+                                />
+                              </div>
                             </td>
 
                             {/* 13. Taxable */}
@@ -6415,17 +6569,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     <Clock className="w-3 h-3 text-indigo-300" />
                     <span>Held ({heldPurchases.length})</span>
                   </button>
-                  {selectedSupplier && (
-                    <button
-                      type="button"
-                      onClick={handleOpenSupplierLedger}
-                      className="px-1.5 py-0 rounded bg-teal-700 hover:bg-teal-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
-                      title="Open Detailed Supplier Ledger"
-                    >
-                      <Scale className="w-3 h-3 text-teal-200" />
-                      <span>Ledger</span>
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={handleOpenSupplierLedger}
+                    className={`px-1.5 py-0 rounded font-bold flex items-center gap-0.5 cursor-pointer ${
+                      selectedSupplier
+                        ? 'bg-teal-700 hover:bg-teal-600 text-white'
+                        : 'bg-slate-600 hover:bg-slate-500 text-slate-200'
+                    }`}
+                    title="Open Selected Supplier Ledger (All or Last 30 Days)"
+                  >
+                    <Scale className="w-3 h-3 text-teal-200" />
+                    <span>Ledger</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => setSubTab('advance-tax')}
@@ -7189,9 +7345,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                       !e.ctrlKey &&
                                       !e.altKey &&
                                       !e.metaKey &&
-                                      (e.key === 'Backspace' ||
-                                        (!e.shiftKey &&
-                                          (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')))
+                                      !e.shiftKey &&
+                                      (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
                                     ) {
                                       e.preventDefault();
                                       e.stopPropagation();
@@ -7441,22 +7596,44 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               />
                             </td>
 
-                            {/* 12. GST */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('gst')}`}>
-                              <NumericInput
-                                id={`pur_cell_${idx}_tax_percent`}
-                                value={line.item_id ? line.tax_percent : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'tax_percent',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'tax_percent')}
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
+                            {/* 12. GST / Tax */}
+                            <td
+                              className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('gst')}`}
+                              title={
+                                line.item_id
+                                  ? line.tax_type === 'amount'
+                                    ? `Fixed Tax: Rs. ${Number(line.tax_value || 0).toFixed(2)} / unit | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                    : `Tax: ${Number(line.tax_value ?? line.tax_percent ?? 0).toFixed(2)}% on Gross | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                  : ''
+                              }
+                            >
+                              <div className="flex items-center h-[15px]">
+                                {line.item_id && line.tax_type === 'amount' && (
+                                  <span className="pl-0.5 text-[9px] font-bold text-amber-700 select-none">
+                                    Rs
+                                  </span>
+                                )}
+                                <NumericInput
+                                  id={`pur_cell_${idx}_tax_percent`}
+                                  value={
+                                    line.item_id
+                                      ? line.tax_type === 'amount'
+                                        ? Number(line.tax_value || 0)
+                                        : Number(line.tax_value ?? line.tax_percent ?? 0)
+                                      : 0
+                                  }
+                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                  onChange={(e) =>
+                                    handleLineChange(
+                                      idx,
+                                      'tax_value',
+                                      parseFloat(e.target.value) || 0
+                                    )
+                                  }
+                                  onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'tax_percent')}
+                                  className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                />
+                              </div>
                             </td>
 
                             {/* 13. Taxable */}
@@ -7969,7 +8146,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
                         {p.bill_number}
                       </td>
-                      <td className="py-2.5 px-2.5 font-mono">{p.bill_date}</td>
+                      <td className="py-2.5 px-2.5 font-mono">{formatAppDate(p.bill_date)}</td>
                       <td className="py-2.5 px-2.5">
                         <div className="font-bold text-slate-900">{p.supplier_name}</div>
                         <div className="font-mono text-[10px] text-slate-500">
@@ -8136,30 +8313,153 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         defaultFilename={`Purchase_Custom_Export_${billDate}.xlsx`}
       />
 
+      {/* Supplier Ledger Date Range Choice Popup */}
+      {showSupplierLedgerChoicePopup && selectedSupplier && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 flex items-center justify-center p-4"
+          onClick={() => setShowSupplierLedgerChoicePopup(false)}
+        >
+          <div
+            className="bg-white rounded-xl border border-slate-200 shadow-2xl w-full max-w-sm overflow-hidden text-xs"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 min-w-0">
+                <Scale className="w-4 h-4 text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="text-xs font-bold uppercase tracking-wide">Supplier Ledger</h3>
+                  <p className="text-[11px] text-slate-300 truncate">
+                    [{selectedSupplier.account_code}] {selectedSupplier.account_name}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSupplierLedgerChoicePopup(false)}
+                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white cursor-pointer"
+                aria-label="Close popup"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="p-4 space-y-2.5">
+              <p className="text-slate-600 text-[11px]">
+                Choose the ledger period to display for{' '}
+                <span className="font-bold text-slate-900">{selectedSupplier.account_name}</span>:
+              </p>
+              <div className="grid grid-cols-1 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleLoadSupplierLedgerForPeriod('all')}
+                  className="w-full px-3 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center justify-between cursor-pointer transition-colors"
+                >
+                  <span>All Ledger</span>
+                  <span className="text-[10px] text-emerald-100 font-normal">Complete history</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLoadSupplierLedgerForPeriod('30days')}
+                  className="w-full px-3 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-between cursor-pointer transition-colors"
+                >
+                  <span>Last 30 Days Ledger</span>
+                  <span className="text-[10px] text-slate-300 font-normal">Recent 30 days</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Supplier Detailed Account Ledger Modal */}
       {supplierLedgerModalOpen && selectedSupplier && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden text-xs">
-            <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col overflow-hidden text-xs">
+            <div className="bg-slate-900 text-white px-5 py-3.5 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="text-sm font-bold">
-                  Supplier Account Ledger — [{selectedSupplier.account_code}]{' '}
-                  {selectedSupplier.account_name}
-                </h3>
-                <p className="text-[11px] text-slate-400">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold">
+                    Supplier Account Ledger — [{selectedSupplier.account_code}]{' '}
+                    {selectedSupplier.account_name}
+                  </h3>
+                  <span className="px-2 py-0.5 rounded bg-emerald-700/80 text-emerald-100 text-[10px] font-bold">
+                    {supplierLedgerPeriod === '30days' ? 'Last 30 Days' : 'All Ledger'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {supplierLedgerSummary?.dateLabel ? `${supplierLedgerSummary.dateLabel} • ` : ''}
                   Previous Balance: {formatPKR(previousSupplierBalance)} ({previousBalanceType}) •
                   Current Purchase Net: {formatPKR(netInvoiceAmount)} • Total Payable:{' '}
                   {formatPKR(totalPayable)}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setSupplierLedgerModalOpen(false)}
-                className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold cursor-pointer"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleLoadSupplierLedgerForPeriod('all')}
+                  className={`px-2.5 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                    supplierLedgerPeriod === 'all'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                  }`}
+                >
+                  All Ledger
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLoadSupplierLedgerForPeriod('30days')}
+                  className={`px-2.5 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                    supplierLedgerPeriod === '30days'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                  }`}
+                >
+                  Last 30 Days
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSupplierLedgerModalOpen(false)}
+                  className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
             </div>
+
+            {supplierLedgerSummary && !loadingSupplierLedger && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 px-4 pt-3 pb-1 bg-slate-50 border-b border-slate-200">
+                <div className="bg-white border border-slate-200 rounded-lg px-3 py-2">
+                  <div className="text-[10px] font-bold uppercase text-slate-500">Opening Balance</div>
+                  <div className="font-mono font-bold text-slate-900">
+                    {formatPKR(supplierLedgerSummary.openingBalance)}{' '}
+                    <span className="text-[10px] text-slate-500">
+                      ({supplierLedgerSummary.openingBalanceType === 'Debit' ? 'Dr' : 'Cr'})
+                    </span>
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-lg px-3 py-2">
+                  <div className="text-[10px] font-bold uppercase text-emerald-700">Total Debit (Paid/Ret)</div>
+                  <div className="font-mono font-bold text-emerald-700">
+                    {formatPKR(supplierLedgerSummary.totalDebit)}
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-lg px-3 py-2">
+                  <div className="text-[10px] font-bold uppercase text-rose-700">Total Credit (Billed)</div>
+                  <div className="font-mono font-bold text-rose-700">
+                    {formatPKR(supplierLedgerSummary.totalCredit)}
+                  </div>
+                </div>
+                <div className="bg-slate-900 text-white rounded-lg px-3 py-2">
+                  <div className="text-[10px] font-bold uppercase text-emerald-300">Closing Balance</div>
+                  <div className="font-mono font-bold">
+                    {formatPKR(supplierLedgerSummary.closingBalance)}{' '}
+                    <span className="text-[10px] text-emerald-300">
+                      ({supplierLedgerSummary.closingBalanceType === 'Debit' ? 'Dr' : 'Cr'})
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="p-4 overflow-y-auto flex-1">
               {loadingSupplierLedger ? (
                 <div className="py-10 text-center text-slate-500">
@@ -8167,7 +8467,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 </div>
               ) : supplierLedgerEntries.length === 0 ? (
                 <div className="py-10 text-center text-slate-500">
-                  No posted ledger entries found for this supplier yet.
+                  No posted ledger entries found for this supplier in the selected period.
                 </div>
               ) : (
                 <table className="w-full text-left border-collapse border border-slate-200 text-[11px]">
@@ -8184,13 +8484,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-200">
                     {supplierLedgerEntries.map((row: any, i: number) => (
-                      <tr key={i} className="hover:bg-slate-50">
-                        <td className="p-2 font-mono">{row.entry_date || row.date || '—'}</td>
-                        <td className="p-2 font-mono font-bold text-slate-900">
-                          {row.voucher_no || row.reference_no || '—'}
+                      <tr key={row.id || i} className="hover:bg-slate-50">
+                        <td className="p-2 font-mono whitespace-nowrap">
+                          {formatAppDate(row.entry_date || row.date, '—')}
                         </td>
-                        <td className="p-2">{row.voucher_type || row.transaction_type || '—'}</td>
-                        <td className="p-2 text-slate-600">{row.narration || row.description || '—'}</td>
+                        <td className="p-2 font-mono font-bold text-slate-900 whitespace-nowrap">
+                          {row.document_number || row.entry_number || row.voucher_no || row.reference_no || '—'}
+                        </td>
+                        <td className="p-2 whitespace-nowrap">
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px] font-bold">
+                            {row.reference_type || row.source_type || row.voucher_type || row.transaction_type || '—'}
+                          </span>
+                        </td>
+                        <td className="p-2 text-slate-600">
+                          {row.description || row.narration || row.entry_description || '—'}
+                        </td>
                         <td className="p-2 text-right font-mono text-emerald-700">
                           {Number(row.debit_amount || row.debit || 0) > 0
                             ? formatPKR(Number(row.debit_amount || row.debit || 0))
@@ -8201,14 +8509,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             ? formatPKR(Number(row.credit_amount || row.credit || 0))
                             : '—'}
                         </td>
-                        <td className="p-2 text-right font-mono font-bold text-slate-900">
+                        <td className="p-2 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
                           {formatPKR(
                             Math.abs(
                               Number(
                                 row.running_balance ?? row.balance ?? prevSupplierNetPayable
                               )
                             )
-                          )}
+                          )}{' '}
+                          <span className="text-[10px] text-slate-500">
+                            {row.running_balance_type
+                              ? row.running_balance_type === 'Debit'
+                                ? 'Dr'
+                                : 'Cr'
+                              : ''}
+                          </span>
                         </td>
                       </tr>
                     ))}
@@ -8454,7 +8769,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         title="Click or double-click to open this held purchase invoice in the datasheet"
                       >
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">{h.bill_number}</td>
-                        <td className="px-3 py-2 font-mono text-slate-600">{h.bill_date}</td>
+                        <td className="px-3 py-2 font-mono text-slate-600">{formatAppDate(h.bill_date)}</td>
                         <td className="px-3 py-2 font-semibold text-slate-800">
                           {h.supplier_name || 'Unspecified Supplier'}
                         </td>
@@ -8928,14 +9243,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 const discPct = Math.max(0, round2(Number(l.discount_percent) || 0));
                 const discAmt = round2(gross * (discPct / 100));
                 const taxable = round2(gross - discAmt);
-                const taxPct = Math.max(
-                  0,
-                  round2(
-                    Number(updatedItem.tax_percent ?? l.tax_percent ?? 0)
-                  )
-                );
-                const taxAmt = round2(taxable * (taxPct / 100));
-                const net = round2(taxable + taxAmt);
+                const resolvedTax = resolveItemTaxConfig(matchedVar || updatedItem);
+                const taxType = resolvedTax.tax_type;
+                const taxValue = resolvedTax.tax_value;
+                const taxPct = resolvedTax.tax_percent;
+                const taxAmt = calculateLineTax({
+                  grossAmount: gross,
+                  quantity: qty,
+                  looseQuantity: looseQty,
+                  unitsPerPack: upp,
+                  taxType,
+                  taxValue,
+                  taxPercent: taxPct,
+                });
+                const net = round2(gross + taxAmt - discAmt);
 
                 return {
                   ...l,
@@ -8954,6 +9275,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   gross_amount: gross,
                   discount_amount: discAmt,
                   taxable_amount: taxable,
+                  tax_type: taxType,
+                  tax_value: taxValue,
                   tax_percent: taxPct,
                   tax_amount: taxAmt,
                   line_total: net,

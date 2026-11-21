@@ -1,4 +1,4 @@
-import { formatPKR, formatPKTDate } from './formatters';
+import { formatAppDate, formatPKR, formatPKTDate } from './formatters';
 
 /**
  * Normalizes a Pakistani phone/mobile number for WhatsApp (wa.me & WhatsApp Business Cloud API).
@@ -40,30 +40,13 @@ export function normalizeWhatsAppNumber(phone?: string | null): string | null {
 }
 
 /**
- * Formats a date string/object as DD/MM/YYYY while also respecting PKT date formatting.
+ * Formats a date string/object as dd-MMM-yy (e.g. 21-Nov-26).
  */
 export function formatWhatsAppDate(dateInput?: string | Date | null): string {
   if (!dateInput) {
-    const now = new Date();
-    const dd = String(now.getDate()).padStart(2, '0');
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const yyyy = now.getFullYear();
-    return `${dd}/${mm}/${yyyy} (${formatPKTDate(now)})`;
+    return formatAppDate(new Date());
   }
-  const raw = String(dateInput).trim();
-  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) {
-    const [, yyyy, mm, dd] = isoMatch;
-    return `${dd}/${mm}/${yyyy} (${formatPKTDate(raw)})`;
-  }
-  const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  if (!isNaN(d.getTime())) {
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    return `${dd}/${mm}/${yyyy} (${formatPKTDate(d)})`;
-  }
-  return formatPKTDate(dateInput);
+  return formatAppDate(dateInput, formatPKTDate(new Date()));
 }
 
 export interface WhatsAppDocumentPayload {
@@ -319,22 +302,13 @@ const HELV_BOLD_W = [
   611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
 ];
 
-const PDF_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-
-// 2026-11-14 -> 14-nov-2026
+// 2026-11-21 -> 21-Nov-26
 function formatDateDMY(raw?: string | null): string {
   const str = String(raw || '').trim();
-  const now = new Date();
   if (!str) {
-    return `${String(now.getDate()).padStart(2, '0')}-${PDF_MONTHS[now.getMonth()]}-${now.getFullYear()}`;
+    return formatAppDate(new Date());
   }
-  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return `${m[3]}-${PDF_MONTHS[Number(m[2]) - 1] || m[2]}-${m[1]}`;
-  const d = new Date(str);
-  if (!Number.isNaN(d.getTime())) {
-    return `${String(d.getDate()).padStart(2, '0')}-${PDF_MONTHS[d.getMonth()]}-${d.getFullYear()}`;
-  }
-  return str;
+  return formatAppDate(str, str);
 }
 
 // "Abrar" + "123" + "2026-11-18"  ->  "abrar_invno:123_18-nov-2026.pdf"
