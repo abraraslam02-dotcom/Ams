@@ -276,15 +276,17 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
   const marginMm = getMarginMm(paperSize, isThermal ? 'none' : config.margin || 'standard');
   const zoomPercent = getFontZoomPercent(config.fontSizeScale || 'normal');
   const thermalPaperWidthCss = paperSize === '58mm' ? '58mm' : '80mm';
-
+const thermalContentHeightMm = isThermal && element
+  ? Math.max(50, Math.ceil(element.scrollHeight * 25.4 / 96 + 5))
+  : 297;
   const pageSizeCss =
-    paperSize === '80mm'
-      ? '80mm auto'
-      : paperSize === '58mm'
-      ? '58mm auto'
-      : orientation === 'landscape'
-      ? '297mm 210mm'
-      : '210mm 297mm';
+  paperSize === '80mm'
+    ? `80mm ${thermalContentHeightMm}mm`
+    : paperSize === '58mm'
+    ? `58mm ${thermalContentHeightMm}mm`
+    : orientation === 'landscape'
+    ? '297mm 210mm'
+    : '210mm 297mm';
 
   const containerWidthCss =
     paperSize === '80mm'
