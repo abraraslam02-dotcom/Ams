@@ -8,7 +8,7 @@ export type FontSizeScaleOption = 'small' | 'normal' | 'large';
  * 1. A4 Sales Invoices (210mm x 297mm)
  * 2. A4 Purchase Invoices (210mm x 297mm)
  * 3. A4 Reports (210mm x 297mm)
- * 4. 80mm Thermal Invoices (80mm x 297mm PDF page)
+ * 4. 80mm Thermal Invoices (80mm x auto dynamic height)
  * 5. 58mm Thermal Invoices (58mm x auto dynamic height)
  */
 export type PrintConfigurationProfileId =
@@ -81,13 +81,13 @@ export const PRINT_CONFIGURATION_PROFILES: Record<
   },
   'thermal-80mm': {
     id: 'thermal-80mm',
-    label: '80mm Thermal Receipt (80mm × 297mm PDF Page)',
+    label: '80mm Thermal Receipt (80mm × Auto)',
     paperSize: '80mm',
     widthMm: 80,
-    heightMm: 297,
+    heightMm: 'auto',
     defaultMargin: 'none',
     defaultOrientation: 'portrait',
-    pageSizeCss: () => '80mm 297mm',
+    pageSizeCss: () => '80mm auto',
     printableWidthCss: () => '76mm',
     previewWidthCss: () => '80mm',
     previewMinHeightCss: () => 'auto',
@@ -285,7 +285,7 @@ export function buildInvoicePdfTitle(
  * - No popup windows (window.open) are required
  * - Complete CSS styles, Tailwind utility classes, custom fonts, borders, and colors are synchronously inlined
  * - Independent print configurations for A4 Sales, A4 Purchase, A4 Reports, 80mm Thermal, and 58mm Thermal are strictly enforced
- * - 80mm Thermal PDF documents use an explicit 80mm x 297mm page; 58mm remains dynamic height
+ * - Thermal documents print using exact 80mm or 58mm width and dynamic height (never Legal or A4)
  */
 export function executePrintElement(element: HTMLElement | null, config: PrintJobConfig): void {
   if (!element) {
@@ -305,12 +305,13 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
   const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const isFullPage = !isThermal;
   const orientation: PageOrientationOption = isFullPage ? config.orientation || 'portrait' : 'portrait';
-  const marginMm = getMarginMm(paperSize, isThermal ? (config.margin === 'none' ? 'none' : 'minimum') : config.margin || 'standard');
+  const marginMm = getMarginMm(paperSize, isThermal ? 'none' : config.margin || 'standard');
   const zoomPercent = getFontZoomPercent(config.fontSizeScale || 'normal');
+  const thermalPaperWidthCss = paperSize === '58mm' ? '58mm' : '80mm';
 
   const pageSizeCss =
     paperSize === '80mm'
-      ? '80mm 297mm'
+      ? '80mm auto'
       : paperSize === '58mm'
       ? '58mm auto'
       : orientation === 'landscape'
@@ -319,9 +320,9 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
 
   const containerWidthCss =
     paperSize === '80mm'
-      ? '76mm'
+      ? '80mm'
       : paperSize === '58mm'
-      ? '54mm'
+      ? '58mm'
       : orientation === 'landscape'
       ? '281mm'
       : '194mm';
@@ -420,8 +421,8 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
       html, body {
         margin: 0 !important;
         padding: 0 !important;
-        width: ${isThermal ? (paperSize === '80mm' ? '80mm' : '58mm') : '100%'} !important;
-        max-width: ${isThermal ? (paperSize === '80mm' ? '80mm' : '58mm') : '100%'} !important;
+        width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
+        max-width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
         height: auto !important;
         min-height: 0 !important;
         max-height: none !important;
@@ -434,36 +435,64 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
         zoom: ${zoomPercent};
       }
       .ams-print-root {
-        width: ${isThermal ? containerWidthCss : '100%'} !important;
-        max-width: ${containerWidthCss} !important;
+        width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
+        max-width: ${isThermal ? thermalPaperWidthCss : containerWidthCss} !important;
         height: auto !important;
         min-height: 0 !important;
-        margin: 0 auto !important;
-        padding: ${isThermal ? '1mm 1.5mm' : '0'} !important;
+        margin: ${isThermal ? '0' : '0 auto'} !important;
+        padding: 0 !important;
+        ${
+          isThermal
+            ? `display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        justify-content: flex-start !important;`
+            : ''
+        }
         background: #ffffff !important;
       }
       .ams-print-root > .ams-print-copy-wrapper {
-        height: auto !important;
-        min-height: 0 !important;
-      }
-      .ams-print-root > .ams-print-copy-wrapper > * {
-        width: 100% !important;
-        max-width: 100% !important;
+        width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
+        max-width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
         height: auto !important;
         min-height: 0 !important;
         margin: 0 !important;
+        padding: 0 !important;
+        ${
+          isThermal
+            ? `display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        justify-content: flex-start !important;`
+            : ''
+        }
+      }
+      .ams-print-root > .ams-print-copy-wrapper > * {
+        width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
+        max-width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        ${isThermal ? 'padding: 0 !important; align-self: flex-start !important;' : ''}
         box-shadow: none !important;
         border: none !important;
       }
       .thermal-receipt,
+      .thermal-80mm,
+      .thermal-58mm,
       .thermal-receipt * {
         color: #000000 !important;
       }
-      .thermal-receipt {
-        width: 100% !important;
-        max-width: 100% !important;
+      .thermal-receipt,
+      .thermal-80mm,
+      .thermal-58mm {
+        width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
+        max-width: ${isThermal ? thermalPaperWidthCss : '100%'} !important;
         height: auto !important;
         min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        align-self: flex-start !important;
       }
       .thermal-receipt table {
         width: 100% !important;

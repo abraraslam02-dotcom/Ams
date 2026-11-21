@@ -4171,27 +4171,13 @@ export const api = {
       const res = await authFetch('/api/auth/status');
       const data = await res.json();
       if (res.ok && data.authenticated && data.user) {
-        // A non-Remember-Me login is valid only for the page instance in which
-        // the user signed in. A fresh application load (including browser
-        // history restoration) must require credentials again.
-        if (data.rememberMe !== true) {
-          await clearActiveAuthSession();
-          try {
-            await authFetch('/api/auth/logout', { method: 'POST' });
-          } catch {
-            // The client still treats this load as unauthenticated. The server
-            // session has a short expiry and the browser cookie is session-only.
-          }
-          return { ...data, authenticated: false, user: null, permissions: {} };
-        }
-
         if (Array.isArray(data.offlineUsers) && data.offlineUsers.length > 0) {
           await saveOfflineAuthVault(data.offlineUsers);
         }
         await saveActiveAuthSession({
           user: data.user,
           permissions: data.permissions || {},
-          rememberMe: true,
+          rememberMe: Boolean(data.rememberMe ?? true),
           offlineLogin: false,
         });
         return data;
@@ -4199,7 +4185,7 @@ export const api = {
       if (res.ok && data.authenticated === false) {
         // If user logged in while offline during this session, preserve their offline session
         const savedSession = await getSavedActiveAuthSession();
-        if (savedSession && savedSession.offlineLogin && savedSession.rememberMe === true) {
+        if (savedSession && savedSession.offlineLogin) {
           return {
             initialized: true,
             authenticated: true,
@@ -4216,7 +4202,7 @@ export const api = {
     }
 
     const savedSession = await getSavedActiveAuthSession();
-    if (savedSession && savedSession.user && savedSession.rememberMe === true) {
+    if (savedSession && savedSession.user) {
       return {
         initialized: true,
         authenticated: true,

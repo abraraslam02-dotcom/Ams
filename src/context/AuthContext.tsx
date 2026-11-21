@@ -52,13 +52,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     checkStatus();
 
-    // Browsers may restore a page from the back/forward cache without a full
-    // React remount. Revalidate authentication whenever that page is shown.
-    const handlePageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) checkStatus();
-    };
-    window.addEventListener('pageshow', handlePageShow);
-
     const handleSessionExpired = () => {
       setUser(null);
       setPermissions({});
@@ -67,7 +60,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     window.addEventListener('ams-session-expired', handleSessionExpired);
     return () => {
-      window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('ams-session-expired', handleSessionExpired);
     };
   }, [checkStatus]);
