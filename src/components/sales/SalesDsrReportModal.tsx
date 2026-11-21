@@ -559,7 +559,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
                           <tr className="dsr-a4-company-row bg-slate-200/90">
                             <td
                               colSpan={5}
-                              className="py-1 px-2 border border-slate-300 font-black text-slate-950 text-[13.5px] uppercase tracking-wide leading-snug"
+                              className="py-1 px-2 border border-slate-300 font-black text-slate-950 text-[12px] uppercase tracking-wide leading-snug"
                             >
                               {group.companyName}
                             </td>
