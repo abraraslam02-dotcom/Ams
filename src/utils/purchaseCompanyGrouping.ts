@@ -1,8 +1,10 @@
 import { calculateLineTax, resolveItemTaxConfig } from './taxCalculation';
 import { formatAppDate } from './formatters';
+import type { PageMarginOption, FontSizeScaleOption } from './printEngine';
 
 export interface GroupedPurchaseLine {
   sNo: number;
+  originalIndex: number;
   raw: Record<string, any>;
   itemName: string;
   variantName?: string;
@@ -140,7 +142,7 @@ export function buildCompanyGroupedPurchaseData(
   }
 
   // 1. Extract base gross & item-level discounts/taxes from saved purchase lines (never using sales prices)
-  const baseRows = items.map((item) => {
+  const baseRows = items.map((item, originalIndex) => {
     const quantity = round2(item.quantity ?? item.pack_quantity ?? 0);
     const looseQuantity = round2(item.loose_quantity ?? 0);
     const bonusQuantity = round2(item.bonus_quantity ?? 0);
@@ -167,6 +169,7 @@ export function buildCompanyGroupedPurchaseData(
 
     const resolvedTax = resolveItemTaxConfig(item);
     return {
+      originalIndex,
       raw: item,
       companyName,
       companyKey: companyName.toLowerCase(),
@@ -293,6 +296,7 @@ export function buildCompanyGroupedPurchaseData(
     }
 
     bucket.rows.push({
+      originalIndex: r.originalIndex,
       raw: r.raw,
       itemName: r.itemName,
       variantName: r.variantName,
@@ -370,5 +374,294 @@ export function buildCompanyGroupedPurchaseData(
       totalAdvanceTax: combinedAdvanceTax,
       grandTotal: combinedGrandTotal,
     },
+  };
+}
+
+export type PurchaseItemSortMode = 'company' | 'item_name' | 'direct';
+export type PurchasePrintLayoutMode =
+  | 'a4-portrait'
+  | 'a4-landscape'
+  | 'thermal-80mm'
+  | 'thermal-58mm';
+
+export interface PurchasePrintFieldsConfig {
+  // Core 22 Purchase Print Fields
+  showCompanyName: boolean;
+  showItemName: boolean;
+  showItemCode: boolean;
+  showPacking: boolean;
+  showBatchNumber: boolean;
+  showExpiryDate: boolean;
+  showQuantity: boolean;
+  showBonusQuantity: boolean;
+  showLooseQuantity: boolean;
+  showPurchaseRate: boolean;
+  showDiscount: boolean;
+  showTax: boolean;
+  showNetAmount: boolean;
+  showTotalQuantity: boolean;
+  showTotalItems: boolean;
+  showInvoiceNumber: boolean;
+  showInvoiceDate: boolean;
+  showSupplierName: boolean;
+  showPreviousBalance: boolean;
+  showPaidAmount: boolean;
+  showRemainingBalance: boolean;
+  showRemarks: boolean;
+  // Store Header & Verification Fields
+  showLogo: boolean;
+  showDrugLicense: boolean;
+  showNtn: boolean;
+  showSignature: boolean;
+  showAccountingVerification: boolean;
+}
+
+export interface PurchasePrintOptions {
+  sortMode: PurchaseItemSortMode;
+  groupByCompany: boolean;
+  layout: PurchasePrintLayoutMode;
+  margin: PageMarginOption;
+  fontSizeScale: FontSizeScaleOption;
+  copies: number;
+  fields: PurchasePrintFieldsConfig;
+}
+
+export const DEFAULT_PURCHASE_PRINT_FIELDS: PurchasePrintFieldsConfig = {
+  showCompanyName: true,
+  showItemName: true,
+  showItemCode: false, // Default off to maintain exact existing 12-column A4 Purchase Invoice layout
+  showPacking: true,
+  showBatchNumber: true,
+  showExpiryDate: true,
+  showQuantity: true,
+  showBonusQuantity: true,
+  showLooseQuantity: true,
+  showPurchaseRate: true,
+  showDiscount: true,
+  showTax: true,
+  showNetAmount: true,
+  showTotalQuantity: true,
+  showTotalItems: true,
+  showInvoiceNumber: true,
+  showInvoiceDate: true,
+  showSupplierName: true,
+  showPreviousBalance: true,
+  showPaidAmount: true,
+  showRemainingBalance: true,
+  showRemarks: true,
+  showLogo: true,
+  showDrugLicense: true,
+  showNtn: true,
+  showSignature: true,
+  showAccountingVerification: false,
+};
+
+export const DEFAULT_PURCHASE_PRINT_OPTIONS: PurchasePrintOptions = {
+  sortMode: 'company',
+  groupByCompany: true,
+  layout: 'a4-portrait',
+  margin: 'standard',
+  fontSizeScale: 'normal',
+  copies: 1,
+  fields: { ...DEFAULT_PURCHASE_PRINT_FIELDS },
+};
+
+const VALID_SORT_MODES: PurchaseItemSortMode[] = ['company', 'item_name', 'direct'];
+const VALID_LAYOUTS: PurchasePrintLayoutMode[] = [
+  'a4-portrait',
+  'a4-landscape',
+  'thermal-80mm',
+  'thermal-58mm',
+];
+const VALID_MARGINS: PageMarginOption[] = ['none', 'minimum', 'compact', 'standard'];
+const VALID_FONT_SCALES: FontSizeScaleOption[] = ['small', 'normal', 'large'];
+
+/**
+ * Parses Purchase-specific print options from company_settings.field_visibility_json
+ * without affecting Sales Invoice field visibility settings.
+ */
+export function parsePurchasePrintOptions(
+  fieldVisibilityJson?: string | null
+): PurchasePrintOptions {
+  const defaults: PurchasePrintOptions = {
+    ...DEFAULT_PURCHASE_PRINT_OPTIONS,
+    fields: { ...DEFAULT_PURCHASE_PRINT_FIELDS },
+  };
+  if (!fieldVisibilityJson) return defaults;
+  try {
+    const parsed = JSON.parse(fieldVisibilityJson);
+    if (!parsed || typeof parsed !== 'object') return defaults;
+    const saved = parsed.purchasePrintOptions;
+    if (!saved || typeof saved !== 'object') {
+      // Respect legacy top-level store header toggles if Purchase options were never explicitly saved
+      return {
+        ...defaults,
+        fields: {
+          ...defaults.fields,
+          showLogo: typeof parsed.showLogo === 'boolean' ? parsed.showLogo : defaults.fields.showLogo,
+          showDrugLicense:
+            typeof parsed.showDrugLicense === 'boolean'
+              ? parsed.showDrugLicense
+              : defaults.fields.showDrugLicense,
+          showNtn: typeof parsed.showNtn === 'boolean' ? parsed.showNtn : defaults.fields.showNtn,
+          showPreviousBalance:
+            typeof parsed.showPreviousBalance === 'boolean'
+              ? parsed.showPreviousBalance
+              : defaults.fields.showPreviousBalance,
+          showSignature:
+            typeof parsed.showSignature === 'boolean'
+              ? parsed.showSignature
+              : defaults.fields.showSignature,
+          showAccountingVerification:
+            typeof parsed.showAccountingVerification === 'boolean'
+              ? parsed.showAccountingVerification
+              : defaults.fields.showAccountingVerification,
+        },
+      };
+    }
+
+    const savedFields =
+      saved.fields && typeof saved.fields === 'object' ? saved.fields : {};
+    const mergedFields: PurchasePrintFieldsConfig = { ...DEFAULT_PURCHASE_PRINT_FIELDS };
+    (Object.keys(DEFAULT_PURCHASE_PRINT_FIELDS) as Array<keyof PurchasePrintFieldsConfig>).forEach(
+      (k) => {
+        if (typeof savedFields[k] === 'boolean') {
+          mergedFields[k] = savedFields[k];
+        }
+      }
+    );
+
+    return {
+      sortMode: VALID_SORT_MODES.includes(saved.sortMode) ? saved.sortMode : defaults.sortMode,
+      groupByCompany:
+        typeof saved.groupByCompany === 'boolean' ? saved.groupByCompany : defaults.groupByCompany,
+      layout: VALID_LAYOUTS.includes(saved.layout) ? saved.layout : defaults.layout,
+      margin: VALID_MARGINS.includes(saved.margin) ? saved.margin : defaults.margin,
+      fontSizeScale: VALID_FONT_SCALES.includes(saved.fontSizeScale)
+        ? saved.fontSizeScale
+        : defaults.fontSizeScale,
+      copies: Math.max(1, Math.min(10, Number(saved.copies) || 1)),
+      fields: mergedFields,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+/**
+ * Safely merges Purchase-only print preferences into field_visibility_json
+ * while preserving every existing Sales Invoice key untouched.
+ */
+export function mergePurchasePrintOptionsIntoJson(
+  existingFieldVisibilityJson: string | null | undefined,
+  options: PurchasePrintOptions
+): string {
+  let baseObj: Record<string, any> = {};
+  if (existingFieldVisibilityJson) {
+    try {
+      const parsed = JSON.parse(existingFieldVisibilityJson);
+      if (parsed && typeof parsed === 'object') {
+        baseObj = { ...parsed };
+      }
+    } catch {
+      baseObj = {};
+    }
+  }
+  baseObj.purchasePrintOptions = options;
+  return JSON.stringify(baseObj);
+}
+
+export interface PurchasePrintViewData {
+  isGrouped: boolean;
+  groups: CompanyPurchaseGroup[];
+  flatItems: GroupedPurchaseLine[];
+  companyCount: number;
+  totalItemsCount: number;
+  summary: PurchaseInvoiceGroupedSummary['summary'];
+}
+
+/**
+ * Builds the Purchase Invoice print view dataset according to the selected Sorting
+ * and Company Display options. Reuses buildCompanyGroupedPurchaseData so every
+ * line amount, discount, tax, and invoice grand total remains 100% mathematically accurate.
+ */
+export function buildPurchasePrintViewData(
+  doc: Record<string, any> | null | undefined,
+  rawItems: Array<Record<string, any>>,
+  options: { sortMode: PurchaseItemSortMode; groupByCompany: boolean; showCompanyName: boolean }
+): PurchasePrintViewData {
+  const baseGrouped = buildCompanyGroupedPurchaseData(doc, rawItems);
+  const allReconciledLines: GroupedPurchaseLine[] = baseGrouped.groups.flatMap((g) => g.items);
+
+  // Determine whether company headings/subtotals are shown
+  // When sortMode is 'direct' ("All Items Directly") or groupByCompany is false or company name is hidden,
+  // display items cleanly without company headings or empty group headers.
+  const isGrouped =
+    options.sortMode !== 'direct' && options.groupByCompany && options.showCompanyName;
+
+  if (isGrouped) {
+    let runningSNo = 1;
+    const orderedGroups: CompanyPurchaseGroup[] = baseGrouped.groups.map((g) => {
+      const sortedItems =
+        options.sortMode === 'item_name'
+          ? [...g.items].sort(
+              (a, b) =>
+                a.itemName.localeCompare(b.itemName, undefined, { sensitivity: 'base' }) ||
+                a.originalIndex - b.originalIndex
+            )
+          : [...g.items].sort((a, b) => a.originalIndex - b.originalIndex);
+
+      const renumbered = sortedItems.map((item) => ({
+        ...item,
+        sNo: runningSNo++,
+      }));
+
+      return {
+        ...g,
+        items: renumbered,
+      };
+    });
+
+    return {
+      isGrouped: true,
+      groups: orderedGroups,
+      flatItems: orderedGroups.flatMap((g) => g.items),
+      companyCount: baseGrouped.groups.length,
+      totalItemsCount: allReconciledLines.length,
+      summary: baseGrouped.summary,
+    };
+  }
+
+  // Continuous ungrouped list (no company headings or blank spaces)
+  let sortedFlat: GroupedPurchaseLine[];
+  if (options.sortMode === 'item_name') {
+    sortedFlat = [...allReconciledLines].sort(
+      (a, b) =>
+        a.itemName.localeCompare(b.itemName, undefined, { sensitivity: 'base' }) ||
+        a.originalIndex - b.originalIndex
+    );
+  } else if (options.sortMode === 'company') {
+    sortedFlat = [...allReconciledLines].sort(
+      (a, b) =>
+        a.companyName.localeCompare(b.companyName, undefined, { sensitivity: 'base' }) ||
+        a.originalIndex - b.originalIndex
+    );
+  } else {
+    // 'direct': original invoice entry order
+    sortedFlat = [...allReconciledLines].sort((a, b) => a.originalIndex - b.originalIndex);
+  }
+
+  const renumberedFlat = sortedFlat.map((item, idx) => ({
+    ...item,
+    sNo: idx + 1,
+  }));
+
+  return {
+    isGrouped: false,
+    groups: baseGrouped.groups,
+    flatItems: renumberedFlat,
+    companyCount: baseGrouped.groups.length,
+    totalItemsCount: renumberedFlat.length,
+    summary: baseGrouped.summary,
   };
 }
