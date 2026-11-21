@@ -1868,7 +1868,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
       const totalUnits = round2((quantity + bonusQuantity) * parsed.unitsPerPack + looseQuantity);
 
-      if (status === 'completed' && totalUnits === 0) {
+      if (status === 'completed' && quantity === 0 && bonusQuantity === 0 && looseQuantity === 0) {
         throw new Error(`Row #${idx + 1} (${itemRow.item_name}): Quantity or Loose Quantity cannot be zero.`);
       }
 
@@ -2653,7 +2653,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
               performedBy: String(body.created_by || 'Super Admin'),
             });
           }
-        } else {
+        } else if (pLine.totalUnits > 0) {
           // Normal Positive Sale Row (pLine.totalUnits > 0 -> deduct stock across FIFO batches)
           const allEligibleBatches = db
             .prepare(`

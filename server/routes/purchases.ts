@@ -1972,13 +1972,14 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
     const packingStr = String(raw.packing || dbVariant?.packing || dbItem.packing || '1x1').trim();
     const parsedPack = parsePacking(packingStr, dbVariant?.packing ? null : dbItem);
-    const rawQty = Math.max(0, round2(raw.quantity || 0));
-    const bonusQty = Math.max(0, round2(raw.bonus_quantity || 0));
-    const looseQty = Math.max(0, round2(raw.loose_quantity || 0));
+    const rawQty = round2(raw.quantity || 0);
+    const looseQty = round2(raw.loose_quantity || 0);
+    const bonusQty =
+      rawQty < 0 || looseQty < 0 ? 0 : Math.max(0, round2(raw.bonus_quantity || 0));
 
-    if (targetStatus === 'completed' && rawQty <= 0 && bonusQty <= 0 && looseQty <= 0) {
+    if (targetStatus === 'completed' && rawQty === 0 && bonusQty === 0 && looseQty === 0) {
       throw new Error(
-        `Row ${rowIdx} (${dbItem.item_name}): Quantity (Packs, Loose, or Bonus) must be greater than 0.`
+        `Row ${rowIdx} (${dbItem.item_name}): Quantity (Full, Loose, or Bonus) cannot be zero.`
       );
     }
     const qty = rawQty;
@@ -2008,7 +2009,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         ? round2(Number(raw.loose_rate))
         : defaultLooseRate;
     const mrpRate = Math.max(0, round2(raw.mrp_rate ?? defaultRetailPrice));
-    const discPct = Math.max(0, round2(raw.discount_percent ?? 0));
+    const discPct = Math.max(0, Math.min(100, round2(raw.discount_percent ?? 0)));
     const lineTaxCfg = resolveItemTaxConfig({
       tax_type: raw.tax_type !== undefined ? raw.tax_type : defaultTaxCfg.tax_type,
       tax_value:
@@ -2024,10 +2025,16 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     const taxPct = lineTaxCfg.tax_percent;
 
     const lineGross = round2(qty * purchaseRate + looseQty * looseRate);
-    const lineItemDisc =
-      raw.discount_amount !== undefined && Number(raw.discount_percent || 0) === 0
-        ? Math.min(lineGross, Math.max(0, round2(raw.discount_amount)))
-        : round2(lineGross * (discPct / 100));
+    let lineItemDisc = round2(lineGross * (discPct / 100));
+    if (
+      raw.discount_amount !== undefined &&
+      Number(raw.discount_amount) !== 0 &&
+      discPct === 0
+    ) {
+      const rawDiscAmt = Math.abs(round2(raw.discount_amount));
+      const clampedAbsDisc = Math.min(Math.abs(lineGross), rawDiscAmt);
+      lineItemDisc = round2(lineGross >= 0 ? clampedAbsDisc : -clampedAbsDisc);
+    }
 
     const lineAfterItemDisc = round2(lineGross - lineItemDisc);
 
@@ -2076,11 +2083,17 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
   }
 
   const subtotalAfterItemDisc = round2(grossTotal - itemDiscountTotal);
-  const invDiscPct = Math.max(0, round2(invoice_discount_percent || 0));
-  const invoiceDiscountAmount =
-    rawInvoiceDiscountAmount !== undefined && Number(rawInvoiceDiscountAmount) > 0 && invDiscPct === 0
-      ? Math.min(subtotalAfterItemDisc, round2(rawInvoiceDiscountAmount))
-      : round2(subtotalAfterItemDisc * (invDiscPct / 100));
+  const invDiscPct = Math.max(0, Math.min(100, round2(invoice_discount_percent || 0)));
+  let invoiceDiscountAmount = round2(subtotalAfterItemDisc * (invDiscPct / 100));
+  if (
+    rawInvoiceDiscountAmount !== undefined &&
+    Number(rawInvoiceDiscountAmount) !== 0 &&
+    invDiscPct === 0 &&
+    subtotalAfterItemDisc !== 0
+  ) {
+    const clampedAbs = Math.min(Math.abs(subtotalAfterItemDisc), Math.abs(round2(rawInvoiceDiscountAmount)));
+    invoiceDiscountAmount = round2(subtotalAfterItemDisc >= 0 ? clampedAbs : -clampedAbs);
+  }
 
   const totalDiscountAmount = round2(itemDiscountTotal + invoiceDiscountAmount);
   const taxableAmount = round2(grossTotal - totalDiscountAmount);
@@ -2092,7 +2105,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
   for (let i = 0; i < processedLines.length; i++) {
     const line = processedLines[i];
     let lineTaxable = line.lineAfterItemDisc;
-    if (invoiceDiscountAmount > 0 && subtotalAfterItemDisc > 0) {
+    if (invoiceDiscountAmount !== 0 && subtotalAfterItemDisc !== 0) {
       if (i === processedLines.length - 1) {
         lineTaxable = round2(taxableAmount - allocatedTaxable);
       } else {
@@ -2160,7 +2173,15 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
   const remainingBalance = round2(totalPayable - paidAmount);
   const paymentStatus: 'unpaid' | 'partial' | 'paid' =
-    paidAmount <= 0 ? 'unpaid' : paidAmount >= netInvoiceAmount ? 'paid' : 'partial';
+    netInvoiceAmount <= 0
+      ? paidAmount > 0
+        ? 'paid'
+        : 'unpaid'
+      : paidAmount <= 0
+        ? 'unpaid'
+        : paidAmount >= netInvoiceAmount
+          ? 'paid'
+          : 'partial';
 
   // Resolve Payment Account if paidAmount > 0
   let resolvedPaymentAccountId: number | null = null;
@@ -2403,6 +2424,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           effectiveMinStock
         );
 
+        const nextBatchStatusLabel = nextPackQty <= 0 ? 'Out of Stock' : 'Active';
+
         db.prepare(`
           UPDATE inventory SET
             variant_id = COALESCE(variant_id, ?),
@@ -2429,7 +2452,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             purchase_invoice_number = ?,
             supplier_name = ?,
             status = ?,
-            batch_status = 'Active',
+            batch_status = ?,
             updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
@@ -2457,6 +2480,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           finalBillNumber,
           String(supplier.account_name || ''),
           nextStatus,
+          nextBatchStatusLabel,
           existingBatch.id
         );
         inventoryId = Number(existingBatch.id);
@@ -2474,19 +2498,22 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           batchNumber: String(existingBatch.batch_number || line.batchNo),
           expiryDate: preservedExpiryDate,
           purchaseDate: invoiceDate,
-          movementType: 'PURCHASE_IN',
+          movementType: line.totalLooseUnits < 0 ? 'BATCH_ADJUSTMENT' : 'PURCHASE_IN',
           referenceType: 'PURCHASE_INVOICE',
           referenceId: purchaseId,
           referenceNumber: finalBillNumber,
           partyAccountId: supplierId,
           partyName: String(supplier.account_name || ''),
-          quantityPacks: line.qty,
+          quantityPacks: line.totalPacksAdded,
           bonusPacks: line.bonusQty,
           totalUnits: line.totalLooseUnits,
           purchaseRate: line.purchaseRate,
           tradePrice: effectiveTradePrice,
           balanceAfterPacks: nextPackQty,
-          remarks: `Purchase Invoice ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`,
+          remarks:
+            line.totalLooseUnits < 0
+              ? `Purchase Return/Reversal ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`
+              : `Purchase Invoice ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`,
           performedBy: 'Super Admin',
         });
       } else {
@@ -2499,6 +2526,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           line.expiryDate,
           effectiveMinStock
         );
+        const nextBatchStatusLabel = nextPackQty <= 0 ? 'Out of Stock' : 'Active';
 
         const invResult = db
           .prepare(`
@@ -2511,7 +2539,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
               current_pack_qty, current_strip_qty, current_loose_qty, total_stock_units,
               rack_shelf, last_purchase_id, last_supplier_id,
               purchase_date, purchase_invoice_number, supplier_name, status, batch_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             line.itemId,
@@ -2542,7 +2570,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
             invoiceDate,
             finalBillNumber,
             String(supplier.account_name || ''),
-            nextStatus
+            nextStatus,
+            nextBatchStatusLabel
           );
         inventoryId = Number(invResult.lastInsertRowid);
 
@@ -2559,19 +2588,22 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           batchNumber: line.batchNo,
           expiryDate: line.expiryDate,
           purchaseDate: invoiceDate,
-          movementType: 'PURCHASE_IN',
+          movementType: nextTotalUnits < 0 ? 'BATCH_ADJUSTMENT' : 'PURCHASE_IN',
           referenceType: 'PURCHASE_INVOICE',
           referenceId: purchaseId,
           referenceNumber: finalBillNumber,
           partyAccountId: supplierId,
           partyName: String(supplier.account_name || ''),
-          quantityPacks: line.qty,
+          quantityPacks: line.totalPacksAdded,
           bonusPacks: line.bonusQty,
           totalUnits: nextTotalUnits,
           purchaseRate: line.purchaseRate,
           tradePrice: effectiveTradePrice,
           balanceAfterPacks: nextPackQty,
-          remarks: `Purchase Invoice ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`,
+          remarks:
+            nextTotalUnits < 0
+              ? `Purchase Return/Reversal ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`
+              : `Purchase Invoice ${finalBillNumber}${line.variantName ? ` (${line.variantName})` : ''}`,
           performedBy: 'Super Admin',
         });
       }
@@ -2682,8 +2714,8 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       narration: string;
     }> = [];
 
-    // 1. Debit Medicine Purchases Account & Capitalize Net Stock into Inventory Asset (INV-1030)
-    const purchaseGrossOrTaxable = totalDiscountAmount > 0 ? grossTotal : taxableAmount;
+    // 1. Debit/Credit Medicine Purchases Account & Inventory Asset (INV-1030) for signed purchases/reversals
+    const purchaseGrossOrTaxable = totalDiscountAmount !== 0 ? grossTotal : taxableAmount;
     if (purchaseGrossOrTaxable > 0) {
       jeLines.push({
         account_id: purchaseAccId,
@@ -2692,7 +2724,16 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         credit_amount: 0,
         narration: `Medicine Purchase Invoice ${finalBillNumber} (Supplier Inv: ${cleanSupInvNo || 'N/A'})`,
       });
+    } else if (purchaseGrossOrTaxable < 0) {
+      jeLines.push({
+        account_id: purchaseAccId,
+        ledger_type: 'general',
+        debit_amount: 0,
+        credit_amount: Math.abs(purchaseGrossOrTaxable),
+        narration: `Medicine Purchase Reversal / Return on ${finalBillNumber} (Supplier Inv: ${cleanSupInvNo || 'N/A'})`,
+      });
     }
+
     if (totalDiscountAmount > 0) {
       jeLines.push({
         account_id: purchaseDiscountAccId,
@@ -2701,7 +2742,16 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         credit_amount: totalDiscountAmount,
         narration: `Purchase Discount earned on Invoice ${finalBillNumber}`,
       });
+    } else if (totalDiscountAmount < 0) {
+      jeLines.push({
+        account_id: purchaseDiscountAccId,
+        ledger_type: 'general',
+        debit_amount: Math.abs(totalDiscountAmount),
+        credit_amount: 0,
+        narration: `Purchase Discount reversed on Return/Adjustment Invoice ${finalBillNumber}`,
+      });
     }
+
     if (taxableAmount > 0) {
       jeLines.push({
         account_id: inventoryAssetAccId,
@@ -2717,9 +2767,25 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         credit_amount: taxableAmount,
         narration: `Net Purchase Stock capitalized to Medicine Inventory (${finalBillNumber})`,
       });
+    } else if (taxableAmount < 0) {
+      const absTaxable = Math.abs(taxableAmount);
+      jeLines.push({
+        account_id: inventoryAssetAccId,
+        ledger_type: 'general',
+        debit_amount: 0,
+        credit_amount: absTaxable,
+        narration: `Medicine Inventory Asset reduction from Purchase Return ${finalBillNumber}`,
+      });
+      jeLines.push({
+        account_id: purchaseAccId,
+        ledger_type: 'general',
+        debit_amount: absTaxable,
+        credit_amount: 0,
+        narration: `Net Purchase Return Stock de-capitalized from Medicine Inventory (${finalBillNumber})`,
+      });
     }
 
-    // 2. Debit GST / Applicable Input Tax Account
+    // 2. GST / Input Tax Account (Debit if > 0, Credit reversal if < 0)
     if (gstTotal > 0) {
       jeLines.push({
         account_id: gstAccId,
@@ -2728,9 +2794,17 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         credit_amount: 0,
         narration: `GST / Input Tax on Purchase Invoice ${finalBillNumber}`,
       });
+    } else if (gstTotal < 0) {
+      jeLines.push({
+        account_id: gstAccId,
+        ledger_type: 'general',
+        debit_amount: 0,
+        credit_amount: Math.abs(gstTotal),
+        narration: `GST / Input Tax reversed on Purchase Invoice ${finalBillNumber}`,
+      });
     }
 
-    // 3. Debit Advance Tax Receivable Account (kept strictly separate from purchase discounts)
+    // 3. Advance Tax Receivable Account (Debit if > 0, Credit reversal if < 0)
     if (advanceTaxAmount > 0) {
       jeLines.push({
         account_id: advTaxAccId,
@@ -2739,9 +2813,17 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         credit_amount: 0,
         narration: `${taxName} (${appliedAdvRate}% - ${filerStatus}) on Purchase Invoice ${finalBillNumber}`,
       });
+    } else if (advanceTaxAmount < 0) {
+      jeLines.push({
+        account_id: advTaxAccId,
+        ledger_type: 'general',
+        debit_amount: 0,
+        credit_amount: Math.abs(advanceTaxAmount),
+        narration: `${taxName} (${appliedAdvRate}% - ${filerStatus}) reversed on Purchase Invoice ${finalBillNumber}`,
+      });
     }
 
-    // 4. Credit Supplier Payable Account
+    // 4. Supplier Payable Account (Credit if > 0, Debit adjustment if < 0)
     if (netInvoiceAmount > 0) {
       jeLines.push({
         account_id: supplierId,
@@ -2749,6 +2831,14 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         debit_amount: 0,
         credit_amount: netInvoiceAmount,
         narration: `Payable against Purchase Invoice ${finalBillNumber} (Supplier Inv: ${cleanSupInvNo || 'N/A'})`,
+      });
+    } else if (netInvoiceAmount < 0) {
+      jeLines.push({
+        account_id: supplierId,
+        ledger_type: 'supplier',
+        debit_amount: Math.abs(netInvoiceAmount),
+        credit_amount: 0,
+        narration: `Supplier Debit / Purchase Return adjustment on ${finalBillNumber} (Supplier Inv: ${cleanSupInvNo || 'N/A'})`,
       });
     }
 
@@ -2777,47 +2867,49 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       throw new Error(`Double-Entry Accounting Error: Total Debit (${totalDebit}) != Total Credit (${totalCredit}).`);
     }
 
-    const jeNumber = `JE-${finalBillNumber}-${Date.now().toString().slice(-4)}`;
-    const jeInsert = db
-      .prepare(`
-        INSERT INTO journal_entries (
-          entry_number, entry_date, reference_type, reference_id,
-          description, total_debit, total_credit, is_balanced, status
-        ) VALUES (?, ?, 'PURCHASE', ?, ?, ?, ?, 1, 'posted')
-      `)
-      .run(
-        jeNumber,
-        invoiceDate,
-        purchaseId,
-        `Purchase Invoice ${finalBillNumber} - ${supplier.account_name}`,
-        totalDebit,
-        totalCredit
-      );
+    if (jeLines.length > 0) {
+      const jeNumber = `JE-${finalBillNumber}-${Date.now().toString().slice(-4)}`;
+      const jeInsert = db
+        .prepare(`
+          INSERT INTO journal_entries (
+            entry_number, entry_date, reference_type, reference_id,
+            description, total_debit, total_credit, is_balanced, status
+          ) VALUES (?, ?, 'PURCHASE', ?, ?, ?, ?, 1, 'posted')
+        `)
+        .run(
+          jeNumber,
+          invoiceDate,
+          purchaseId,
+          `Purchase Invoice ${finalBillNumber} - ${supplier.account_name}`,
+          totalDebit,
+          totalCredit
+        );
 
-    const jeId = Number(jeInsert.lastInsertRowid);
-    const insertLineStmt = db.prepare(`
-      INSERT INTO journal_entry_lines (
-        journal_entry_id, account_id, ledger_type, debit_amount, credit_amount, narration
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `);
+      const jeId = Number(jeInsert.lastInsertRowid);
+      const insertLineStmt = db.prepare(`
+        INSERT INTO journal_entry_lines (
+          journal_entry_id, account_id, ledger_type, debit_amount, credit_amount, narration
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `);
 
-    const touchedAccounts = new Set<number>();
-    for (const line of jeLines) {
-      insertLineStmt.run(
-        jeId,
-        line.account_id,
-        line.ledger_type,
-        line.debit_amount,
-        line.credit_amount,
-        line.narration
-      );
-      touchedAccounts.add(line.account_id);
+      const touchedAccounts = new Set<number>();
+      for (const line of jeLines) {
+        insertLineStmt.run(
+          jeId,
+          line.account_id,
+          line.ledger_type,
+          line.debit_amount,
+          line.credit_amount,
+          line.narration
+        );
+        touchedAccounts.add(line.account_id);
+      }
+
+      db.prepare('UPDATE purchases SET journal_entry_id = ? WHERE id = ?').run(jeId, purchaseId);
+
+      // Recalculate all touched account balances
+      touchedAccounts.forEach((accId) => recalculateAccountBalance(accId));
     }
-
-    db.prepare('UPDATE purchases SET journal_entry_id = ? WHERE id = ?').run(jeId, purchaseId);
-
-    // Recalculate all touched account balances
-    touchedAccounts.forEach((accId) => recalculateAccountBalance(accId));
   } else {
     // Held or draft invoices must NEVER create or retain any journal entry
     cleanupPurchaseJournalEntries(purchaseId, { includeEditReversalAdjustments: true });
@@ -2886,14 +2978,20 @@ export function reverseExistingPurchase(
     }
 
     if (batch) {
-      const packsToRemove = round2(Number(item.quantity || 0) + Number(item.bonus_quantity || 0));
-      const newPackQty = Math.max(0, round2(Number(batch.current_pack_qty || 0) - packsToRemove));
-      const newPurQty = Math.max(0, round2(Number(batch.purchased_qty || 0) - Number(item.quantity || 0)));
-      const newBonusQty = Math.max(0, round2(Number(batch.bonus_qty || 0) - Number(item.bonus_quantity || 0)));
       const parsedPack = parsePacking(batch.packing);
+      const upp = Math.max(1, parsedPack.unitsPerPack);
+      const unitsToRemove = round2(
+        item.total_units !== undefined && item.total_units !== null
+          ? Number(item.total_units)
+          : (Number(item.quantity || 0) + Number(item.bonus_quantity || 0)) * upp +
+            Number(item.loose_quantity || 0)
+      );
+      const newTotalUnits = round2(Number(batch.total_stock_units || 0) - unitsToRemove);
+      const newPackQty = round2(newTotalUnits / upp);
+      const newPurQty = round2(Number(batch.purchased_qty || 0) - Number(item.quantity || 0));
+      const newBonusQty = round2(Number(batch.bonus_qty || 0) - Number(item.bonus_quantity || 0));
       const newStripQty = round2(newPackQty * parsedPack.stripsPerBox);
-      const newTotalUnits = round2(newPackQty * parsedPack.unitsPerPack);
-      const newLooseUnits = round2(newTotalUnits % Math.max(1, parsedPack.unitsPerPack));
+      const newLooseUnits = round2(newTotalUnits % upp);
       const newStatus = computeBatchStatus(newPackQty, batch.expiry_date);
 
       db.prepare(`
@@ -2905,6 +3003,7 @@ export function reverseExistingPurchase(
           current_loose_qty = ?,
           total_stock_units = ?,
           status = ?,
+          batch_status = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(
@@ -2915,6 +3014,7 @@ export function reverseExistingPurchase(
         newLooseUnits,
         newTotalUnits,
         newStatus,
+        newPackQty <= 0 ? 'Out of Stock' : 'Active',
         batch.id
       );
     }

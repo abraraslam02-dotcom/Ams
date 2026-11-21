@@ -110,6 +110,14 @@ const isHeldPurchaseStatus = (status: unknown): boolean => {
   return s === 'held' || s === 'draft' || s === 'on_hold' || s === 'on hold' || s === 'hold';
 };
 
+function parseSignedNumeric(val: unknown): number {
+  if (val === '' || val === '-' || val === '.' || val === '-.' || val === null || val === undefined) {
+    return 0;
+  }
+  const n = Number(val);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function calculateRetailFromPurchasePrice(newPurchasePrice: number): {
   retailBase: number;
   roundedRetailPrice: number;
@@ -401,22 +409,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     storageKey: 'ams_purchase_pos_col_widths_v1',
     defaultWidths: {
       selector: 34,
-      item_code: 104,
-      company: 126,
-      item_name: 245,
+      item_code: 100,
+      company: 120,
+      item_name: 225,
       quantity: 74,
-      discount: 74,
-      bonus: 70,
-      gross_amount: 96,
-      net_amount: 96,
-      packing: 78,
-      batch_expiry: 210,
-      purchase_rate: 104,
-      mrp: 88,
+      loose_quantity: 74,
+      discount: 70,
+      bonus: 66,
+      gross_amount: 92,
+      net_amount: 92,
+      packing: 76,
+      batch_expiry: 200,
+      purchase_rate: 96,
+      mrp: 84,
       gst: 68,
-      taxable: 92,
-      line_total: 104,
-      remarks: 130,
+      taxable: 90,
+      line_total: 100,
+      remarks: 120,
       actions: 52,
     },
     minWidth: 36,
@@ -435,7 +444,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       item_code: 104,
       company: 126,
       item_name: 245,
-      quantity: 74,
+      quantity: 70,
+      loose_quantity: 68,
       discount: 74,
       purchase_rate: 98,
       bonus: 70,
@@ -1580,7 +1590,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     const unitsPerPack = Math.max(1, parseUnitsPerPack(packingStr));
     const hasExistingQty =
       existingRow?.quantity !== undefined && existingRow?.quantity !== null;
-    const qty = hasExistingQty ? Math.max(0, Number(existingRow.quantity) || 0) : 0;
+    const qty = hasExistingQty ? round2(parseSignedNumeric(existingRow.quantity)) : 0;
     const hasExistingDiscount =
       existingRow?.discount_percent !== undefined && existingRow?.discount_percent !== null;
     const defaultDisc = chosenVariant
@@ -1591,11 +1601,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       : round2(defaultDisc);
 
     const looseQty =
-      !preserveQtyAndDiscountOnly && existingRow?.loose_quantity && existingRow.loose_quantity > 0
-        ? round2(existingRow.loose_quantity)
+      !preserveQtyAndDiscountOnly &&
+      existingRow?.loose_quantity !== undefined &&
+      existingRow?.loose_quantity !== null
+        ? round2(parseSignedNumeric(existingRow.loose_quantity))
         : 0;
     const bonusQty =
-      !preserveQtyAndDiscountOnly && existingRow?.bonus_quantity && existingRow.bonus_quantity > 0
+      qty < 0 || looseQty < 0
+        ? 0
+        : !preserveQtyAndDiscountOnly && existingRow?.bonus_quantity && existingRow.bonus_quantity > 0
         ? existingRow.bonus_quantity
         : 0;
     const defaultLooseRate = round2(rate / unitsPerPack);
@@ -2020,7 +2034,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           Number(prevRow.variant_id || 0) === Number(chosenVariant?.id || 0)
       );
       const hasPreEnteredQtyOrDisc = Boolean(
-        prevRow && (Number(prevRow.quantity || 0) > 0 || Number(prevRow.discount_percent || 0) > 0)
+        prevRow &&
+          (Number(prevRow.quantity || 0) !== 0 ||
+            Number(prevRow.loose_quantity || 0) !== 0 ||
+            Number(prevRow.discount_percent || 0) > 0)
       );
       while (copy.length <= idx) {
         copy.push(createBlankPurchaseLine());
@@ -2280,8 +2297,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     const row = { ...rowInput };
     const upp = Math.max(1, parseUnitsPerPack(row.packing));
 
-    const qty = Math.max(0, round2(Number(row.quantity) || 0));
-    const looseQty = Math.max(0, round2(Number(row.loose_quantity) || 0));
+    const qty = round2(parseSignedNumeric(row.quantity));
+    const looseQty = round2(parseSignedNumeric(row.loose_quantity));
+    const bonusQty = qty < 0 || looseQty < 0 ? 0 : Math.max(0, round2(Number(row.bonus_quantity) || 0));
     const rate = Math.max(0, round2(Number(row.purchase_rate) || 0));
 
     if (editedField === 'loose_rate') {
@@ -2293,12 +2311,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     const looseRate = Math.max(0, round2(Number(row.loose_rate) || 0));
     const gross = round2(qty * rate + looseQty * looseRate);
 
-    let discPct = Math.max(0, round2(Number(row.discount_percent) || 0));
-    let discAmt = Math.max(0, round2(Number(row.discount_amount) || 0));
+    let discPct = Math.max(0, Math.min(100, round2(Number(row.discount_percent) || 0)));
+    let discAmt = round2(parseSignedNumeric(row.discount_amount));
 
     if (editedField === 'discount_amount') {
-      discAmt = Math.min(gross, discAmt);
-      discPct = gross > 0 ? round2((discAmt / gross) * 100) : 0;
+      if (gross >= 0) {
+        discAmt = Math.min(gross, Math.max(0, discAmt));
+        discPct = gross > 0 ? round2((discAmt / gross) * 100) : 0;
+      } else {
+        discAmt = -Math.min(Math.abs(gross), Math.abs(discAmt));
+        discPct = Math.abs(gross) > 0 ? round2((Math.abs(discAmt) / Math.abs(gross)) * 100) : 0;
+      }
     } else {
       discAmt = round2(gross * (discPct / 100));
     }
@@ -2320,6 +2343,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       taxPct = taxType === 'percentage' ? taxValue : 0;
     }
 
+    // CRITICAL TAX RULE: Tax calculates on ORIGINAL gross BEFORE discount (supports positive, negative & mixed qty)
     const taxAmt = calculateLineTax({
       grossAmount: gross,
       quantity: qty,
@@ -2334,6 +2358,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     return {
       ...row,
       quantity: qty,
+      bonus_quantity: bonusQty,
       units_per_pack: upp,
       loose_quantity: looseQty,
       loose_rate: looseRate,
@@ -2512,6 +2537,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'company',
     'item_name',
     'quantity',
+    'loose_quantity',
     'discount',
     'bonus',
     'gross_amount',
@@ -2531,6 +2557,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'company',
     'item_name',
     'quantity',
+    'loose_quantity',
     'discount',
     'purchase_rate',
     'bonus',
@@ -2549,7 +2576,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     item_code: 'Item Code',
     company: 'Company',
     item_name: 'Item Name',
-    quantity: 'Qty',
+    quantity: 'Full Qty',
+    loose_quantity: 'Loose Qty',
     discount: 'Discount',
     bonus: 'Bonus',
     gross_amount: 'Gross Amount',
@@ -2644,6 +2672,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         'item_code',
         'item_name',
         'quantity',
+        'loose_quantity',
         'discount',
         'bonus',
         'batch_expiry',
@@ -2755,7 +2784,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const computedInvoiceDiscAmt =
     invoiceDiscountPercent > 0
       ? round2(subtotalAfterItemDisc * (invoiceDiscountPercent / 100))
-      : Math.min(subtotalAfterItemDisc, round2(invoiceDiscountAmount));
+      : subtotalAfterItemDisc >= 0
+      ? Math.min(subtotalAfterItemDisc, Math.max(0, round2(invoiceDiscountAmount)))
+      : round2(-Math.min(Math.abs(subtotalAfterItemDisc), Math.abs(round2(invoiceDiscountAmount))));
 
   const totalDiscount = round2(itemDiscountTotal + computedInvoiceDiscAmt);
   const taxableAmount = round2(grossTotal - totalDiscount);
@@ -2976,9 +3007,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   const handleDecrementPurchaseQty = (idx: number) => {
     const cur = Number(lines[idx]?.quantity || 0);
-    if (cur > 0) {
-      handleLineChange(idx, 'quantity', Math.max(0, cur - 1));
-    }
+    handleLineChange(idx, 'quantity', cur - 1);
   };
 
   const handleIncrementBonusQty = (idx: number) => {
@@ -3011,6 +3040,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'item_code',
     'item_name',
     'quantity',
+    'loose_quantity',
     'discount_percent',
     'purchase_rate',
     'bonus_quantity',
@@ -3025,6 +3055,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'item_code',
     'item_name',
     'quantity',
+    'loose_quantity',
     'discount_percent',
     'bonus_quantity',
     'batch_number',
@@ -3708,9 +3739,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         for (let i = 0; i < validLines.length; i++) {
           const l = validLines[i];
           if (
-            (Number(l.quantity) || 0) <= 0 &&
-            (Number(l.bonus_quantity) || 0) <= 0 &&
-            (Number(l.loose_quantity) || 0) <= 0
+            (Number(l.quantity) || 0) === 0 &&
+            (Number(l.bonus_quantity) || 0) === 0 &&
+            (Number(l.loose_quantity) || 0) === 0
           ) {
             const gridIdx = lines.findIndex((row) => row.item_id === l.item_id && row.batch_number === l.batch_number);
             const focusIdx = gridIdx >= 0 ? gridIdx : i;
@@ -4849,17 +4880,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   return (
     <div
-      className={`ams-readable-invoice-scope w-full h-full ${
+      className={`${
+        subTab === 'new-invoice' && purchaseViewMode === 'pos' ? '' : 'ams-readable-invoice-scope'
+      } w-full h-full ${
         subTab === 'new-invoice'
-          ? 'flex-1 flex flex-col min-h-0 overflow-hidden px-1.5 py-1 bg-slate-100'
+          ? purchaseViewMode === 'pos'
+            ? 'flex-1 flex flex-col min-h-0 overflow-hidden px-3 py-2 bg-[#F4F7F6] text-slate-900'
+            : 'flex-1 flex flex-col min-h-0 overflow-hidden px-1.5 py-1 bg-slate-100'
           : 'flex-1 min-h-0 overflow-y-auto p-2 space-y-3 bg-slate-100'
       }`}
     >
       {/* Top Full-Screen Header & Sub-Navigation Bar */}
       <div
-        className={`bg-slate-900 text-white border border-slate-700 shadow-xs flex flex-wrap items-center justify-between gap-1.5 shrink-0 print:hidden ${
+        className={`bg-slate-900 text-white border border-slate-700/90 shadow-xs flex flex-wrap items-center justify-between gap-1.5 shrink-0 print:hidden ${
           subTab === 'new-invoice'
-            ? 'ams-pos-compact-chrome px-2 py-0.5 rounded-md mb-1'
+            ? purchaseViewMode === 'pos'
+              ? 'px-3 py-1.5 rounded-xl mb-2 text-xs'
+              : 'ams-pos-compact-chrome px-2 py-0.5 rounded-md mb-1'
             : 'px-3 py-2 rounded-xl'
         }`}
       >
@@ -5036,1499 +5073,1833 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       {/* TAB 1: NEW / EDIT PURCHASE INVOICE SCREEN */}
       {subTab === 'new-invoice' && (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-          {/* ================= OPTION 1: POS INTERFACE (THREE-SECTION MS ACCESS LAYOUT) ================= */}
-          {purchaseViewMode === 'pos' && (
-            <form
-              onSubmit={(e) => handleSavePurchaseInvoice(e, false)}
-              className="flex-1 min-h-0 flex flex-col gap-1 overflow-hidden"
-            >
-              {/* SECTION A (TOP): COMPACT PURCHASE HEADER */}
-              <div className="ams-pos-compact-chrome bg-white rounded-md border border-slate-300 shadow-xs px-2.5 py-1 space-y-1 shrink-0">
-                {/* Header Row 1: Bill #, Date, Supplier Inv, Filer, Mode & Quick Actions */}
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-1.5 items-center">
-                  <div className="md:col-span-5 flex flex-wrap items-center gap-1">
-                    <span className="px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-black uppercase">
-                      PURCHASE POS
-                    </span>
-                    <span className="font-mono font-black text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-300">
-                      {billNumber}
-                    </span>
-                    {editingPurchaseId && (
-                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                        EDIT #{editingPurchaseId}
-                      </span>
-                    )}
-                    <input
-                      type="date"
-                      required
-                      value={billDate}
-                      onChange={(e) => setBillDate(e.target.value)}
-                      className="px-1.5 py-0 font-mono font-semibold text-slate-800 bg-slate-50 border border-slate-300 rounded outline-none cursor-pointer"
-                      title="Purchase Bill Date"
-                    />
-                    <input
-                      type="text"
-                      value={supplierInvoiceNumber}
-                      onChange={(e) => setSupplierInvoiceNumber(e.target.value)}
-                      placeholder="Sup. Inv #"
-                      className="w-24 px-1.5 py-0 font-mono font-semibold rounded border border-slate-300 bg-white"
-                      title="Supplier Invoice / Bill Number"
-                    />
-                  </div>
+          {/* ================= OPTION 1: MODERN RETAIL PURCHASE POS INTERFACE ================= */}
+          {purchaseViewMode === 'pos' && (() => {
+            const activePurRow = lines[selectedPurchaseLineIndex] || createBlankPurchaseLine();
+            const activePurHasItem = Boolean(activePurRow.item_id && Number(activePurRow.item_id) > 0);
+            const isNetReturnCredit = netInvoiceAmount < 0;
+            const totalUnitsSummary = validLines.reduce(
+              (s, l) => s + (Number(l.quantity) || 0),
+              0
+            );
+            const totalLooseSummary = validLines.reduce(
+              (s, l) => s + (Number(l.loose_quantity) || 0),
+              0
+            );
 
-                  <div className="md:col-span-7 flex flex-wrap items-center justify-end gap-1">
-                    <select
-                      value={supplierFilerStatus}
-                      onChange={(e) => setSupplierFilerStatus(e.target.value as FilerStatus)}
-                      className="px-1.5 py-0 font-bold rounded border border-slate-300 bg-slate-50 text-slate-900"
-                      title="Supplier FBR Filer Status"
-                    >
-                      <option value="Filer">Filer ({taxSettings?.filer_rate ?? 0.5}%)</option>
-                      <option value="Non-Filer">Non-Filer ({taxSettings?.non_filer_rate ?? 2.5}%)</option>
-                      <option value="Exempt">Exempt (0%)</option>
-                    </select>
-                    <select
-                      value={paymentMode}
-                      onChange={(e) => {
-                        const nextMode = e.target.value as PurchasePaymentMode;
-                        setPaymentMode(nextMode);
-                        if (nextMode === 'Cash') {
-                          setPaidAmount(0);
-                          setPaidAmountManuallyEdited(true);
-                        } else {
-                          setPaidAmountManuallyEdited(false);
-                        }
-                      }}
-                      className="px-1.5 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900"
-                      title="Payment Mode"
-                    >
-                      <option value="Cash">Cash</option>
-                      <option value="Credit">Credit</option>
-                      <option value="Bank">Bank</option>
-                      <option value="Partial">Partial</option>
-                    </select>
-                    <button
-                      type="button"
-                      onClick={resetInvoiceForm}
-                      className="px-1.5 py-0 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold flex items-center gap-0.5 cursor-pointer"
-                      title="New Purchase Invoice (Ctrl+N)"
-                    >
-                      <Plus className="w-3 h-3 text-emerald-600" />
-                      <span>New</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handlePreviewInvoice}
-                      className="px-1.5 py-0 rounded bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold flex items-center gap-0.5 cursor-pointer"
-                      title="Preview A4 Invoice (F4)"
-                    >
-                      <Printer className="w-3 h-3 text-blue-700" />
-                      <span>Preview</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={savingInvoice}
-                      onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
-                      className="px-1.5 py-0 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold flex items-center gap-0.5 cursor-pointer disabled:opacity-50"
-                      title="Hold Invoice (F3)"
-                    >
-                      <PauseCircle className="w-3 h-3 text-amber-700" />
-                      <span>Hold</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={openHeldPurchasesModal}
-                      className="px-1.5 py-0 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold flex items-center gap-0.5 cursor-pointer"
-                      title="Held Drafts"
-                    >
-                      <Clock className="w-3 h-3 text-indigo-700" />
-                      <span>Held ({heldPurchases.length})</span>
-                    </button>
-                    {purchases.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenPrintInvoice(purchases[0].id)}
-                        className="px-1.5 py-0 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold flex items-center gap-0.5 cursor-pointer"
-                        title="Reprint Last Purchase Invoice"
+            return (
+              <form
+                onSubmit={(e) => handleSavePurchaseInvoice(e, false)}
+                className="flex-1 min-h-0 flex flex-col gap-2.5 overflow-hidden"
+              >
+                {/* SECTION A: MODERN RETAIL INVOICE HEADER */}
+                <div className="bg-white rounded-xl border border-slate-200/90 shadow-xs px-4 py-2.5 shrink-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2 border-b border-slate-100">
+                    {/* Left: Identity Badge, Bill #, Date, Sup Inv # */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center gap-2 pr-2 border-r border-slate-200">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-bold tracking-wide uppercase">
+                          <ShoppingBag className="w-3.5 h-3.5" />
+                          <span>Purchase POS</span>
+                        </span>
+                        <span
+                          className="font-mono text-sm font-black text-slate-900 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200"
+                          title="Purchase Invoice Number"
+                        >
+                          {billNumber}
+                        </span>
+                        {editingPurchaseId && (
+                          <span className="px-2 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold">
+                            Editing #{editingPurchaseId}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <label
+                          htmlFor="pos_pur_bill_date"
+                          className="text-[11px] font-semibold uppercase tracking-wider text-slate-500"
+                        >
+                          Date
+                        </label>
+                        <input
+                          id="pos_pur_bill_date"
+                          type="date"
+                          required
+                          value={billDate}
+                          onChange={(e) => setBillDate(e.target.value)}
+                          className="px-2.5 py-1 text-xs font-mono font-semibold text-slate-800 bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 focus:border-emerald-500 rounded-lg outline-none cursor-pointer transition-colors"
+                          title="Purchase Bill Date"
+                        />
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <label
+                          htmlFor="pos_pur_sup_inv"
+                          className="text-[11px] font-semibold uppercase tracking-wider text-slate-500"
+                        >
+                          Sup. Inv
+                        </label>
+                        <input
+                          id="pos_pur_sup_inv"
+                          type="text"
+                          value={supplierInvoiceNumber}
+                          onChange={(e) => setSupplierInvoiceNumber(e.target.value)}
+                          placeholder="Supplier Bill #"
+                          className="w-32 px-2.5 py-1 text-xs font-mono font-semibold rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-500 text-slate-900 outline-none transition-colors"
+                          title="Supplier Invoice / Bill Number"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Right: Tax Filer, Payment Mode, Account & Quick Tools */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={supplierFilerStatus}
+                        onChange={(e) => setSupplierFilerStatus(e.target.value as FilerStatus)}
+                        className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-slate-200 bg-slate-50 hover:bg-white text-slate-800 outline-none focus:border-emerald-500"
+                        title="Supplier FBR Filer Status"
                       >
-                        <Printer className="w-3 h-3 text-blue-700" />
-                        <span>Reprint</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
+                        <option value="Filer">Filer ({taxSettings?.filer_rate ?? 0.5}%)</option>
+                        <option value="Non-Filer">Non-Filer ({taxSettings?.non_filer_rate ?? 2.5}%)</option>
+                        <option value="Exempt">Exempt (0%)</option>
+                      </select>
 
-                {/* Header Row 2: Supplier Search, Live Previous Balance, Company Filter & Compact F3 Item Search */}
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-1.5 pt-1 border-t border-slate-200 items-center">
-                  {/* Searchable Supplier Input + Add New Supplier */}
-                  <div
-                    ref={purchaseViewMode === 'pos' ? supplierDropdownContainerRef : undefined}
-                    className="md:col-span-4 flex items-center gap-1 relative"
-                  >
-                    <label className="font-bold text-slate-600 shrink-0">Supplier:</label>
-                    <div className="relative flex-1">
-                      <Search className="w-3 h-3 text-slate-400 absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        ref={purchaseViewMode === 'pos' ? supplierSearchInputRef : undefined}
-                        type="text"
-                        value={supplierSearchQuery}
-                        onFocus={() => {
-                          setIsSupplierDropdownOpen(false);
-                        }}
+                      <select
+                        value={paymentMode}
                         onChange={(e) => {
-                          const value = e.target.value;
-                          setSupplierSearchQuery(value);
-                          setIsSupplierDropdownOpen(value.trim().length > 0);
-                          setSupplierHighlightIndex(0);
+                          const nextMode = e.target.value as PurchasePaymentMode;
+                          setPaymentMode(nextMode);
+                          if (nextMode === 'Cash') {
+                            setPaidAmount(0);
+                            setPaidAmountManuallyEdited(true);
+                          } else {
+                            setPaidAmountManuallyEdited(false);
+                          }
                         }}
-                        onKeyDown={handleSupplierSearchKeyDown}
-                        placeholder="Search Supplier Name, Code or Mobile #..."
-                        className="w-full pl-6 pr-10 py-0 font-bold rounded border border-emerald-500 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-600"
-                      />
-                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
-                        {supplierSearchQuery && (
+                        className="px-2.5 py-1 text-xs font-bold rounded-lg border border-slate-200 bg-white text-slate-900 outline-none focus:border-emerald-500"
+                        title="Payment Mode"
+                      >
+                        <option value="Cash">Cash</option>
+                        <option value="Credit">Credit</option>
+                        <option value="Bank">Bank</option>
+                        <option value="Partial">Partial</option>
+                      </select>
+
+                      <select
+                        value={paymentAccountId}
+                        onChange={(e) => setPaymentAccountId(e.target.value)}
+                        className="px-2.5 py-1 text-xs font-medium rounded-lg border border-slate-200 bg-slate-50 text-slate-800 outline-none focus:border-emerald-500 max-w-[165px]"
+                        title="Payment Cash / Bank Account"
+                      >
+                        <option value="">Auto ({paymentMode === 'Bank' ? 'Bank' : 'Cash'})</option>
+                        {financialAccounts.map((fa) => (
+                          <option key={fa.id} value={fa.id}>
+                            [{fa.account_code}] {fa.account_name}
+                          </option>
+                        ))}
+                      </select>
+
+                      <div className="flex items-center gap-1 pl-2 border-l border-slate-200">
+                        <button
+                          type="button"
+                          onClick={resetInvoiceForm}
+                          className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                          title="New Purchase Invoice (Ctrl+N)"
+                        >
+                          <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>New</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={openHeldPurchasesModal}
+                          className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                          title="View Held Purchase Drafts"
+                        >
+                          <Clock className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Held ({heldPurchases.length})</span>
+                        </button>
+                        {purchases.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenPrintInvoice(purchases[0].id)}
+                            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                            title="Reprint Last Purchase Invoice"
+                          >
+                            <Printer className="w-3.5 h-3.5 text-slate-600" />
+                            <span>Reprint</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Header Row 2: Supplier Search, Account Balance & Note */}
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 pt-2 items-center">
+                    <div
+                      ref={purchaseViewMode === 'pos' ? supplierDropdownContainerRef : undefined}
+                      className="md:col-span-5 flex items-center gap-2 relative"
+                    >
+                      <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 shrink-0">
+                        Supplier
+                      </label>
+                      <div className="relative flex-1">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          ref={purchaseViewMode === 'pos' ? supplierSearchInputRef : undefined}
+                          type="text"
+                          value={supplierSearchQuery}
+                          onFocus={() => {
+                            setIsSupplierDropdownOpen(false);
+                          }}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setSupplierSearchQuery(value);
+                            setIsSupplierDropdownOpen(value.trim().length > 0);
+                            setSupplierHighlightIndex(0);
+                          }}
+                          onKeyDown={handleSupplierSearchKeyDown}
+                          placeholder="Search Supplier Name, Code or Mobile #..."
+                          className="w-full pl-8 pr-11 py-1.5 text-xs font-bold rounded-lg border border-slate-300 focus:border-emerald-600 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
+                        />
+                        <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+                          {supplierSearchQuery && (
+                            <button
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                setSupplierSearchQuery('');
+                                setIsSupplierDropdownOpen(true);
+                                setSupplierHighlightIndex(0);
+                                supplierSearchInputRef.current?.focus();
+                              }}
+                              className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                              title="Clear supplier search"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <button
                             type="button"
                             onMouseDown={(e) => {
                               e.preventDefault();
-                              setSupplierSearchQuery('');
-                              setIsSupplierDropdownOpen(true);
+                              setIsSupplierDropdownOpen((prev) => !prev);
                               setSupplierHighlightIndex(0);
                               supplierSearchInputRef.current?.focus();
                             }}
-                            className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
-                            title="Clear search text"
+                            className="p-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                            title="Open Supplier List"
                           >
-                            <X className="w-3 h-3" />
+                            <ChevronDown className="w-3.5 h-3.5" />
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            setIsSupplierDropdownOpen((prev) => !prev);
-                            setSupplierHighlightIndex(0);
-                            supplierSearchInputRef.current?.focus();
-                          }}
-                          className="p-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
-                          title="Open Supplier List"
-                        >
-                          <ChevronDown className="w-3 h-3" />
-                        </button>
+                        </div>
                       </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenAddSupplierModal()}
-                      className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-0.5 cursor-pointer shrink-0"
-                      title="Add New Supplier"
-                    >
-                      <UserPlus className="w-3 h-3" />
-                      <span>+New</span>
-                    </button>
-
-                    {renderSupplierDropdownMenu()}
-                  </div>
-
-                  {/* Live Supplier Previous Balance Pill */}
-                  <div className="md:col-span-2 bg-slate-900 text-white rounded px-2 py-0.5 flex items-center justify-between gap-1">
-                    <div className="flex items-center gap-1 truncate">
-                      <span className="text-slate-400 shrink-0">Prev:</span>
-                      <span
-                        className={`font-mono font-bold truncate ${
-                          previousSupplierBalance > 0
-                            ? 'text-amber-300'
-                            : previousSupplierBalance < 0
-                            ? 'text-emerald-300'
-                            : 'text-slate-300'
-                        }`}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenAddSupplierModal()}
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors"
+                        title="Add New Supplier"
                       >
-                        {formatPKR(Math.abs(previousSupplierBalance))} ({previousBalanceType})
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleOpenSupplierLedger}
-                      className={`px-1.5 py-0 rounded font-bold flex items-center gap-0.5 cursor-pointer shrink-0 ${
-                        selectedSupplier
-                          ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                          : 'bg-slate-600 hover:bg-slate-500 text-slate-200'
-                      }`}
-                      title="Open Selected Supplier Ledger (All or Last 30 Days)"
-                    >
-                      <Scale className="w-2.5 h-2.5" />
-                      <span>Ledger</span>
-                    </button>
-                  </div>
+                        <UserPlus className="w-3.5 h-3.5" />
+                        <span>New</span>
+                      </button>
 
-                  {/* Accessible Company Master Filter */}
-                  <div className="md:col-span-2 flex items-center gap-1">
-                    <label
-                      htmlFor="pos_purchase_company_filter"
-                      className="font-bold text-slate-600 shrink-0"
-                    >
-                      Company:
-                    </label>
-                    <div className="relative flex-1 flex items-center gap-0.5 min-w-0">
-                      <select
-                        id="pos_purchase_company_filter"
-                        aria-label="Filter items by Company"
-                        value={selectedCompanyFilter}
-                        onChange={(e) => setSelectedCompanyFilter(e.target.value)}
-                        className={`w-full px-1 py-0 font-semibold rounded border outline-none ${
-                          selectedCompanyFilter
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
-                            : 'border-slate-300 bg-slate-50 text-slate-900'
-                        }`}
-                      >
-                        <option value="">All Companies</option>
-                        {companyOptions.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        ))}
-                      </select>
-                      {selectedCompanyFilter && (
-                        <button
-                          type="button"
-                          onClick={() => setSelectedCompanyFilter('')}
-                          title="Clear Company Filter"
-                          aria-label="Clear Company Filter"
-                          className="px-1 py-0 rounded border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-800 font-bold text-[10px] cursor-pointer shrink-0"
+                      {renderSupplierDropdownMenu()}
+                    </div>
+
+                    {/* Supplier Balance & Ledger Access */}
+                    <div className="md:col-span-4 bg-slate-900 text-white rounded-lg px-3 py-1.5 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-[11px] font-medium text-slate-400 shrink-0">
+                          Prev Bal ({previousBalanceType}):
+                        </span>
+                        <span
+                          className={`font-mono text-xs font-bold tabular-nums truncate ${
+                            previousSupplierBalance > 0
+                              ? 'text-amber-300'
+                              : previousSupplierBalance < 0
+                              ? 'text-emerald-300'
+                              : 'text-slate-300'
+                          }`}
                         >
-                          ✕
-                        </button>
-                      )}
+                          {formatPKR(Math.abs(previousSupplierBalance))}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleOpenSupplierLedger}
+                        className={`px-2 py-0.5 rounded-md text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0 transition-colors ${
+                          selectedSupplier
+                            ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                            : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+                        }`}
+                        title="Open Selected Supplier Ledger"
+                      >
+                        <Scale className="w-3 h-3" />
+                        <span>Ledger</span>
+                      </button>
                     </div>
-                  </div>
 
-                  {/* Compact F3 Quick Barcode / Item Add inside Header */}
-                  <div
-                    ref={purchaseViewMode === 'pos' ? itemDropdownContainerRef : undefined}
-                    className="md:col-span-4 relative flex items-center gap-1"
-                  >
-                    <div className="relative flex-1">
-                      <Barcode className="w-3.5 h-3.5 text-emerald-600 absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    {/* Remarks / Reference */}
+                    <div className="md:col-span-3 flex items-center gap-2">
+                      <label
+                        htmlFor="pos_pur_notes"
+                        className="text-[11px] font-bold uppercase tracking-wider text-slate-500 shrink-0"
+                      >
+                        Note
+                      </label>
                       <input
-                        id="pos_purchase_item_search_input"
-                        ref={purchaseViewMode === 'pos' ? itemSearchInputRef : undefined}
+                        id="pos_pur_notes"
                         type="text"
-                        value={purchaseSearchQuery}
-                        onFocus={() => {
-                          if (purchaseSearchQuery.trim().length > 0 || selectedCompanyFilter) {
-                            setShowPurchaseSearchDropdown(true);
-                          }
-                          setItemHighlightIndex(0);
-                        }}
-                        onBlur={() => {
-                          setTimeout(() => {
-                            setShowPurchaseSearchDropdown(false);
-                          }, 160);
-                        }}
-                        onChange={(e) => {
-                          const q = e.target.value;
-                          setPurchaseSearchQuery(q);
-                          setItemHighlightIndex(0);
-                          setShowPurchaseSearchDropdown(
-                            q.trim().length > 0 || Boolean(selectedCompanyFilter)
-                          );
-                        }}
-                        onKeyDown={handleItemSearchKeyDown}
-                        placeholder={
-                          selectedCompanyFilter
-                            ? `Search in ${selectedCompanyFilter}...`
-                            : 'Barcode / Quick Search...'
-                        }
-                        className="w-full pl-6 pr-6 py-0 rounded border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 outline-none"
+                        value={notes}
+                        onChange={(e) => setNotes(e.target.value)}
+                        placeholder="Challan # or bill notes..."
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:border-emerald-500 text-slate-900 outline-none transition-colors"
                       />
-                      {purchaseSearchQuery && (
-                        <button
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            setPurchaseSearchQuery('');
-                            setItemHighlightIndex(0);
-                            setShowPurchaseSearchDropdown(Boolean(selectedCompanyFilter));
-                            itemSearchInputRef.current?.focus();
-                          }}
-                          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      )}
-                      {renderTopItemSearchDropdown()}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openPurchaseItemListForRow(
-                          lines[selectedPurchaseLineIndex]?.item_id
-                            ? null
-                            : selectedPurchaseLineIndex,
-                          'pos_row'
-                        )
-                      }
-                      className="px-2 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
-                      title="Open Item List (F2)"
-                    >
-                      <PackageSearch className="w-3 h-3 text-emerald-400" />
-                      <span>Items</span>
-                    </button>
                   </div>
                 </div>
-              </div>
 
-              {/* SECTION B (CENTER): PURCHASE INVOICE ITEM GRID ONLY (MIN 10 VISIBLE ROWS, STICKY HEADERS) */}
-              <div
-                onKeyDownCapture={(e) => {
-                  if (
-                    e.shiftKey &&
-                    e.key === 'Delete' &&
-                    !e.ctrlKey &&
-                    !e.altKey &&
-                    !e.metaKey
-                  ) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    requestPurchaseDeleteConfirm(selectedPurchaseLineIndex);
-                    return;
-                  }
-                  if (
-                    e.shiftKey &&
-                    (e.key === 'ArrowDown' || e.key === 'ArrowUp') &&
-                    !e.ctrlKey &&
-                    !e.altKey &&
-                    !e.metaKey
-                  ) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const activeElId = (document.activeElement as HTMLElement | null)?.id || '';
-                    const m = activeElId.match(/^pos_row_(\d+)_(.+)$/);
-                    const curRow = m ? Number(m[1]) : selectedPurchaseLineIndex;
-                    const curCol = m ? m[2] : 'item_name';
-                    const anchor = rowSelectionAnchorRef.current ?? curRow;
-                    if (rowSelectionAnchorRef.current === null) rowSelectionAnchorRef.current = anchor;
-                    const delta = e.key === 'ArrowDown' ? 1 : -1;
-                    const nextRow = Math.max(0, Math.min(entryRowIdx, lines.length - 1, curRow + delta));
-                    setSelectedColKeys([]);
-                    colSelectionAnchorRef.current = null;
-                    setSelectedRowRange({ start: anchor, end: nextRow });
-                    setSelectedPurchaseLineIndex(nextRow);
-                    focusPurchaseCell(nextRow, curCol, 'pos_row');
-                    return;
-                  }
-                  if (
-                    e.key === 'Escape' &&
-                    activeRowItemSearchIdx === null &&
-                    !showPurchaseCompactHistoryPopup &&
-                    (selectedRowRange !== null || selectedColKeys.length > 0)
-                  ) {
-                    setSelectedRowRange(null);
-                    rowSelectionAnchorRef.current = null;
-                    setSelectedColKeys([]);
-                    colSelectionAnchorRef.current = null;
-                  }
-                }}
-                className="ams-pos-item-grid-card bg-white rounded-md border border-slate-300 shadow-xs overflow-hidden flex flex-col flex-1 min-h-[356px] relative z-10"
-              >
-                <div
-                  ref={posGridViewportRef}
-                  className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative bg-white"
-                >
-                  <table
-                    style={{ width: `${purPosTotalWidth}px` }}
-                    className="ams-compact-10-grid table-fixed text-left text-[11px] border-collapse leading-none"
-                  >
-                    <colgroup>
-                      <col style={{ width: `${purPosColWidths.selector}px` }} />
-                      <col style={{ width: `${purPosColWidths.item_code}px` }} />
-                      <col style={{ width: `${purPosColWidths.company}px` }} />
-                      <col style={{ width: `${purPosColWidths.item_name}px` }} />
-                      <col style={{ width: `${purPosColWidths.quantity}px` }} />
-                      <col style={{ width: `${purPosColWidths.discount}px` }} />
-                      <col style={{ width: `${purPosColWidths.bonus}px` }} />
-                      <col style={{ width: `${purPosColWidths.gross_amount}px` }} />
-                      <col style={{ width: `${purPosColWidths.net_amount}px` }} />
-                      <col style={{ width: `${purPosColWidths.packing}px` }} />
-                      <col style={{ width: `${purPosColWidths.batch_expiry}px` }} />
-                      <col style={{ width: `${purPosColWidths.purchase_rate}px` }} />
-                      <col style={{ width: `${purPosColWidths.mrp}px` }} />
-                      <col style={{ width: `${purPosColWidths.gst}px` }} />
-                      <col style={{ width: `${purPosColWidths.taxable}px` }} />
-                      <col style={{ width: `${purPosColWidths.line_total}px` }} />
-                      <col style={{ width: `${purPosColWidths.remarks}px` }} />
-                      <col style={{ width: `${purPosColWidths.actions}px` }} />
-                    </colgroup>
-                    <thead className="sticky top-0 z-20 bg-slate-200 border-b-2 border-slate-300 text-slate-800 text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm select-none">
-                      <tr className="h-7">
-                        {(
-                          [
-                            { key: 'selector', label: '#', cls: 'py-1 px-1.5 text-center border-r border-slate-300' },
-                            { key: 'item_code', label: 'Item Code', cls: 'py-1 px-2 border-r border-slate-300' },
-                            { key: 'company', label: 'Company', cls: 'py-1 px-2 border-r border-slate-300' },
-                            { key: 'item_name', label: 'Item Name', cls: 'py-1 px-2 border-r border-slate-300' },
-                            { key: 'quantity', label: 'Qty', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'discount', label: 'Discount', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'bonus', label: 'Bonus', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'gross_amount', label: 'Gross Amount', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'net_amount', label: 'Net Amount', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'packing', label: 'Packing', cls: 'py-1 px-2 text-center border-r border-slate-300' },
-                            { key: 'batch_expiry', label: 'Batch/Expiry', cls: 'py-1 px-2 border-r border-slate-300' },
-                            { key: 'purchase_rate', label: 'Purchase Rate', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'mrp', label: 'MRP', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'gst', label: 'GST', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'taxable', label: 'Taxable', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'line_total', label: 'Line Total', cls: 'py-1 px-2 text-right border-r border-slate-300' },
-                            { key: 'remarks', label: 'Remarks', cls: 'py-1 px-2 text-left border-r border-slate-300' },
-                            { key: 'actions', label: '', cls: 'py-1 px-1 text-center' },
-                          ] as const
-                        ).map((col) => {
-                          const isColSelected = selectedColKeys.includes(col.key);
-                          const isSelectableCol = col.key !== 'selector' && col.key !== 'actions';
-                          return (
-                            <th
-                              key={col.key}
-                              onMouseDown={(e) =>
-                                handlePurchaseColHeaderMouseDown(col.key, PURCHASE_POS_COL_KEYS, e)
-                              }
-                              onMouseEnter={() =>
-                                handlePurchaseColHeaderMouseEnter(col.key, PURCHASE_POS_COL_KEYS)
-                              }
-                              style={{ width: `${purPosColWidths[col.key]}px` }}
-                              title={
-                                isSelectableCol
-                                  ? 'Click or drag to select column(s) · Press Shift+Delete to clear column values'
-                                  : undefined
-                              }
-                              className={`${col.cls} ${
-                                isSelectableCol ? 'cursor-pointer hover:bg-sky-100/70' : ''
-                              } ${
-                                isColSelected
-                                  ? '!bg-sky-200 !text-sky-950 ring-1 ring-inset ring-sky-500'
-                                  : ''
-                              } h-7 relative whitespace-nowrap overflow-hidden text-ellipsis`}
-                            >
-                              <span className="truncate block">{col.label}</span>
-                              <div
-                                onMouseDown={(e) => {
-                                  e.stopPropagation();
-                                  handlePurPosResizeStart(col.key, e);
-                                }}
-                                onDoubleClick={(e) => handleResetPurPosColWidth(col.key, e)}
-                                title="Drag border to resize column (double-click to reset)"
-                                className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
-                                  purPosResizingCol === col.key
-                                    ? 'bg-emerald-600'
-                                    : 'hover:bg-emerald-500/80'
-                                }`}
-                              />
-                            </th>
-                          );
-                        })}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                      {lines.map((line, rIdx) => {
-                        if (isGhostRow(rIdx)) {
-                          return (
-                            <tr key={rIdx} className="h-[16px] border-b border-slate-200 bg-slate-50/40 select-none">
-                              <td className="py-0 px-1 text-center font-mono text-slate-300 text-[10px] h-[16px] align-middle">
-                                {rIdx + 1}
-                              </td>
-                              <td colSpan={17} />
-                            </tr>
-                          );
-                        }
-                        const isSelected = rIdx === selectedPurchaseLineIndex;
-                        const isMultiRowSelected = isPurchaseRowInSelectionRange(rIdx);
-                        const isActiveSearchMatch = purchaseSearchActiveRow === rIdx;
-                        const isSearchMatch = purchaseSearchMatchedRows.includes(rIdx);
-                        const hasItem = Boolean(line.item_id && Number(line.item_id) > 0);
-                        const isZeroQty = hasItem && Number(line.quantity || 0) === 0;
-                        const isZeroNet = hasItem && round2(Number(line.taxable_amount || 0)) === 0;
-                        const isZeroRow = isZeroQty || isZeroNet;
-                        const colHighlight = (colKey: string) =>
-                          selectedColKeys.includes(colKey)
-                            ? '!bg-sky-100/80 ring-1 ring-inset ring-sky-400'
-                            : '';
-
-                        return (
-                          <tr
-                            key={rIdx}
-                            data-purchase-row-idx={rIdx}
-                            data-zero-qty={isZeroQty ? 'true' : 'false'}
-                            data-zero-net={isZeroNet ? 'true' : 'false'}
-                            onMouseEnter={() => handlePurchaseRowSelectorMouseEnter(rIdx)}
-                            onClick={(e) => {
-                              if (e.shiftKey) {
-                                const anchor = rowSelectionAnchorRef.current ?? selectedPurchaseLineIndex;
-                                rowSelectionAnchorRef.current = anchor;
-                                setSelectedColKeys([]);
-                                colSelectionAnchorRef.current = null;
-                                setSelectedRowRange({ start: anchor, end: rIdx });
-                              } else {
-                                rowSelectionAnchorRef.current = rIdx;
-                                setSelectedRowRange(null);
-                                setSelectedColKeys([]);
-                                colSelectionAnchorRef.current = null;
-                              }
-                              setSelectedPurchaseLineIndex(rIdx);
-                            }}
-                            className={`cursor-pointer transition-colors h-[16px] leading-none ${
-                              isMultiRowSelected
-                                ? 'bg-sky-100/90 ring-1 ring-inset ring-sky-400 font-medium'
-                                : isActiveSearchMatch
-                                ? 'bg-amber-200/80 ring-2 ring-inset ring-amber-500 font-semibold'
-                                : isSearchMatch
-                                ? 'bg-sky-100/80 font-medium'
-                                : isZeroRow
-                                ? 'bg-orange-50/90 hover:bg-orange-100/75'
-                                : isSelected
-                                ? 'bg-emerald-50/90 font-medium'
-                                : rIdx % 2 === 0
-                                ? 'bg-white hover:bg-slate-50'
-                                : 'bg-slate-50/50 hover:bg-slate-100/60'
+                {/* MAIN WORKSPACE SPLIT: LEFT = ITEM ENTRY + ITEMS TABLE | RIGHT = BILLING SUMMARY & ACTIONS */}
+                <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-2.5 overflow-hidden">
+                  {/* LEFT WORKSPACE COLUMN (SECTION B + SECTION C) */}
+                  <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-2.5 overflow-hidden">
+                    {/* SECTION B: ITEM ENTRY BAR (SEARCH + ACTIVE ROW FULL/LOOSE ENTRY) */}
+                    <div className="bg-white rounded-xl border border-slate-200/90 shadow-xs p-3 shrink-0 space-y-2.5">
+                      {/* Barcode / Quick Item Search + Company Filter + Catalog Button */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="w-48 flex items-center gap-1">
+                          <select
+                            id="pos_purchase_company_filter"
+                            aria-label="Filter items by Company"
+                            value={selectedCompanyFilter}
+                            onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                            className={`w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border outline-none transition-colors ${
+                              selectedCompanyFilter
+                                ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
+                                : 'border-slate-200 bg-slate-50 text-slate-800'
                             }`}
                           >
-                            <td
+                            <option value="">All Companies</option>
+                            {companyOptions.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                          {selectedCompanyFilter && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedCompanyFilter('')}
+                              title="Clear Company Filter"
+                              className="px-2 py-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold cursor-pointer shrink-0"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+
+                        <div
+                          ref={purchaseViewMode === 'pos' ? itemDropdownContainerRef : undefined}
+                          className="flex-1 min-w-[240px] relative"
+                        >
+                          <Barcode className="w-4 h-4 text-emerald-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                          <input
+                            id="pos_purchase_item_search_input"
+                            ref={purchaseViewMode === 'pos' ? itemSearchInputRef : undefined}
+                            type="text"
+                            value={purchaseSearchQuery}
+                            onFocus={() => {
+                              if (purchaseSearchQuery.trim().length > 0 || selectedCompanyFilter) {
+                                setShowPurchaseSearchDropdown(true);
+                              }
+                              setItemHighlightIndex(0);
+                            }}
+                            onBlur={() => {
+                              setTimeout(() => {
+                                setShowPurchaseSearchDropdown(false);
+                              }, 160);
+                            }}
+                            onChange={(e) => {
+                              const q = e.target.value;
+                              setPurchaseSearchQuery(q);
+                              setItemHighlightIndex(0);
+                              setShowPurchaseSearchDropdown(
+                                q.trim().length > 0 || Boolean(selectedCompanyFilter)
+                              );
+                            }}
+                            onKeyDown={handleItemSearchKeyDown}
+                            placeholder={
+                              selectedCompanyFilter
+                                ? `Scan Barcode or Type Item Name in ${selectedCompanyFilter}...`
+                                : 'Scan Barcode or Search Item Name / Code to Add (F3)...'
+                            }
+                            className="w-full pl-9 pr-8 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/20 text-slate-900 outline-none transition-all"
+                          />
+                          {purchaseSearchQuery && (
+                            <button
+                              type="button"
                               onMouseDown={(e) => {
-                                e.stopPropagation();
-                                handlePurchaseRowSelectorMouseDown(rIdx, e);
+                                e.preventDefault();
+                                setPurchaseSearchQuery('');
+                                setItemHighlightIndex(0);
+                                setShowPurchaseSearchDropdown(Boolean(selectedCompanyFilter));
+                                itemSearchInputRef.current?.focus();
                               }}
-                              title="Click or drag to select multiple rows (Shift+Delete to delete selected rows)"
-                              className={`py-0 px-1 text-center font-mono text-[10px] h-[16px] align-middle select-none cursor-pointer ${
-                                isMultiRowSelected
-                                  ? 'bg-sky-300 text-sky-950 font-black'
-                                  : 'text-slate-500 hover:bg-sky-100'
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {renderTopItemSearchDropdown()}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openPurchaseItemListForRow(
+                              lines[selectedPurchaseLineIndex]?.item_id
+                                ? null
+                                : selectedPurchaseLineIndex,
+                              'pos_row'
+                            )
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
+                          title="Browse Full Item Catalog (F2)"
+                        >
+                          <PackageSearch className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Item Catalog (F2)</span>
+                        </button>
+                      </div>
+
+                      {/* Synchronized Active Line Quick-Entry Inspector */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-12 gap-2 pt-2 border-t border-slate-100 items-end">
+                        <div className="col-span-2 sm:col-span-2 xl:col-span-3 min-w-0">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
+                            Selected Line #{selectedPurchaseLineIndex + 1}
+                          </div>
+                          <div className="px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 truncate">
+                            {activePurHasItem ? (
+                              <div className="flex items-center justify-between gap-2 min-w-0">
+                                <span className="text-xs font-bold text-slate-900 truncate">
+                                  {activePurRow.item_name}
+                                </span>
+                                <span className="text-[11px] font-medium text-slate-500 shrink-0 truncate max-w-[90px]">
+                                  {activePurRow.company_name || '—'}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400 italic">
+                                Scan or pick an item above...
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="xl:col-span-2">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
+                            Full Qty
+                          </label>
+                          <div className="flex items-center rounded-lg border border-slate-300 bg-white overflow-hidden focus-within:border-emerald-600">
+                            <button
+                              type="button"
+                              disabled={!activePurHasItem}
+                              onClick={() => handleDecrementPurchaseQty(selectedPurchaseLineIndex)}
+                              className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs border-r border-slate-200 cursor-pointer disabled:opacity-40"
+                              title="Decrease Full Qty (allows negative returns)"
+                            >
+                              −
+                            </button>
+                            <NumericInput
+                              allowNegative={true}
+                              disabled={!activePurHasItem}
+                              displayZero={activePurHasItem}
+                              value={activePurHasItem ? activePurRow.quantity : 0}
+                              onChange={(e) =>
+                                handleLineChange(
+                                  selectedPurchaseLineIndex,
+                                  'quantity',
+                                  parseSignedNumeric(e.target.value)
+                                )
+                              }
+                              className="w-full px-1.5 py-1 text-center font-mono font-bold text-xs text-slate-900 bg-transparent outline-none disabled:opacity-40"
+                            />
+                            <button
+                              type="button"
+                              disabled={!activePurHasItem}
+                              onClick={() => handleIncrementPurchaseQty(selectedPurchaseLineIndex)}
+                              className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs border-l border-slate-200 cursor-pointer disabled:opacity-40"
+                              title="Increase Full Qty"
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="xl:col-span-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-teal-700 mb-0.5">
+                            Loose Qty
+                          </label>
+                          <NumericInput
+                            allowNegative={true}
+                            disabled={!activePurHasItem}
+                            displayZero={activePurHasItem}
+                            value={activePurHasItem ? activePurRow.loose_quantity : 0}
+                            onChange={(e) =>
+                              handleLineChange(
+                                selectedPurchaseLineIndex,
+                                'loose_quantity',
+                                parseSignedNumeric(e.target.value)
+                              )
+                            }
+                            className="w-full px-2 py-1 text-right font-mono font-bold text-xs text-teal-950 rounded-lg border border-teal-300 bg-teal-50/40 focus:bg-white focus:border-teal-600 outline-none disabled:opacity-40"
+                          />
+                        </div>
+
+                        <div className="xl:col-span-2">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
+                            Pur. Rate
+                          </label>
+                          <NumericInput
+                            disabled={!activePurHasItem}
+                            value={activePurHasItem ? activePurRow.purchase_rate : 0}
+                            onChange={(e) =>
+                              handleLineChange(
+                                selectedPurchaseLineIndex,
+                                'purchase_rate',
+                                parseFloat(e.target.value) || 0
+                              )
+                            }
+                            onBlur={() => checkAndTriggerPurchasePriceChange(selectedPurchaseLineIndex)}
+                            className="w-full px-2 py-1 text-right font-mono font-bold text-xs text-slate-900 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
+                          />
+                        </div>
+
+                        <div className="xl:col-span-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
+                            Disc %
+                          </label>
+                          <NumericInput
+                            disabled={!activePurHasItem}
+                            value={activePurHasItem ? activePurRow.discount_percent : 0}
+                            onChange={(e) =>
+                              handleLineChange(
+                                selectedPurchaseLineIndex,
+                                'discount_percent',
+                                parseFloat(e.target.value) || 0
+                              )
+                            }
+                            className="w-full px-2 py-1 text-right font-mono font-semibold text-xs text-slate-800 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
+                          />
+                        </div>
+
+                        <div className="xl:col-span-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
+                            {activePurRow.tax_type === 'amount' ? 'Tax (Rs)' : 'Tax (%)'}
+                          </label>
+                          <NumericInput
+                            disabled={!activePurHasItem}
+                            value={
+                              activePurHasItem
+                                ? activePurRow.tax_type === 'amount'
+                                  ? Number(activePurRow.tax_value || 0)
+                                  : Number(activePurRow.tax_value ?? activePurRow.tax_percent ?? 0)
+                                : 0
+                            }
+                            onChange={(e) =>
+                              handleLineChange(
+                                selectedPurchaseLineIndex,
+                                'tax_value',
+                                parseFloat(e.target.value) || 0
+                              )
+                            }
+                            className="w-full px-2 py-1 text-right font-mono font-semibold text-xs text-slate-800 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
+                          />
+                        </div>
+
+                        <div className="col-span-2 xl:col-span-2 flex items-end justify-between gap-2">
+                          <div className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-slate-900 text-white text-right">
+                            <div className="text-[9.5px] uppercase tracking-wider text-slate-400">
+                              Line Amount
+                            </div>
+                            <div
+                              className={`font-mono font-black text-xs tabular-nums ${
+                                Number(activePurRow.line_total || 0) < 0
+                                  ? 'text-rose-300'
+                                  : 'text-emerald-300'
                               }`}
                             >
-                              {rIdx + 1}
-                            </td>
-                            <td className={`p-0 h-[16px] align-middle relative ${colHighlight('item_code')}`}>
-                              <input
-                                id={`pos_row_${rIdx}_item_code`}
-                                type="text"
-                                value={
-                                  activeRowItemSearchIdx === rIdx &&
-                                  activeRowItemSearchField === 'item_code'
-                                    ? rowItemSearchQuery
-                                    : line.item_code
-                                }
-                                onFocus={() => {
-                                  setSelectedPurchaseLineIndex(rIdx);
-                                  if (
-                                    activeRowItemSearchIdx !== rIdx ||
-                                    activeRowItemSearchField !== 'item_code'
-                                  ) {
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }
-                                }}
-                                onBlur={() => {
-                                  setTimeout(() => {
-                                    setActiveRowItemSearchIdx((prev) =>
-                                      prev === rIdx ? null : prev
-                                    );
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }, 180);
-                                }}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  setSelectedPurchaseLineIndex(rIdx);
-                                  setRowItemSearchQuery(v);
-                                  setRowItemHighlightIndex(0);
-                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_code' : null);
-                                  setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape' && (activeRowItemSearchIdx === rIdx || showPurchaseCompactHistoryPopup)) {
-                                    e.preventDefault();
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                    setShowPurchaseCompactHistoryPopup(false);
-                                    return;
-                                  }
-                                  if (
-                                    activeRowItemSearchIdx === rIdx &&
-                                    activeRowItemSearchField === 'item_code' &&
-                                    rowItemSearchResults.length > 0
-                                  ) {
-                                    if (e.key === 'ArrowDown') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.min(
-                                          prev + 1,
-                                          rowItemSearchResults.length - 1
-                                        );
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'ArrowUp') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.max(0, prev - 1);
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      const chosen =
-                                        rowItemSearchResults[rowItemHighlightIndex] ||
-                                        rowItemSearchResults[0];
-                                      if (chosen) {
-                                        populatePurchaseRowWithItem(rIdx, chosen, true);
-                                      }
-                                      return;
-                                    }
-                                  }
-                                  handlePurchaseCellKeyDown(e, rIdx, 'item_code', 'pos_row');
-                                }}
-                                placeholder="Code..."
-                                className="w-full px-1 py-0 font-mono font-bold text-[11px] text-emerald-800 bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
-                              />
-                            </td>
-                            {/* Company (Displays item company on populated rows; accessible Company Master filter on blank rows) */}
-                            <td
-                              className={`p-0 h-[16px] align-middle overflow-hidden text-slate-700 ${colHighlight('company')}`}
-                              title={hasItem ? line.company_name : selectedCompanyFilter || 'All Companies'}
-                            >
-                              {hasItem ? (
-                                <div className="px-1 truncate text-[10.5px] font-medium">
-                                  {line.company_name || ''}
-                                </div>
-                              ) : (
-                                <select
-                                  aria-label={`Purchase Row ${rIdx + 1} Company Filter`}
-                                  value={selectedCompanyFilter}
-                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                  onChange={(e) => setSelectedCompanyFilter(e.target.value)}
-                                  className={`w-full h-[15px] px-1 py-0 text-[10.5px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 outline-none truncate ${
-                                    selectedCompanyFilter
-                                      ? 'text-emerald-900 bg-emerald-50/60'
-                                      : 'text-slate-600'
-                                  }`}
-                                >
-                                  <option value="">All Companies</option>
-                                  {companyOptions.map((c) => (
-                                    <option key={c} value={c}>
-                                      {c}
-                                    </option>
-                                  ))}
-                                </select>
-                              )}
-                            </td>
+                              {activePurHasItem ? formatPKR(Number(activePurRow.line_total || 0)) : 'Rs. 0'}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={addLineRow}
+                            className="px-2.5 py-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold cursor-pointer shrink-0 transition-colors"
+                            title="Add / Jump to Blank Row"
+                          >
+                            + Row
+                          </button>
+                        </div>
+                      </div>
+                    </div>
 
-                            <td className={`p-0 h-[16px] align-middle relative ${colHighlight('item_name')}`}>
-                              <div className="flex items-center gap-1 h-[15px] px-0.5">
-                                {line.item_id > 0 && line.thumbnail_url && (
-                                  <ProductThumb
-                                    src={line.thumbnail_url}
-                                    alt={line.item_name}
-                                    size="xs"
-                                    className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
-                                  />
-                                )}
-                                <input
-                                  id={`pos_row_${rIdx}_item_name`}
-                                  type="text"
-                                  value={
-                                    activeRowItemSearchIdx === rIdx &&
-                                    activeRowItemSearchField === 'item_name'
-                                      ? rowItemSearchQuery
-                                      : formatItemNameWithRemarks(line.item_name, line.remarks)
-                                  }
-                                  onFocus={() => {
-                                    setSelectedPurchaseLineIndex(rIdx);
-                                    if (!line.item_id && selectedCompanyFilter) {
-                                      setActiveRowItemSearchIdx(rIdx);
-                                      setActiveRowItemSearchField('item_name');
-                                      setRowItemSearchQuery('');
-                                      setRowItemHighlightIndex(0);
-                                    } else if (
-                                      activeRowItemSearchIdx !== rIdx ||
-                                      activeRowItemSearchField !== 'item_name'
-                                    ) {
-                                      setActiveRowItemSearchIdx(null);
-                                      setActiveRowItemSearchField(null);
-                                      setRowItemSearchQuery('');
-                                    }
-                                    if (line.item_code || line.item_id) {
-                                      fetchPurchaseItemHistoryByCode(
-                                        line.item_code,
-                                        Number(line.item_id || 0),
-                                        line.variant_id || null
-                                      );
-                                    }
-                                  }}
-                                  onDoubleClick={(e) => {
-                                    if (!line.item_id) return;
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                    setItemLogModalState({
-                                      isOpen: true,
-                                      itemId: Number(line.item_id),
-                                      itemCode: line.item_code,
-                                      itemName: line.item_name,
-                                      returnFocusId: `pos_row_${rIdx}_item_name`,
-                                    });
-                                  }}
-                                  title={
-                                    line.item_id
-                                      ? `${formatItemNameWithRemarks(line.item_name, line.remarks)}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
-                                      : selectedCompanyFilter
-                                      ? `Type Item Name or Code in ${selectedCompanyFilter}`
-                                      : 'Type Item Name or Code'
-                                  }
-                                  onBlur={() => {
-                                    setTimeout(() => {
-                                      setActiveRowItemSearchIdx((prev) =>
-                                        prev === rIdx ? null : prev
-                                      );
-                                      setActiveRowItemSearchField(null);
-                                      setRowItemSearchQuery('');
-                                    }, 180);
-                                  }}
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    setSelectedPurchaseLineIndex(rIdx);
-                                    setRowItemSearchQuery(v);
-                                    setRowItemHighlightIndex(0);
-                                    const keepOpen = v.trim().length > 0 || Boolean(selectedCompanyFilter);
-                                    setActiveRowItemSearchField(keepOpen ? 'item_name' : null);
-                                    setActiveRowItemSearchIdx(keepOpen ? rIdx : null);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (
-                                      !e.ctrlKey &&
-                                      !e.altKey &&
-                                      !e.metaKey &&
-                                      !e.shiftKey &&
-                                      (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
-                                    ) {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      clearPurchaseItemNameOnly(rIdx);
-                                      return;
-                                    }
-                                    if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
-                                      e.preventDefault();
-                                      setActiveRowItemSearchIdx(null);
-                                      setActiveRowItemSearchField(null);
-                                      setRowItemSearchQuery('');
-                                      return;
-                                    }
-                                    if (
-                                      activeRowItemSearchIdx === rIdx &&
-                                      activeRowItemSearchField === 'item_name' &&
-                                      rowItemSearchResults.length > 0
-                                    ) {
-                                      if (e.key === 'ArrowDown') {
-                                        e.preventDefault();
-                                        setRowItemHighlightIndex((prev) => {
-                                          const next = Math.min(
-                                            prev + 1,
-                                            rowItemSearchResults.length - 1
-                                          );
-                                          setTimeout(() => {
-                                            document
-                                              .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
-                                              ?.scrollIntoView({ block: 'nearest' });
-                                          }, 0);
-                                          return next;
-                                        });
-                                        return;
-                                      }
-                                      if (e.key === 'ArrowUp') {
-                                        e.preventDefault();
-                                        setRowItemHighlightIndex((prev) => {
-                                          const next = Math.max(0, prev - 1);
-                                          setTimeout(() => {
-                                            document
-                                              .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
-                                              ?.scrollIntoView({ block: 'nearest' });
-                                          }, 0);
-                                          return next;
-                                        });
-                                        return;
-                                      }
-                                      if (e.key === 'Enter') {
-                                        e.preventDefault();
-                                        const chosen =
-                                          rowItemSearchResults[rowItemHighlightIndex] ||
-                                          rowItemSearchResults[0];
-                                        if (chosen) {
-                                          populatePurchaseRowWithItem(rIdx, chosen, true);
-                                        }
-                                        return;
-                                      }
-                                    }
-                                    handlePurchaseCellKeyDown(e, rIdx, 'item_name', 'pos_row');
-                                  }}
-                                  placeholder="Type Item Name / Code (or F2)..."
-                                  className="flex-1 min-w-0 px-1 py-0 font-bold text-slate-900 text-[11px] bg-transparent focus:bg-white border border-transparent focus:border-emerald-500 h-[15px] leading-none outline-none"
-                                />
-                                {line.variant_name && !(activeRowItemSearchIdx === rIdx && activeRowItemSearchField === 'item_name') && (
-                                  <span className="shrink-0 px-1 py-0 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[9px] leading-tight">
-                                    {line.variant_name}
-                                  </span>
-                                )}
-                              </div>
-                              {renderRowItemSearchCombobox(rIdx, true)}
-                            </td>
-                            {/* 3. Qty */}
-                            <td
-                              className={`p-0 h-[16px] align-middle ${
-                                isZeroQty
-                                  ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
-                                  : ''
-                              } ${colHighlight('quantity')}`}
-                            >
-                              <NumericInput
-                                id={`pos_row_${rIdx}_quantity`}
-                                displayZero={hasItem}
-                                value={
-                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
-                                    ? line.quantity
-                                    : 0
-                                }
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    rIdx,
-                                    'quantity',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'quantity', 'pos_row')
-                                }
-                                className={`w-full px-1 py-0 text-right font-mono font-bold text-[11px] border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none ${
-                                  isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
-                                }`}
-                              />
-                            </td>
-
-                            {/* 4. Discount */}
-                            <td className={`p-0 text-right h-[16px] align-middle ${colHighlight('discount')}`}>
-                              <NumericInput
-                                id={`pos_row_${rIdx}_discount_percent`}
-                                value={
-                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
-                                    ? line.discount_percent
-                                    : 0
-                                }
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    rIdx,
-                                    'discount_percent',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'discount_percent', 'pos_row')
-                                }
-                                className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 5. Bonus */}
-                            <td className={`p-0 h-[16px] align-middle ${colHighlight('bonus')}`}>
-                              <NumericInput
-                                id={`pos_row_${rIdx}_bonus_quantity`}
-                                value={line.item_id ? line.bonus_quantity : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    rIdx,
-                                    'bonus_quantity',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'bonus_quantity', 'pos_row')
-                                }
-                                className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-teal-900 border border-transparent focus:border-teal-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 6. Gross Amount */}
-                            <td className={`py-0 px-1.5 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('gross_amount')}`}>
-                              {line.item_id && line.gross_amount > 0
-                                ? formatPKR(line.gross_amount)
-                                : ''}
-                            </td>
-
-                            {/* 7. Net Amount */}
-                            <td
-                              className={`py-0 px-1.5 text-right font-mono font-semibold text-[11px] h-[16px] align-middle ${
-                                isZeroNet
-                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
-                                  : 'text-slate-900'
-                              } ${colHighlight('net_amount')}`}
-                            >
-                              {hasItem ? formatPKR(Number(line.taxable_amount || 0)) : ''}
-                            </td>
-
-                            {/* 8. Packing */}
-                            <td className={`py-0 px-1 text-center font-mono text-[10px] text-slate-700 h-[16px] align-middle ${colHighlight('packing')}`}>
-                              {line.item_id ? line.packing : ''}
-                            </td>
-
-                            {/* 9. Batch/Expiry */}
-                            <td className={`p-0 h-[16px] align-middle ${colHighlight('batch_expiry')}`}>
-                              <div className="flex items-center gap-0.5 h-[15px]">
-                                <input
-                                  id={`pos_row_${rIdx}_batch_number`}
-                                  type="text"
-                                  placeholder="Batch #"
-                                  value={line.batch_number}
-                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                  onChange={(e) =>
-                                    handleLineChange(rIdx, 'batch_number', e.target.value)
-                                  }
-                                  onKeyDown={(e) =>
-                                    handlePurchaseCellKeyDown(e, rIdx, 'batch_number', 'pos_row')
-                                  }
-                                  className="flex-1 min-w-0 px-1 py-0 font-mono text-[10px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                                />
-                                <input
-                                  id={`pos_row_${rIdx}_expiry_date`}
-                                  type="date"
-                                  value={line.item_id ? line.expiry_date : ''}
-                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                  onChange={(e) =>
-                                    handleLineChange(rIdx, 'expiry_date', e.target.value)
-                                  }
-                                  onKeyDown={(e) =>
-                                    handlePurchaseCellKeyDown(e, rIdx, 'expiry_date', 'pos_row')
-                                  }
-                                  className="flex-1 min-w-0 px-1 py-0 font-mono text-[10px] text-slate-700 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                                />
-                              </div>
-                            </td>
-
-                            {/* 10. Purchase Rate */}
-                            <td className={`p-0 text-right h-[16px] align-middle ${colHighlight('purchase_rate')}`}>
-                              <NumericInput
-                                id={`pos_row_${rIdx}_purchase_rate`}
-                                value={line.item_id ? line.purchase_rate : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    rIdx,
-                                    'purchase_rate',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onBlur={() => {
-                                  checkAndTriggerPurchasePriceChange(rIdx);
-                                }}
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'purchase_rate', 'pos_row')
-                                }
-                                title={
-                                  line.item_id
-                                    ? 'Purchase Price — Press Ctrl to view Item Purchase History'
-                                    : 'Purchase Price'
-                                }
-                                className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 11. MRP */}
-                            <td className={`p-0 text-right h-[16px] align-middle ${colHighlight('mrp')}`}>
-                              <NumericInput
-                                id={`pos_row_${rIdx}_mrp_rate`}
-                                value={line.item_id ? line.mrp_rate : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    rIdx,
-                                    'mrp_rate',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'mrp_rate', 'pos_row')
-                                }
-                                className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-700 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 12. GST / Tax */}
-                            <td
-                              className={`p-0 text-right h-[16px] align-middle ${colHighlight('gst')}`}
-                              title={
-                                line.item_id
-                                  ? line.tax_type === 'amount'
-                                    ? `Fixed Tax: Rs. ${Number(line.tax_value || 0).toFixed(2)} / unit | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
-                                    : `Tax: ${Number(line.tax_value ?? line.tax_percent ?? 0).toFixed(2)}% on Gross | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
-                                  : ''
-                              }
-                            >
-                              <div className="flex items-center h-[15px]">
-                                {line.item_id && line.tax_type === 'amount' && (
-                                  <span className="pl-0.5 text-[9px] font-bold text-amber-700 select-none">
-                                    Rs
-                                  </span>
-                                )}
-                                <NumericInput
-                                  id={`pos_row_${rIdx}_tax_percent`}
-                                  value={
-                                    line.item_id
-                                      ? line.tax_type === 'amount'
-                                        ? Number(line.tax_value || 0)
-                                        : Number(line.tax_value ?? line.tax_percent ?? 0)
-                                      : 0
-                                  }
-                                  onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      rIdx,
-                                      'tax_value',
-                                      parseFloat(e.target.value) || 0
-                                    )
-                                  }
-                                  onKeyDown={(e) =>
-                                    handlePurchaseCellKeyDown(e, rIdx, 'tax_percent', 'pos_row')
-                                  }
-                                  className="w-full px-1 py-0 text-right font-mono text-[11px] text-slate-800 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                                />
-                              </div>
-                            </td>
-
-                            {/* 13. Taxable */}
-                            <td className={`py-0 px-1.5 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('taxable')}`}>
-                              {line.item_id && line.taxable_amount > 0
-                                ? formatPKR(line.taxable_amount)
-                                : ''}
-                            </td>
-
-                            {/* 14. Line Total */}
-                            <td
-                              className={`py-0 px-1.5 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
-                                isZeroNet
-                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
-                                  : 'text-slate-900'
-                              } ${colHighlight('line_total')}`}
-                            >
-                              {hasItem ? formatPKR(Number(line.line_total || 0)) : ''}
-                            </td>
-
-                            {/* 15. Remarks */}
-                            <td className={`p-0 h-[16px] align-middle ${colHighlight('remarks')}`}>
-                              <input
-                                id={`pos_row_${rIdx}_remarks`}
-                                type="text"
-                                value={line.remarks || ''}
-                                onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
-                                onChange={(e) => handleLineChange(rIdx, 'remarks', e.target.value)}
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, rIdx, 'remarks', 'pos_row')
-                                }
-                                placeholder="Remarks..."
-                                className="w-full px-1 py-0 text-[11px] text-slate-800 border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white h-[15px] leading-none outline-none"
-                              />
-                            </td>
-                            <td className="py-0 px-1 text-center h-[16px] align-middle whitespace-nowrap">
-                              <div className="inline-flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    suppressItemListReopenRef.current = false;
-                                    openPurchaseItemListForRow(
-                                      rIdx,
-                                      'pos_row',
-                                      `pos_row_${rIdx}_item_code`
-                                    );
-                                  }}
-                                  className="p-0 text-slate-400 hover:text-emerald-700 cursor-pointer leading-none"
-                                  title="Select or change item from Item List"
-                                >
-                                  <PackageSearch className="w-3 h-3 inline" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    requestPurchaseDeleteConfirm(rIdx);
-                                  }}
-                                  className="p-0 text-slate-400 hover:text-rose-600 cursor-pointer leading-none"
-                                  title="Delete row (Shift+Delete)"
-                                >
-                                  <Trash2 className="w-3 h-3 inline" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* POS Datasheet Record Navigator Bar + MS Access-Style Invoice Item Search */}
-                <div className="ams-pos-compact-chrome ams-access-record-bar bg-slate-200 border-t border-slate-300 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-                  {(selectedRowRange || selectedColKeys.length > 0) && (
-                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-sky-100 border border-sky-300 text-sky-900 font-bold">
-                      <span>
-                        {selectedColKeys.length > 0
-                          ? `Selected ${selectedColKeys.length} col(s): ${selectedColKeys
-                              .map((k) => PURCHASE_COL_LABELS[k] || k)
-                              .join(', ')}`
-                          : `Selected ${
-                              Math.abs((selectedRowRange?.end ?? 0) - (selectedRowRange?.start ?? 0)) + 1
-                            } row(s)`}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => requestPurchaseDeleteConfirm(selectedPurchaseLineIndex)}
-                        className="px-1.5 py-0 rounded bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
-                      >
-                        Shift+Del
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
+                    {/* SECTION C: MODERN INVOICE ITEMS TABLE */}
+                    <div
+                      onKeyDownCapture={(e) => {
+                        if (
+                          e.shiftKey &&
+                          e.key === 'Delete' &&
+                          !e.ctrlKey &&
+                          !e.altKey &&
+                          !e.metaKey
+                        ) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          requestPurchaseDeleteConfirm(selectedPurchaseLineIndex);
+                          return;
+                        }
+                        if (
+                          e.shiftKey &&
+                          (e.key === 'ArrowDown' || e.key === 'ArrowUp') &&
+                          !e.ctrlKey &&
+                          !e.altKey &&
+                          !e.metaKey
+                        ) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const activeElId = (document.activeElement as HTMLElement | null)?.id || '';
+                          const m = activeElId.match(/^pos_row_(\d+)_(.+)$/);
+                          const curRow = m ? Number(m[1]) : selectedPurchaseLineIndex;
+                          const curCol = m ? m[2] : 'item_name';
+                          const anchor = rowSelectionAnchorRef.current ?? curRow;
+                          if (rowSelectionAnchorRef.current === null) rowSelectionAnchorRef.current = anchor;
+                          const delta = e.key === 'ArrowDown' ? 1 : -1;
+                          const nextRow = Math.max(0, Math.min(entryRowIdx, lines.length - 1, curRow + delta));
+                          setSelectedColKeys([]);
+                          colSelectionAnchorRef.current = null;
+                          setSelectedRowRange({ start: anchor, end: nextRow });
+                          setSelectedPurchaseLineIndex(nextRow);
+                          focusPurchaseCell(nextRow, curCol, 'pos_row');
+                          return;
+                        }
+                        if (
+                          e.key === 'Escape' &&
+                          activeRowItemSearchIdx === null &&
+                          !showPurchaseCompactHistoryPopup &&
+                          (selectedRowRange !== null || selectedColKeys.length > 0)
+                        ) {
                           setSelectedRowRange(null);
                           rowSelectionAnchorRef.current = null;
                           setSelectedColKeys([]);
                           colSelectionAnchorRef.current = null;
-                        }}
-                        className="px-1 py-0 rounded bg-white border border-sky-300 text-sky-800 cursor-pointer"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  )}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <div className="flex items-center gap-1">
-                      <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
-                      <button
-                        type="button"
-                        onClick={() => navigateToPurchaseRecord(0)}
-                        disabled={selectedPurchaseLineIndex === 0}
-                        title="First Record (Home)"
-                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                      >
-                        |◀
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex - 1)}
-                        disabled={selectedPurchaseLineIndex === 0}
-                        title="Previous Record (Up)"
-                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                      >
-                        ◀
-                      </button>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={purchaseRecordJumpInput}
-                        onChange={(e) =>
-                          setPurchaseRecordJumpInput(e.target.value.replace(/[^0-9]/g, ''))
                         }
-                        onKeyDown={handlePurchaseRecordJumpKeyDown}
-                        onBlur={() => {
-                          const parsed = parseInt(purchaseRecordJumpInput, 10);
-                          if (!isNaN(parsed) && parsed >= 1) {
-                            navigateToPurchaseRecord(parsed - 1);
-                          } else {
-                            setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
-                          }
-                        }}
-                        title="Type record number and press Enter to jump"
-                        className="w-9 px-1 py-0 text-center bg-white border border-slate-400 focus:border-emerald-600 font-mono font-bold text-[10px] text-slate-900 outline-none"
-                      />
-                      <span className="text-[10px] font-mono">of {lines.length}</span>
-                      <button
-                        type="button"
-                        onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex + 1)}
-                        disabled={selectedPurchaseLineIndex >= lines.length - 1}
-                        title="Next Record (Down)"
-                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                      >
-                        ▶
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => navigateToPurchaseRecord(lines.length - 1)}
-                        disabled={selectedPurchaseLineIndex >= lines.length - 1}
-                        title="Last Record (End)"
-                        className="px-1 py-0 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-400 text-[10px] font-mono font-bold cursor-pointer"
-                      >
-                        ▶|
-                      </button>
-                      <button
-                        type="button"
-                        onClick={addLineRow}
-                        title="Jump to first blank row or append new record"
-                        className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-100 border border-slate-400 text-[10px] font-bold text-emerald-800 cursor-pointer ml-0.5"
-                      >
-                        * New
-                      </button>
-                    </div>
-                    <InvoiceRecordSearchInput
-                      items={purchaseSearchableItems}
-                      onPreviewMatch={handlePreviewSearchedPurchaseRow}
-                      onNavigateToMatch={handleNavigateToSearchedPurchaseRow}
-                      onMatchesChange={(matches, activeRow) => {
-                        setPurchaseSearchMatchedRows(matches);
-                        setPurchaseSearchActiveRow(activeRow);
                       }}
-                    />
-                  </div>
-                  <div className="flex items-center gap-2 text-[10px] font-mono text-slate-600 hidden xl:flex">
-                    <span>Keys: Enter/Tab • Arrows • PgUp/PgDn • Ctrl+Home/End</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Compact Item History Popup (Purchase POS View) */}
-              {(() => {
-                const activePurchaseLine = lines[selectedPurchaseLineIndex] || lines[0];
-                const vSuffix = activePurchaseLine?.variant_id ? `::v${activePurchaseLine.variant_id}` : '';
-                const codeKey = activePurchaseLine?.item_code
-                  ? `${activePurchaseLine.item_code.trim().toLowerCase()}${vSuffix}`
-                  : '';
-                const idKey = activePurchaseLine?.item_id
-                  ? `${activePurchaseLine.item_id}${vSuffix}`
-                  : '';
-                const activePurHistory =
-                  (codeKey && purchaseItemHistoryMap[codeKey]) ||
-                  (idKey && purchaseItemHistoryMap[idKey]) ||
-                  null;
-                return showPurchaseCompactHistoryPopup &&
-                  activePurchaseLine &&
-                  (activePurchaseLine.item_code || activePurchaseLine.item_id) ? (
-                  <CompactItemHistoryPopup
-                    isOpen={showPurchaseCompactHistoryPopup}
-                    mode="purchase"
-                    itemCode={activePurchaseLine.item_code}
-                    itemName={activePurchaseLine.item_name}
-                    variantName={activePurchaseLine.variant_name}
-                    thumbnailUrl={activePurchaseLine.thumbnail_url}
-                    packing={activePurchaseLine.packing}
-                    selectedSupplierName={selectedSupplier?.account_name || 'Supplier'}
-                    historyData={activePurHistory}
-                    loading={purchaseHistoryLoading}
-                    onClose={() => setShowPurchaseCompactHistoryPopup(false)}
-                  />
-                ) : null;
-              })()}
-
-              {/* SECTION C (BOTTOM): COMPACT PURCHASE POS FOOTER */}
-              <div className="ams-pos-compact-chrome w-full bg-slate-900 text-white rounded-md border border-slate-700 px-2.5 py-1.5 shrink-0 space-y-1">
-                {/* Row 1: Essential Totals & Payment Settlement */}
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-1 tabular-nums">
-                  <div className="flex flex-wrap items-center gap-3 text-xs">
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Grand Total:</span>
-                      <span className="font-mono font-bold text-white">{formatPKR(grossTotal)}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-rose-400">Discount:</span>
-                      <span className="font-mono font-bold text-rose-300">-{formatPKR(totalDiscount)}</span>
-                      <NumericInput
-                        value={invoiceDiscountPercent}
-                        onChange={(e) => {
-                          const pct = Math.max(0, parseFloat(e.target.value) || 0);
-                          setInvoiceDiscountPercent(pct);
-                          setInvoiceDiscountAmount(round2(subtotalAfterItemDisc * (pct / 100)));
-                        }}
-                        placeholder="%"
-                        title="Bill Discount %"
-                        className="w-12 px-1 py-0 rounded bg-slate-800 border border-slate-600 font-mono text-white text-right"
-                      />
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Tax ({appliedAdvanceTaxRate}%):</span>
-                      <span className="font-mono font-bold text-amber-300">
-                        +{formatPKR(gstTotal + advanceTaxAmount)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Prev Bal ({previousBalanceType}):</span>
-                      <span className="font-mono font-bold text-amber-300">{formatPKR(previousSupplierBalance)}</span>
-                    </div>
-                  </div>
-
-                  {/* Highlighted Net Amount, Payable, Cash Paid & Remaining Balance */}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1.5">
-                      <span className="font-bold uppercase text-emerald-300">Net Amount:</span>
-                      <span className="font-mono font-black text-emerald-300 ams-total-highlight">
-                        {formatPKR(netInvoiceAmount)}
-                      </span>
-                    </div>
-                    <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1.5">
-                      <span className="font-bold uppercase text-sky-300">Payable:</span>
-                      <span className="font-mono font-black text-sky-300 ams-total-highlight">
-                        {formatPKR(totalPayable)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded border border-emerald-500">
-                      <span className="font-bold text-emerald-300 whitespace-nowrap">Cash Paid:</span>
-                      <NumericInput
-                        value={paidAmount}
-                        displayZero={Boolean(editingPurchaseId) || paidAmountManuallyEdited}
-                        onChange={(e) => {
-                          setPaidAmountManuallyEdited(true);
-                          setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
-                        }}
-                        className="w-24 px-1.5 py-0 rounded bg-slate-900 border border-slate-700 font-mono font-black text-white text-right outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleExactPurchasePayment}
-                        className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
+                      className="bg-white rounded-xl border border-slate-200/90 shadow-xs overflow-hidden flex flex-col flex-1 min-h-[280px] relative z-10"
+                    >
+                      <div
+                        ref={posGridViewportRef}
+                        className="flex-1 min-h-0 overflow-y-auto overflow-x-auto relative bg-white"
                       >
-                        Exact
-                      </button>
+                        <table
+                          style={{ width: `${purPosTotalWidth}px` }}
+                          className="table-fixed text-left text-xs border-collapse"
+                        >
+                          <colgroup>
+                            <col style={{ width: `${purPosColWidths.selector}px` }} />
+                            <col style={{ width: `${purPosColWidths.item_code}px` }} />
+                            <col style={{ width: `${purPosColWidths.company}px` }} />
+                            <col style={{ width: `${purPosColWidths.item_name}px` }} />
+                            <col style={{ width: `${purPosColWidths.quantity}px` }} />
+                            <col style={{ width: `${purPosColWidths.loose_quantity}px` }} />
+                            <col style={{ width: `${purPosColWidths.discount}px` }} />
+                            <col style={{ width: `${purPosColWidths.bonus}px` }} />
+                            <col style={{ width: `${purPosColWidths.gross_amount}px` }} />
+                            <col style={{ width: `${purPosColWidths.net_amount}px` }} />
+                            <col style={{ width: `${purPosColWidths.packing}px` }} />
+                            <col style={{ width: `${purPosColWidths.batch_expiry}px` }} />
+                            <col style={{ width: `${purPosColWidths.purchase_rate}px` }} />
+                            <col style={{ width: `${purPosColWidths.mrp}px` }} />
+                            <col style={{ width: `${purPosColWidths.gst}px` }} />
+                            <col style={{ width: `${purPosColWidths.taxable}px` }} />
+                            <col style={{ width: `${purPosColWidths.line_total}px` }} />
+                            <col style={{ width: `${purPosColWidths.remarks}px` }} />
+                            <col style={{ width: `${purPosColWidths.actions}px` }} />
+                          </colgroup>
+                          <thead className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-600 text-[10.5px] font-bold uppercase tracking-wider select-none">
+                            <tr className="h-9">
+                              {(
+                                [
+                                  { key: 'selector', label: '#', cls: 'py-2 px-2 text-center border-r border-slate-200' },
+                                  { key: 'item_code', label: 'Code', cls: 'py-2 px-2 border-r border-slate-200' },
+                                  { key: 'company', label: 'Company', cls: 'py-2 px-2 border-r border-slate-200' },
+                                  { key: 'item_name', label: 'Item Name', cls: 'py-2 px-2.5 border-r border-slate-200' },
+                                  { key: 'quantity', label: 'Full Qty', cls: 'py-2 px-2 text-right bg-emerald-50/70 text-emerald-900 border-r border-slate-200' },
+                                  { key: 'loose_quantity', label: 'Loose Qty', cls: 'py-2 px-2 text-right bg-teal-50/70 text-teal-900 border-r border-slate-200' },
+                                  { key: 'discount', label: 'Disc %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'bonus', label: 'Bonus', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'gross_amount', label: 'Gross', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'net_amount', label: 'Net Amt', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'packing', label: 'Packing', cls: 'py-2 px-2 text-center border-r border-slate-200' },
+                                  { key: 'batch_expiry', label: 'Batch & Expiry', cls: 'py-2 px-2 border-r border-slate-200' },
+                                  { key: 'purchase_rate', label: 'Pur. Rate', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'mrp', label: 'MRP', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'gst', label: 'Tax', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'taxable', label: 'Taxable', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'line_total', label: 'Amount', cls: 'py-2 px-2 text-right bg-slate-100 text-slate-900 font-extrabold border-r border-slate-200' },
+                                  { key: 'remarks', label: 'Remarks', cls: 'py-2 px-2 text-left border-r border-slate-200' },
+                                  { key: 'actions', label: '', cls: 'py-2 px-1.5 text-center' },
+                                ] as const
+                              ).map((col) => {
+                                const isColSelected = selectedColKeys.includes(col.key);
+                                const isSelectableCol = col.key !== 'selector' && col.key !== 'actions';
+                                return (
+                                  <th
+                                    key={col.key}
+                                    onMouseDown={(e) =>
+                                      handlePurchaseColHeaderMouseDown(col.key, PURCHASE_POS_COL_KEYS, e)
+                                    }
+                                    onMouseEnter={() =>
+                                      handlePurchaseColHeaderMouseEnter(col.key, PURCHASE_POS_COL_KEYS)
+                                    }
+                                    style={{ width: `${purPosColWidths[col.key]}px` }}
+                                    title={
+                                      isSelectableCol
+                                        ? 'Click or drag to select column(s) · Press Shift+Delete to clear column values'
+                                        : undefined
+                                    }
+                                    className={`${col.cls} ${
+                                      isSelectableCol ? 'cursor-pointer hover:bg-sky-50' : ''
+                                    } ${
+                                      isColSelected
+                                        ? '!bg-sky-100 !text-sky-900 ring-1 ring-inset ring-sky-400'
+                                        : ''
+                                    } relative whitespace-nowrap overflow-hidden text-ellipsis`}
+                                  >
+                                    <span className="truncate block">{col.label}</span>
+                                    <div
+                                      onMouseDown={(e) => {
+                                        e.stopPropagation();
+                                        handlePurPosResizeStart(col.key, e);
+                                      }}
+                                      onDoubleClick={(e) => handleResetPurPosColWidth(col.key, e)}
+                                      title="Drag border to resize column (double-click to reset)"
+                                      className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                                        purPosResizingCol === col.key
+                                          ? 'bg-emerald-600'
+                                          : 'hover:bg-emerald-400/70'
+                                      }`}
+                                    />
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {lines.map((line, rIdx) => {
+                              if (isGhostRow(rIdx)) {
+                                return (
+                                  <tr key={rIdx} className="h-9 border-b border-slate-100 bg-slate-50/30 select-none">
+                                    <td className="py-1 px-1.5 text-center font-mono text-slate-300 text-[11px]">
+                                      {rIdx + 1}
+                                    </td>
+                                    <td colSpan={18} />
+                                  </tr>
+                                );
+                              }
+                              const isSelected = rIdx === selectedPurchaseLineIndex;
+                              const isMultiRowSelected = isPurchaseRowInSelectionRange(rIdx);
+                              const isActiveSearchMatch = purchaseSearchActiveRow === rIdx;
+                              const isSearchMatch = purchaseSearchMatchedRows.includes(rIdx);
+                              const hasItem = Boolean(line.item_id && Number(line.item_id) > 0);
+                              const isZeroQty =
+                                hasItem &&
+                                Number(line.quantity || 0) === 0 &&
+                                Number(line.loose_quantity || 0) === 0;
+                              const isZeroNet = hasItem && round2(Number(line.taxable_amount || 0)) === 0;
+                              const isNegativeLine =
+                                hasItem &&
+                                (Number(line.quantity || 0) < 0 || Number(line.loose_quantity || 0) < 0);
+                              const colHighlight = (colKey: string) =>
+                                selectedColKeys.includes(colKey)
+                                  ? '!bg-sky-100/70 ring-1 ring-inset ring-sky-300'
+                                  : '';
+
+                              return (
+                                <tr
+                                  key={rIdx}
+                                  data-purchase-row-idx={rIdx}
+                                  data-zero-qty={isZeroQty ? 'true' : 'false'}
+                                  data-zero-net={isZeroNet ? 'true' : 'false'}
+                                  onMouseEnter={() => handlePurchaseRowSelectorMouseEnter(rIdx)}
+                                  onClick={(e) => {
+                                    if (e.shiftKey) {
+                                      const anchor = rowSelectionAnchorRef.current ?? selectedPurchaseLineIndex;
+                                      rowSelectionAnchorRef.current = anchor;
+                                      setSelectedColKeys([]);
+                                      colSelectionAnchorRef.current = null;
+                                      setSelectedRowRange({ start: anchor, end: rIdx });
+                                    } else {
+                                      rowSelectionAnchorRef.current = rIdx;
+                                      setSelectedRowRange(null);
+                                      setSelectedColKeys([]);
+                                      colSelectionAnchorRef.current = null;
+                                    }
+                                    setSelectedPurchaseLineIndex(rIdx);
+                                  }}
+                                  className={`cursor-pointer transition-colors h-10 ${
+                                    isMultiRowSelected
+                                      ? 'bg-sky-50 ring-1 ring-inset ring-sky-400'
+                                      : isActiveSearchMatch
+                                      ? 'bg-amber-100 ring-2 ring-inset ring-amber-400'
+                                      : isSearchMatch
+                                      ? 'bg-sky-50/70'
+                                      : isNegativeLine
+                                      ? 'bg-rose-50/70 hover:bg-rose-100/60'
+                                      : isZeroQty && hasItem
+                                      ? 'bg-amber-50/60 hover:bg-amber-100/50'
+                                      : isSelected
+                                      ? 'bg-emerald-50/80'
+                                      : 'bg-white hover:bg-slate-50/80'
+                                  }`}
+                                >
+                                  <td
+                                    onMouseDown={(e) => {
+                                      e.stopPropagation();
+                                      handlePurchaseRowSelectorMouseDown(rIdx, e);
+                                    }}
+                                    title="Click or drag to select rows (Shift+Delete to delete)"
+                                    className={`py-1 px-1.5 text-center font-mono text-[11px] border-r border-slate-100 align-middle select-none cursor-pointer ${
+                                      isMultiRowSelected
+                                        ? 'bg-sky-600 text-white font-bold'
+                                        : isSelected
+                                        ? 'text-emerald-700 font-black'
+                                        : 'text-slate-400 hover:bg-slate-100'
+                                    }`}
+                                  >
+                                    {isSelected ? `▶ ${rIdx + 1}` : rIdx + 1}
+                                  </td>
+
+                                  {/* Item Code */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle relative ${colHighlight('item_code')}`}>
+                                    <input
+                                      id={`pos_row_${rIdx}_item_code`}
+                                      type="text"
+                                      value={
+                                        activeRowItemSearchIdx === rIdx &&
+                                        activeRowItemSearchField === 'item_code'
+                                          ? rowItemSearchQuery
+                                          : line.item_code
+                                      }
+                                      onFocus={() => {
+                                        setSelectedPurchaseLineIndex(rIdx);
+                                        if (
+                                          activeRowItemSearchIdx !== rIdx ||
+                                          activeRowItemSearchField !== 'item_code'
+                                        ) {
+                                          setActiveRowItemSearchIdx(null);
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                        }
+                                      }}
+                                      onBlur={() => {
+                                        setTimeout(() => {
+                                          setActiveRowItemSearchIdx((prev) =>
+                                            prev === rIdx ? null : prev
+                                          );
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                        }, 180);
+                                      }}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setSelectedPurchaseLineIndex(rIdx);
+                                        setRowItemSearchQuery(v);
+                                        setRowItemHighlightIndex(0);
+                                        setActiveRowItemSearchField(v.trim().length > 0 ? 'item_code' : null);
+                                        setActiveRowItemSearchIdx(v.trim().length > 0 ? rIdx : null);
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Escape' && (activeRowItemSearchIdx === rIdx || showPurchaseCompactHistoryPopup)) {
+                                          e.preventDefault();
+                                          setActiveRowItemSearchIdx(null);
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                          setShowPurchaseCompactHistoryPopup(false);
+                                          return;
+                                        }
+                                        if (
+                                          activeRowItemSearchIdx === rIdx &&
+                                          activeRowItemSearchField === 'item_code' &&
+                                          rowItemSearchResults.length > 0
+                                        ) {
+                                          if (e.key === 'ArrowDown') {
+                                            e.preventDefault();
+                                            setRowItemHighlightIndex((prev) => {
+                                              const next = Math.min(
+                                                prev + 1,
+                                                rowItemSearchResults.length - 1
+                                              );
+                                              setTimeout(() => {
+                                                document
+                                                  .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
+                                                  ?.scrollIntoView({ block: 'nearest' });
+                                              }, 0);
+                                              return next;
+                                            });
+                                            return;
+                                          }
+                                          if (e.key === 'ArrowUp') {
+                                            e.preventDefault();
+                                            setRowItemHighlightIndex((prev) => {
+                                              const next = Math.max(0, prev - 1);
+                                              setTimeout(() => {
+                                                document
+                                                  .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
+                                                  ?.scrollIntoView({ block: 'nearest' });
+                                              }, 0);
+                                              return next;
+                                            });
+                                            return;
+                                          }
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            const chosen =
+                                              rowItemSearchResults[rowItemHighlightIndex] ||
+                                              rowItemSearchResults[0];
+                                            if (chosen) {
+                                              populatePurchaseRowWithItem(rIdx, chosen, true);
+                                            }
+                                            return;
+                                          }
+                                        }
+                                        handlePurchaseCellKeyDown(e, rIdx, 'item_code', 'pos_row');
+                                      }}
+                                      placeholder="Code..."
+                                      className="w-full px-1.5 py-1 font-mono font-bold text-xs text-emerald-800 bg-transparent focus:bg-white rounded border border-transparent focus:border-emerald-500 outline-none"
+                                    />
+                                  </td>
+
+                                  {/* Company */}
+                                  <td
+                                    className={`p-1 border-r border-slate-100 align-middle overflow-hidden text-slate-600 ${colHighlight('company')}`}
+                                    title={hasItem ? line.company_name : selectedCompanyFilter || 'All Companies'}
+                                  >
+                                    {hasItem ? (
+                                      <div className="px-1.5 truncate text-xs font-medium">
+                                        {line.company_name || '—'}
+                                      </div>
+                                    ) : (
+                                      <select
+                                        aria-label={`Purchase Row ${rIdx + 1} Company Filter`}
+                                        value={selectedCompanyFilter}
+                                        onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                        onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                                        className={`w-full px-1 py-1 text-xs font-semibold bg-transparent focus:bg-white rounded border border-transparent focus:border-emerald-500 outline-none truncate ${
+                                          selectedCompanyFilter ? 'text-emerald-800' : 'text-slate-500'
+                                        }`}
+                                      >
+                                        <option value="">All Companies</option>
+                                        {companyOptions.map((c) => (
+                                          <option key={c} value={c}>
+                                            {c}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    )}
+                                  </td>
+
+                                  {/* Item Name */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle relative ${colHighlight('item_name')}`}>
+                                    <div className="flex items-center gap-1.5">
+                                      {line.item_id > 0 && line.thumbnail_url && (
+                                        <ProductThumb
+                                          src={line.thumbnail_url}
+                                          alt={line.item_name}
+                                          size="xs"
+                                          className="!w-5 !h-5 !rounded border-0 shrink-0"
+                                        />
+                                      )}
+                                      <input
+                                        id={`pos_row_${rIdx}_item_name`}
+                                        type="text"
+                                        value={
+                                          activeRowItemSearchIdx === rIdx &&
+                                          activeRowItemSearchField === 'item_name'
+                                            ? rowItemSearchQuery
+                                            : formatItemNameWithRemarks(line.item_name, line.remarks)
+                                        }
+                                        onFocus={() => {
+                                          setSelectedPurchaseLineIndex(rIdx);
+                                          if (!line.item_id && selectedCompanyFilter) {
+                                            setActiveRowItemSearchIdx(rIdx);
+                                            setActiveRowItemSearchField('item_name');
+                                            setRowItemSearchQuery('');
+                                            setRowItemHighlightIndex(0);
+                                          } else if (
+                                            activeRowItemSearchIdx !== rIdx ||
+                                            activeRowItemSearchField !== 'item_name'
+                                          ) {
+                                            setActiveRowItemSearchIdx(null);
+                                            setActiveRowItemSearchField(null);
+                                            setRowItemSearchQuery('');
+                                          }
+                                          if (line.item_code || line.item_id) {
+                                            fetchPurchaseItemHistoryByCode(
+                                              line.item_code,
+                                              Number(line.item_id || 0),
+                                              line.variant_id || null
+                                            );
+                                          }
+                                        }}
+                                        onDoubleClick={(e) => {
+                                          if (!line.item_id) return;
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          setActiveRowItemSearchIdx(null);
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                          setItemLogModalState({
+                                            isOpen: true,
+                                            itemId: Number(line.item_id),
+                                            itemCode: line.item_code,
+                                            itemName: line.item_name,
+                                            returnFocusId: `pos_row_${rIdx}_item_name`,
+                                          });
+                                        }}
+                                        title={
+                                          line.item_id
+                                            ? `${formatItemNameWithRemarks(line.item_name, line.remarks)}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                            : selectedCompanyFilter
+                                            ? `Type Item Name or Code in ${selectedCompanyFilter}`
+                                            : 'Type Item Name or Code (or F2)'
+                                        }
+                                        onBlur={() => {
+                                          setTimeout(() => {
+                                            setActiveRowItemSearchIdx((prev) =>
+                                              prev === rIdx ? null : prev
+                                            );
+                                            setActiveRowItemSearchField(null);
+                                            setRowItemSearchQuery('');
+                                          }, 180);
+                                        }}
+                                        onChange={(e) => {
+                                          const v = e.target.value;
+                                          setSelectedPurchaseLineIndex(rIdx);
+                                          setRowItemSearchQuery(v);
+                                          setRowItemHighlightIndex(0);
+                                          const keepOpen = v.trim().length > 0 || Boolean(selectedCompanyFilter);
+                                          setActiveRowItemSearchField(keepOpen ? 'item_name' : null);
+                                          setActiveRowItemSearchIdx(keepOpen ? rIdx : null);
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (
+                                            !e.ctrlKey &&
+                                            !e.altKey &&
+                                            !e.metaKey &&
+                                            !e.shiftKey &&
+                                            (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
+                                          ) {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            clearPurchaseItemNameOnly(rIdx);
+                                            return;
+                                          }
+                                          if (e.key === 'Escape' && activeRowItemSearchIdx === rIdx) {
+                                            e.preventDefault();
+                                            setActiveRowItemSearchIdx(null);
+                                            setActiveRowItemSearchField(null);
+                                            setRowItemSearchQuery('');
+                                            return;
+                                          }
+                                          if (
+                                            activeRowItemSearchIdx === rIdx &&
+                                            activeRowItemSearchField === 'item_name' &&
+                                            rowItemSearchResults.length > 0
+                                          ) {
+                                            if (e.key === 'ArrowDown') {
+                                              e.preventDefault();
+                                              setRowItemHighlightIndex((prev) => {
+                                                const next = Math.min(
+                                                  prev + 1,
+                                                  rowItemSearchResults.length - 1
+                                                );
+                                                setTimeout(() => {
+                                                  document
+                                                    .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
+                                                    ?.scrollIntoView({ block: 'nearest' });
+                                                }, 0);
+                                                return next;
+                                              });
+                                              return;
+                                            }
+                                            if (e.key === 'ArrowUp') {
+                                              e.preventDefault();
+                                              setRowItemHighlightIndex((prev) => {
+                                                const next = Math.max(0, prev - 1);
+                                                setTimeout(() => {
+                                                  document
+                                                    .querySelector(`[data-row-item-idx="${rIdx}-${next}"]`)
+                                                    ?.scrollIntoView({ block: 'nearest' });
+                                                }, 0);
+                                                return next;
+                                              });
+                                              return;
+                                            }
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              const chosen =
+                                                rowItemSearchResults[rowItemHighlightIndex] ||
+                                                rowItemSearchResults[0];
+                                              if (chosen) {
+                                                populatePurchaseRowWithItem(rIdx, chosen, true);
+                                              }
+                                              return;
+                                            }
+                                          }
+                                          handlePurchaseCellKeyDown(e, rIdx, 'item_name', 'pos_row');
+                                        }}
+                                        placeholder="Type Item Name / Code (or F2)..."
+                                        className="flex-1 min-w-0 px-1.5 py-1 font-bold text-slate-900 text-xs bg-transparent focus:bg-white rounded border border-transparent focus:border-emerald-500 outline-none truncate"
+                                      />
+                                      {isNegativeLine && (
+                                        <span className="shrink-0 px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-200 font-mono font-bold text-[10px] leading-none">
+                                          RET
+                                        </span>
+                                      )}
+                                      {line.variant_name && !(activeRowItemSearchIdx === rIdx && activeRowItemSearchField === 'item_name') && (
+                                        <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-200 font-semibold text-[10px] leading-none max-w-[90px] truncate">
+                                          {line.variant_name}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {renderRowItemSearchCombobox(rIdx, true)}
+                                  </td>
+
+                                  {/* Full Qty */}
+                                  <td
+                                    className={`p-1 border-r border-slate-100 align-middle ${
+                                      Number(line.quantity || 0) < 0
+                                        ? 'bg-rose-100/70'
+                                        : isZeroQty
+                                        ? 'bg-amber-50'
+                                        : 'bg-emerald-50/30'
+                                    } ${colHighlight('quantity')}`}
+                                  >
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_quantity`}
+                                      allowNegative={true}
+                                      displayZero={hasItem}
+                                      value={
+                                        line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                          ? line.quantity
+                                          : 0
+                                      }
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'quantity',
+                                          parseSignedNumeric(e.target.value)
+                                        )
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'quantity', 'pos_row')
+                                      }
+                                      className={`w-full px-1.5 py-1 text-right font-mono font-bold text-xs rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums ${
+                                        Number(line.quantity || 0) < 0
+                                          ? 'text-rose-800'
+                                          : isZeroQty
+                                          ? 'text-amber-900'
+                                          : 'text-slate-900'
+                                      }`}
+                                    />
+                                  </td>
+
+                                  {/* Loose Qty */}
+                                  <td
+                                    className={`p-1 border-r border-slate-100 align-middle ${
+                                      Number(line.loose_quantity || 0) < 0
+                                        ? 'bg-rose-100/70'
+                                        : 'bg-teal-50/30'
+                                    } ${colHighlight('loose_quantity')}`}
+                                  >
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_loose_quantity`}
+                                      allowNegative={true}
+                                      displayZero={hasItem}
+                                      value={
+                                        line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                          ? line.loose_quantity
+                                          : 0
+                                      }
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'loose_quantity',
+                                          parseSignedNumeric(e.target.value)
+                                        )
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'loose_quantity', 'pos_row')
+                                      }
+                                      className={`w-full px-1.5 py-1 text-right font-mono font-bold text-xs rounded border border-transparent focus:border-teal-500 bg-transparent focus:bg-white outline-none tabular-nums ${
+                                        Number(line.loose_quantity || 0) < 0
+                                          ? 'text-rose-800'
+                                          : 'text-teal-950'
+                                      }`}
+                                    />
+                                  </td>
+
+                                  {/* Discount % */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount')}`}>
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_discount_percent`}
+                                      value={
+                                        line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                          ? line.discount_percent
+                                          : 0
+                                      }
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'discount_percent',
+                                          parseFloat(e.target.value) || 0
+                                        )
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'discount_percent', 'pos_row')
+                                      }
+                                      className="w-full px-1.5 py-1 text-right font-mono text-xs text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                                    />
+                                  </td>
+
+                                  {/* Bonus */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('bonus')}`}>
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_bonus_quantity`}
+                                      value={line.item_id ? line.bonus_quantity : 0}
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'bonus_quantity',
+                                          parseFloat(e.target.value) || 0
+                                        )
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'bonus_quantity', 'pos_row')
+                                      }
+                                      className="w-full px-1.5 py-1 text-right font-mono font-bold text-xs text-teal-900 rounded border border-transparent focus:border-teal-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                                    />
+                                  </td>
+
+                                  {/* Gross Amount */}
+                                  <td className={`px-2 py-1 text-right font-mono text-xs border-r border-slate-100 align-middle tabular-nums ${Number(line.gross_amount || 0) < 0 ? 'text-rose-700' : 'text-slate-700'} ${colHighlight('gross_amount')}`}>
+                                    {hasItem ? formatPKR(Number(line.gross_amount || 0)) : ''}
+                                  </td>
+
+                                  {/* Net Amount */}
+                                  <td
+                                    className={`px-2 py-1 text-right font-mono font-semibold text-xs border-r border-slate-100 align-middle tabular-nums ${
+                                      Number(line.taxable_amount || 0) < 0
+                                        ? 'text-rose-800'
+                                        : isZeroNet
+                                        ? 'text-amber-800'
+                                        : 'text-slate-900'
+                                    } ${colHighlight('net_amount')}`}
+                                  >
+                                    {hasItem ? formatPKR(Number(line.taxable_amount || 0)) : ''}
+                                  </td>
+
+                                  {/* Packing */}
+                                  <td className={`px-2 py-1 text-center font-mono text-[11px] text-slate-600 border-r border-slate-100 align-middle ${colHighlight('packing')}`}>
+                                    {line.item_id ? line.packing : ''}
+                                  </td>
+
+                                  {/* Batch/Expiry */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('batch_expiry')}`}>
+                                    <div className="flex items-center gap-1">
+                                      <input
+                                        id={`pos_row_${rIdx}_batch_number`}
+                                        type="text"
+                                        placeholder="Batch #"
+                                        value={line.batch_number}
+                                        onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                        onChange={(e) =>
+                                          handleLineChange(rIdx, 'batch_number', e.target.value)
+                                        }
+                                        onKeyDown={(e) =>
+                                          handlePurchaseCellKeyDown(e, rIdx, 'batch_number', 'pos_row')
+                                        }
+                                        className="flex-1 min-w-0 px-1.5 py-1 font-mono text-[11px] text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none"
+                                      />
+                                      <input
+                                        id={`pos_row_${rIdx}_expiry_date`}
+                                        type="date"
+                                        value={line.item_id ? line.expiry_date : ''}
+                                        onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                        onChange={(e) =>
+                                          handleLineChange(rIdx, 'expiry_date', e.target.value)
+                                        }
+                                        onKeyDown={(e) =>
+                                          handlePurchaseCellKeyDown(e, rIdx, 'expiry_date', 'pos_row')
+                                        }
+                                        className="flex-1 min-w-0 px-1 py-1 font-mono text-[11px] text-slate-700 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none"
+                                      />
+                                    </div>
+                                  </td>
+
+                                  {/* Purchase Rate */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('purchase_rate')}`}>
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_purchase_rate`}
+                                      value={line.item_id ? line.purchase_rate : 0}
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'purchase_rate',
+                                          parseFloat(e.target.value) || 0
+                                        )
+                                      }
+                                      onBlur={() => {
+                                        checkAndTriggerPurchasePriceChange(rIdx);
+                                      }}
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'purchase_rate', 'pos_row')
+                                      }
+                                      title={
+                                        line.item_id
+                                          ? 'Purchase Price — Press Ctrl to view Item Purchase History'
+                                          : 'Purchase Price'
+                                      }
+                                      className="w-full px-1.5 py-1 text-right font-mono font-bold text-xs text-slate-900 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                                    />
+                                  </td>
+
+                                  {/* MRP */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('mrp')}`}>
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_mrp_rate`}
+                                      value={line.item_id ? line.mrp_rate : 0}
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'mrp_rate',
+                                          parseFloat(e.target.value) || 0
+                                        )
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'mrp_rate', 'pos_row')
+                                      }
+                                      className="w-full px-1.5 py-1 text-right font-mono text-xs text-slate-700 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                                    />
+                                  </td>
+
+                                  {/* GST / Tax */}
+                                  <td
+                                    className={`p-1 border-r border-slate-100 align-middle ${colHighlight('gst')}`}
+                                    title={
+                                      line.item_id
+                                        ? line.tax_type === 'amount'
+                                          ? `Fixed Tax: Rs. ${Number(line.tax_value || 0).toFixed(2)} / unit | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                          : `Tax: ${Number(line.tax_value ?? line.tax_percent ?? 0).toFixed(2)}% on Gross | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                        : ''
+                                    }
+                                  >
+                                    <div className="flex items-center gap-0.5">
+                                      {line.item_id && line.tax_type === 'amount' && (
+                                        <span className="text-[10px] font-bold text-amber-700 select-none">
+                                          Rs
+                                        </span>
+                                      )}
+                                      <NumericInput
+                                        id={`pos_row_${rIdx}_tax_percent`}
+                                        value={
+                                          line.item_id
+                                            ? line.tax_type === 'amount'
+                                              ? Number(line.tax_value || 0)
+                                              : Number(line.tax_value ?? line.tax_percent ?? 0)
+                                            : 0
+                                        }
+                                        onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                        onChange={(e) =>
+                                          handleLineChange(
+                                            rIdx,
+                                            'tax_value',
+                                            parseFloat(e.target.value) || 0
+                                          )
+                                        }
+                                        onKeyDown={(e) =>
+                                          handlePurchaseCellKeyDown(e, rIdx, 'tax_percent', 'pos_row')
+                                        }
+                                        className="w-full px-1 py-1 text-right font-mono text-xs text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                                      />
+                                    </div>
+                                  </td>
+
+                                  {/* Taxable */}
+                                  <td className={`px-2 py-1 text-right font-mono text-xs border-r border-slate-100 align-middle tabular-nums ${Number(line.taxable_amount || 0) < 0 ? 'text-rose-700' : 'text-slate-700'} ${colHighlight('taxable')}`}>
+                                    {hasItem ? formatPKR(Number(line.taxable_amount || 0)) : ''}
+                                  </td>
+
+                                  {/* Line Total */}
+                                  <td
+                                    className={`px-2 py-1 text-right font-mono font-black text-xs border-r border-slate-100 align-middle tabular-nums ${
+                                      Number(line.line_total || 0) < 0
+                                        ? 'text-rose-800 bg-rose-50/70'
+                                        : 'text-slate-900 bg-slate-50/50'
+                                    } ${colHighlight('line_total')}`}
+                                  >
+                                    {hasItem ? formatPKR(Number(line.line_total || 0)) : ''}
+                                  </td>
+
+                                  {/* Remarks */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('remarks')}`}>
+                                    <input
+                                      id={`pos_row_${rIdx}_remarks`}
+                                      type="text"
+                                      value={line.remarks || ''}
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) => handleLineChange(rIdx, 'remarks', e.target.value)}
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'remarks', 'pos_row')
+                                      }
+                                      placeholder="Remarks..."
+                                      className="w-full px-1.5 py-1 text-xs text-slate-700 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none"
+                                    />
+                                  </td>
+
+                                  {/* Row Actions */}
+                                  <td className="px-1.5 py-1 text-center align-middle whitespace-nowrap">
+                                    <div className="inline-flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          suppressItemListReopenRef.current = false;
+                                          openPurchaseItemListForRow(
+                                            rIdx,
+                                            'pos_row',
+                                            `pos_row_${rIdx}_item_code`
+                                          );
+                                        }}
+                                        className="p-1 rounded hover:bg-emerald-50 text-slate-400 hover:text-emerald-700 cursor-pointer"
+                                        title="Select or change item from Item List"
+                                      >
+                                        <PackageSearch className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          requestPurchaseDeleteConfirm(rIdx);
+                                        }}
+                                        className="p-1 rounded hover:bg-rose-50 text-slate-400 hover:text-rose-600 cursor-pointer"
+                                        title="Delete row (Shift+Delete)"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Table Bottom Bar: Record Navigation & Search Inside Invoice */}
+                      <div className="bg-slate-50 border-t border-slate-200 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 shrink-0">
+                        {(selectedRowRange || selectedColKeys.length > 0) && (
+                          <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-sky-50 border border-sky-200 text-sky-900 font-semibold text-xs">
+                            <span>
+                              {selectedColKeys.length > 0
+                                ? `Selected ${selectedColKeys.length} col(s): ${selectedColKeys
+                                    .map((k) => PURCHASE_COL_LABELS[k] || k)
+                                    .join(', ')}`
+                                : `Selected ${
+                                    Math.abs((selectedRowRange?.end ?? 0) - (selectedRowRange?.start ?? 0)) + 1
+                                  } row(s)`}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => requestPurchaseDeleteConfirm(selectedPurchaseLineIndex)}
+                              className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold cursor-pointer"
+                            >
+                              Shift+Del
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedRowRange(null);
+                                rowSelectionAnchorRef.current = null;
+                                setSelectedColKeys([]);
+                                colSelectionAnchorRef.current = null;
+                              }}
+                              className="px-2 py-0.5 rounded bg-white border border-sky-200 text-sky-800 text-[11px] font-semibold cursor-pointer"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="flex items-center gap-1">
+                            <span className="font-semibold text-[11px] text-slate-500 mr-1">Row:</span>
+                            <button
+                              type="button"
+                              onClick={() => navigateToPurchaseRecord(0)}
+                              disabled={selectedPurchaseLineIndex === 0}
+                              title="First Record (Home)"
+                              className="px-1.5 py-0.5 rounded bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-200 text-[11px] font-mono font-bold cursor-pointer"
+                            >
+                              |◀
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex - 1)}
+                              disabled={selectedPurchaseLineIndex === 0}
+                              title="Previous Record"
+                              className="px-1.5 py-0.5 rounded bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-200 text-[11px] font-mono font-bold cursor-pointer"
+                            >
+                              ◀
+                            </button>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={purchaseRecordJumpInput}
+                              onChange={(e) =>
+                                setPurchaseRecordJumpInput(e.target.value.replace(/[^0-9]/g, ''))
+                              }
+                              onKeyDown={handlePurchaseRecordJumpKeyDown}
+                              onBlur={() => {
+                                const parsed = parseInt(purchaseRecordJumpInput, 10);
+                                if (!isNaN(parsed) && parsed >= 1) {
+                                  navigateToPurchaseRecord(parsed - 1);
+                                } else {
+                                  setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
+                                }
+                              }}
+                              className="w-10 px-1.5 py-0.5 text-center rounded bg-white border border-slate-300 focus:border-emerald-500 font-mono font-bold text-[11px] text-slate-900 outline-none"
+                            />
+                            <span className="text-[11px] font-mono text-slate-500">/ {lines.length}</span>
+                            <button
+                              type="button"
+                              onClick={() => navigateToPurchaseRecord(selectedPurchaseLineIndex + 1)}
+                              disabled={selectedPurchaseLineIndex >= lines.length - 1}
+                              title="Next Record"
+                              className="px-1.5 py-0.5 rounded bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-200 text-[11px] font-mono font-bold cursor-pointer"
+                            >
+                              ▶
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => navigateToPurchaseRecord(lines.length - 1)}
+                              disabled={selectedPurchaseLineIndex >= lines.length - 1}
+                              title="Last Record (End)"
+                              className="px-1.5 py-0.5 rounded bg-white hover:bg-slate-100 disabled:opacity-40 border border-slate-200 text-[11px] font-mono font-bold cursor-pointer"
+                            >
+                              ▶|
+                            </button>
+                          </div>
+                          <InvoiceRecordSearchInput
+                            items={purchaseSearchableItems}
+                            onPreviewMatch={handlePreviewSearchedPurchaseRow}
+                            onNavigateToMatch={handleNavigateToSearchedPurchaseRow}
+                            onMatchesChange={(matches, activeRow) => {
+                              setPurchaseSearchMatchedRows(matches);
+                              setPurchaseSearchActiveRow(activeRow);
+                            }}
+                          />
+                        </div>
+                        <div className="flex items-center gap-3 text-[11px] font-mono text-slate-500">
+                          <span>
+                            Items <strong className="text-slate-900">{validLines.length}</strong>
+                          </span>
+                          <span>·</span>
+                          <span>
+                            Full <strong className="text-slate-900">{totalUnitsSummary}</strong>
+                          </span>
+                          <span>·</span>
+                          <span>
+                            Loose <strong className="text-teal-700">{totalLooseSummary}</strong>
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div
-                      className={`px-2 py-0.5 rounded border flex items-center gap-1.5 ${
-                        remainingBalance <= 0
-                          ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300'
-                          : 'bg-amber-950/80 border-amber-500/60 text-amber-300'
-                      }`}
-                    >
-                      <span className="font-bold uppercase">Remaining:</span>
-                      <span className="font-mono font-black ams-total-highlight">
-                        {formatPKR(Math.abs(remainingBalance))}
-                      </span>
-                    </div>
-                  </div>
-                </div>
 
-                {/* Row 2: Compact Professional Action Buttons */}
-                <div className="flex flex-wrap items-center justify-between gap-1.5">
-                  <div className="flex flex-wrap items-center gap-1">
-                    <button
-                      type="submit"
-                      disabled={savingInvoice}
-                      className="px-3 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                      title="Confirm & Save Purchase Invoice (F2)"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      <span>
-                        {savingInvoice
-                          ? 'Posting...'
-                          : editingPurchaseId
-                          ? 'Update (F2)'
-                          : 'Save Purchase (F2)'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={savingInvoice}
-                      onClick={() => handleSavePurchaseInvoice(undefined, true)}
-                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white font-bold flex items-center gap-1 cursor-pointer border border-slate-600"
-                      title="Save & Print A4 Purchase Invoice (Ctrl+P)"
-                    >
-                      <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>A4 Print</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleExportCurrentPurchasePdf}
-                      className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Save Purchase Invoice to PDF (supplier_invno:123_date)"
-                    >
-                      <Download className="w-3 h-3 text-sky-200" />
-                      <span>Export PDF</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={exportingExcel}
-                      onClick={handleExportCurrentPurchaseToExcel}
-                      className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Export Purchase Invoice to Excel (.xlsx)"
-                    >
-                      <Download className="w-3 h-3 text-emerald-200" />
-                      <span>Excel</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handlePreviewInvoice}
-                      className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Preview A4 Invoice (F4)"
-                    >
-                      <Printer className="w-3 h-3 text-sky-200" />
-                      <span>Preview (F4)</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleSendPurchaseOrderWhatsApp}
-                      className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Send WhatsApp Order for Current Purchase Invoice"
-                    >
-                      <MessageCircle className="w-3 h-3 text-green-100" />
-                      <span>Send WhatsApp Order</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={savingInvoice}
-                      onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
-                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold flex items-center gap-1 cursor-pointer border border-slate-600 disabled:opacity-50"
-                      title="Hold this Purchase Invoice (F3)"
-                    >
-                      <PauseCircle className="w-3 h-3 text-amber-400" />
-                      <span>Hold (F3)</span>
-                    </button>
+                    {/* Compact Item History Popup */}
+                    {(() => {
+                      const activePurchaseLine = lines[selectedPurchaseLineIndex] || lines[0];
+                      const vSuffix = activePurchaseLine?.variant_id ? `::v${activePurchaseLine.variant_id}` : '';
+                      const codeKey = activePurchaseLine?.item_code
+                        ? `${activePurchaseLine.item_code.trim().toLowerCase()}${vSuffix}`
+                        : '';
+                      const idKey = activePurchaseLine?.item_id
+                        ? `${activePurchaseLine.item_id}${vSuffix}`
+                        : '';
+                      const activePurHistory =
+                        (codeKey && purchaseItemHistoryMap[codeKey]) ||
+                        (idKey && purchaseItemHistoryMap[idKey]) ||
+                        null;
+                      return showPurchaseCompactHistoryPopup &&
+                        activePurchaseLine &&
+                        (activePurchaseLine.item_code || activePurchaseLine.item_id) ? (
+                        <CompactItemHistoryPopup
+                          isOpen={showPurchaseCompactHistoryPopup}
+                          mode="purchase"
+                          itemCode={activePurchaseLine.item_code}
+                          itemName={activePurchaseLine.item_name}
+                          variantName={activePurchaseLine.variant_name}
+                          thumbnailUrl={activePurchaseLine.thumbnail_url}
+                          packing={activePurchaseLine.packing}
+                          selectedSupplierName={selectedSupplier?.account_name || 'Supplier'}
+                          historyData={activePurHistory}
+                          loading={purchaseHistoryLoading}
+                          onClose={() => setShowPurchaseCompactHistoryPopup(false)}
+                        />
+                      ) : null;
+                    })()}
                   </div>
 
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={resetInvoiceForm}
-                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold flex items-center gap-1 cursor-pointer border border-slate-600"
-                      title="Reset Form (Ctrl+N)"
-                    >
-                      <span>Reset</span>
-                    </button>
-                    {onBackToDashboard && (
-                      <button
-                        type="button"
-                        onClick={onBackToDashboard}
-                        className="px-2 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  {/* RIGHT SETTLEMENT RAIL: SECTION D (BILLING SUMMARY) + SECTION E (ACTION BUTTONS) */}
+                  <div className="w-full lg:w-[320px] xl:w-[350px] shrink-0 bg-slate-900 text-white rounded-xl border border-slate-800 shadow-lg flex flex-col justify-between p-4 gap-3 overflow-y-auto">
+                    {/* SECTION D: BILLING SUMMARY */}
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                          Purchase Summary
+                        </span>
+                        <span className="font-mono text-xs font-semibold text-emerald-400 tabular-nums">
+                          {validLines.length} Line{validLines.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+
+                      <div className="space-y-2 text-xs tabular-nums">
+                        <div className="flex items-center justify-between text-slate-300">
+                          <span>Subtotal (Gross)</span>
+                          <span className="font-mono font-bold text-white">{formatPKR(grossTotal)}</span>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 text-slate-300">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-rose-300">Total Discount</span>
+                            <NumericInput
+                              value={invoiceDiscountPercent}
+                              onChange={(e) => {
+                                const pct = Math.max(0, parseFloat(e.target.value) || 0);
+                                setInvoiceDiscountPercent(pct);
+                                setInvoiceDiscountAmount(round2(subtotalAfterItemDisc * (pct / 100)));
+                              }}
+                              placeholder="%"
+                              title="Extra Bill Discount %"
+                              className="w-12 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-[11px] text-white text-right outline-none focus:border-emerald-500"
+                            />
+                            <span className="text-[10px] text-slate-500">%</span>
+                          </div>
+                          <span className="font-mono font-bold text-rose-300">
+                            {totalDiscount >= 0 ? `-${formatPKR(totalDiscount)}` : `+${formatPKR(Math.abs(totalDiscount))}`}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-slate-300">
+                          <span>
+                            Tax ({gstTotal !== 0 ? 'Item + ' : ''}{appliedAdvanceTaxRate}% Adv)
+                          </span>
+                          <span className="font-mono font-bold text-amber-300">
+                            {gstTotal + advanceTaxAmount >= 0 ? '+' : ''}
+                            {formatPKR(gstTotal + advanceTaxAmount)}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-slate-400 pt-1 border-t border-slate-800/80">
+                          <span>Previous ({previousBalanceType})</span>
+                          <span className="font-mono font-semibold text-slate-200">
+                            {formatPKR(previousSupplierBalance)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Prominent Grand Total Card */}
+                      <div
+                        className={`rounded-xl p-3.5 border ${
+                          isNetReturnCredit
+                            ? 'bg-rose-950/70 border-rose-500/40'
+                            : 'bg-emerald-950/60 border-emerald-500/40'
+                        }`}
                       >
-                        <ArrowLeft className="w-3 h-3" />
-                        <span>Close</span>
+                        <div className="flex items-center justify-between mb-1">
+                          <span
+                            className={`text-[11px] font-bold uppercase tracking-wider ${
+                              isNetReturnCredit ? 'text-rose-300' : 'text-emerald-300'
+                            }`}
+                          >
+                            {isNetReturnCredit ? 'Grand Total (Return)' : 'Grand Total'}
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                            Payable: {formatPKR(totalPayable)}
+                          </span>
+                        </div>
+                        <div
+                          className={`text-2xl font-mono font-black tracking-tight tabular-nums ${
+                            isNetReturnCredit ? 'text-rose-200' : 'text-emerald-300'
+                          }`}
+                        >
+                          {formatPKR(netInvoiceAmount)}
+                        </div>
+                      </div>
+
+                      {/* Payment Settlement */}
+                      <div className="bg-slate-800/70 rounded-xl border border-slate-700/80 p-3 space-y-2.5">
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-300">
+                              Paid Amount
+                            </label>
+                            <button
+                              type="button"
+                              onClick={handleExactPurchasePayment}
+                              className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-[10.5px] font-bold cursor-pointer transition-colors"
+                            >
+                              Exact Payable
+                            </button>
+                          </div>
+                          <NumericInput
+                            value={paidAmount}
+                            displayZero={Boolean(editingPurchaseId) || paidAmountManuallyEdited}
+                            onChange={(e) => {
+                              setPaidAmountManuallyEdited(true);
+                              setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
+                            }}
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:border-emerald-500 font-mono font-black text-base text-white text-right outline-none tabular-nums"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-700/70 text-xs tabular-nums">
+                          <span className="font-semibold text-slate-300">Remaining Balance</span>
+                          <span
+                            className={`font-mono font-black text-sm ${
+                              remainingBalance <= 0 ? 'text-emerald-300' : 'text-amber-300'
+                            }`}
+                          >
+                            {formatPKR(Math.abs(remainingBalance))}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* SECTION E: ACTION BUTTONS */}
+                    <div className="space-y-2 pt-2 border-t border-slate-800 shrink-0">
+                      <button
+                        type="submit"
+                        disabled={savingInvoice}
+                        className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-black flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 shadow-md shadow-emerald-950/40 transition-colors"
+                        title="Confirm & Save Purchase Invoice (F2)"
+                      >
+                        <Save className="w-4 h-4" />
+                        <span>
+                          {savingInvoice
+                            ? 'Posting...'
+                            : editingPurchaseId
+                            ? 'Update Purchase (F2)'
+                            : 'Save Invoice (F2)'}
+                        </span>
                       </button>
-                    )}
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          disabled={savingInvoice}
+                          onClick={() => handleSavePurchaseInvoice(undefined, true)}
+                          className="py-2 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer border border-slate-700 transition-colors"
+                          title="Save & Print A4 Purchase Invoice (Ctrl+P)"
+                        >
+                          <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Save &amp; Print</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handlePreviewInvoice}
+                          className="py-2 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer border border-slate-700 transition-colors"
+                          title="Print Preview (F4)"
+                        >
+                          <Printer className="w-3.5 h-3.5 text-sky-400" />
+                          <span>Print Preview</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={savingInvoice}
+                          onClick={() => handleSavePurchaseInvoice(undefined, false, 'held')}
+                          className="py-2 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer border border-slate-700 disabled:opacity-50 transition-colors"
+                          title="Hold Invoice (F3)"
+                        >
+                          <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Hold Invoice</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleSendPurchaseOrderWhatsApp}
+                          className="py-2 px-2.5 rounded-lg bg-green-600 hover:bg-green-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                          title="Send WhatsApp Order for Current Purchase Invoice"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                          <span>WhatsApp</span>
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleExportCurrentPurchasePdf}
+                          className="py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                          title="Save Purchase Invoice as PDF"
+                        >
+                          <Download className="w-3 h-3 text-sky-400" />
+                          <span>PDF</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={exportingExcel}
+                          onClick={handleExportCurrentPurchaseToExcel}
+                          className="py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                          title="Export Excel"
+                        >
+                          <FileSpreadsheet className="w-3 h-3 text-emerald-400" />
+                          <span>Excel</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={resetInvoiceForm}
+                          className="py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] font-bold cursor-pointer"
+                          title="Reset Form (Ctrl+N)"
+                        >
+                          Reset
+                        </button>
+                        {onBackToDashboard ? (
+                          <button
+                            type="button"
+                            onClick={onBackToDashboard}
+                            className="py-1.5 px-2 rounded-lg bg-rose-900/60 hover:bg-rose-700 text-rose-200 hover:text-white border border-rose-800 text-[11px] font-bold cursor-pointer"
+                          >
+                            Close
+                          </button>
+                        ) : (
+                          <div />
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </form>
-          )}
+              </form>
+            );
+          })()}
 
           {/* ================= OPTION 2: MICROSOFT ACCESS-STYLE INTERFACE (THREE-SECTION COMPACT FORM) ================= */}
           {purchaseViewMode === 'access' && (
@@ -6973,6 +7344,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       <col style={{ width: `${purAccessColWidths.company}px` }} />
                       <col style={{ width: `${purAccessColWidths.item_name}px` }} />
                       <col style={{ width: `${purAccessColWidths.quantity}px` }} />
+                      <col style={{ width: `${purAccessColWidths.loose_quantity}px` }} />
                       <col style={{ width: `${purAccessColWidths.discount}px` }} />
                       <col style={{ width: `${purAccessColWidths.purchase_rate}px` }} />
                       <col style={{ width: `${purAccessColWidths.bonus}px` }} />
@@ -6996,6 +7368,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             { key: 'company', label: 'Company', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
                             { key: 'item_name', label: 'Item Name', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
                             { key: 'quantity', label: 'Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950' },
+                            { key: 'loose_quantity', label: 'Loose Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-teal-100/60 text-teal-950' },
                             { key: 'discount', label: 'Discount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
                             { key: 'purchase_rate', label: 'Purchase Rate', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
                             { key: 'bonus', label: 'Bonus', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950' },
@@ -7063,7 +7436,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                                 {idx + 1}
                               </td>
-                              <td colSpan={17} />
+                              <td colSpan={18} />
                             </tr>
                           );
                         }
@@ -7072,7 +7445,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         const isActiveSearchMatch = purchaseSearchActiveRow === idx;
                         const isSearchMatch = purchaseSearchMatchedRows.includes(idx);
                         const hasItem = Boolean(line.item_id && Number(line.item_id) > 0);
-                        const isZeroQty = hasItem && Number(line.quantity || 0) === 0;
+                        const isZeroQty =
+                          hasItem &&
+                          Number(line.quantity || 0) === 0 &&
+                          Number(line.loose_quantity || 0) === 0;
                         const isZeroNet = hasItem && round2(Number(line.taxable_amount || 0)) === 0;
                         const isZeroRow = isZeroQty || isZeroNet;
                         const colHighlight = (colKey: string) =>
@@ -7440,6 +7816,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             >
                               <NumericInput
                                 id={`pur_cell_${idx}_quantity`}
+                                allowNegative={true}
                                 displayZero={hasItem}
                                 value={
                                   line.item_id || line.item_code?.trim() || line.item_name?.trim()
@@ -7451,13 +7828,41 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   handleLineChange(
                                     idx,
                                     'quantity',
-                                    parseFloat(e.target.value) || 0
+                                    parseSignedNumeric(e.target.value)
                                   )
                                 }
                                 onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'quantity')}
                                 className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
                                   isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
                                 }`}
+                              />
+                            </td>
+
+                            {/* 3b. Loose Qty */}
+                            <td
+                              className={`border-r border-slate-300 p-0 h-[16px] align-middle bg-teal-50/20 ${colHighlight('loose_quantity')}`}
+                            >
+                              <NumericInput
+                                id={`pur_cell_${idx}_loose_quantity`}
+                                allowNegative={true}
+                                displayZero={hasItem}
+                                value={
+                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                    ? line.loose_quantity
+                                    : 0
+                                }
+                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                onChange={(e) =>
+                                  handleLineChange(
+                                    idx,
+                                    'loose_quantity',
+                                    parseSignedNumeric(e.target.value)
+                                  )
+                                }
+                                onKeyDown={(e) =>
+                                  handlePurchaseCellKeyDown(e, idx, 'loose_quantity')
+                                }
+                                className="w-full px-1 py-0 border border-transparent focus:border-teal-600 focus:bg-white text-right font-mono font-bold text-teal-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                               />
                             </td>
 
@@ -7546,9 +7951,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                             {/* 6. Gross Amount */}
                             <td className={`border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('gross_amount')}`}>
-                              {line.item_id && line.gross_amount > 0
-                                ? line.gross_amount.toFixed(2)
-                                : ''}
+                              {hasItem ? Number(line.gross_amount || 0).toFixed(2) : ''}
                             </td>
 
                             {/* 8. Packing */}
@@ -7649,9 +8052,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                             {/* 13. Taxable */}
                             <td className={`border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('taxable')}`}>
-                              {line.item_id && line.taxable_amount > 0
-                                ? line.taxable_amount.toFixed(2)
-                                : ''}
+                              {hasItem ? Number(line.taxable_amount || 0).toFixed(2) : ''}
                             </td>
 
                             {/* 14. Line Total */}
@@ -9237,8 +9638,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 const nextLooseRate = l.is_loose_rate_manual
                   ? Number(l.loose_rate || 0)
                   : round2(nextRate / upp);
-                const qty = Math.max(0, round2(Number(l.quantity) || 0));
-                const looseQty = Math.max(0, round2(Number(l.loose_quantity) || 0));
+                const qty = round2(parseSignedNumeric(l.quantity));
+                const looseQty = round2(parseSignedNumeric(l.loose_quantity));
                 const gross = round2(qty * nextRate + looseQty * nextLooseRate);
                 const discPct = Math.max(0, round2(Number(l.discount_percent) || 0));
                 const discAmt = round2(gross * (discPct / 100));
