@@ -32,6 +32,7 @@ import {
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { NavTabId } from '../layout/Sidebar';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 import { formatAppDate, formatAppDateTime } from '../../utils/formatters';
@@ -808,6 +809,23 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             <div className="flex flex-wrap items-center gap-2">
               {canExportClosing && (
                 <>
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={printContainerRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: `Daily Closing Report - ${formatAppDate(dailyDate)}`,
+                      documentDate: dailyDate,
+                      customerName: `Daily Closing Report`,
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
                   <button
                     onClick={() => handlePrintActiveSection(`Daily Closing Report - ${formatAppDate(dailyDate)}`, 'portrait')}
                     className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
@@ -1133,6 +1151,23 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             <div className="flex flex-wrap items-center gap-2">
               {canExportClosing && (
                 <>
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={printContainerRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: `Monthly Closing Report (${selectedMonth})`,
+                      documentDate: monthlyEnd,
+                      customerName: `Monthly Financial Closing Report`,
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
                   <button
                     onClick={() =>
                       handlePrintActiveSection(
@@ -1707,6 +1742,23 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             <div className="flex items-center gap-2">
               {canExportClosing && (
                 <>
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={printContainerRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: `Annual Closing Report (${formatAppDate(fyStartDate)} to ${formatAppDate(fyEndDate)})`,
+                      documentDate: fyEndDate,
+                      customerName: `Annual Financial Year Closing`,
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
                   <button
                     onClick={() =>
                       handlePrintActiveSection(
@@ -2091,6 +2143,23 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
               />
               {canExportClosing && (
                 <>
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={printContainerRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: `Stock Closing Report (${formatAppDate(stockEnd)})`,
+                      documentDate: stockEnd,
+                      customerName: `Stock Closing & Valuation Report`,
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
                   <button
                     onClick={() =>
                       handlePrintActiveSection(
@@ -2354,6 +2423,23 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
             </div>
 
             <div className="flex items-center gap-2">
+              <WhatsAppSendButton
+                label="Send to WhatsApp"
+                allowWithoutPhone
+                skipDuplicateCheck
+                printElementRef={printContainerRef}
+                paperSize="a4"
+                orientation="landscape"
+                payload={{
+                  documentType: 'report',
+                  documentNumber: 'Financial Closing History Register',
+                  documentDate: new Date().toISOString().slice(0, 10),
+                  customerName: 'Financial Closing History Register',
+                  totalAmount: 0,
+                  paidAmount: 0,
+                  remainingBalance: 0,
+                }}
+              />
               <button
                 onClick={() => handlePrintActiveSection('Financial Closing History Register', 'landscape')}
                 className="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
@@ -2675,6 +2761,23 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
               </div>
 
               <div className="flex items-center gap-2">
+                <WhatsAppSendButton
+                  label="Send to WhatsApp"
+                  allowWithoutPhone
+                  skipDuplicateCheck
+                  printElementRef={modalPrintRef}
+                  paperSize="a4"
+                  orientation="portrait"
+                  payload={{
+                    documentType: 'report',
+                    documentNumber: `${selectedClosingDetail.closing_code} - ${selectedClosingDetail.closing_type} Closing Report`,
+                    documentDate: new Date().toISOString().slice(0, 10),
+                    customerName: `${selectedClosingDetail.closing_code} Closing Report`,
+                    totalAmount: 0,
+                    paidAmount: 0,
+                    remainingBalance: 0,
+                  }}
+                />
                 <button
                   onClick={() =>
                     handlePrintModalReport(

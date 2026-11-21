@@ -24,6 +24,8 @@
     "drizzle-orm": "^0.45.4",
     "express": "^4.21.2",
     "firebase": "^13.3.0",
+    "html2canvas-pro": "^2.6.4",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "nodemailer": "^10.5.0",

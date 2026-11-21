@@ -3,6 +3,7 @@ import { Printer, Receipt, FileText, X, ClipboardList, AlertCircle } from 'lucid
 import { DatasheetRow, FastSearchItem } from '../../types/sales';
 import { api } from '../../services/api';
 import { executePrintElement, buildInvoicePdfTitle } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
@@ -400,6 +401,31 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
               <Receipt className="w-3.5 h-3.5" />
               <span>Print Thermal</span>
             </button>
+
+            {/* Send to WhatsApp (Direct PDF matching active A4 or 80mm Thermal layout) */}
+            <WhatsAppSendButton
+              disabled={!dsrData.hasItems}
+              label="Send to WhatsApp"
+              allowWithoutPhone
+              skipDuplicateCheck
+              getPrintElement={() =>
+                activeLayout === 'thermal' ? thermalPrintRef.current : a4PrintRef.current
+              }
+              paperSize={activeLayout === 'thermal' ? '80mm' : 'a4'}
+              orientation="portrait"
+              fixedThermalHeightMm={activeLayout === 'thermal' ? 297 : undefined}
+              pdfFilename={`DSR_${pdfDocumentTitle}.pdf`}
+              payload={{
+                documentType: 'report',
+                documentNumber: `DSR-${displayInvoiceNumber}`,
+                documentDate: displayInvoiceDate,
+                customerName: `DSR - ${displayCustomerName}`,
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+                extraNotes: `Daily Stock Requisition (${activeLayout === 'thermal' ? '80mm Thermal' : 'A4'}) — ${dsrData.totalItems} item(s)`,
+              }}
+            />
 
             {/* 3. Close */}
             <button

@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import { Printer, X, Columns, FileText, Filter } from 'lucide-react';
 import type { OrderFormPrintLayout } from '../../types/supply';
 import { executePrintElement } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 
@@ -291,6 +292,30 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
               compact
               showPageNav
               showFullScreenButton
+            />
+
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={printAreaRef}
+              paperSize={
+                paperSize === 'thermal-80'
+                  ? '80mm'
+                  : paperSize === 'thermal-58'
+                  ? '58mm'
+                  : 'a4'
+              }
+              orientation="portrait"
+              payload={{
+                documentType: 'report',
+                documentNumber: title,
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName: title,
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
             />
 
             <button

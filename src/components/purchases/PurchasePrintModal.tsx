@@ -51,6 +51,7 @@ import {
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { formatAppDate } from '../../utils/formatters';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 
 interface PurchasePrintModalProps {
   isOpen?: boolean;
@@ -986,6 +987,27 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
               <Info className="w-3.5 h-3.5" />
               <span>Printer Info</span>
             </button>
+
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              printElementRef={printAreaRef}
+              paperSize={activePaperSize}
+              orientation={isThermalLayout ? 'portrait' : activeOrientation}
+              pdfFilename={`${pdfDocumentTitle}.pdf`}
+              skipDuplicateCheck
+              payload={{
+                storeName: settings?.store_name || 'ABRAR MEDICAL STORE',
+                documentType: 'invoice',
+                documentNumber: String(resolvedDocNumber),
+                documentDate: String(resolvedDocDate || ''),
+                customerAccountId: doc.supplier_account_id ? Number(doc.supplier_account_id) : null,
+                customerName: resolvedPartyName,
+                customerPhone: String(doc.supplier_phone || doc.phone || ''),
+                totalAmount: Number(doc.net_amount ?? doc.total_amount ?? 0),
+                paidAmount: Number(doc.paid_amount ?? 0),
+                remainingBalance: Number(doc.balance_amount ?? 0),
+              }}
+            />
 
             <button
               type="button"

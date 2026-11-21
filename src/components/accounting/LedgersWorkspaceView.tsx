@@ -352,15 +352,20 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {activeTab === 'customer' && ledger?.account && (
+          {ledger?.account && (
             <WhatsAppSendButton
-              label="Send Ledger via WhatsApp"
+              label="Send to WhatsApp"
+              printElementRef={printableAreaRef}
+              paperSize="a4"
+              orientation="portrait"
+              allowWithoutPhone={activeTab !== 'customer' && activeTab !== 'supplier'}
+              skipDuplicateCheck
               payload={{
                 documentType: 'ledger',
-                documentNumber: `LEDGER-${ledger.account.account_code || ledger.account.id}`,
+                documentNumber: `${activeTab.toUpperCase()}-LEDGER-${ledger.account.account_code || ledger.account.id}`,
                 documentDate: endDate || new Date().toISOString().slice(0, 10),
                 customerAccountId: Number(ledger.account.id),
-                customerName: String(ledger.account.account_name || 'Customer'),
+                customerName: String(ledger.account.account_name || 'Account'),
                 customerPhone: String(ledger.account.phone || ''),
                 totalAmount: Number(ledger.totalDebit || 0),
                 paidAmount: Number(ledger.totalCredit || 0),

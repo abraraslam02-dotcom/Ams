@@ -13,6 +13,7 @@ import { StockLedgerEntry, ReportMetaItem } from '../../types/inventory';
 import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const StockLedgerView: React.FC = () => {
@@ -249,6 +250,24 @@ export const StockLedgerView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2">
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              disabled={ledger.length === 0 && !fromDate}
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={ledgerPrintRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'ledger',
+                documentNumber: `Item Stock Log (${selectedItemObj ? selectedItemObj.item_name : 'All Items'})`,
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName: selectedItemObj ? selectedItemObj.item_name : 'Item Stock Ledger',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
             <button
               type="button"
               onClick={() => {

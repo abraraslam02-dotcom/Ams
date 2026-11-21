@@ -469,6 +469,23 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                 <RotateCcw className="w-3.5 h-3.5" />
                 Reset
               </button>
+              <WhatsAppSendButton
+                label="Send to WhatsApp"
+                allowWithoutPhone
+                skipDuplicateCheck
+                printElementRef={salesReportPrintRef}
+                paperSize="a4"
+                orientation="portrait"
+                payload={{
+                  documentType: 'report',
+                  documentNumber: reportTabs.find((t) => t.id === reportKey)?.label || 'Sales Report',
+                  documentDate: endDate || new Date().toISOString().slice(0, 10),
+                  customerName: reportTabs.find((t) => t.id === reportKey)?.label || 'Sales Report',
+                  totalAmount: 0,
+                  paidAmount: 0,
+                  remainingBalance: 0,
+                }}
+              />
               <button
                 type="button"
                 onClick={handlePrint}

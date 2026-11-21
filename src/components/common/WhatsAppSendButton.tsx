@@ -1,7 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { MessageCircle, CheckCircle2, AlertTriangle, RotateCcw, Send, X, Phone } from 'lucide-react';
+import {
+  MessageCircle,
+  CheckCircle2,
+  AlertTriangle,
+  RotateCcw,
+  Send,
+  X,
+  Phone,
+  ExternalLink,
+} from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
+import { PageOrientationOption, PaperSizeOption } from '../../utils/printEngine';
 import {
   normalizeWhatsAppNumber,
   shareOrOpenWhatsAppPhase1,
@@ -16,6 +26,24 @@ export interface WhatsAppSendButtonProps {
   autoTriggerKey?: string | number | null;
   onPhoneSaved?: (newPhone: string) => void;
   onSendSuccess?: () => void;
+  /** Printable DOM ref to render into a real PDF matching the current print layout */
+  printElementRef?: React.RefObject<HTMLElement | null>;
+  /** Optional getter for printable DOM element (useful when layout switches dynamically) */
+  getPrintElement?: () => HTMLElement | null;
+  /** Paper size matching the report/invoice print layout */
+  paperSize?: PaperSizeOption;
+  /** Orientation matching the report/invoice print layout */
+  orientation?: PageOrientationOption;
+  /** Optional fixed thermal height in mm (e.g. DSR thermal 297mm) */
+  fixedThermalHeightMm?: number;
+  /** Optional explicit PDF filename */
+  pdfFilename?: string;
+  /** Allow sharing general store reports/statements directly without requiring a customer mobile number */
+  allowWithoutPhone?: boolean;
+  /** Skip duplicate confirmation modal (useful for general filterable reports) */
+  skipDuplicateCheck?: boolean;
+  /** Optional disabled flag */
+  disabled?: boolean;
 }
 
 export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
@@ -26,18 +54,35 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
   autoTriggerKey = null,
   onPhoneSaved,
   onSendSuccess,
+  printElementRef,
+  getPrintElement,
+  paperSize,
+  orientation,
+  fixedThermalHeightMm,
+  pdfFilename,
+  allowWithoutPhone = false,
+  skipDuplicateCheck = false,
+  disabled = false,
 }) => {
   const { hasPermission } = useAuth();
   const canSend =
+    allowWithoutPhone ||
     hasPermission('sales', 'export') ||
     hasPermission('sales', 'create') ||
-    hasPermission('sales', 'view');
+    hasPermission('sales', 'view') ||
+    hasPermission('purchases', 'view') ||
+    hasPermission('accounting', 'view') ||
+    hasPermission('inventory', 'view');
 
   const [savedPhone, setSavedPhone] = useState<string>(payload.customerPhone || '');
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'Sent' | 'Failed'>('idle');
   const [previouslySent, setPreviouslySent] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [cloudConfigured, setCloudConfigured] = useState<boolean>(false);
+  const [desktopNotice, setDesktopNotice] = useState<{
+    filename: string;
+    webFallbackUrl: string;
+  } | null>(null);
 
   // Modals for one-time phone entry or duplicate send confirmation
   const [showPhoneModal, setShowPhoneModal] = useState<boolean>(false);
@@ -53,10 +98,10 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
     setSavedPhone(payload.customerPhone || '');
   }, [payload.customerPhone, payload.customerAccountId, payload.documentNumber]);
 
-  // Check existing whatsapp_log status for this invoice/document:
-  // Only surface Failed notifications so completed activities never show stale notifications after refresh/reopen
+  // Check existing whatsapp_log status for party documents (skip for general reports)
   useEffect(() => {
-    if (!canSend || (!payload.invoiceId && !payload.documentNumber)) return;
+    if (!canSend || allowWithoutPhone || skipDuplicateCheck) return;
+    if (!payload.invoiceId && !payload.documentNumber) return;
     let mounted = true;
     api
       .getWhatsAppLogs({
@@ -94,16 +139,25 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
     return () => {
       mounted = false;
     };
-  }, [canSend, payload.invoiceId, payload.documentNumber]);
+  }, [canSend, allowWithoutPhone, skipDuplicateCheck, payload.invoiceId, payload.documentNumber]);
 
   // Automatically dismiss transient 'Sent' badge after completion so no manual dismissal is needed
   useEffect(() => {
     if (sendStatus !== 'Sent') return;
     const timer = window.setTimeout(() => {
       setSendStatus('idle');
-    }, 1200);
+    }, 1500);
     return () => window.clearTimeout(timer);
   }, [sendStatus]);
+
+  // Auto-dismiss desktop fallback notice after 8 seconds
+  useEffect(() => {
+    if (!desktopNotice) return;
+    const timer = window.setTimeout(() => {
+      setDesktopNotice(null);
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [desktopNotice]);
 
   // Manual send only: never auto-trigger WhatsApp on save/update/modify
   useEffect(() => {
@@ -119,20 +173,28 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
     Number(payload.customerAccountId) <= 0 ||
     payload.customerName.toLowerCase().includes('walk-in');
 
+  const resolvePrintElement = (): HTMLElement | null => {
+    if (typeof getPrintElement === 'function') {
+      return getPrintElement();
+    }
+    return printElementRef?.current || null;
+  };
+
   const executeSendWithNumber = async (
-    normalizedNumber: string,
+    normalizedNumber: string | null,
     rawPhoneUsed: string,
     mode: 'phase1' | 'phase2'
   ) => {
     setSendStatus('sending');
     setErrorMessage(null);
+    setDesktopNotice(null);
 
     const enrichedPayload: WhatsAppDocumentPayload = {
       ...payload,
-      customerPhone: rawPhoneUsed || normalizedNumber,
+      customerPhone: rawPhoneUsed || normalizedNumber || payload.customerPhone || '',
     };
 
-    if (mode === 'phase2') {
+    if (mode === 'phase2' && normalizedNumber) {
       try {
         const res = await api.sendWhatsAppCloudApi({
           invoiceId: payload.invoiceId || null,
@@ -161,23 +223,51 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
       return;
     }
 
-    // Phase 1 (Free: wa.me + PDF Share/Download)
+    // Direct PDF generation from print layout + Native OS File Share or WhatsApp Desktop protocol
     try {
-      await shareOrOpenWhatsAppPhase1(normalizedNumber, enrichedPayload);
-      await api
-        .logWhatsAppSend({
-          invoiceId: payload.invoiceId || null,
-          documentType: payload.documentType,
-          documentNumber: payload.documentNumber,
-          customerAccountId: payload.customerAccountId || null,
-          customerName: payload.customerName,
-          number: normalizedNumber,
-          mode: 'phase1_wa_me',
-          status: 'Sent',
-        })
-        .catch(() => null);
+      const targetElement = resolvePrintElement();
+      const result = await shareOrOpenWhatsAppPhase1(normalizedNumber, enrichedPayload, {
+        printElement: targetElement,
+        paperSize: paperSize || payload.paperSize || 'a4',
+        orientation: orientation || 'portrait',
+        fixedThermalHeightMm,
+        pdfFilename,
+      });
+
+      if (result.method === 'cancelled') {
+        setSendStatus('idle');
+        return;
+      }
+
+      if (result.method === 'whatsapp_desktop_protocol') {
+        setDesktopNotice({
+          filename: result.filename,
+          webFallbackUrl: result.webFallbackUrl,
+        });
+      }
+
+      if (normalizedNumber) {
+        await api
+          .logWhatsAppSend({
+            invoiceId: payload.invoiceId || null,
+            documentType: payload.documentType,
+            documentNumber: payload.documentNumber,
+            customerAccountId: payload.customerAccountId || null,
+            customerName: payload.customerName,
+            number: normalizedNumber,
+            mode:
+              result.method === 'web_share_file'
+                ? 'phase1_web_share_pdf'
+                : 'phase1_whatsapp_desktop_pdf',
+            status: 'Sent',
+          })
+          .catch(() => null);
+      }
+
       setSendStatus('Sent');
-      setPreviouslySent(true);
+      if (!skipDuplicateCheck && !allowWithoutPhone) {
+        setPreviouslySent(true);
+      }
       setErrorMessage(null);
       onSendSuccess?.();
       window.dispatchEvent(
@@ -189,40 +279,55 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
       const msg = err instanceof Error ? err.message : String(err);
       setSendStatus('Failed');
       setErrorMessage(msg);
-      await api
-        .logWhatsAppSend({
-          invoiceId: payload.invoiceId || null,
-          documentType: payload.documentType,
-          documentNumber: payload.documentNumber,
-          customerAccountId: payload.customerAccountId || null,
-          customerName: payload.customerName,
-          number: normalizedNumber,
-          mode: 'phase1_wa_me',
-          status: 'Failed',
-          error: msg,
-        })
-        .catch(() => null);
+      if (normalizedNumber) {
+        await api
+          .logWhatsAppSend({
+            invoiceId: payload.invoiceId || null,
+            documentType: payload.documentType,
+            documentNumber: payload.documentNumber,
+            customerAccountId: payload.customerAccountId || null,
+            customerName: payload.customerName,
+            number: normalizedNumber,
+            mode: 'phase1_whatsapp_pdf',
+            status: 'Failed',
+            error: msg,
+          })
+          .catch(() => null);
+      }
     }
   };
 
   const handleInitiateSend = (mode: 'phase1' | 'phase2' = 'phase1', bypassDuplicate = false) => {
     setPendingMode(mode);
 
-    // Prevent duplicate sends without confirmation prompt
-    if ((sendStatus === 'Sent' || previouslySent) && !bypassDuplicate) {
+    // Prevent duplicate sends without confirmation prompt (for party invoices/ledgers)
+    if (
+      !skipDuplicateCheck &&
+      !allowWithoutPhone &&
+      (sendStatus === 'Sent' || previouslySent) &&
+      !bypassDuplicate
+    ) {
       setShowDuplicateConfirm(true);
       return;
     }
 
     const normalized = normalizeWhatsAppNumber(savedPhone);
+
+    // For general store reports/statements (or when native OS file share is available without a phone),
+    // share the PDF directly without nagging for a customer mobile number.
+    if (!normalized && allowWithoutPhone && mode === 'phase1') {
+      executeSendWithNumber(null, '', mode);
+      return;
+    }
+
     if (!normalized) {
       setPhoneInput(savedPhone || '');
       setPhoneModalError(
         savedPhone
           ? `Saved number "${savedPhone}" is invalid. Please enter a valid Pakistani mobile number (e.g. 03001234567).`
           : isWalkInCustomer
-          ? 'Walk-in / Cash customer has no saved mobile number. Enter a WhatsApp number for this one-time send:'
-          : `No WhatsApp number is saved for "${payload.customerName}". Enter it once below and it will be saved to their customer record automatically:`
+          ? 'No saved mobile number found. Enter a WhatsApp number for this one-time send, or share directly:'
+          : `No WhatsApp number is saved for "${payload.customerName}". Enter it once below and it will be saved to their account automatically:`
       );
       setShowPhoneModal(true);
       return;
@@ -245,7 +350,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
 
     try {
       setSavingPhone(true);
-      // If linked to a customer account, save it permanently to the customer record
+      // If linked to an account, save it permanently to the account record
       if (!isWalkInCustomer && payload.customerAccountId && payload.customerAccountId > 0) {
         await api.saveCustomerWhatsAppPhone(payload.customerAccountId, phoneInput.trim());
         onPhoneSaved?.(phoneInput.trim());
@@ -262,39 +367,41 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
 
   return (
     <>
-      <div className={`inline-flex items-center gap-1 ${className}`}>
+      <div className={`inline-flex items-center gap-1 print:hidden ${className}`}>
         <button
           type="button"
-          disabled={sendStatus === 'sending'}
+          disabled={disabled || sendStatus === 'sending'}
           onClick={(e) => {
             e.stopPropagation();
             handleInitiateSend('phase1', false);
           }}
           title={
             savedPhone
-              ? `Send via WhatsApp (${normalizeWhatsAppNumber(savedPhone) || savedPhone})`
-              : 'Send via WhatsApp (Prompt for Customer Number)'
+              ? `Send PDF to WhatsApp (${normalizeWhatsAppNumber(savedPhone) || savedPhone})`
+              : allowWithoutPhone
+              ? 'Generate PDF & Send to WhatsApp'
+              : 'Send PDF to WhatsApp'
           }
           className={
             compact
-              ? 'px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs disabled:opacity-50'
-              : 'px-2.5 py-1 rounded bg-green-600 hover:bg-green-500 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs disabled:opacity-50'
+              ? 'px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs disabled:opacity-50 whitespace-nowrap shrink-0'
+              : 'px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:opacity-50 whitespace-nowrap shrink-0'
           }
         >
-          <MessageCircle className="w-3 h-3" />
-          <span>{sendStatus === 'sending' ? 'Sending...' : label}</span>
+          <MessageCircle className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+          <span>{sendStatus === 'sending' ? 'Preparing PDF...' : label}</span>
         </button>
 
-        {cloudConfigured && (
+        {cloudConfigured && !allowWithoutPhone && (
           <button
             type="button"
-            disabled={sendStatus === 'sending'}
+            disabled={disabled || sendStatus === 'sending'}
             onClick={(e) => {
               e.stopPropagation();
               handleInitiateSend('phase2', false);
             }}
             title="Send PDF Directly via WhatsApp Business Cloud API"
-            className="px-1.5 py-1 rounded bg-emerald-800 hover:bg-emerald-700 text-white text-[10px] font-bold inline-flex items-center gap-0.5 cursor-pointer"
+            className="px-1.5 py-1 rounded bg-emerald-800 hover:bg-emerald-700 text-white text-[10px] font-bold inline-flex items-center gap-0.5 cursor-pointer whitespace-nowrap shrink-0"
           >
             <Send className="w-2.5 h-2.5" />
             <span>API</span>
@@ -304,10 +411,10 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
         {sendStatus === 'Sent' && (
           <span
             className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300 text-[9px] font-bold inline-flex items-center gap-0.5"
-            title="WhatsApp message & PDF sent"
+            title="WhatsApp PDF shared"
           >
             <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
-            <span>Sent</span>
+            <span>Shared</span>
           </span>
         )}
 
@@ -335,6 +442,48 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
           </div>
         )}
       </div>
+
+      {/* Non-blocking Desktop Fallback Toast (only shown when OS Web Share with files is unsupported) */}
+      {desktopNotice && (
+        <div
+          className="fixed bottom-4 right-4 z-[70] max-w-sm bg-slate-900 text-white border border-emerald-500/60 rounded-xl shadow-2xl px-3.5 py-2.5 text-xs print:hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold text-emerald-300">
+                  WhatsApp Opened &amp; PDF Ready
+                </div>
+                <p className="text-[11px] text-slate-200 leading-snug">
+                  PDF <span className="font-mono text-white">{desktopNotice.filename}</span> saved
+                  for WhatsApp. Attach it directly in the opened WhatsApp chat.
+                </p>
+                <div className="pt-0.5 flex items-center gap-2">
+                  <a
+                    href={desktopNotice.webFallbackUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-300 hover:text-sky-200 underline"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    <span>Open WhatsApp Web instead</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDesktopNotice(null)}
+              className="text-slate-400 hover:text-white cursor-pointer"
+              title="Dismiss"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Duplicate Send Confirmation Modal */}
       {showDuplicateConfirm && (
@@ -391,7 +540,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
         </div>
       )}
 
-      {/* One-Time Phone Entry & Save Modal (when customer phone is missing or invalid) */}
+      {/* One-Time Phone Entry & Save Modal (when party phone is missing or invalid) */}
       {showPhoneModal && (
         <div
           className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4 print:hidden"
@@ -407,7 +556,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
                 <Phone className="w-3.5 h-3.5 text-green-400" />
                 <span>
                   {isWalkInCustomer
-                    ? 'Walk-in Customer WhatsApp Number'
+                    ? 'WhatsApp Recipient Number'
                     : `Save WhatsApp Number — ${payload.customerName}`}
                 </span>
               </div>
@@ -429,7 +578,7 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
 
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  Customer Mobile / WhatsApp Number (Pakistan):
+                  Mobile / WhatsApp Number (Pakistan):
                 </label>
                 <input
                   type="text"
@@ -448,28 +597,41 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setShowPhoneModal(false)}
-                  className="px-3 py-1.5 rounded border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer"
+                  onClick={() => {
+                    setShowPhoneModal(false);
+                    executeSendWithNumber(null, '', 'phase1');
+                  }}
+                  className="px-2.5 py-1.5 rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold cursor-pointer"
+                  title="Share PDF directly and pick contact inside WhatsApp"
                 >
-                  Cancel
+                  Pick in WhatsApp
                 </button>
-                <button
-                  type="submit"
-                  disabled={savingPhone}
-                  className="px-3.5 py-1.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                >
-                  <MessageCircle className="w-3.5 h-3.5" />
-                  <span>
-                    {savingPhone
-                      ? 'Saving...'
-                      : isWalkInCustomer
-                      ? 'Send via WhatsApp'
-                      : 'Save to Customer & Send'}
-                  </span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPhoneModal(false)}
+                    className="px-3 py-1.5 rounded border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingPhone}
+                    className="px-3.5 py-1.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>
+                      {savingPhone
+                        ? 'Saving...'
+                        : isWalkInCustomer
+                        ? 'Send via WhatsApp'
+                        : 'Save & Send'}
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
           </form>

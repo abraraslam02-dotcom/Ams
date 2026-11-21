@@ -23,6 +23,7 @@ import { api } from '../../services/api';
 import { formatPKR, formatPKTDateTime } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
@@ -759,6 +760,23 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
               <Eye className="w-3.5 h-3.5" />
               Print Preview
             </button>
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={printContainerRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'report',
+                documentNumber: `Top Performance Report (${rankingTitleBadge})`,
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName: `Top Performance & Overall Report (${rankingTitleBadge})`,
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
             <button
               type="button"
               onClick={handlePrint}
@@ -1707,6 +1725,23 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <WhatsAppSendButton
+                  label="Send to WhatsApp"
+                  allowWithoutPhone
+                  skipDuplicateCheck
+                  printElementRef={printContainerRef}
+                  paperSize="a4"
+                  orientation="portrait"
+                  payload={{
+                    documentType: 'report',
+                    documentNumber: `Top Performance Report (${rankingTitleBadge})`,
+                    documentDate: new Date().toISOString().slice(0, 10),
+                    customerName: `Top Performance & Overall Report (${rankingTitleBadge})`,
+                    totalAmount: 0,
+                    paidAmount: 0,
+                    remainingBalance: 0,
+                  }}
+                />
                 <button
                   type="button"
                   onClick={handlePrint}

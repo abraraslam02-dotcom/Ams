@@ -21,6 +21,7 @@ import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface ExpiryManagementViewProps {
@@ -237,6 +238,24 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
             <Sliders className="w-3.5 h-3.5" />
             <span>Configure Alert Window</span>
           </button>
+          <WhatsAppSendButton
+            label="Send to WhatsApp"
+            disabled={data.length === 0}
+            allowWithoutPhone
+            skipDuplicateCheck
+            printElementRef={expiryPrintRef}
+            paperSize="a4"
+            orientation="portrait"
+            payload={{
+              documentType: 'report',
+              documentNumber: 'Expiry & Quarantine Report',
+              documentDate: new Date().toISOString().slice(0, 10),
+              customerName: 'Expiry & Quarantine Report',
+              totalAmount: 0,
+              paidAmount: 0,
+              remainingBalance: 0,
+            }}
+          />
           <button
             onClick={() => {
               if (expiryPrintRef.current) {

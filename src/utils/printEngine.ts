@@ -86,13 +86,13 @@ export const PRINT_CONFIGURATION_PROFILES: Record<
     label: '80mm Thermal Receipt (80mm × 297)',
     paperSize: '80mm',
     widthMm: 80,
-    heightMm: '297',
+    heightMm: 297,
     defaultMargin: 'none',
     defaultOrientation: 'portrait',
-    pageSizeCss: () => '80mm 297',
+    pageSizeCss: () => '80mm 297mm',
     printableWidthCss: () => '76mm',
     previewWidthCss: () => '80mm',
-    previewMinHeightCss: () => '297',
+    previewMinHeightCss: () => '297mm',
     isThermal: true,
   },
   'thermal-58mm': {
@@ -100,13 +100,13 @@ export const PRINT_CONFIGURATION_PROFILES: Record<
     label: '58mm Thermal Receipt (58mm × 297)',
     paperSize: '58mm',
     widthMm: 58,
-    heightMm: '297',
+    heightMm: 297,
     defaultMargin: 'none',
     defaultOrientation: 'portrait',
-    pageSizeCss: () => '58mm 297',
+    pageSizeCss: () => '58mm 297mm',
     printableWidthCss: () => '54mm',
     previewWidthCss: () => '58mm',
-    previewMinHeightCss: () => '297',
+    previewMinHeightCss: () => '297mm',
     isThermal: true,
   },
 };
@@ -132,6 +132,7 @@ export interface PrintJobConfig {
   copies?: number;
   selectedPrinter?: string;
   showPageNumbers?: boolean;
+  fixedThermalHeightMm?: number;
 }
 
 export interface BrowserPrintCapabilities {
@@ -276,17 +277,21 @@ export function executePrintElement(element: HTMLElement | null, config: PrintJo
   const marginMm = getMarginMm(paperSize, isThermal ? 'none' : config.margin || 'standard');
   const zoomPercent = getFontZoomPercent(config.fontSizeScale || 'normal');
   const thermalPaperWidthCss = paperSize === '58mm' ? '58mm' : '80mm';
-const thermalContentHeightMm = isThermal && element
-  ? Math.max(50, Math.ceil(element.scrollHeight * 25.4 / 96 + 5))
-  : 297;
+  const thermalContentHeightMm = isThermal
+    ? typeof config.fixedThermalHeightMm === 'number' && config.fixedThermalHeightMm > 0
+      ? config.fixedThermalHeightMm
+      : element
+      ? Math.max(50, Math.ceil((element.scrollHeight * 25.4) / 96 + 5))
+      : 297
+    : 297;
   const pageSizeCss =
-  paperSize === '80mm'
-    ? `80mm ${thermalContentHeightMm}mm`
-    : paperSize === '58mm'
-    ? `58mm ${thermalContentHeightMm}mm`
-    : orientation === 'landscape'
-    ? '297mm 210mm'
-    : '210mm 297mm';
+    paperSize === '80mm'
+      ? `80mm ${thermalContentHeightMm}mm`
+      : paperSize === '58mm'
+      ? `58mm ${thermalContentHeightMm}mm`
+      : orientation === 'landscape'
+      ? '297mm 210mm'
+      : '210mm 297mm';
 
   const containerWidthCss =
     paperSize === '80mm'

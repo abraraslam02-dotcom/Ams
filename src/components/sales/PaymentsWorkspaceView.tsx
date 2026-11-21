@@ -6,6 +6,7 @@ import { Banknote, CheckCircle2, AlertCircle, Printer } from 'lucide-react';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface PaymentsWorkspaceViewProps {
@@ -352,23 +353,43 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
         />
         <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between text-xs print:hidden">
           <span className="font-bold text-slate-800">Recent Payment & Receipt Vouchers</span>
-          <button
-            type="button"
-            onClick={() => {
-              if (paymentsPrintRef.current) {
-                printReportDocument(
-                  paymentsPrintRef.current,
-                  'Abrar Medical Store - Payments and Receipts Register'
-                );
-              } else {
-                window.print();
-              }
-            }}
-            className="px-2.5 py-1 rounded bg-slate-900 text-white font-bold flex items-center gap-1 cursor-pointer"
-          >
-            <Printer className="w-3 h-3" />
-            Print Register
-          </button>
+          <div className="flex items-center gap-2">
+            <WhatsAppSendButton
+              compact
+              label="Send to WhatsApp"
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={paymentsPrintRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'report',
+                documentNumber: 'Payments and Receipts Register',
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName: 'Payments & Receipts Register',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                if (paymentsPrintRef.current) {
+                  printReportDocument(
+                    paymentsPrintRef.current,
+                    'Abrar Medical Store - Payments and Receipts Register'
+                  );
+                } else {
+                  window.print();
+                }
+              }}
+              className="px-2.5 py-1 rounded bg-slate-900 text-white font-bold flex items-center gap-1 cursor-pointer"
+            >
+              <Printer className="w-3 h-3" />
+              Print Register
+            </button>
+          </div>
         </div>
 
         <table className="w-full text-left border-collapse text-xs">

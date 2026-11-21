@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import {
   Gift,
@@ -26,6 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { formatAppDate, formatAppDateTime, replaceIsoDatesInText } from '../../utils/formatters';
 
 export type OfferWorkspaceSubTab =
@@ -70,6 +71,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
   const [townsList, setTownsList] = useState<Array<Record<string, any>>>([]);
   const [salesmenList, setSalesmenList] = useState<Array<Record<string, any>>>([]);
   const [companiesList, setCompaniesList] = useState<string[]>([]);
+  const offerReportPrintRef = useRef<HTMLDivElement | null>(null);
 
   // Trade Offers state
   const [offers, setOffers] = useState<Array<Record<string, any>>>([]);
@@ -1842,6 +1844,33 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                   <FileSpreadsheet className="w-3.5 h-3.5" />
                   Excel
                 </button>
+                <WhatsAppSendButton
+                  label="WhatsApp"
+                  allowWithoutPhone
+                  skipDuplicateCheck
+                  printElementRef={offerReportPrintRef}
+                  paperSize={
+                    printMode === 'THERMAL_80'
+                      ? '80mm'
+                      : printMode === 'THERMAL_58'
+                      ? '58mm'
+                      : 'a4'
+                  }
+                  orientation="portrait"
+                  payload={{
+                    documentType: 'report',
+                    documentNumber:
+                      OFFER_REPORTS_LIST.find((r) => r.key === activeReportKey)?.label ||
+                      'Offer & Discount Report',
+                    documentDate: new Date().toISOString().slice(0, 10),
+                    customerName:
+                      OFFER_REPORTS_LIST.find((r) => r.key === activeReportKey)?.label ||
+                      'Offer & Discount Report',
+                    totalAmount: 0,
+                    paidAmount: 0,
+                    remainingBalance: 0,
+                  }}
+                />
                 <button
                   type="button"
                   onClick={() => window.print()}
@@ -1861,6 +1890,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
             paperHeightMm={printMode === 'A4' ? 355.6 : 260}
           >
           <div
+            ref={offerReportPrintRef}
             className={`bg-white rounded-2xl border border-slate-200 p-5 shadow-xs mx-auto ${
               printMode === 'THERMAL_80'
                 ? 'max-w-[310px] text-[10px]'

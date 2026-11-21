@@ -22,6 +22,7 @@ import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatter
 import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface PurchaseReportsPanelProps {
@@ -272,6 +273,23 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             <span>Refresh</span>
           </button>
+          <WhatsAppSendButton
+            label="Send to WhatsApp"
+            allowWithoutPhone
+            skipDuplicateCheck
+            printElementRef={purchaseReportPrintRef}
+            paperSize="a4"
+            orientation="portrait"
+            payload={{
+              documentType: 'report',
+              documentNumber: activeTabInfo.label,
+              documentDate: new Date().toISOString().slice(0, 10),
+              customerName: activeTabInfo.label,
+              totalAmount: 0,
+              paidAmount: 0,
+              remainingBalance: 0,
+            }}
+          />
           <button
             type="button"
             onClick={() => {

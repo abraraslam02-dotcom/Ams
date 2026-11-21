@@ -15,6 +15,7 @@ import { api } from '../../services/api';
 import { FinancialReportKey } from '../../types/accounting';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 import { formatAppDate, formatDateRange } from '../../utils/formatters';
 
@@ -184,6 +185,25 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
               <Download className="w-3.5 h-3.5" />
               Export Excel/CSV
             </button>
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={reportPrintRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'statement',
+                documentNumber:
+                  REPORT_TABS.find((t) => t.key === activeReport)?.label || 'Financial Statement',
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName:
+                  REPORT_TABS.find((t) => t.key === activeReport)?.label || 'Financial Statement',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
             <button
               type="button"
               onClick={() => {

@@ -18,6 +18,7 @@ import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 type ViewMode = 'item-stock-report' | 'consolidated-summary';
@@ -364,6 +365,26 @@ export const CurrentStockView: React.FC = () => {
               </button>
             </div>
 
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              disabled={activeTotalCount === 0}
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={stockPrintRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'report',
+                documentNumber:
+                  viewMode === 'item-stock-report' ? 'Item Stock Report' : 'Current Stock Valuation',
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName:
+                  viewMode === 'item-stock-report' ? 'Item Stock Report' : 'Current Stock Valuation',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
             <button
               type="button"
               onClick={() => {

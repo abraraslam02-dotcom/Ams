@@ -40,6 +40,12 @@ import {
 } from '../../types/cashBook';
 import { formatPKR, formatPKTDate, formatAppDate } from '../../utils/formatters';
 import { executePrintElement } from '../../utils/printEngine';
+import { normalizeWhatsAppNumber } from '../../utils/whatsapp';
+import {
+  buildReportPdfFilename,
+  generatePdfFromPrintElement,
+  sharePdfFileViaWhatsApp,
+} from '../../utils/whatsappPdfShare';
 
 interface CashBookModuleViewProps {
   onNavigateToCustomerLedger?: (customerId: number) => void;
@@ -601,24 +607,24 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
     }, 100);
   };
 
-  // WhatsApp Share Modal
+  // WhatsApp Share Modal (also mounts printable voucher layout for real PDF generation)
   const handleOpenWhatsApp = (v: any) => {
+    setPrintVoucher(v);
     setWhatsAppModalVoucher(v);
     const head = (accountsData?.allAccounts || []).find((a) => a.id === v.head_account_id);
     setWhatsAppPhone(head?.phone || '');
   };
 
-  const handleSendWhatsApp = () => {
+  const handleSendWhatsApp = async () => {
     if (!whatsAppModalVoucher) return;
     const v = whatsAppModalVoucher;
-    const cleanPhone = whatsAppPhone.replace(/[^0-9]/g, '');
-    const phoneParam = cleanPhone ? (cleanPhone.startsWith('92') ? cleanPhone : `92${cleanPhone.replace(/^0/, '')}`) : '';
+    const normalizedPhone = normalizeWhatsAppNumber(whatsAppPhone);
 
-    const text = encodeURIComponent(
+    const message =
       `*ABRAR MEDICAL STORE*\n` +
       `*Cash Book Voucher #${v.voucher_number}*\n` +
       `--------------------------------\n` +
-      `Date: ${formatPKTDate(v.voucher_date)}\n` +
+      `Date: ${formatAppDate(v.voucher_date)}\n` +
       `Type: ${v.transaction_type} (${v.category.replace(/_/g, ' ').toUpperCase()})\n` +
       `Account: ${v.head_account_name}\n` +
       `Cash/Bank: ${v.cash_bank_account_name}\n` +
@@ -626,11 +632,31 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
       (v.narration ? `Details: ${v.narration}\n` : '') +
       `--------------------------------\n` +
       `Thank you for your business!\n` +
-      `Abrar Medical Store, Main Bazar`
-    );
+      `Abrar Medical Store, Main Bazar`;
 
-    const url = phoneParam ? `https://wa.me/${phoneParam}?text=${text}` : `https://wa.me/?text=${text}`;
-    window.open(url, '_blank');
+    try {
+      const filename = buildReportPdfFilename(
+        `Cash_Voucher_${v.voucher_number}`,
+        v.voucher_date
+      );
+      if (printableElementRef.current) {
+        const { file, blob } = await generatePdfFromPrintElement(printableElementRef.current, {
+          filename,
+          paperSize: 'a4',
+          orientation: 'portrait',
+        });
+        await sharePdfFileViaWhatsApp({
+          file,
+          blob,
+          filename,
+          title: `Cash Book Voucher #${v.voucher_number}`,
+          message,
+          normalizedPhone,
+        });
+      }
+    } catch {
+      // ignore error
+    }
     setWhatsAppModalVoucher(null);
   };
 

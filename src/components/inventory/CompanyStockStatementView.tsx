@@ -14,6 +14,7 @@ import { StockStatementResponse } from '../../types/inventory';
 import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const CompanyStockStatementView: React.FC = () => {
@@ -210,6 +211,25 @@ export const CompanyStockStatementView: React.FC = () => {
               {printPreviewMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
               <span>{printPreviewMode ? 'Exit Preview' : 'Print Preview'}</span>
             </button>
+
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              disabled={!statement || statement.companies.length === 0}
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={printRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'statement',
+                documentNumber: 'Company Stock Statement',
+                documentDate: toDate || new Date().toISOString().slice(0, 10),
+                customerName: 'Company-wise Stock Statement',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
 
             <button
               type="button"

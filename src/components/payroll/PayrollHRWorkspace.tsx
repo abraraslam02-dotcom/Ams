@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { authFetch } from '../../services/api';
 import {
@@ -31,6 +31,7 @@ import {
   ArrowUpDown,
 } from 'lucide-react';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { formatAppDate } from '../../utils/formatters';
 
 export type PayrollTabId =
@@ -156,6 +157,8 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
 
   const [loading, setLoading] = useState<boolean>(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const salarySlipPrintRef = useRef<HTMLDivElement | null>(null);
+  const hrReportPrintRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!notice || notice.type !== 'success') return;
@@ -3477,6 +3480,24 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
 
             {salarySlipData && (
               <div className="flex items-center gap-2">
+                <WhatsAppSendButton
+                  label="Send to WhatsApp"
+                  allowWithoutPhone
+                  skipDuplicateCheck
+                  printElementRef={salarySlipPrintRef}
+                  paperSize="a4"
+                  orientation="portrait"
+                  payload={{
+                    documentType: 'statement',
+                    documentNumber: String(salarySlipData.payroll?.payroll_code || 'Salary Slip'),
+                    documentDate: new Date().toISOString().slice(0, 10),
+                    customerName: String(salarySlipData.payroll?.full_name || 'Employee Salary Slip'),
+                    customerPhone: String(salarySlipData.payroll?.phone || ''),
+                    totalAmount: Number(salarySlipData.payroll?.net_salary || 0),
+                    paidAmount: Number(salarySlipData.payroll?.paid_amount || 0),
+                    remainingBalance: Number(salarySlipData.payroll?.balance_amount || 0),
+                  }}
+                />
                 <button
                   type="button"
                   onClick={() => window.print()}
@@ -3491,7 +3512,10 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
 
           {salarySlipData?.payroll ? (
             <ReportZoomWrapper label="Salary Slip Print Preview Zoom" paperWidthMm={215.9} paperHeightMm={355.6}>
-            <div className="bg-white rounded-2xl border border-slate-300 shadow-sm max-w-4xl mx-auto p-8 print:shadow-none print:border-0 print:p-2 space-y-6">
+            <div
+              ref={salarySlipPrintRef}
+              className="bg-white rounded-2xl border border-slate-300 shadow-sm max-w-4xl mx-auto p-8 print:shadow-none print:border-0 print:p-2 space-y-6"
+            >
               {/* Store Header */}
               <div className="border-b-2 border-slate-900 pb-4 flex items-start justify-between">
                 <div>
@@ -3749,6 +3773,23 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                     <Download className="w-3.5 h-3.5" />
                     <span>Export Excel (.xlsx)</span>
                   </button>
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={hrReportPrintRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: String(reportData?.title || 'Payroll & HR Report'),
+                      documentDate: new Date().toISOString().slice(0, 10),
+                      customerName: String(reportData?.title || 'Payroll & HR Report'),
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
                   <button
                     type="button"
                     onClick={() => window.print()}
@@ -3809,7 +3850,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
 
             {/* Summary Strip */}
             <ReportZoomWrapper label="Payroll & HR Report Preview Zoom">
-            <div className="space-y-3">
+            <div ref={hrReportPrintRef} className="space-y-3">
             {reportData?.summary && Object.keys(reportData.summary).length > 0 && (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 {Object.entries(reportData.summary).map(([k, v]) => (

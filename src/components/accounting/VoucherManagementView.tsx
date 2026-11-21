@@ -22,6 +22,7 @@ import {
 } from '../../types/accounting';
 import { NumericInput } from '../common/NumericInput';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 import { formatAppDate } from '../../utils/formatters';
 
@@ -1049,6 +1050,23 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
                 Print Preview — {printVoucher.voucher_number}
               </span>
               <div className="flex items-center gap-2">
+                <WhatsAppSendButton
+                  label="Send to WhatsApp"
+                  allowWithoutPhone
+                  skipDuplicateCheck
+                  printElementRef={voucherSheetRef}
+                  paperSize="a4"
+                  orientation="portrait"
+                  payload={{
+                    documentType: 'report',
+                    documentNumber: String(printVoucher.voucher_number || 'Voucher'),
+                    documentDate: String(printVoucher.voucher_date || new Date().toISOString().slice(0, 10)),
+                    customerName: String(printVoucher.voucher_number || 'Accounting Voucher'),
+                    totalAmount: Number(printVoucher.total_debit || 0),
+                    paidAmount: 0,
+                    remainingBalance: 0,
+                  }}
+                />
                 <button
                   type="button"
                   onClick={() => {

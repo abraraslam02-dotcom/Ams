@@ -29,7 +29,7 @@ import {
   Clock,
   Download,
   ArrowLeft,
-  MessageSquare,
+  MessageCircle,
   PackageSearch,
   Calculator,
 } from 'lucide-react';
@@ -64,7 +64,6 @@ import { PurchaseReportsPanel } from './PurchaseReportsPanel';
 import { NumericInput } from '../common/NumericInput';
 import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
-import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
 import { VariantPickerModal } from '../common/VariantPickerModal';
@@ -78,6 +77,8 @@ import {
   InvoiceSearchableItem,
 } from '../common/InvoiceRecordSearchInput';
 import { generatePurchaseOrderSmsText } from '../../utils/invoiceSms';
+import { normalizeWhatsAppNumber } from '../../utils/whatsapp';
+import { openWhatsAppDesktopDirect } from '../../utils/whatsappPdfShare';
 import {
   calculateItemPricingFromPurchase,
   calculateLooseRateFromRetail,
@@ -330,9 +331,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // Add New Supplier Modal State
   const [showAddSupplierModal, setShowAddSupplierModal] = useState<boolean>(false);
 
-  // Purchase Order SMS Modal State
-  const [showPurchaseSmsModal, setShowPurchaseSmsModal] = useState<boolean>(false);
-  const [purchaseSmsText, setPurchaseSmsText] = useState<string>('');
   const [storeDisplayName, setStoreDisplayName] = useState<string>('ABRAR MEDICAL STORE');
   const [newSupplierCode, setNewSupplierCode] = useState<string>('SUP-0001');
   const [newSupplierName, setNewSupplierName] = useState<string>('');
@@ -525,7 +523,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     if (!formSuccess) return;
     const timer = window.setTimeout(() => {
       setFormSuccess(null);
-      setShowPurchaseSmsModal(false);
     }, 2200);
     return () => window.clearTimeout(timer);
   }, [formSuccess]);
@@ -3937,7 +3934,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // Export Purchase Invoices to Formatted Multi-Sheet Excel (.xlsx)
   const [exportingExcel, setExportingExcel] = useState<boolean>(false);
 
-  const handleOpenPurchaseOrderSms = async () => {
+  const handleSendPurchaseOrderWhatsApp = async () => {
     setFormError(null);
     const syncedLines = lines.map((l, idx) => {
       const qtyInput =
@@ -3972,8 +3969,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         Boolean(l.item_name?.trim())
     );
     if (activePurchaseLines.length === 0) {
-      setFormError('Please add at least one item in the Purchase Invoice before clicking Send Order SMS.');
+      setFormError(
+        'Please add at least one item in the Purchase Invoice before clicking Send WhatsApp Order.'
+      );
       itemSearchInputRef.current?.focus();
+      return;
+    }
+
+    if (!selectedSupplier) {
+      setFormError('Please select a supplier before clicking Send WhatsApp Order.');
+      supplierSearchInputRef.current?.focus();
+      return;
+    }
+
+    const normalizedSupplierPhone = normalizeWhatsAppNumber(selectedSupplier.phone);
+    if (!normalizedSupplierPhone) {
+      setFormError(
+        `No valid mobile number is saved for supplier "${selectedSupplier.account_name}". Please save a valid mobile number in the supplier account first.`
+      );
       return;
     }
 
@@ -3988,9 +4001,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       // Keep default ABRAR MEDICAL STORE
     }
 
-    const preparedSms = generatePurchaseOrderSmsText(activePurchaseLines, resolvedStore);
-    setPurchaseSmsText(preparedSms);
-    setShowPurchaseSmsModal(true);
+    // Keep the exact existing order message content and format unchanged
+    const preparedOrderMessage = generatePurchaseOrderSmsText(activePurchaseLines, resolvedStore);
+    openWhatsAppDesktopDirect(normalizedSupplierPhone, preparedOrderMessage);
   };
 
   const [customExportOpen, setCustomExportOpen] = useState<boolean>(false);
@@ -4222,7 +4235,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         f9ItemMasterState.isOpen ||
         netAmountModalState.isOpen ||
         showAddSupplierModal ||
-        showPurchaseSmsModal ||
         printModalOpen
       ) {
         return;
@@ -4291,7 +4303,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     f9ItemMasterState.isOpen,
     netAmountModalState.isOpen,
     showAddSupplierModal,
-    showPurchaseSmsModal,
     printModalOpen,
   ]);
 
@@ -4957,12 +4968,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           {subTab === 'new-invoice' && (
             <button
               type="button"
-              onClick={handleOpenPurchaseOrderSms}
-              className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-              title="Send Order SMS for Current Purchase Invoice"
+              onClick={handleSendPurchaseOrderWhatsApp}
+              className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+              title="Send WhatsApp Order for Current Purchase Invoice"
             >
-              <MessageSquare className="w-3 h-3" />
-              <span>Order SMS</span>
+              <MessageCircle className="w-3 h-3" />
+              <span>Send WhatsApp Order</span>
             </button>
           )}
 
@@ -6474,12 +6485,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                     <button
                       type="button"
-                      onClick={handleOpenPurchaseOrderSms}
-                      className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Send Order SMS for Current Purchase Invoice"
+                      onClick={handleSendPurchaseOrderWhatsApp}
+                      className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Send WhatsApp Order for Current Purchase Invoice"
                     >
-                      <MessageSquare className="w-3 h-3 text-indigo-200" />
-                      <span>Order SMS</span>
+                      <MessageCircle className="w-3 h-3 text-green-100" />
+                      <span>Send WhatsApp Order</span>
                     </button>
 
                     <button
@@ -8028,12 +8039,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={handleOpenPurchaseOrderSms}
-                      className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Send Order SMS for Current Purchase Invoice"
+                      onClick={handleSendPurchaseOrderWhatsApp}
+                      className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Send WhatsApp Order for Current Purchase Invoice"
                     >
-                      <MessageSquare className="w-3 h-3 text-indigo-200" />
-                      <span>Order SMS</span>
+                      <MessageCircle className="w-3 h-3 text-green-100" />
+                      <span>Send WhatsApp Order</span>
                     </button>
                   </div>
                   <div className="flex items-center gap-1">
@@ -9073,18 +9084,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         </div>
       )}
 
-      {/* Purchase Order SMS Modal (Always asks user for recipient number manually) */}
-      {showPurchaseSmsModal && (
-        <InvoiceSmsModal
-          isOpen={showPurchaseSmsModal}
-          mode="purchase"
-          title="Send Order SMS — Purchase Invoice"
-          initialPhone=""
-          isPhoneFromAccounts={false}
-          initialMessage={purchaseSmsText}
-          onClose={() => setShowPurchaseSmsModal(false)}
-        />
-      )}
+
 
       {/* Shared Item Selection List Modal (Reused from Sales Module) */}
       <ItemListSelectionModal

@@ -15,6 +15,7 @@ import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatter
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const DetailedItemStockReportView: React.FC = () => {
@@ -186,6 +187,25 @@ export const DetailedItemStockReportView: React.FC = () => {
               <Layers className="w-3.5 h-3.5" />
               <span>{showExtendedDetails ? 'Extended Columns: ON' : 'Extended Columns: OFF'}</span>
             </button>
+
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              disabled={rows.length === 0}
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={printRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'report',
+                documentNumber: 'Detailed Item Stock Report',
+                documentDate: toDate || new Date().toISOString().slice(0, 10),
+                customerName: 'Detailed Item Stock & Transaction Report',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
 
             <button
               type="button"

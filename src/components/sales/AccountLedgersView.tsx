@@ -312,15 +312,20 @@ export const AccountLedgersView: React.FC<AccountLedgersViewProps> = ({ ledgerTy
         </div>
 
         <div className="flex items-center gap-2">
-          {selectedAccount && (ledgerType === 'customer' || ledgerType === 'statement') && (
+          {selectedAccount && (
             <WhatsAppSendButton
-              label={ledgerType === 'statement' ? 'WhatsApp Statement' : 'WhatsApp Ledger'}
+              label={ledgerType === 'statement' ? 'Send to WhatsApp' : 'Send to WhatsApp'}
+              printElementRef={statementPrintRef}
+              paperSize="a4"
+              orientation="portrait"
+              allowWithoutPhone={ledgerType !== 'customer' && ledgerType !== 'supplier' && ledgerType !== 'statement'}
+              skipDuplicateCheck
               payload={{
                 documentType: ledgerType === 'statement' ? 'statement' : 'ledger',
                 documentNumber: `${ledgerType.toUpperCase()}-${selectedAccount.account_code || selectedAccount.id}`,
                 documentDate: endDate || new Date().toISOString().slice(0, 10),
                 customerAccountId: Number(selectedAccount.id),
-                customerName: String(selectedAccount.account_name || 'Customer'),
+                customerName: String(selectedAccount.account_name || 'Account'),
                 customerPhone: String(selectedAccount.phone || ''),
                 totalAmount: Number(summary.totalDebit || 0),
                 paidAmount: Number(summary.totalCredit || 0),

@@ -1,4 +1,11 @@
 import { formatAppDate, formatPKR, formatPKTDate } from './formatters';
+import { PageOrientationOption, PaperSizeOption } from './printEngine';
+import {
+  buildReportPdfFilename,
+  DirectWhatsAppShareResult,
+  generatePdfFromPrintElement,
+  sharePdfFileViaWhatsApp,
+} from './whatsappPdfShare';
 
 /**
  * Normalizes a Pakistani phone/mobile number for WhatsApp (wa.me & WhatsApp Business Cloud API).
@@ -113,12 +120,28 @@ export function buildWhatsAppMessage(payload: WhatsAppDocumentPayload): string {
   }
 
   if (payload.documentType === 'report') {
+    const isGeneralStoreReport =
+      !payload.customerAccountId &&
+      payload.totalAmount === 0 &&
+      payload.paidAmount === 0 &&
+      payload.remainingBalance === 0;
+    if (isGeneralStoreReport) {
+      return [
+        `*${storeName}*`,
+        `Report: *${payload.customerName || payload.documentNumber}*`,
+        `Date: ${dateFormatted}`,
+        payload.extraNotes ? payload.extraNotes : '',
+        `Generated from ${storeName}.`,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
     return [
       `*${storeName}*`,
-      `Customer Sales Summary: *${payload.customerName}*`,
+      `Report: *${payload.customerName}*`,
       `Ref: ${payload.documentNumber}`,
       `Date: ${dateFormatted}`,
-      `Net Sales Total: *${totalStr}*`,
+      `Total Amount: *${totalStr}*`,
       `Paid Amount: ${paidStr}`,
       `Current Balance: *${balStr}${payload.balanceType ? ` (${payload.balanceType})` : ''}*`,
       ``,
@@ -676,65 +699,65 @@ export class WhatsAppNeedsUserClickError extends Error {
   }
 }
 
+export interface ShareWhatsAppPhase1Options {
+  auto?: boolean;
+  printElement?: HTMLElement | null;
+  paperSize?: PaperSizeOption;
+  orientation?: PageOrientationOption;
+  fixedThermalHeightMm?: number;
+  pdfFilename?: string;
+}
+
 export async function shareOrOpenWhatsAppPhase1(
-  normalizedNumber: string,
+  normalizedNumber: string | null | undefined,
   payload: WhatsAppDocumentPayload,
-  options?: { auto?: boolean }
-): Promise<{ method: 'web_share' | 'wa_link_and_pdf' }> {
+  options?: ShareWhatsAppPhase1Options
+): Promise<DirectWhatsAppShareResult> {
   // Browsers block opening WhatsApp / share sheets without a recent user click.
   // For auto-send (after save) we stop here instead of pretending it was sent.
   if (options?.auto) {
     const ua = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
     if (ua && !ua.isActive) throw new WhatsAppNeedsUserClickError();
   }
+
   const message = buildWhatsAppMessage(payload);
-  const { blob, file, filename } = generateWhatsAppPdfFile(payload);
+  const resolvedFilename =
+    options?.pdfFilename ||
+    (payload.documentType === 'invoice'
+      ? buildInvoicePdfFilename(
+          payload.customerName,
+          payload.documentNumber,
+          payload.documentDate
+        )
+      : buildReportPdfFilename(
+          `${payload.customerName || payload.documentNumber}_${payload.documentNumber}`,
+          payload.documentDate
+        ));
 
-  const isMobileDevice = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
-  const nav = navigator as Navigator & {
-    canShare?: (data?: ShareData) => boolean;
-  };
-
-  if (
-    isMobileDevice &&
-    typeof nav.share === 'function' &&
-    typeof nav.canShare === 'function' &&
-    nav.canShare({ files: [file] })
-  ) {
+  // Prefer capturing the ACTUAL rendered print layout DOM element when available
+  // so A4 Portrait/Landscape and 80mm/58mm Thermal PDFs match the printed document 1:1.
+  let generated: { blob: Blob; file: File; filename: string };
+  if (options?.printElement) {
     try {
-      await nav.share({
-        title: `${payload.storeName || 'Abrar Medical Store'} - ${payload.documentNumber}`,
-        text: message,
-        files: [file],
+      generated = await generatePdfFromPrintElement(options.printElement, {
+        filename: resolvedFilename,
+        paperSize: options.paperSize || payload.paperSize || 'a4',
+        orientation: options.orientation || 'portrait',
+        fixedThermalHeightMm: options.fixedThermalHeightMm,
       });
-      return { method: 'web_share' };
     } catch {
-      // Fallback to wa.me link if user cancels or share fails
+      generated = generateWhatsAppPdfFile(payload);
     }
+  } else {
+    generated = generateWhatsAppPdfFile(payload);
   }
 
-  // Trigger PDF download so the user can attach it in WhatsApp Desktop / Web
-  try {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  } catch {
-    // ignore download error
-  }
-
-  const waUrl = `https://wa.me/${normalizedNumber}?text=${encodeURIComponent(message)}`;
-  const link = document.createElement('a');
-  link.href = waUrl;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-
-  return { method: 'wa_link_and_pdf' };
+  return sharePdfFileViaWhatsApp({
+    file: generated.file,
+    blob: generated.blob,
+    filename: generated.filename,
+    title: `${payload.storeName || 'Abrar Medical Store'} - ${payload.documentNumber}`,
+    message,
+    normalizedPhone: normalizedNumber || null,
+  });
 }

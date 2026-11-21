@@ -502,29 +502,33 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               <span>Printer Info</span>
             </button>
 
-            {/* Send via WhatsApp Button */}
-            {!isReturn && (
-              <WhatsAppSendButton
-                payload={{
-                  storeName,
-                  documentType: 'invoice',
-                  invoiceId: docRecord.id ? Number(docRecord.id) : null,
-                  documentNumber: String(docRecord.invoice_number || `SAL-${docRecord.id}`),
-                  documentDate: String(docRecord.invoice_date || ''),
-                  customerAccountId: docRecord.customer_account_id
-                    ? Number(docRecord.customer_account_id)
-                    : null,
-                  customerName: String(docRecord.customer_name || 'Walk-in Cash Customer'),
-                  customerPhone: String(docRecord.customer_phone || ''),
-                  totalAmount: savedNetTotal,
-                  paidAmount: savedPaidAmount,
-                  remainingBalance: savedRemainingBalance,
-                  items,
-                  paperSize: format === '58mm' ? '58mm' : '80mm',
-                }}
-                label="Send via WhatsApp"
-              />
-            )}
+            {/* Send via WhatsApp Button (Generates actual A4 or Thermal PDF matching active preview layout) */}
+            <WhatsAppSendButton
+              printElementRef={printAreaRef}
+              paperSize={format === '80mm' || format === '58mm' ? format : 'a4'}
+              orientation={orientation}
+              pdfFilename={`${pdfDocumentTitle}.pdf`}
+              payload={{
+                storeName,
+                documentType: 'invoice',
+                invoiceId: !isReturn && docRecord.id ? Number(docRecord.id) : null,
+                documentNumber: String(
+                  docRecord.invoice_number || docRecord.return_number || `SAL-${docRecord.id}`
+                ),
+                documentDate: String(docRecord.invoice_date || docRecord.return_date || ''),
+                customerAccountId: docRecord.customer_account_id
+                  ? Number(docRecord.customer_account_id)
+                  : null,
+                customerName: String(docRecord.customer_name || 'Walk-in Cash Customer'),
+                customerPhone: String(docRecord.customer_phone || ''),
+                totalAmount: savedNetTotal,
+                paidAmount: savedPaidAmount,
+                remainingBalance: savedRemainingBalance,
+                items,
+                paperSize: format === '58mm' ? '58mm' : '80mm',
+              }}
+              label="Send to WhatsApp"
+            />
 
             {/* Save to PDF Button (with formatted filename: customer_invno:123_date) */}
             <button

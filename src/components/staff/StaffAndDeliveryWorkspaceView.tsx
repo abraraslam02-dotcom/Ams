@@ -21,6 +21,7 @@ import { formatPKR, formatAppDate } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export type StaffWorkspaceTab = 'salesmen' | 'deliverymen' | 'deliveries';
@@ -709,24 +710,43 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                   ))}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (salesmanReportPrintRef.current) {
-                      printReportDocument(
-                        salesmanReportPrintRef.current,
-                        `Abrar Medical Store - Salesman Report (${selectedSmReport})`,
-                        { orientation: 'portrait', paperSize: 'legal' }
-                      );
-                    } else {
-                      window.print();
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs border border-slate-700"
-                >
-                  <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                  Print Report
-                </button>
+                <div className="flex items-center gap-2">
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={salesmanReportPrintRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: `Salesman Report (${selectedSmReport})`,
+                      documentDate: new Date().toISOString().slice(0, 10),
+                      customerName: `Salesman Report (${selectedSmReport})`,
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (salesmanReportPrintRef.current) {
+                        printReportDocument(
+                          salesmanReportPrintRef.current,
+                          `Abrar Medical Store - Salesman Report (${selectedSmReport})`,
+                          { orientation: 'portrait', paperSize: 'legal' }
+                        );
+                      } else {
+                        window.print();
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs border border-slate-700"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                    Print Report
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200 print:hidden">
@@ -1229,24 +1249,43 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                   ))}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (deliveryReportPrintRef.current) {
-                      printReportDocument(
-                        deliveryReportPrintRef.current,
-                        `Abrar Medical Store - Delivery Report (${selectedDelReport})`,
-                        { orientation: 'portrait', paperSize: 'legal' }
-                      );
-                    } else {
-                      window.print();
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs border border-slate-700"
-                >
-                  <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                  Print Report
-                </button>
+                <div className="flex items-center gap-2">
+                  <WhatsAppSendButton
+                    label="Send to WhatsApp"
+                    allowWithoutPhone
+                    skipDuplicateCheck
+                    printElementRef={deliveryReportPrintRef}
+                    paperSize="a4"
+                    orientation="portrait"
+                    payload={{
+                      documentType: 'report',
+                      documentNumber: `Delivery Report (${selectedDelReport})`,
+                      documentDate: new Date().toISOString().slice(0, 10),
+                      customerName: `Delivery Report (${selectedDelReport})`,
+                      totalAmount: 0,
+                      paidAmount: 0,
+                      remainingBalance: 0,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (deliveryReportPrintRef.current) {
+                        printReportDocument(
+                          deliveryReportPrintRef.current,
+                          `Abrar Medical Store - Delivery Report (${selectedDelReport})`,
+                          { orientation: 'portrait', paperSize: 'legal' }
+                        );
+                      } else {
+                        window.print();
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs border border-slate-700"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                    Print Report
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200 print:hidden">

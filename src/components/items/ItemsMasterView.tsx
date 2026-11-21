@@ -28,6 +28,7 @@ import { exportItemsToExcel } from '../../utils/excel';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 import { ProductThumb } from '../common/ProductThumb';
@@ -223,6 +224,25 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2 print:hidden">
+          <WhatsAppSendButton
+            label="Send to WhatsApp"
+            disabled={items.length === 0}
+            allowWithoutPhone
+            skipDuplicateCheck
+            printElementRef={itemsPrintRef}
+            paperSize="a4"
+            orientation="portrait"
+            payload={{
+              documentType: 'report',
+              documentNumber: 'Medicine Catalog Directory',
+              documentDate: new Date().toISOString().slice(0, 10),
+              customerName: 'Medicine Catalog Directory',
+              totalAmount: 0,
+              paidAmount: 0,
+              remainingBalance: 0,
+            }}
+          />
+
           <button
             onClick={() => {
               if (itemsPrintRef.current) {

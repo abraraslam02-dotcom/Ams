@@ -19,6 +19,7 @@ import { FinancialPillar } from '../../types/accounting';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 interface ChartOfAccountsViewProps {
@@ -376,6 +377,24 @@ export const ChartOfAccountsView: React.FC<ChartOfAccountsViewProps> = ({
             <Download className="w-3.5 h-3.5" />
             Export Excel/CSV
           </button>
+
+          <WhatsAppSendButton
+            label="Send to WhatsApp"
+            allowWithoutPhone
+            skipDuplicateCheck
+            printElementRef={coaPrintRef}
+            paperSize="a4"
+            orientation="portrait"
+            payload={{
+              documentType: 'report',
+              documentNumber: 'Chart of Accounts',
+              documentDate: new Date().toISOString().slice(0, 10),
+              customerName: 'Chart of Accounts',
+              totalAmount: 0,
+              paidAmount: 0,
+              remainingBalance: 0,
+            }}
+          />
 
           <button
             type="button"

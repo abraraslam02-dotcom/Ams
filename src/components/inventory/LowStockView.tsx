@@ -18,6 +18,7 @@ import { LowStockItem } from '../../types/inventory';
 import { formatPKR } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
+import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const LowStockView: React.FC = () => {
@@ -125,6 +126,24 @@ export const LowStockView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 print:hidden">
+            <WhatsAppSendButton
+              label="Send to WhatsApp"
+              disabled={data.length === 0}
+              allowWithoutPhone
+              skipDuplicateCheck
+              printElementRef={lowStockPrintRef}
+              paperSize="a4"
+              orientation="portrait"
+              payload={{
+                documentType: 'report',
+                documentNumber: 'Low Stock & Reorder Sheet',
+                documentDate: new Date().toISOString().slice(0, 10),
+                customerName: 'Low Stock & Purchase Requisition Sheet',
+                totalAmount: 0,
+                paidAmount: 0,
+                remainingBalance: 0,
+              }}
+            />
             <button
               onClick={() => {
                 if (lowStockPrintRef.current) {
