@@ -209,7 +209,7 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
     const sortedCompanyNames = Array.from(groupMap.keys()).sort((a, b) =>
       a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
     );
-
+let runningSerial = 0; // S# poore DSR mein continuous chalega
     const groups: DsrCompanyGroup[] = sortedCompanyNames.map((companyName) => {
       const rawItems = groupMap.get(companyName) || [];
       // Sort item names in ascending alphabetical order (A–Z) within each company group
@@ -227,8 +227,8 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         groupLooseQty += item.looseQty;
         return {
           ...item,
-          // S.No restarts from 1 within each company group
-          sNo: idx + 1,
+           // S.No continuous across all company groups (1, 2, 3, ...)
+          sNo: ++runningSerial
         };
       });
 
