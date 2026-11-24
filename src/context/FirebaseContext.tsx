@@ -87,11 +87,29 @@ function generateNoteId(): string {
 }
 
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [systemOperatingMode, setSystemOperatingMode] = useState<'ONLINE' | 'OFFLINE'>(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        return window.localStorage.getItem('ams_system_operating_mode') === 'OFFLINE'
+          ? 'OFFLINE'
+          : 'ONLINE';
+      }
+    } catch {
+      // ignore storage error
+    }
+    return 'ONLINE';
+  });
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
   const [isFirebaseAdmin, setIsFirebaseAdmin] = useState<boolean>(false);
-  const [firestoreStatus, setFirestoreStatus] = useState<'checking' | 'connected' | 'offline' | 'error'>('checking');
-  const [firestoreStatusMessage, setFirestoreStatusMessage] = useState<string>('Checking Firestore connection...');
+  const [firestoreStatus, setFirestoreStatus] = useState<'checking' | 'connected' | 'offline' | 'error'>(
+    systemOperatingMode === 'OFFLINE' ? 'offline' : 'checking'
+  );
+  const [firestoreStatusMessage, setFirestoreStatusMessage] = useState<string>(
+    systemOperatingMode === 'OFFLINE'
+      ? 'System is in OFFLINE MODE — Cloud Database requests are paused.'
+      : 'Checking Firestore connection...'
+  );
   const [authBusy, setAuthBusy] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -99,33 +117,53 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [notesLoading, setNotesLoading] = useState<boolean>(false);
   const [notesError, setNotesError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const onModeChanged = (e: Event) => {
+      const detail = (e as CustomEvent<{ mode?: string }>).detail;
+      const nextMode: 'ONLINE' | 'OFFLINE' = detail?.mode === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+      setSystemOperatingMode(nextMode);
+      if (nextMode === 'OFFLINE') {
+        setFirestoreStatus('offline');
+        setFirestoreStatusMessage('System is in OFFLINE MODE — Cloud Database requests are disabled.');
+      }
+    };
+    window.addEventListener('ams-operating-mode-changed', onModeChanged);
+    return () => window.removeEventListener('ams-operating-mode-changed', onModeChanged);
+  }, []);
+
   const recheckConnection = useCallback(async (force = true) => {
+    if (systemOperatingMode === 'OFFLINE') {
+      setFirestoreStatus('offline');
+      setFirestoreStatusMessage('System is in OFFLINE MODE — Cloud Database requests are disabled.');
+      return;
+    }
     setFirestoreStatus('checking');
     const result = await testConnection(force);
     setFirestoreStatus(result.status);
     setFirestoreStatusMessage(result.message);
-  }, []);
+  }, [systemOperatingMode]);
 
   useEffect(() => {
+    if (systemOperatingMode === 'OFFLINE') {
+      setFirestoreStatus('offline');
+      setFirestoreStatusMessage('System is in OFFLINE MODE — Cloud Database requests are disabled.');
+      return;
+    }
     void recheckConnection(false);
 
-    const handleOnline = () => {
-      void recheckConnection(true);
-    };
     const handleOffline = () => {
       setFirestoreStatus('offline');
-      setFirestoreStatusMessage('Device is offline. Firestore will reconnect when network returns.');
+      setFirestoreStatusMessage('Device is offline. Use Super Admin Control Panel to check or sync manually.');
     };
 
-    window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     return () => {
-      window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [recheckConnection]);
+  }, [recheckConnection, systemOperatingMode]);
 
   const syncUserDocuments = useCallback(async (user: FirebaseUser) => {
+    if (systemOperatingMode === 'OFFLINE') return;
     if (!user.emailVerified || !user.email) return;
     if (!BLUEPRINT_LIMITS.idPattern.test(user.uid) || user.uid.length > BLUEPRINT_LIMITS.idMaxLength) {
       return;
@@ -234,9 +272,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return buildSafeStoreId(firebaseUser.uid, isBootAdmin);
   }, [firebaseUser]);
 
-  // Attach real-time onSnapshot listener ONLY when auth is ready & user is signed in + verified
+  // Attach real-time onSnapshot listener ONLY when ONLINE MODE is active, auth is ready, and user is verified
   useEffect(() => {
-    if (!isAuthReady || !firebaseUser || !firebaseUser.emailVerified || !activeStoreId) {
+    if (
+      systemOperatingMode === 'OFFLINE' ||
+      !isAuthReady ||
+      !firebaseUser ||
+      !firebaseUser.emailVerified ||
+      !activeStoreId
+    ) {
       setSyncNotes([]);
       setNotesLoading(false);
       return;
@@ -291,7 +335,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
 
     return () => unsub();
-  }, [isAuthReady, firebaseUser, activeStoreId]);
+  }, [isAuthReady, firebaseUser, activeStoreId, systemOperatingMode]);
 
   const signInWithGoogle = useCallback(async () => {
     setAuthBusy(true);

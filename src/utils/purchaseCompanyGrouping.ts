@@ -1,4 +1,4 @@
-import { calculateLineTax, resolveItemTaxConfig } from './taxCalculation';
+import { calculateLineTax, resolveItemTaxConfig, resolveLineSequentialDiscounts } from './taxCalculation';
 import { formatAppDate } from './formatters';
 import type { PageMarginOption, FontSizeScaleOption } from './printEngine';
 
@@ -18,7 +18,10 @@ export interface GroupedPurchaseLine {
   batchNumber: string;
   expiryDate: string;
   tradePrice: number;
+  discount1Percent: number;
+  discount2Percent: number;
   discountPercent: number;
+  netRate: number;
   discountAmount: number;
   grossAmount: number;
   taxableAmount: number;
@@ -153,7 +156,8 @@ export function buildCompanyGroupedPurchaseData(
         ? Number(item.gross_amount)
         : quantity * tradePrice + looseQuantity * looseRate
     );
-    const discountPercent = round2(item.discount_percent ?? 0);
+    const seqDisc = resolveLineSequentialDiscounts(item, tradePrice);
+    const discountPercent = round2(item.discount_percent ?? seqDisc.discount_percent);
     const rawItemDiscount = round2(item.discount_amount ?? 0);
     const rawLineAfterItemDisc = round2(Math.max(0, grossAmount - rawItemDiscount));
     const rawSalesTax = round2(item.tax_amount ?? 0);
@@ -185,7 +189,10 @@ export function buildCompanyGroupedPurchaseData(
       batchNumber: String(item.batch_number || '').trim() || '—',
       expiryDate: formatAppDate(item.expiry_date, '—'),
       tradePrice,
+      discount1Percent: seqDisc.discount_1_percent,
+      discount2Percent: seqDisc.discount_2_percent,
       discountPercent,
+      netRate: seqDisc.net_rate,
       grossAmount,
       rawItemDiscount,
       rawLineAfterItemDisc,
@@ -310,7 +317,10 @@ export function buildCompanyGroupedPurchaseData(
       batchNumber: r.batchNumber,
       expiryDate: r.expiryDate,
       tradePrice: r.tradePrice,
+      discount1Percent: r.discount1Percent,
+      discount2Percent: r.discount2Percent,
       discountPercent: r.discountPercent,
+      netRate: r.netRate,
       discountAmount,
       grossAmount: r.grossAmount,
       taxableAmount,

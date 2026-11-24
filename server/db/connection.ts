@@ -1,18 +1,67 @@
 import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
-import { config } from '../config.ts';
+import { config, validatePermanentStorageLocation } from '../config.ts';
 
 let dbInstance: Database.Database | null = null;
 let connectionError: string | null = null;
 let wasDatabaseCreatedOnBoot = false;
+let wasDatabaseQuarantinedOnBoot = false;
 
 export function getWasDatabaseCreatedOnBoot(): boolean {
   return wasDatabaseCreatedOnBoot;
 }
 
+export function getWasDatabaseQuarantinedOnBoot(): boolean {
+  return wasDatabaseQuarantinedOnBoot;
+}
+
 export function markDatabaseHydratedFromCloud(): void {
   wasDatabaseCreatedOnBoot = false;
+  wasDatabaseQuarantinedOnBoot = false;
+}
+
+/**
+ * Moves corrupted local database files (.db, -wal, -shm) to a timestamped quarantine directory
+ * so no forensic bytes are ever deleted while clearing malformed disk/WAL artifacts before cloud hydration.
+ */
+export function quarantineCorruptDatabaseFiles(reason = 'integrity_failed'): string | null {
+  if (dbInstance) {
+    try {
+      dbInstance.close();
+    } catch {
+      // ignore close error on malformed handle
+    }
+    dbInstance = null;
+  }
+
+  const dbDir = path.dirname(config.databasePath);
+  const baseName = path.basename(config.databasePath);
+  const quarantineDir = path.join(dbDir, 'quarantine', `${reason}_${Date.now()}`);
+  let movedAny = false;
+
+  for (const suffix of ['', '-wal', '-shm']) {
+    const srcPath = `${config.databasePath}${suffix}`;
+    if (fs.existsSync(srcPath)) {
+      if (!fs.existsSync(quarantineDir)) {
+        fs.mkdirSync(quarantineDir, { recursive: true });
+      }
+      const destPath = path.join(quarantineDir, `${baseName}${suffix}`);
+      try {
+        fs.renameSync(srcPath, destPath);
+      } catch {
+        fs.copyFileSync(srcPath, destPath);
+        try {
+          fs.unlinkSync(srcPath);
+        } catch {
+          // ignore
+        }
+      }
+      movedAny = true;
+    }
+  }
+
+  return movedAny ? quarantineDir : null;
 }
 
 export interface ConnectionDiagnostics {
@@ -32,9 +81,119 @@ export interface ConnectionDiagnostics {
   error?: string | null;
 }
 
+function verifyOpenedDatabaseIntegrity(db: Database.Database): boolean {
+  try {
+    const check = String(db.pragma('integrity_check', { simple: true }) || '');
+    if (check.toLowerCase() === 'ok') {
+      return true;
+    }
+  } catch {
+    // Fall through to REINDEX recovery attempt
+  }
+
+  try {
+    db.exec('REINDEX;');
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    const recheck = String(db.pragma('integrity_check', { simple: true }) || '');
+    return recheck.toLowerCase() === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Flushes all committed SQLite WAL frames into the primary database file.
+ * Used before operating-mode switching and manual backup/sync operations.
+ */
+export function checkpointDatabaseWal(): boolean {
+  if (!dbInstance) return false;
+  try {
+    dbInstance.pragma('wal_checkpoint(TRUNCATE)');
+    return true;
+  } catch {
+    try {
+      dbInstance.pragma('wal_checkpoint(PASSIVE)');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+export function isDatabaseOpen(): boolean {
+  return dbInstance !== null;
+}
+
+function isMalformedOrCorruptError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('malformed') ||
+    msg.includes('corrupt') ||
+    msg.includes('not a database') ||
+    msg.includes('file is encrypted')
+  );
+}
+
+/**
+ * Moves only stale/corrupt WAL and SHM sidecar files into quarantine without touching the main .db file.
+ */
+function quarantineWalSidecarsOnly(reason = 'wal_sidecar_recovery'): string | null {
+  const dbDir = path.dirname(config.databasePath);
+  const baseName = path.basename(config.databasePath);
+  const quarantineDir = path.join(dbDir, 'quarantine', `${reason}_${Date.now()}`);
+  let movedAny = false;
+
+  for (const suffix of ['-wal', '-shm']) {
+    const srcPath = `${config.databasePath}${suffix}`;
+    if (fs.existsSync(srcPath)) {
+      if (!fs.existsSync(quarantineDir)) {
+        fs.mkdirSync(quarantineDir, { recursive: true });
+      }
+      const destPath = path.join(quarantineDir, `${baseName}${suffix}`);
+      try {
+        fs.renameSync(srcPath, destPath);
+      } catch {
+        fs.copyFileSync(srcPath, destPath);
+        try {
+          fs.unlinkSync(srcPath);
+        } catch {
+          // ignore
+        }
+      }
+      movedAny = true;
+    }
+  }
+  return movedAny ? quarantineDir : null;
+}
+
+function openAndConfigureSqlite(dbPath: string, verifyIntegrity: boolean): Database.Database {
+  const handle = new Database(dbPath, {
+    verbose: config.nodeEnv === 'development' ? undefined : undefined,
+  });
+  try {
+    handle.pragma('busy_timeout = 5000');
+    handle.pragma('journal_mode = WAL');
+    handle.pragma('foreign_keys = ON');
+    handle.pragma('synchronous = NORMAL');
+
+    if (verifyIntegrity && !verifyOpenedDatabaseIntegrity(handle)) {
+      throw new Error('database disk image is malformed (PRAGMA integrity_check failed)');
+    }
+    return handle;
+  } catch (err) {
+    try {
+      handle.close();
+    } catch {
+      // ignore close error on broken handle
+    }
+    throw err;
+  }
+}
+
 /**
  * Initializes and returns the active SQLite database instance.
- * Ensures the target directory exists and PRAGMAs are strictly enforced.
+ * Ensures the target permanent directory exists and PRAGMAs are strictly enforced.
+ * Never silently creates an empty replacement database if the permanent drive (e.g. D:\ on Windows) is unavailable.
  */
 export function getDatabase(): Database.Database {
   if (dbInstance) {
@@ -42,6 +201,14 @@ export function getDatabase(): Database.Database {
   }
 
   try {
+    const storageCheck = validatePermanentStorageLocation();
+    if (!storageCheck.available) {
+      throw new Error(
+        storageCheck.warning ||
+          `Permanent local database location (${config.databasePath}) is unavailable.`
+      );
+    }
+
     const dbDir = path.dirname(config.databasePath);
     if (!fs.existsSync(dbDir)) {
       fs.mkdirSync(dbDir, { recursive: true });
@@ -72,30 +239,49 @@ export function getDatabase(): Database.Database {
       }
     }
 
-    dbInstance = new Database(config.databasePath, {
-      verbose: config.nodeEnv === 'development' ? undefined : undefined,
-    });
-
-    // Enforce relational integrity and high reliability write-ahead logging
-    dbInstance.pragma('busy_timeout = 5000');
-    dbInstance.pragma('journal_mode = WAL');
-    dbInstance.pragma('foreign_keys = ON');
-    dbInstance.pragma('synchronous = NORMAL');
-
-    // Self-heal any index or freelist anomalies on startup
+    let verifiedHandle: Database.Database | null = null;
     try {
-      const quickCheck = String(dbInstance.pragma('integrity_check', { simple: true }) || '');
-      if (quickCheck.toLowerCase() !== 'ok') {
-        dbInstance.exec('REINDEX;');
-        dbInstance.pragma('wal_checkpoint(TRUNCATE)');
+      verifiedHandle = openAndConfigureSqlite(config.databasePath, !dbMissingBeforeOpen);
+    } catch (openErr: unknown) {
+      if (dbMissingBeforeOpen || !isMalformedOrCorruptError(openErr)) {
+        throw openErr;
       }
-    } catch {
-      // ignore startup reindex warning
+
+      // Step 1 Recovery: If a stale/corrupt -wal or -shm sidecar caused SQLITE_CORRUPT during PRAGMA/open,
+      // quarantine ONLY the sidecars first and test whether the primary .db file itself is 100% healthy!
+      const hasWalSidecars =
+        fs.existsSync(`${config.databasePath}-wal`) || fs.existsSync(`${config.databasePath}-shm`);
+      if (hasWalSidecars) {
+        const walQuarantineDir = quarantineWalSidecarsOnly('boot_wal_sidecar_corrupt');
+        console.warn(
+          `[AMS DB] Detected corrupt/stale WAL sidecar on ${config.databasePath}. Moved sidecars to ${walQuarantineDir || 'data/quarantine'} and retrying primary database integrity check.`
+        );
+        try {
+          verifiedHandle = openAndConfigureSqlite(config.databasePath, true);
+          console.log('[AMS DB] Primary SQLite database recovered cleanly after clearing corrupt WAL sidecar.');
+        } catch {
+          verifiedHandle = null;
+        }
+      }
+
+      // Step 2 Recovery: If the main .db file itself is genuinely malformed, safely quarantine it (never delete!)
+      // and open a clean staging file so Cloud Firestore recovery can hydrate authoritative data cleanly.
+      if (!verifiedHandle) {
+        const quarantineDir = quarantineCorruptDatabaseFiles('boot_integrity_check_failed');
+        wasDatabaseQuarantinedOnBoot = true;
+        wasDatabaseCreatedOnBoot = true;
+        console.warn(
+          `[AMS DB] Local database at ${config.databasePath} failed SQLite integrity verification and was safely quarantined to ${quarantineDir || 'data/quarantine'}. Awaiting authoritative recovery.`
+        );
+        verifiedHandle = openAndConfigureSqlite(config.databasePath, false);
+      }
     }
 
+    dbInstance = verifiedHandle;
     connectionError = null;
     return dbInstance;
   } catch (err: unknown) {
+    dbInstance = null;
     const errorMsg = err instanceof Error ? err.message : String(err);
     connectionError = errorMsg;
     throw new Error(`Database connection failed at ${config.databasePath}: ${errorMsg}`);

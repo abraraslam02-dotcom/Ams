@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
-import { formatPKR, formatPKTDateTime, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatPKTDateTime, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { BarChart3, Download, Printer, RotateCcw, AlertCircle } from 'lucide-react';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -22,6 +22,9 @@ export type SalesReportKey =
   | 'salesman-wise-sales'
   | 'daily-sales'
   | 'profit-report'
+  | 'invoice-profit-report'
+  | 'detailed-profit-report'
+  | 'account-profit-report'
   | 'discount-report'
   | 'sales-return-report'
   | 'tax-summary'
@@ -53,6 +56,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
   const [reportKey, setReportKey] = useState<SalesReportKey>(initialReport);
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [invoiceNumberSearch, setInvoiceNumberSearch] = useState<string>('');
   const [year1, setYear1] = useState<string>(String(currentYear - 1));
   const [year2, setYear2] = useState<string>(String(currentYear));
 
@@ -156,6 +160,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
   const handleResetFilters = () => {
     setStartDate('');
     setEndDate('');
+    setInvoiceNumberSearch('');
     setYear1(String(currentYear - 1));
     setYear2(String(currentYear));
     setSelectedCompanies([]);
@@ -173,7 +178,13 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
       setLoading(true);
       setError(null);
       const apiReportKey = reportKey === 'tax-history' ? 'tax-summary' : reportKey;
-      const useMultiParty = reportKey === 'item-wise-sales' && selectedPartyIds.length > 0;
+      const useMultiParty =
+        (reportKey === 'item-wise-sales' ||
+          reportKey === 'profit-report' ||
+          reportKey === 'invoice-profit-report' ||
+          reportKey === 'detailed-profit-report' ||
+          reportKey === 'account-profit-report') &&
+        selectedPartyIds.length > 0;
       const res = await api.getSalesReport(apiReportKey, {
         startDate: startDate || undefined,
         endDate: endDate || undefined,
@@ -185,6 +196,11 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
         salesmanId: salesmanId !== 'ALL' ? salesmanId : undefined,
         townName: townName !== 'ALL' ? townName : undefined,
         areaName: areaName !== 'ALL' ? areaName : undefined,
+        invoiceNumber:
+          (reportKey === 'invoice-profit-report' || reportKey === 'detailed-profit-report') &&
+          invoiceNumberSearch.trim()
+            ? invoiceNumberSearch.trim()
+            : undefined,
         year1: reportKey === 'yearly-party-comparison' ? year1 : undefined,
         year2: reportKey === 'yearly-party-comparison' ? year2 : undefined,
       });
@@ -209,6 +225,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
     salesmanId,
     townName,
     areaName,
+    invoiceNumberSearch,
     year1,
     year2,
   ]);
@@ -229,7 +246,10 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
     { id: 'item-wise-sales', label: 'Item-wise Sales' },
     { id: 'salesman-wise-sales', label: 'Salesman-wise Sales' },
     { id: 'daily-sales', label: 'Daily Sales' },
-    { id: 'profit-report', label: 'Profit Report' },
+    { id: 'profit-report', label: 'Item-wise Profit Report' },
+    { id: 'invoice-profit-report', label: 'Invoice-wise Profit Report' },
+    { id: 'detailed-profit-report', label: 'Detailed Profit Report' },
+    { id: 'account-profit-report', label: 'Account Profit Report' },
     { id: 'discount-report', label: 'Discount Report' },
     { id: 'sales-return-report', label: 'Sales Return Report' },
     { id: 'tax-summary', label: 'Tax Summary' },
@@ -282,15 +302,49 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
         }
       );
     }
-    if (reportKey === 'profit-report') {
+    if (
+      reportKey === 'profit-report' ||
+      reportKey === 'invoice-profit-report' ||
+      reportKey === 'detailed-profit-report' ||
+      reportKey === 'account-profit-report'
+    ) {
       const sum = rowsArray.reduce(
         (acc, r) => ({
-          net_units_sold: acc.net_units_sold + Number(r.net_units_sold || 0),
+          invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+          item_lines_count: acc.item_lines_count + Number(r.item_lines_count || 0),
+          sold_pack_qty: acc.sold_pack_qty + Number(r.sold_pack_qty || 0),
+          sold_loose_qty: acc.sold_loose_qty + Number(r.sold_loose_qty || 0),
+          bonus_qty: acc.bonus_qty + Number(r.bonus_qty || 0),
+          return_packs_eq: acc.return_packs_eq + Number(r.return_packs_eq || 0),
+          returned_total_units: acc.returned_total_units + Number(r.returned_total_units || 0),
+          net_packs_sold: acc.net_packs_sold + Number(r.net_packs_sold ?? r.net_units_sold ?? 0),
+          net_units_sold: acc.net_units_sold + Number(r.net_packs_sold ?? r.net_units_sold ?? 0),
+          net_total_units: acc.net_total_units + Number(r.net_total_units || 0),
+          gross_sales_amount: acc.gross_sales_amount + Number(r.gross_sales_amount || 0),
+          discount_amount: acc.discount_amount + Number(r.discount_amount || 0),
+          sales_return_amount: acc.sales_return_amount + Number(r.sales_return_amount || 0),
           total_cost_amount: acc.total_cost_amount + Number(r.total_cost_amount || 0),
           net_revenue_amount: acc.net_revenue_amount + Number(r.net_revenue_amount || 0),
           gross_profit: acc.gross_profit + Number(r.gross_profit || 0),
         }),
-        { net_units_sold: 0, total_cost_amount: 0, net_revenue_amount: 0, gross_profit: 0 }
+        {
+          invoice_count: 0,
+          item_lines_count: 0,
+          sold_pack_qty: 0,
+          sold_loose_qty: 0,
+          bonus_qty: 0,
+          return_packs_eq: 0,
+          returned_total_units: 0,
+          net_packs_sold: 0,
+          net_units_sold: 0,
+          net_total_units: 0,
+          gross_sales_amount: 0,
+          discount_amount: 0,
+          sales_return_amount: 0,
+          total_cost_amount: 0,
+          net_revenue_amount: 0,
+          gross_profit: 0,
+        }
       );
       return {
         ...sum,
@@ -346,6 +400,99 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
             'Net Sales': rest.net_sales_amount,
           };
         }
+        if (reportKey === 'profit-report') {
+          return {
+            'Item Code': r.item_code,
+            'Item Name': r.item_name,
+            Company: r.company_name,
+            Packing: r.packing,
+            'Full Packs Sold': r.sold_pack_qty ?? 0,
+            'Loose Units Sold': r.sold_loose_qty ?? 0,
+            'Bonus Qty': r.bonus_qty ?? 0,
+            'Return Packs Eq': r.return_packs_eq ?? 0,
+            'Net Packs Sold': r.net_packs_sold ?? r.net_units_sold ?? 0,
+            'Net Units Sold': r.net_total_units ?? 0,
+            'Gross Sales': r.gross_sales_amount ?? 0,
+            Discount: r.discount_amount ?? 0,
+            'Sales Return': r.sales_return_amount ?? 0,
+            'Net Revenue': r.net_revenue_amount ?? 0,
+            'Purchase / FIFO Cost': r.total_cost_amount ?? 0,
+            'Gross Profit': r.gross_profit ?? 0,
+            'Margin %': r.profit_margin_percent ?? 0,
+          };
+        }
+        if (reportKey === 'invoice-profit-report') {
+          return {
+            'Invoice #': r.invoice_number,
+            Date: r.invoice_date,
+            'Party Code': r.customer_code,
+            'Customer / Party': r.customer_name,
+            'Town / Area': `${r.town_name || '—'}${r.area_name && r.area_name !== '—' ? ` / ${r.area_name}` : ''}`,
+            Salesman: r.salesman_name,
+            Items: r.item_lines_count,
+            'Full Packs': r.sold_pack_qty ?? 0,
+            'Loose Units': r.sold_loose_qty ?? 0,
+            'Bonus Qty': r.bonus_qty ?? 0,
+            'Return Packs': r.return_packs_eq ?? 0,
+            'Net Packs': r.net_packs_sold ?? 0,
+            'Gross Sales': r.gross_sales_amount ?? 0,
+            Discount: r.discount_amount ?? 0,
+            'Sales Return': r.sales_return_amount ?? 0,
+            'Net Revenue': r.net_revenue_amount ?? 0,
+            'Actual / FIFO Cost': r.total_cost_amount ?? 0,
+            'Invoice Profit': r.gross_profit ?? 0,
+            'Margin %': r.profit_margin_percent ?? 0,
+          };
+        }
+        if (reportKey === 'detailed-profit-report') {
+          return {
+            Date: r.invoice_date,
+            'Invoice #': r.invoice_number,
+            'Customer / Party': r.customer_name,
+            'Item Code': r.item_code,
+            'Item Name': r.item_name,
+            Company: r.company_name,
+            Packing: r.packing,
+            'Batch #': r.batch_number,
+            'Full Packs': r.sold_pack_qty ?? 0,
+            'Loose Units': r.sold_loose_qty ?? 0,
+            'Bonus Qty': r.bonus_qty ?? 0,
+            'Return Units': r.returned_total_units ?? 0,
+            'Net Units': r.net_total_units ?? 0,
+            'Net Packs': r.net_packs_sold ?? 0,
+            'Sale Pack Rate': r.sale_pack_rate ?? 0,
+            'Purchase Pack Cost': r.purchase_pack_cost ?? 0,
+            'Unit FIFO Cost': r.purchase_unit_cost ?? 0,
+            'Gross Sale': r.gross_sales_amount ?? 0,
+            Discount: r.discount_amount ?? 0,
+            'Sales Return': r.sales_return_amount ?? 0,
+            'Net Revenue': r.net_revenue_amount ?? 0,
+            'Total Cost': r.total_cost_amount ?? 0,
+            'Net Profit': r.gross_profit ?? 0,
+            'Margin %': r.profit_margin_percent ?? 0,
+          };
+        }
+        if (reportKey === 'account-profit-report') {
+          return {
+            'Party Code': r.party_code,
+            'Party Name': r.party_name,
+            'Town / Area': `${r.town_name || '—'}${r.area_name && r.area_name !== '—' ? ` / ${r.area_name}` : ''}`,
+            Salesman: r.salesman_name,
+            Invoices: r.invoice_count,
+            'Full Packs': r.sold_pack_qty ?? 0,
+            'Loose Units': r.sold_loose_qty ?? 0,
+            'Bonus Qty': r.bonus_qty ?? 0,
+            'Return Packs': r.return_packs_eq ?? 0,
+            'Net Packs': r.net_packs_sold ?? 0,
+            'Gross Sales': r.gross_sales_amount ?? 0,
+            Discount: r.discount_amount ?? 0,
+            'Sales Return': r.sales_return_amount ?? 0,
+            'Net Revenue': r.net_revenue_amount ?? 0,
+            'Total Cost': r.total_cost_amount ?? 0,
+            'Gross Profit': r.gross_profit ?? 0,
+            'Margin %': r.profit_margin_percent ?? 0,
+          };
+        }
         if (reportKey === 'sales-return-report') {
           return {
             'Return #': r.return_number,
@@ -386,7 +533,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
       const wsParty = XLSX.utils.json_to_sheet(partySubtotals);
       XLSX.utils.book_append_sheet(wb, wsParty, 'Party Subtotals');
     }
-    XLSX.writeFile(wb, `AMS_${reportKey}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(wb, `AMS_${reportKey}_${getPakistanDateISO()}.xlsx`);
   };
 
   const handlePrint = () => {
@@ -445,6 +592,15 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                 </>
               ) : (
                 <>
+                  {(reportKey === 'invoice-profit-report' || reportKey === 'detailed-profit-report') && (
+                    <input
+                      type="text"
+                      placeholder="Filter Invoice #..."
+                      value={invoiceNumberSearch}
+                      onChange={(e) => setInvoiceNumberSearch(e.target.value)}
+                      className="w-36 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono"
+                    />
+                  )}
                   <input
                     type="date"
                     value={startDate}
@@ -479,7 +635,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                 payload={{
                   documentType: 'report',
                   documentNumber: reportTabs.find((t) => t.id === reportKey)?.label || 'Sales Report',
-                  documentDate: endDate || new Date().toISOString().slice(0, 10),
+                  documentDate: endDate || getPakistanDateISO(),
                   customerName: reportTabs.find((t) => t.id === reportKey)?.label || 'Sales Report',
                   totalAmount: 0,
                   paidAmount: 0,
@@ -603,7 +759,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
           </div>
         )}
 
-        {/* Reusable Advanced Multi-Company & Multi-Item Selection (+ Party Selection on Item Sales Report) */}
+        {/* Reusable Advanced Multi-Company & Multi-Item Selection (+ Party Selection on Item Sales & Profit Reports) */}
         {showCompanyItemFilter && reportKey !== 'top-performance' && (
           <CompanyItemSelector
             theme="light"
@@ -614,7 +770,12 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
             onChangeItemIds={setSelectedItemIds}
             selectedItemGroup={selectedItemGroup}
             onChangeItemGroup={setSelectedItemGroup}
-            enablePartySelection={reportKey === 'item-wise-sales'}
+            enablePartySelection={
+              reportKey === 'item-wise-sales' ||
+              reportKey === 'profit-report' ||
+              reportKey === 'invoice-profit-report' ||
+              reportKey === 'detailed-profit-report'
+            }
             selectedPartyIds={selectedPartyIds}
             onChangePartyIds={setSelectedPartyIds}
             title="Filter by Multiple Companies, Item Group, or Specific Items"
@@ -886,9 +1047,82 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                       <th className="p-2.5">Item Code</th>
                       <th className="p-2.5">Medicine Name & Company</th>
                       <th className="p-2.5 text-center">Packing</th>
-                      <th className="p-2.5 text-right">Net Packs Sold</th>
-                      <th className="p-2.5 text-right">Cost Amount</th>
+                      <th className="p-2.5 text-right">Full Packs</th>
+                      <th className="p-2.5 text-right">Loose Units</th>
+                      <th className="p-2.5 text-right">Bonus</th>
+                      <th className="p-2.5 text-right">Return Packs</th>
+                      <th className="p-2.5 text-right">Net Packs</th>
+                      <th className="p-2.5 text-right">Gross Sales</th>
+                      <th className="p-2.5 text-right">Discount</th>
+                      <th className="p-2.5 text-right">Sales Return</th>
                       <th className="p-2.5 text-right">Net Revenue</th>
+                      <th className="p-2.5 text-right">Purchase / FIFO Cost</th>
+                      <th className="p-2.5 text-right">Gross Profit</th>
+                      <th className="p-2.5 text-right">Margin %</th>
+                    </tr>
+                  )}
+
+                  {reportKey === 'invoice-profit-report' && (
+                    <tr>
+                      <th className="p-2.5">Invoice #</th>
+                      <th className="p-2.5">Date</th>
+                      <th className="p-2.5">Customer / Party</th>
+                      <th className="p-2.5">Town / Salesman</th>
+                      <th className="p-2.5 text-right">Items</th>
+                      <th className="p-2.5 text-right">Full Packs</th>
+                      <th className="p-2.5 text-right">Loose Units</th>
+                      <th className="p-2.5 text-right">Bonus</th>
+                      <th className="p-2.5 text-right">Ret. Packs</th>
+                      <th className="p-2.5 text-right">Gross Sales</th>
+                      <th className="p-2.5 text-right">Discount</th>
+                      <th className="p-2.5 text-right">Sales Return</th>
+                      <th className="p-2.5 text-right">Net Revenue</th>
+                      <th className="p-2.5 text-right">Actual / FIFO Cost</th>
+                      <th className="p-2.5 text-right">Invoice Profit</th>
+                      <th className="p-2.5 text-right">Margin %</th>
+                    </tr>
+                  )}
+
+                  {reportKey === 'detailed-profit-report' && (
+                    <tr>
+                      <th className="p-2.5">Date & Invoice #</th>
+                      <th className="p-2.5">Customer / Party</th>
+                      <th className="p-2.5">Item Code & Medicine</th>
+                      <th className="p-2.5">Packing & Batch</th>
+                      <th className="p-2.5 text-right">Packs</th>
+                      <th className="p-2.5 text-right">Loose</th>
+                      <th className="p-2.5 text-right">Bonus</th>
+                      <th className="p-2.5 text-right">Ret. Units</th>
+                      <th className="p-2.5 text-right">Net Units</th>
+                      <th className="p-2.5 text-right">Sale Rate</th>
+                      <th className="p-2.5 text-right">Unit Cost</th>
+                      <th className="p-2.5 text-right">Gross Sale</th>
+                      <th className="p-2.5 text-right">Discount</th>
+                      <th className="p-2.5 text-right">Return Amt</th>
+                      <th className="p-2.5 text-right">Net Revenue</th>
+                      <th className="p-2.5 text-right">Total Cost</th>
+                      <th className="p-2.5 text-right">Net Profit</th>
+                      <th className="p-2.5 text-right">Margin %</th>
+                    </tr>
+                  )}
+
+                  {reportKey === 'account-profit-report' && (
+                    <tr>
+                      <th className="p-2.5">Party Code</th>
+                      <th className="p-2.5">Party Name</th>
+                      <th className="p-2.5">Town / Area</th>
+                      <th className="p-2.5">Salesman</th>
+                      <th className="p-2.5 text-right">Inv</th>
+                      <th className="p-2.5 text-right">Full Packs</th>
+                      <th className="p-2.5 text-right">Loose</th>
+                      <th className="p-2.5 text-right">Bonus</th>
+                      <th className="p-2.5 text-right">Ret. Packs</th>
+                      <th className="p-2.5 text-right">Net Packs</th>
+                      <th className="p-2.5 text-right">Gross Sales</th>
+                      <th className="p-2.5 text-right">Discount</th>
+                      <th className="p-2.5 text-right">Sales Return</th>
+                      <th className="p-2.5 text-right">Net Revenue</th>
+                      <th className="p-2.5 text-right">Total Cost</th>
                       <th className="p-2.5 text-right">Gross Profit</th>
                       <th className="p-2.5 text-right">Margin %</th>
                     </tr>
@@ -926,7 +1160,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                 <tbody>
                   {rowsArray.length === 0 ? (
                     <tr>
-                      <td colSpan={14} className="p-6 text-center text-slate-400">
+                      <td colSpan={18} className="p-6 text-center text-slate-400">
                         No records found for this report and filter selection.
                       </td>
                     </tr>
@@ -1045,7 +1279,7 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                                     payload={{
                                       documentType: 'report',
                                       documentNumber: `CUST-RPT-${r.customer_code || idx + 1}`,
-                                      documentDate: endDate || new Date().toISOString().slice(0, 10),
+                                      documentDate: endDate || getPakistanDateISO(),
                                       customerAccountId: r.customer_account_id
                                         ? Number(r.customer_account_id)
                                         : null,
@@ -1227,16 +1461,209 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                                   )}
                                 </td>
                                 <td className="p-2.5 text-center font-mono">{r.packing}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_pack_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_loose_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono text-emerald-700">
+                                  {fmtQty(r.bonus_qty || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {fmtQty(r.return_packs_eq || 0)}
+                                </td>
                                 <td className="p-2.5 text-right font-mono font-bold">
                                   {fmtQty(r.net_packs_sold ?? r.net_units_sold)}
                                 </td>
                                 <td className="p-2.5 text-right font-mono">
-                                  {formatPKR(r.total_cost_amount)}
+                                  {formatPKR(r.gross_sales_amount ?? r.net_revenue_amount)}
                                 </td>
-                                <td className="p-2.5 text-right font-mono">
+                                <td className="p-2.5 text-right font-mono text-rose-700">
+                                  {formatPKR(r.discount_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {formatPKR(r.sales_return_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
                                   {formatPKR(r.net_revenue_amount)}
                                 </td>
-                                <td className="p-2.5 text-right font-mono font-black text-emerald-700">
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.total_cost_amount)}
+                                </td>
+                                <td
+                                  className={`p-2.5 text-right font-mono font-black ${
+                                    Number(r.gross_profit) >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                                  }`}
+                                >
+                                  {formatPKR(r.gross_profit)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {r.profit_margin_percent}%
+                                </td>
+                              </>
+                            )}
+
+                            {reportKey === 'invoice-profit-report' && (
+                              <>
+                                <td className="p-2.5 font-mono font-bold text-slate-900">
+                                  {r.invoice_number}
+                                </td>
+                                <td className="p-2.5 font-mono">{formatAppDate(r.invoice_date)}</td>
+                                <td className="p-2.5 font-bold text-slate-900">
+                                  {r.customer_name || 'Walk-in Customer'}
+                                  {r.customer_code && r.customer_code !== 'WALK-IN' && (
+                                    <span className="ml-1 text-[10px] font-mono text-slate-500">
+                                      ({r.customer_code})
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-2.5 text-slate-600">
+                                  {r.town_name || '—'} / {r.salesman_name || 'Counter'}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">{r.item_lines_count}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_pack_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_loose_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono text-emerald-700">
+                                  {fmtQty(r.bonus_qty || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {fmtQty(r.return_packs_eq || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.gross_sales_amount)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-rose-700">
+                                  {formatPKR(r.discount_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {formatPKR(r.sales_return_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {formatPKR(r.net_revenue_amount)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.total_cost_amount)}
+                                </td>
+                                <td
+                                  className={`p-2.5 text-right font-mono font-black ${
+                                    Number(r.gross_profit) >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                                  }`}
+                                >
+                                  {formatPKR(r.gross_profit)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {r.profit_margin_percent}%
+                                </td>
+                              </>
+                            )}
+
+                            {reportKey === 'detailed-profit-report' && (
+                              <>
+                                <td className="p-2.5 font-mono">
+                                  <div className="font-bold text-slate-900">{r.invoice_number}</div>
+                                  <div className="text-[10px] text-slate-500">
+                                    {formatAppDate(r.invoice_date)}
+                                  </div>
+                                </td>
+                                <td className="p-2.5">
+                                  <div className="font-bold text-slate-900">
+                                    {r.customer_name || 'Walk-in Customer'}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500">
+                                    {r.town_name || '—'} • {r.salesman_name || 'Counter'}
+                                  </div>
+                                </td>
+                                <td className="p-2.5">
+                                  <div className="font-bold text-slate-900">
+                                    <span className="font-mono text-slate-600 mr-1">{r.item_code}</span>
+                                    {r.item_name}
+                                  </div>
+                                  <div className="text-[10px] text-slate-500">{r.company_name}</div>
+                                </td>
+                                <td className="p-2.5 font-mono text-[11px]">
+                                  <div>{r.packing}</div>
+                                  <div className="text-slate-500">Batch: {r.batch_number || '—'}</div>
+                                </td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_pack_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_loose_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono text-emerald-700">
+                                  {fmtQty(r.bonus_qty || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {fmtQty(r.returned_total_units || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {fmtQty(r.net_total_units || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.sale_pack_rate)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-slate-600">
+                                  {formatPKR(r.purchase_unit_cost)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.gross_sales_amount)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-rose-700">
+                                  {formatPKR(r.discount_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {formatPKR(r.sales_return_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {formatPKR(r.net_revenue_amount)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.total_cost_amount)}
+                                </td>
+                                <td
+                                  className={`p-2.5 text-right font-mono font-black ${
+                                    Number(r.gross_profit) >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                                  }`}
+                                >
+                                  {formatPKR(r.gross_profit)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {r.profit_margin_percent}%
+                                </td>
+                              </>
+                            )}
+
+                            {reportKey === 'account-profit-report' && (
+                              <>
+                                <td className="p-2.5 font-mono font-bold">{r.party_code || r.customer_code}</td>
+                                <td className="p-2.5 font-bold text-slate-900">{r.party_name || r.customer_name}</td>
+                                <td className="p-2.5 text-slate-600">{r.town_name || '—'}</td>
+                                <td className="p-2.5 text-slate-600">{r.salesman_name || 'Counter'}</td>
+                                <td className="p-2.5 text-right font-mono">{r.invoice_count}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_pack_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono">{fmtQty(r.sold_loose_qty || 0)}</td>
+                                <td className="p-2.5 text-right font-mono text-emerald-700">
+                                  {fmtQty(r.bonus_qty || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {fmtQty(r.return_packs_eq || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {fmtQty(r.net_packs_sold || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.gross_sales_amount)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-rose-700">
+                                  {formatPKR(r.discount_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono text-amber-700">
+                                  {formatPKR(r.sales_return_amount || 0)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono font-bold">
+                                  {formatPKR(r.net_revenue_amount)}
+                                </td>
+                                <td className="p-2.5 text-right font-mono">
+                                  {formatPKR(r.total_cost_amount)}
+                                </td>
+                                <td
+                                  className={`p-2.5 text-right font-mono font-black ${
+                                    Number(r.gross_profit) >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                                  }`}
+                                >
                                   {formatPKR(r.gross_profit)}
                                 </td>
                                 <td className="p-2.5 text-right font-mono font-bold">
@@ -1542,11 +1969,142 @@ export const SalesReportsView: React.FC<SalesReportsViewProps> = ({ initialRepor
                     {reportKey === 'profit-report' && (
                       <tr>
                         <td colSpan={3} className="p-3 uppercase">
-                          Grand Total
+                          Grand Total ({rowsArray.length} Items)
                         </td>
-                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.net_units_sold)}</td>
-                        <td className="p-3 text-right font-mono">{formatPKR(computedTotals.total_cost_amount)}</td>
-                        <td className="p-3 text-right font-mono">{formatPKR(computedTotals.net_revenue_amount)}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_pack_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_loose_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {fmtQty(computedTotals.bonus_qty || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {fmtQty(computedTotals.return_packs_eq || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.net_packs_sold || 0)}</td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.gross_sales_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-rose-300">
+                          {formatPKR(computedTotals.discount_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {formatPKR(computedTotals.sales_return_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.net_revenue_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.total_cost_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {formatPKR(computedTotals.gross_profit)}
+                        </td>
+                        <td className="p-3 text-right font-mono">{computedTotals.profit_margin_percent}%</td>
+                      </tr>
+                    )}
+
+                    {reportKey === 'invoice-profit-report' && (
+                      <tr>
+                        <td colSpan={4} className="p-3 uppercase">
+                          Grand Total ({rowsArray.length} Invoices)
+                        </td>
+                        <td className="p-3 text-right font-mono">{computedTotals.item_lines_count}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_pack_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_loose_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {fmtQty(computedTotals.bonus_qty || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {fmtQty(computedTotals.return_packs_eq || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.gross_sales_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-rose-300">
+                          {formatPKR(computedTotals.discount_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {formatPKR(computedTotals.sales_return_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.net_revenue_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.total_cost_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {formatPKR(computedTotals.gross_profit)}
+                        </td>
+                        <td className="p-3 text-right font-mono">{computedTotals.profit_margin_percent}%</td>
+                      </tr>
+                    )}
+
+                    {reportKey === 'detailed-profit-report' && (
+                      <tr>
+                        <td colSpan={4} className="p-3 uppercase">
+                          Grand Total ({rowsArray.length} Lines)
+                        </td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_pack_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_loose_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {fmtQty(computedTotals.bonus_qty || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {fmtQty(computedTotals.returned_total_units || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.net_total_units || 0)}</td>
+                        <td colSpan={2} className="p-3" />
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.gross_sales_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-rose-300">
+                          {formatPKR(computedTotals.discount_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {formatPKR(computedTotals.sales_return_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.net_revenue_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.total_cost_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {formatPKR(computedTotals.gross_profit)}
+                        </td>
+                        <td className="p-3 text-right font-mono">{computedTotals.profit_margin_percent}%</td>
+                      </tr>
+                    )}
+
+                    {reportKey === 'account-profit-report' && (
+                      <tr>
+                        <td colSpan={4} className="p-3 uppercase">
+                          Grand Total ({rowsArray.length} Parties)
+                        </td>
+                        <td className="p-3 text-right font-mono">{computedTotals.invoice_count}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_pack_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.sold_loose_qty || 0)}</td>
+                        <td className="p-3 text-right font-mono text-emerald-300">
+                          {fmtQty(computedTotals.bonus_qty || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {fmtQty(computedTotals.return_packs_eq || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">{fmtQty(computedTotals.net_packs_sold || 0)}</td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.gross_sales_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-rose-300">
+                          {formatPKR(computedTotals.discount_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-300">
+                          {formatPKR(computedTotals.sales_return_amount || 0)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.net_revenue_amount)}
+                        </td>
+                        <td className="p-3 text-right font-mono">
+                          {formatPKR(computedTotals.total_cost_amount)}
+                        </td>
                         <td className="p-3 text-right font-mono text-emerald-300">
                           {formatPKR(computedTotals.gross_profit)}
                         </td>

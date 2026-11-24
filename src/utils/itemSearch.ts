@@ -272,3 +272,134 @@ export function searchItems<T extends BaseSearchableItem>(
   matches.sort((a, b) => b.score - a.score || String(a.item.item_name || '').localeCompare(String(b.item.item_name || '')));
   return matches.slice(0, limit).map((m) => m.item);
 }
+
+export interface ResolvedItemSelectionFields {
+  itemCode: string;
+  itemName: string;
+  sPrice: number;
+  purchasePrice: number;
+  loosePrice: number;
+  stockPacks: number;
+  company: string;
+  packing: string;
+  batchNumber: string;
+  expiryDate: string;
+  otherInfo: string;
+}
+
+function round2ItemVal(val: unknown): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+function deriveUnitsPerPackFromItem(item: BaseSearchableItem): number {
+  const explicit = Number(item.units_per_pack || 0);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const strips = Number(item.strips_per_box || 0);
+  const perStrip = Number(item.tablets_per_strip || item.units_per_strip || 0);
+  if (strips > 0 && perStrip > 0) return strips * perStrip;
+  const packingStr = String(item.packing || '').trim();
+  const matrix = packingStr.match(/(\d+)\s*[xX*×]\s*(\d+)/);
+  if (matrix) {
+    const a = parseInt(matrix[1], 10) || 1;
+    const b = parseInt(matrix[2], 10) || 1;
+    return Math.max(1, a * b);
+  }
+  const single = packingStr.match(/(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc)/i);
+  if (single) return Math.max(1, parseInt(single[1], 10) || 1);
+  return 1;
+}
+
+/**
+ * Resolves all required Item Master + Inventory/Batch display fields in canonical order
+ * for BOTH the Item Name ComboBox/Dropdown and the Expanded Item Selection List across
+ * Sales POS, Sales MS Access, Purchase POS, and Purchase MS Access.
+ */
+export function resolveItemSelectionFields<T extends BaseSearchableItem>(
+  item: T,
+  opts?: {
+    salePrice?: number;
+    purchasePrice?: number;
+    stockPacks?: number;
+    batchNumber?: string;
+    expiryDate?: string;
+  }
+): ResolvedItemSelectionFields {
+  const realBatchList = Array.isArray(item.batches) ? item.batches : [];
+  const primaryBatch =
+    realBatchList.find((b: any) => Number(b?.total_stock_units || b?.current_pack_qty || 0) > 0) ||
+    realBatchList[0] ||
+    (item.default_batch && item.default_batch.inventory_id != null ? item.default_batch : null);
+
+  const sPrice = round2ItemVal(
+    opts?.salePrice !== undefined
+      ? opts.salePrice
+      : Number(item.retail_price || item.wholesale_price || item.trade_price || 0)
+  );
+
+  const purchasePrice = round2ItemVal(
+    opts?.purchasePrice !== undefined
+      ? opts.purchasePrice
+      : Number(item.purchase_price || primaryBatch?.purchase_price_per_pack || 0)
+  );
+
+  const unitsPerPack = deriveUnitsPerPackFromItem(item);
+  const explicitLoose = Number(item.loose_rate || item.retail_loose_rate || 0);
+  const loosePrice =
+    Number.isFinite(explicitLoose) && explicitLoose > 0
+      ? round2ItemVal(explicitLoose)
+      : sPrice > 0 && unitsPerPack > 0
+      ? round2ItemVal(sPrice / unitsPerPack)
+      : 0;
+
+  const stockPacks = round2ItemVal(
+    opts?.stockPacks !== undefined
+      ? opts.stockPacks
+      : item.total_available_packs !== undefined
+      ? item.total_available_packs
+      : item.consolidated_stock_packs !== undefined
+      ? item.consolidated_stock_packs
+      : item.default_batch?.available_packs !== undefined
+      ? item.default_batch.available_packs
+      : item.opening_stock ?? 0
+  );
+
+  const rawBatch = String(
+    opts?.batchNumber ??
+      item.batch_number ??
+      primaryBatch?.batch_number ??
+      ''
+  ).trim();
+  const rawExpiry = String(
+    opts?.expiryDate ??
+      item.expiry_date ??
+      primaryBatch?.expiry_date ??
+      ''
+  ).trim();
+
+  const otherParts: string[] = [];
+  if (item.generic_name && String(item.generic_name).trim()) {
+    otherParts.push(String(item.generic_name).trim());
+  }
+  if (item.rack_number && String(item.rack_number).trim()) {
+    otherParts.push(`Rack: ${String(item.rack_number).trim()}`);
+  }
+  if (item.barcode && String(item.barcode).trim()) {
+    otherParts.push(String(item.barcode).trim());
+  }
+
+  return {
+    itemCode: String(item.item_code || '').trim() || '—',
+    itemName: String(item.item_name || '').trim() || '—',
+    sPrice,
+    purchasePrice,
+    loosePrice,
+    stockPacks,
+    company: String(item.company_name || '').trim() || '—',
+    packing: String(item.packing || '1x1').trim() || '1x1',
+    batchNumber: rawBatch || '—',
+    expiryDate: rawExpiry || '—',
+    otherInfo: otherParts.join(' • ') || '—',
+  };
+}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../../services/api';
 import { PaymentVoucherRecord } from '../../types/sales';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { Banknote, CheckCircle2, AlertCircle, Printer } from 'lucide-react';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
@@ -21,7 +21,7 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
   >(initialVoucherType);
 
   const [voucherNumber, setVoucherNumber] = useState<string>('VCH-2026-0001');
-  const [voucherDate, setVoucherDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [voucherDate, setVoucherDate] = useState<string>(getPakistanDateISO());
   const [partyAccountId, setPartyAccountId] = useState<number>(0);
   const [financialAccountId, setFinancialAccountId] = useState<number>(0);
   const [amount, setAmount] = useState<string>('');
@@ -365,7 +365,7 @@ export const PaymentsWorkspaceView: React.FC<PaymentsWorkspaceViewProps> = ({
               payload={{
                 documentType: 'report',
                 documentNumber: 'Payments and Receipts Register',
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName: 'Payments & Receipts Register',
                 totalAmount: 0,
                 paidAmount: 0,

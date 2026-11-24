@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { formatAppDateTime } from '../../utils/formatters';
 import {
   Users,
   UserPlus,
@@ -640,7 +641,7 @@ export const UserManagementView: React.FC = () => {
 
                       {/* Last Login */}
                       <td className="py-3.5 px-4 text-[11.5px] text-slate-500">
-                        {u.last_login ? new Date(u.last_login).toLocaleString() : 'Never logged in'}
+                        {u.last_login ? formatAppDateTime(u.last_login) : 'Never logged in'}
                       </td>
 
                       {/* Actions */}

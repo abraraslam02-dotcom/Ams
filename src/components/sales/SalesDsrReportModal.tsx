@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../../utils/formatters';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Printer, Receipt, FileText, X, ClipboardList, AlertCircle } from 'lucide-react';
 import { DatasheetRow, FastSearchItem } from '../../types/sales';
@@ -29,6 +30,10 @@ export interface DsrItemEntry {
   qty: number;
   bonusQty: number;
   looseQty: number;
+  rate: number;
+  looseRate: number;
+  discountPercent: number;
+  amount: number;
   remarks?: string;
 }
 
@@ -159,6 +164,10 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         qty: number;
         bonusQty: number;
         looseQty: number;
+        rate: number;
+        looseRate: number;
+        discountPercent: number;
+        amount: number;
         remarks: string;
       }>
     >();
@@ -201,6 +210,10 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
         qty,
         bonusQty,
         looseQty,
+        rate: Math.max(0, Number(r.unit_price || 0)),
+        looseRate: Math.max(0, Number(r.loose_rate || 0)),
+        discountPercent: Math.max(0, Number(r.discount_percent || 0)),
+        amount: Number(r.line_total || 0),
         remarks: String(r.remarks || '').trim(),
       });
     }
@@ -209,7 +222,10 @@ export const SalesDsrReportModal: React.FC<SalesDsrReportModalProps> = ({
     const sortedCompanyNames = Array.from(groupMap.keys()).sort((a, b) =>
       a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
     );
-let runningSerial = 0; // S# poore DSR mein continuous chalega
+
+    // S.No runs continuously across all company groups (1..N), not restarting per company
+    let runningSNo = 0;
+
     const groups: DsrCompanyGroup[] = sortedCompanyNames.map((companyName) => {
       const rawItems = groupMap.get(companyName) || [];
       // Sort item names in ascending alphabetical order (A–Z) within each company group
@@ -221,14 +237,14 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
       let groupBonusQty = 0;
       let groupLooseQty = 0;
 
-      const itemsWithSerial: DsrItemEntry[] = sortedItems.map((item, idx) => {
+      const itemsWithSerial: DsrItemEntry[] = sortedItems.map((item) => {
         groupQty += item.qty;
         groupBonusQty += item.bonusQty;
         groupLooseQty += item.looseQty;
         return {
           ...item,
-           // S.No continuous across all company groups (1, 2, 3, ...)
-          sNo: ++runningSerial
+          // Continuous serial number across all companies
+          sNo: ++runningSNo,
         };
       });
 
@@ -255,7 +271,7 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
 
   const displayStoreName = resolvedStoreName || 'Abrar Medical Store';
   const displayInvoiceNumber = invoiceNumber?.trim() || 'N/A';
-  const displayInvoiceDate = invoiceDate?.trim() || new Date().toISOString().slice(0, 10);
+  const displayInvoiceDate = invoiceDate?.trim() || getPakistanDateISO();
   const displayCustomerName = customerName?.trim() || 'Walk-in Cash Customer';
   const displayCustomerPhone = customerPhone?.trim() || '';
   const displayCustomerAddress = customerAddress?.trim() || '';
@@ -559,32 +575,47 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
                   {/* Company-wise Grouped Items Table (exact A4 Sales Bill typography, compact rows) */}
                   <table className="dsr-a4-table w-full border-collapse border border-slate-300 mb-2.5 tabular-nums">
                     <thead>
-                      {/* Exact Required Column Order: S.No | Item Name | Qty | Bonus | Loose */}
-                      <tr className="bg-slate-900 text-white text-xs font-bold uppercase tracking-wide">
-                        <th className="py-1.5 px-2 text-center border border-slate-700 w-12">
+                      {/* Column Order: S.No | Item Name | Qty | Loose Qty | Bonus | Rate | Loose Rate | Discount | Amount | Remarks */}
+                      <tr className="bg-slate-900 text-white text-[10px] font-bold uppercase tracking-tight">
+                        <th className="py-1 px-1 text-center border border-slate-700 w-8">
                           S.No
                         </th>
-                        <th className="py-1.5 px-2 text-left border border-slate-700">
+                        <th className="py-1 px-1 text-left border border-slate-700">
                           Item Name
                         </th>
-                        <th className="py-1.5 px-2 text-right border border-slate-700 w-20">
+                        <th className="py-1 px-1 text-right border border-slate-700 w-10">
                           Qty
                         </th>
-                        <th className="py-1.5 px-2 text-right border border-slate-700 w-20">
+                        <th className="py-1 px-1 text-right border border-slate-700 w-11">
+                          Loose Qty
+                        </th>
+                        <th className="py-1 px-1 text-right border border-slate-700 w-10">
                           Bonus
                         </th>
-                        <th className="py-1.5 px-2 text-right border border-slate-700 w-20">
-                          Loose
+                        <th className="py-1 px-1 text-right border border-slate-700 w-14">
+                          Rate
+                        </th>
+                        <th className="py-1 px-1 text-right border border-slate-700 w-12">
+                          Loose Rate
+                        </th>
+                        <th className="py-1 px-1 text-right border border-slate-700 w-11">
+                          Disc %
+                        </th>
+                        <th className="py-1 px-1 text-right border border-slate-700 w-16">
+                          Amount
+                        </th>
+                        <th className="py-1 px-1 text-left border border-slate-700 w-20">
+                          Remarks
                         </th>
                       </tr>
                     </thead>
                     <tbody>
                       {dsrData.groups.map((group) => (
                         <React.Fragment key={group.companyName}>
-                          {/* Company Group Heading Row (matched to Item Name 13.5px size) */}
+                          {/* Company Group Heading Row */}
                           <tr className="dsr-a4-company-row bg-slate-200/90">
                             <td
-                              colSpan={5}
+                              colSpan={10}
                               className="py-1 px-2 border border-slate-300 font-black text-slate-950 text-[12px] uppercase tracking-wide leading-snug"
                             >
                               {group.companyName}
@@ -594,22 +625,37 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
                           {group.items.map((item) => (
                             <tr
                               key={item.rowId}
-                              className="dsr-a4-item-row text-[13px] leading-snug hover:bg-slate-50/70"
+                              className="dsr-a4-item-row text-[11.5px] leading-snug hover:bg-slate-50/70"
                             >
-                              <td className="py-1 px-2 border border-slate-300 text-center font-mono tabular-nums text-slate-600 font-semibold text-[13px]">
+                              <td className="py-1 px-1 border border-slate-300 text-center font-mono tabular-nums text-slate-600 font-semibold">
                                 {item.sNo}
                               </td>
-                              <td className="py-1 px-2 border border-slate-300 font-bold text-[13.5px] leading-snug text-slate-950 break-words">
+                              <td className="py-1 px-1 border border-slate-300 font-bold text-[12px] leading-snug text-slate-950 break-words">
                                 {formatItemNameWithRemarks(item.itemName, item.remarks)}
                               </td>
-                              <td className="py-1 px-2 border border-slate-300 text-right font-mono tabular-nums font-bold text-[13.5px] text-slate-950">
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums font-bold text-slate-950">
                                 {formatQtyValue(item.qty)}
                               </td>
-                              <td className="py-1 px-2 border border-slate-300 text-right font-mono tabular-nums font-bold text-[13px] text-slate-950">
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums font-bold text-slate-950">
+                                {formatQtyValue(item.looseQty)}
+                              </td>
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums font-bold text-slate-950">
                                 {formatQtyValue(item.bonusQty)}
                               </td>
-                              <td className="py-1 px-2 border border-slate-300 text-right font-mono tabular-nums font-bold text-[13px] text-slate-950">
-                                {formatQtyValue(item.looseQty)}
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums text-slate-950">
+                                {formatQtyValue(item.rate)}
+                              </td>
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums text-slate-950">
+                                {formatQtyValue(item.looseRate)}
+                              </td>
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums text-slate-950">
+                                {item.discountPercent > 0 ? `${formatQtyValue(item.discountPercent)}%` : ''}
+                              </td>
+                              <td className="py-1 px-1 border border-slate-300 text-right font-mono tabular-nums font-bold text-slate-950">
+                                {formatQtyValue(item.amount)}
+                              </td>
+                              <td className="py-1 px-1 border border-slate-300 text-left text-[10.5px] text-slate-800 break-words">
+                                {item.remarks || ''}
                               </td>
                             </tr>
                           ))}
@@ -672,10 +718,10 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
                 >
                   {/* Centered Store Header (exact 80mm Sales Bill typography) */}
                   <div className="text-center pb-0.5">
-                    <div className="font-black text-black tracking-tight leading-tight text-[11px]">
+                    <div className="font-normal text-black tracking-tight leading-tight text-[11px]">
                       {displayStoreName}
                     </div>
-                    <div className="font-semibold text-black leading-tight mt-0 text-[10px]">
+                    <div className="font-normal text-black leading-tight mt-0 text-[10px]">
                       DSR – Daily Stock Requisition
                     </div>
                   </div>
@@ -684,38 +730,38 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
                   <table className="w-full border-collapse border border-black text-black text-[10px]">
                     <tbody>
                       <tr className="break-inside-avoid">
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap">
+                        <td className="border border-black px-1 py-0 font-normal whitespace-nowrap">
                           Party
                         </td>
                         <td
                           colSpan={3}
-                          className="border border-black px-1 py-0 font-black break-words text-[11px]"
+                          className="border border-black px-1 py-0 font-normal break-words text-[11px]"
                         >
                           {displayCustomerName}
                         </td>
                       </tr>
                       <tr className="break-inside-avoid">
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap">
+                        <td className="border border-black px-1 py-0 font-normal whitespace-nowrap">
                           Inv#
                         </td>
-                        <td className="border border-black px-1 py-0 font-black font-mono text-[10.5px] break-all">
+                        <td className="border border-black px-1 py-0 font-normal font-mono text-[10.5px] break-all">
                           {displayInvoiceNumber}
                         </td>
-                        <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap">
+                        <td className="border border-black px-1 py-0 font-normal whitespace-nowrap">
                           Date
                         </td>
-                        <td className="border border-black px-1 py-0 font-semibold text-left whitespace-nowrap">
+                        <td className="border border-black px-1 py-0 font-normal text-left whitespace-nowrap">
                           {formatDateDMY(displayInvoiceDate)}
                         </td>
                       </tr>
                       {(displayCustomerPhone || displayCustomerAddress) && (
                         <tr className="break-inside-avoid">
-                          <td className="border border-black px-1 py-0 font-semibold whitespace-nowrap align-top">
+                          <td className="border border-black px-1 py-0 font-normal whitespace-nowrap align-top">
                             Info
                           </td>
                           <td
                             colSpan={3}
-                            className="border border-black px-1 py-0 font-semibold break-words"
+                            className="border border-black px-1 py-0 font-normal break-words"
                           >
                             {[displayCustomerPhone, displayCustomerAddress]
                               .filter(Boolean)
@@ -729,20 +775,20 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
                   {/* Compact Boxed items table: # | Item Name | Qty | LQ | Bon (company-wise A-Z, exact 80mm Sales Bill typography) */}
                   <table className="w-full border-collapse border border-black border-t-0 text-black text-[10px]">
                     <thead>
-                      <tr className="font-black text-black bg-white">
-                        <th className="border border-black px-1 py-0 text-center font-black w-[20px]">
+                      <tr className="font-normal text-black bg-white">
+                        <th className="border border-black px-1 py-0 text-center font-normal w-[20px]">
                           #
                         </th>
-                        <th className="border border-black px-1 py-0 text-left font-black">
+                        <th className="border border-black px-1 py-0 text-left font-normal">
                           Item Name
                         </th>
-                        <th className="border border-black px-0.5 py-0 text-center font-black whitespace-nowrap text-[10.5px]">
+                        <th className="border border-black px-0.5 py-0 text-center font-normal whitespace-nowrap text-[10.5px]">
                           Qty
                         </th>
-                        <th className="border border-black px-0.5 py-0 text-center font-black whitespace-nowrap text-[10.5px]">
+                        <th className="border border-black px-0.5 py-0 text-center font-normal whitespace-nowrap text-[10.5px]">
                           LQ
                         </th>
-                        <th className="border border-black px-0.5 py-0 text-center font-black whitespace-nowrap text-[10.5px]">
+                        <th className="border border-black px-0.5 py-0 text-center font-normal whitespace-nowrap text-[10.5px]">
                           Bon
                         </th>
                       </tr>
@@ -754,26 +800,26 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
                             <td
                               colSpan={5}
                               title={group.companyName}
-                              className="border border-black px-1 py-0 bg-slate-100 font-black uppercase text-[11px] leading-snug break-words"
+                              className="border border-black px-1 py-0 bg-slate-100 font-normal uppercase text-[11px] leading-snug break-words"
                             >
                               {formatThermalCompanyName(group.companyName)}
                             </td>
                           </tr>
                           {group.items.map((item) => (
                             <tr key={item.rowId} className="align-middle break-inside-avoid">
-                              <td className="border border-black px-1 py-0 text-center font-bold w-[20px] whitespace-nowrap">
+                              <td className="border border-black px-1 py-0 text-center font-normal w-[20px] whitespace-nowrap">
                                 {item.sNo}
                               </td>
-                              <td className="border border-black px-1 py-0 font-bold text-black leading-tight break-words text-[10.5px]">
+                              <td className="border border-black px-1 py-0 font-normal text-black leading-tight break-words text-[10.5px]">
                                 {formatItemNameWithRemarks(item.itemName, item.remarks)}
                               </td>
-                              <td className="border border-black px-0.5 py-0 text-center font-black whitespace-nowrap text-[10.5px]">
+                              <td className="border border-black px-0.5 py-0 text-center font-normal whitespace-nowrap text-[10.5px]">
                                 {formatQtyValue(item.qty)}
                               </td>
-                              <td className="border border-black px-0.5 py-0 text-center font-mono font-bold whitespace-nowrap text-[11px]">
+                              <td className="border border-black px-0.5 py-0 text-center font-mono font-normal whitespace-nowrap text-[11px]">
                                 {item.looseQty > 0 ? formatQtyValue(item.looseQty) : '-'}
                               </td>
-                              <td className="border border-black px-0.5 py-0 text-center font-mono font-bold whitespace-nowrap text-[11px]">
+                              <td className="border border-black px-0.5 py-0 text-center font-mono font-normal whitespace-nowrap text-[11px]">
                                 {item.bonusQty > 0 ? formatQtyValue(item.bonusQty) : '-'}
                               </td>
                             </tr>
@@ -785,13 +831,13 @@ let runningSerial = 0; // S# poore DSR mein continuous chalega
 
                   {/* Bottom Summary Line: Total Items & Qty (exact 80mm Sales Bill typography) */}
                   <div className="border border-black border-t-0 text-black text-[10.5px]">
-                    <div className="flex items-baseline justify-between gap-2 px-1 py-[1px] font-bold break-inside-avoid">
+                    <div className="flex items-baseline justify-between gap-2 px-1 py-[1px] font-normal break-inside-avoid">
                       <span>
-                        Items: <span className="font-mono font-black">{dsrData.totalItems}</span>
+                        Items: <span className="font-mono font-normal">{dsrData.totalItems}</span>
                       </span>
                       <span>
                         Qty:{' '}
-                        <span className="font-mono font-black">
+                        <span className="font-mono font-normal">
                           {formatQtyValue(dsrData.totalQty)}
                         </span>
                       </span>

@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import express from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -36,7 +37,7 @@ import {
 export const enhancementsRouter = express.Router();
 
 function getTodayDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+  return getPakistanDateISO();
 }
 
 function getAuthenticatedUser(req: express.Request): {

@@ -30,8 +30,11 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
     };
   }, [onSyncCompleted]);
 
+  const isOfflineMode = syncState.operatingMode === 'OFFLINE';
+
   const handleSyncNow = async () => {
-    const ok = await offlineSyncManager.syncNow();
+    if (isOfflineMode) return;
+    const ok = await offlineSyncManager.syncNow({ manualTrigger: true });
     if (ok) {
       onManualSyncCompleted?.();
     }
@@ -81,14 +84,15 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
 
         <button
           type="button"
-          disabled={syncState.syncStatus === 'syncing' || !syncState.isOnline}
+          disabled={isOfflineMode || syncState.syncStatus === 'syncing' || !syncState.isOnline}
           onClick={handleSyncNow}
+          title={isOfflineMode ? 'OFFLINE MODE active — use Super Admin BACKUP & SYNC NOW' : 'Manual Sync'}
           className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer"
         >
           <RefreshCw
             className={`w-3 h-3 ${syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`}
           />
-          <span>SYNC NOW</span>
+          <span>{isOfflineMode ? 'OFFLINE MODE' : 'SYNC NOW'}</span>
         </button>
       </div>
     );
@@ -141,14 +145,15 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
 
       <button
         type="button"
-        disabled={syncState.syncStatus === 'syncing' || !syncState.isOnline}
+        disabled={isOfflineMode || syncState.syncStatus === 'syncing' || !syncState.isOnline}
         onClick={handleSyncNow}
+        title={isOfflineMode ? 'OFFLINE MODE active — use Super Admin BACKUP & SYNC NOW' : 'Manual Sync'}
         className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
       >
         <RefreshCw
           className={`w-3.5 h-3.5 ${syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`}
         />
-        <span>SYNC NOW</span>
+        <span>{isOfflineMode ? 'OFFLINE MODE (LOCAL)' : 'SYNC NOW'}</span>
       </button>
     </div>
   );

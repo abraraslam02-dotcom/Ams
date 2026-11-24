@@ -1,5 +1,10 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
+  getPakistanDateISO,
+  getPakistanDateParts,
+  addDaysToIsoDate,
+} from '../../utils/formatters';
+import {
   ShoppingCart,
   ShoppingBag,
   TrendingUp,
@@ -42,49 +47,48 @@ type DatePreset =
 type SalesChartMode = 'daily' | 'weekly' | 'monthly' | 'yearly';
 type ProfitChartMode = 'daily' | 'monthly' | 'byAccount' | 'byItem';
 
-function toIsoDate(d: Date): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 function computePresetRange(preset: DatePreset): { startDate: string; endDate: string } {
-  const now = new Date();
-  const today = toIsoDate(now);
+  const today = getPakistanDateISO();
+  const pk = getPakistanDateParts();
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const firstOfMonth = `${pk.year}-${pad2(pk.month)}-01`;
 
   switch (preset) {
     case 'today':
       return { startDate: today, endDate: today };
     case 'yesterday': {
-      const y = new Date(now);
-      y.setDate(now.getDate() - 1);
-      const yIso = toIsoDate(y);
+      const yIso = addDaysToIsoDate(today, -1);
       return { startDate: yIso, endDate: yIso };
     }
     case 'this_week': {
-      const start = new Date(now);
-      const dayOfWeek = start.getDay(); // 0 = Sun
-      const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Monday start
-      start.setDate(now.getDate() - diff);
-      return { startDate: toIsoDate(start), endDate: today };
+      const weekdayMap: Record<string, number> = {
+        Monday: 0,
+        Tuesday: 1,
+        Wednesday: 2,
+        Thursday: 3,
+        Friday: 4,
+        Saturday: 5,
+        Sunday: 6,
+      };
+      const diff = weekdayMap[pk.weekday] ?? 0;
+      return { startDate: addDaysToIsoDate(today, -diff), endDate: today };
     }
-    case 'this_month': {
-      const start = new Date(now.getFullYear(), now.getMonth(), 1);
-      return { startDate: toIsoDate(start), endDate: today };
-    }
+    case 'this_month':
+      return { startDate: firstOfMonth, endDate: today };
     case 'last_month': {
-      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const end = new Date(now.getFullYear(), now.getMonth(), 0);
-      return { startDate: toIsoDate(start), endDate: toIsoDate(end) };
+      const prevYear = pk.month === 1 ? pk.year - 1 : pk.year;
+      const prevMonth = pk.month === 1 ? 12 : pk.month - 1;
+      const lastDayPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
+      return {
+        startDate: `${prevYear}-${pad2(prevMonth)}-01`,
+        endDate: `${prevYear}-${pad2(prevMonth)}-${pad2(lastDayPrevMonth)}`,
+      };
     }
-    case 'this_year': {
-      const start = new Date(now.getFullYear(), 0, 1);
-      return { startDate: toIsoDate(start), endDate: today };
-    }
+    case 'this_year':
+      return { startDate: `${pk.year}-01-01`, endDate: today };
     default:
       return {
-        startDate: toIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)),
+        startDate: firstOfMonth,
         endDate: today,
       };
   }

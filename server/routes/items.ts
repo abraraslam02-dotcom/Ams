@@ -16,6 +16,7 @@ import {
   lookupItemByBarcodeExact,
 } from '../services/itemVariantService.ts';
 import { resolveItemTaxConfig, type ItemTaxType } from '../utils/taxCalculation.ts';
+import { classifyItemCategory } from '../utils/itemCategory.ts';
 
 export const itemsRouter = Router();
 
@@ -1564,9 +1565,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
     if (!item_name || String(item_name).trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Item Name is required.' });
     }
-    if (!category || String(category).trim().length === 0) {
-      return res.status(400).json({ success: false, error: 'Category is required.' });
-    }
+    const resolvedCategory = classifyItemCategory(String(item_name).trim());
 
     const packingConfig = resolveMultiLevelPackingConfig({
       packing,
@@ -1635,7 +1634,7 @@ itemsRouter.post('/', (req: Request, res: Response) => {
         canonicalCompany,
         String(item_name).trim(),
         generic_name ? String(generic_name).trim() : null,
-        String(category).trim(),
+        resolvedCategory,
         packingConfig.packing,
         packingConfig.carton,
         packingConfig.boxes_per_carton,
@@ -1683,6 +1682,450 @@ itemsRouter.post('/', (req: Request, res: Response) => {
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return res.status(500).json({ success: false, error: `Failed to create item: ${errorMsg}` });
+  }
+});
+
+/**
+ * PUT /api/items/bulk-update
+ * Controlled bulk datasheet update:
+ * - Updates ONLY modified fields per item ID
+ * - Enforces immutable id, item_code, and opening_stock (never alters stock/batches/sales/purchases/ledgers)
+ * - Validates each row independently and reports per-row errors without silently discarding valid rows
+ */
+itemsRouter.put('/bulk-update', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const rawUpdates = req.body?.updates;
+
+    if (!Array.isArray(rawUpdates) || rawUpdates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No modified item rows provided for bulk update.',
+        updatedCount: 0,
+        errorCount: 0,
+        updatedItems: [],
+        errors: [],
+      });
+    }
+
+    const updatedItems: Array<Record<string, any>> = [];
+    const rowErrors: Array<{
+      id: number;
+      item_code: string;
+      item_name: string;
+      error: string;
+    }> = [];
+
+    const seenIds = new Set<number>();
+
+    // Take a single safety backup before applying bulk datasheet edits
+    triggerPreChangeBackupIfEnabled(
+      `Bulk Item Datasheet Update (${rawUpdates.length} rows)`,
+      req.user?.username || 'Administrator'
+    );
+
+    const parseFiniteNonNeg = (val: unknown, fieldLabel: string): number => {
+      const n = Number(val);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new Error(`${fieldLabel} must be a valid non-negative number.`);
+      }
+      return round2(n);
+    };
+
+    const VALID_PURCHASE_UNITS = new Set(['Carton', 'Box', 'Strip', 'Tablet']);
+    const PACKING_KEYS = new Set([
+      'packing',
+      'carton',
+      'boxes_per_carton',
+      'strips_per_box',
+      'tablets_per_strip',
+      'units_per_strip',
+      'units_per_pack',
+      'purchase_unit',
+    ]);
+
+    for (const entry of rawUpdates) {
+      const itemId = Number(entry?.id);
+      const changes = (entry?.changes && typeof entry.changes === 'object' ? entry.changes : {}) as Record<string, unknown>;
+      const expectedUpdatedAt = entry?.expected_updated_at;
+
+      if (!Number.isInteger(itemId) || itemId <= 0) {
+        rowErrors.push({
+          id: Number.isFinite(itemId) ? itemId : 0,
+          item_code: '',
+          item_name: String(changes.item_name || ''),
+          error: 'Valid Item ID is required.',
+        });
+        continue;
+      }
+
+      if (seenIds.has(itemId)) {
+        rowErrors.push({
+          id: itemId,
+          item_code: String(changes.item_code || ''),
+          item_name: String(changes.item_name || ''),
+          error: 'Duplicate update for the same item in one batch was blocked.',
+        });
+        continue;
+      }
+      seenIds.add(itemId);
+
+      const existingItem = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId) as ItemRow | undefined;
+      if (!existingItem) {
+        rowErrors.push({
+          id: itemId,
+          item_code: String(changes.item_code || ''),
+          item_name: String(changes.item_name || ''),
+          error: 'Item record no longer exists in database.',
+        });
+        continue;
+      }
+
+      try {
+        if (Object.keys(changes).length === 0) {
+          throw new Error('No changed fields supplied for this item.');
+        }
+
+        // Strict immutability guards
+        if (changes.id !== undefined && Number(changes.id) !== itemId) {
+          throw new Error('Item ID is immutable and cannot be modified.');
+        }
+        if (
+          changes.item_code !== undefined &&
+          String(changes.item_code).trim() !== String(existingItem.item_code).trim()
+        ) {
+          throw new Error('Item Code is immutable and cannot be modified in Bulk Datasheet View.');
+        }
+        if (
+          changes.opening_stock !== undefined &&
+          Math.abs((Number(changes.opening_stock) || 0) - Number(existingItem.opening_stock || 0)) > 0.0001
+        ) {
+          throw new Error('Opening Stock cannot be altered in Bulk Datasheet View to protect inventory history.');
+        }
+
+        if (
+          expectedUpdatedAt &&
+          existingItem.updated_at &&
+          String(expectedUpdatedAt) !== String(existingItem.updated_at)
+        ) {
+          throw new Error(
+            'Simultaneous Edit Conflict: Another user updated this item after you loaded the datasheet. Refresh and retry.'
+          );
+        }
+
+        // Validate changed string fields
+        let resolvedCompany = existingItem.company_name;
+        if (changes.company_name !== undefined) {
+          const normComp = normalizeCompanyName(changes.company_name);
+          if (!normComp) {
+            throw new Error('Company Name cannot be empty.');
+          }
+          resolvedCompany = registerItemCompanyIfNew(db, normComp) || normComp;
+        }
+
+        let nextItemName = existingItem.item_name;
+        if (changes.item_name !== undefined) {
+          const cleanName = String(changes.item_name ?? '').trim();
+          if (!cleanName) {
+            throw new Error('Item Name cannot be empty.');
+          }
+          nextItemName = cleanName;
+        }
+
+        let nextGenericName = existingItem.generic_name;
+        if (changes.generic_name !== undefined) {
+          const cleanGen = String(changes.generic_name ?? '').trim();
+          nextGenericName = cleanGen ? cleanGen : null;
+        }
+
+        const nextCategory =
+          changes.item_name !== undefined || changes.category !== undefined
+            ? classifyItemCategory(nextItemName)
+            : existingItem.category;
+
+        let nextRack = existingItem.rack_number;
+        if (changes.rack_number !== undefined) {
+          const cleanRack = String(changes.rack_number ?? '').trim();
+          nextRack = cleanRack ? cleanRack : null;
+        }
+
+        let nextStatus: 'Active' | 'Inactive' = existingItem.status;
+        if (changes.status !== undefined) {
+          const st = String(changes.status).trim();
+          if (st !== 'Active' && st !== 'Inactive') {
+            throw new Error('Status must be Active or Inactive.');
+          }
+          nextStatus = st;
+        }
+
+        let nextBarcode = existingItem.barcode;
+        if (changes.barcode !== undefined) {
+          const cleanBc = String(changes.barcode ?? '').trim();
+          nextBarcode = cleanBc ? cleanBc : null;
+          if (nextBarcode) {
+            const bcConflict = findBarcodeConflict(nextBarcode, { excludeItemId: itemId });
+            if (bcConflict) {
+              throw new Error(
+                `Barcode "${nextBarcode}" is already assigned to ${bcConflict.ownerLabel}. Duplicate barcodes are not allowed.`
+              );
+            }
+          }
+        }
+
+        // Validate packing fields
+        if (changes.packing !== undefined && !String(changes.packing ?? '').trim()) {
+          throw new Error('Packing Specification cannot be empty.');
+        }
+        if (changes.purchase_unit !== undefined && !VALID_PURCHASE_UNITS.has(String(changes.purchase_unit).trim())) {
+          throw new Error('Purchase Unit must be Carton, Box, Strip, or Tablet.');
+        }
+        for (const pNumField of ['carton', 'boxes_per_carton', 'strips_per_box', 'tablets_per_strip'] as const) {
+          if (
+            changes[pNumField] !== undefined &&
+            changes[pNumField] !== null &&
+            String(changes[pNumField]).trim() !== ''
+          ) {
+            const n = Number(changes[pNumField]);
+            if (!Number.isFinite(n) || n < 0) {
+              throw new Error(`${pNumField.replace(/_/g, ' ')} must be 0 or greater.`);
+            }
+          }
+        }
+
+        const hasPackingChanges = Array.from(PACKING_KEYS).some((k) => changes[k] !== undefined);
+        const packingConfig = resolveMultiLevelPackingConfig(
+          {
+            packing: changes.packing,
+            carton: changes.carton,
+            boxes_per_carton: changes.boxes_per_carton,
+            strips_per_box: changes.strips_per_box,
+            tablets_per_strip: changes.tablets_per_strip,
+            units_per_strip: changes.units_per_strip,
+            units_per_pack: changes.units_per_pack,
+            purchase_unit: changes.purchase_unit,
+          },
+          existingItem
+        );
+
+        // Validate numeric pricing & stock alert fields
+        const nextPurchasePrice =
+          changes.purchase_price !== undefined
+            ? parseFiniteNonNeg(changes.purchase_price, 'Purchase Rate')
+            : round2(existingItem.purchase_price);
+        const nextTradePrice =
+          changes.trade_price !== undefined
+            ? parseFiniteNonNeg(changes.trade_price, 'Trade Price')
+            : round2(existingItem.trade_price);
+        const nextWholesalePrice =
+          changes.wholesale_price !== undefined
+            ? parseFiniteNonNeg(changes.wholesale_price, 'Wholesale Price')
+            : round2(existingItem.wholesale_price);
+        const nextRetailPrice =
+          changes.retail_price !== undefined
+            ? parseFiniteNonNeg(changes.retail_price, 'Retail Price')
+            : round2(existingItem.retail_price);
+
+        const nextLooseRate =
+          changes.loose_rate !== undefined
+            ? parseFiniteNonNeg(changes.loose_rate, 'Loose Rate')
+            : Number(existingItem.loose_rate || 0) > 0
+            ? round2(Number(existingItem.loose_rate))
+            : round2(nextRetailPrice / Math.max(1, packingConfig.units_per_pack));
+
+        const nextDiscount =
+          changes.discount_percent !== undefined
+            ? parseFiniteNonNeg(changes.discount_percent, 'Discount %')
+            : round2(existingItem.discount_percent);
+        if (nextDiscount > 100) {
+          throw new Error('Discount % cannot exceed 100%.');
+        }
+
+        const nextMinStock =
+          changes.minimum_stock !== undefined
+            ? parseFiniteNonNeg(changes.minimum_stock, 'Minimum Stock')
+            : round2(existingItem.minimum_stock);
+
+        // Validate tax fields
+        const existingTaxCfg = resolveItemTaxConfig(existingItem);
+        if (changes.tax_type !== undefined) {
+          const tt = String(changes.tax_type).trim();
+          if (tt !== 'percentage' && tt !== 'amount') {
+            throw new Error('Tax Type must be percentage or amount.');
+          }
+        }
+        if (changes.tax_value !== undefined) {
+          parseFiniteNonNeg(changes.tax_value, 'Tax Value');
+        }
+        if (changes.tax_percent !== undefined) {
+          parseFiniteNonNeg(changes.tax_percent, 'Tax %');
+        }
+        const updatedTaxCfg = resolveItemTaxConfig({
+          tax_type: changes.tax_type !== undefined ? (changes.tax_type as ItemTaxType) : existingTaxCfg.tax_type,
+          tax_value:
+            changes.tax_value !== undefined
+              ? Number(changes.tax_value)
+              : changes.tax_percent !== undefined
+              ? Number(changes.tax_percent)
+              : existingTaxCfg.tax_value,
+          tax_percent:
+            changes.tax_percent !== undefined
+              ? Number(changes.tax_percent)
+              : changes.tax_value !== undefined &&
+                (changes.tax_type ?? existingTaxCfg.tax_type) === 'percentage'
+              ? Number(changes.tax_value)
+              : existingTaxCfg.tax_percent,
+        });
+
+        // Build targeted UPDATE of ONLY changed/derived fields inside an isolated per-row transaction
+        const setClauses: string[] = [];
+        const params: unknown[] = [];
+
+        if (changes.company_name !== undefined) {
+          setClauses.push('company_name = ?');
+          params.push(resolvedCompany);
+        }
+        if (changes.item_name !== undefined) {
+          setClauses.push('item_name = ?');
+          params.push(nextItemName);
+        }
+        if (changes.generic_name !== undefined) {
+          setClauses.push('generic_name = ?');
+          params.push(nextGenericName);
+        }
+        if (changes.category !== undefined || changes.item_name !== undefined) {
+          setClauses.push('category = ?');
+          params.push(nextCategory);
+        }
+        if (hasPackingChanges) {
+          setClauses.push(
+            'packing = ?, carton = ?, boxes_per_carton = ?, strips_per_box = ?, tablets_per_strip = ?, units_per_strip = ?, units_per_pack = ?, purchase_unit = ?'
+          );
+          params.push(
+            packingConfig.packing,
+            packingConfig.carton,
+            packingConfig.boxes_per_carton,
+            packingConfig.strips_per_box,
+            packingConfig.tablets_per_strip,
+            packingConfig.units_per_strip,
+            packingConfig.units_per_pack,
+            packingConfig.purchase_unit
+          );
+        }
+        if (changes.barcode !== undefined) {
+          setClauses.push('barcode = ?');
+          params.push(nextBarcode);
+        }
+        if (changes.purchase_price !== undefined) {
+          setClauses.push('purchase_price = ?');
+          params.push(nextPurchasePrice);
+        }
+        if (changes.trade_price !== undefined) {
+          setClauses.push('trade_price = ?');
+          params.push(nextTradePrice);
+        }
+        if (changes.wholesale_price !== undefined) {
+          setClauses.push('wholesale_price = ?');
+          params.push(nextWholesalePrice);
+        }
+        if (changes.retail_price !== undefined) {
+          setClauses.push('retail_price = ?');
+          params.push(nextRetailPrice);
+        }
+        if (changes.loose_rate !== undefined || changes.retail_price !== undefined || hasPackingChanges) {
+          setClauses.push('loose_rate = ?');
+          params.push(nextLooseRate);
+        }
+        if (changes.discount_percent !== undefined) {
+          setClauses.push('discount_percent = ?');
+          params.push(nextDiscount);
+        }
+        if (changes.tax_type !== undefined || changes.tax_value !== undefined || changes.tax_percent !== undefined) {
+          setClauses.push('tax_type = ?, tax_value = ?, tax_percent = ?');
+          params.push(updatedTaxCfg.tax_type, updatedTaxCfg.tax_value, updatedTaxCfg.tax_percent);
+        }
+        if (changes.minimum_stock !== undefined) {
+          setClauses.push('minimum_stock = ?');
+          params.push(nextMinStock);
+        }
+        if (changes.rack_number !== undefined) {
+          setClauses.push('rack_number = ?');
+          params.push(nextRack);
+        }
+        if (changes.status !== undefined) {
+          setClauses.push('status = ?');
+          params.push(nextStatus);
+        }
+
+        if (setClauses.length === 0) {
+          throw new Error('No updatable fields detected.');
+        }
+
+        setClauses.push('updated_at = CURRENT_TIMESTAMP');
+        params.push(itemId);
+
+        const applyRowTx = db.transaction(() => {
+          db.prepare(`UPDATE items SET ${setClauses.join(', ')} WHERE id = ?`).run(...params);
+
+          // Preserve all stock quantities; only keep non-variant inventory packing metadata aligned if packing changed
+          if (hasPackingChanges) {
+            db.prepare(`
+              UPDATE inventory
+              SET packing = ?,
+                  strips_per_box = ?,
+                  units_per_strip = ?,
+                  units_per_pack = ?
+              WHERE item_id = ? AND COALESCE(variant_key, 0) = 0
+            `).run(
+              packingConfig.packing,
+              Math.max(1, Number(packingConfig.strips_per_box || 1)),
+              Math.max(1, Number(packingConfig.units_per_strip || 1)),
+              Math.max(1, Number(packingConfig.units_per_pack || 1)),
+              itemId
+            );
+          }
+        });
+
+        applyRowTx();
+
+        const updatedRow = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId) as ItemRow;
+        const variants = getEnrichedVariants({ parentItemId: itemId, includeInactive: true });
+        updatedItems.push({ ...enrichItemWithPacking(updatedRow), variants });
+      } catch (rowErr: unknown) {
+        const msg = rowErr instanceof Error ? rowErr.message : String(rowErr);
+        rowErrors.push({
+          id: itemId,
+          item_code: existingItem.item_code,
+          item_name: existingItem.item_name,
+          error: msg,
+        });
+      }
+    }
+
+    const statusCode = updatedItems.length === 0 && rowErrors.length > 0 ? 400 : 200;
+    return res.status(statusCode).json({
+      success: updatedItems.length > 0,
+      partial: updatedItems.length > 0 && rowErrors.length > 0,
+      updatedCount: updatedItems.length,
+      errorCount: rowErrors.length,
+      updatedItems,
+      errors: rowErrors,
+      message:
+        rowErrors.length === 0
+          ? `Successfully saved changes for ${updatedItems.length} item(s).`
+          : updatedItems.length > 0
+          ? `Saved ${updatedItems.length} item(s); ${rowErrors.length} item(s) reported validation errors.`
+          : `Bulk update failed validation on ${rowErrors.length} item(s).`,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({
+      success: false,
+      error: `Failed to execute bulk update: ${errorMsg}`,
+      updatedCount: 0,
+      errorCount: 0,
+      updatedItems: [],
+      errors: [],
+    });
   }
 });
 
@@ -1879,12 +2322,15 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
         ? registerItemCompanyIfNew(db, company_name) || normalizeCompanyName(company_name)
         : existingItem.company_name;
 
+    const resolvedItemName = item_name !== undefined ? String(item_name).trim() : existingItem.item_name;
+    const resolvedCategory = classifyItemCategory(resolvedItemName);
+
     db.prepare(updateSql).run(
       cleanCode,
       resolvedCompany,
-      item_name !== undefined ? String(item_name).trim() : existingItem.item_name,
+      resolvedItemName,
       generic_name !== undefined ? (generic_name ? String(generic_name).trim() : null) : existingItem.generic_name,
-      category !== undefined ? String(category).trim() : existingItem.category,
+      resolvedCategory,
       finalPacking,
       packingConfig.carton,
       packingConfig.boxes_per_carton,
@@ -1952,10 +2398,10 @@ itemsRouter.put('/:id', (req: Request, res: Response) => {
 /**
  * PATCH /api/items/:id/price-cascade
  * Safe transactional Item Master price update triggered during Purchase Entry.
- * - Updates ONLY purchase_price when update_purchase_price = true
- * - Updates retail_price (New Purchase Price * 1.15 rounded UP to next multiple of Rs. 50)
- *   and loose_rate (New Retail Price / Units Per Pack) ONLY when update_retail_price = true
- * - Preserves Item ID, Item Code, barcode, packing, wholesale_price, trade_price, stock, batches, and historical invoices.
+ * - Updates ONLY purchase_price when update_purchase_price = true and update_retail_price = false
+ * - When update_retail_price = true, updates all four synchronized selling price fields together:
+ *   retail_price, loose_rate, wholesale_price (= updated retail_price), and trade_price (= updated retail_price)
+ * - Preserves Item ID, Item Code, barcode, packing, tax settings, stock, batches, and historical invoices.
  */
 itemsRouter.patch('/:id/price-cascade', (req: Request, res: Response) => {
   try {
@@ -1980,10 +2426,23 @@ itemsRouter.patch('/:id/price-cascade', (req: Request, res: Response) => {
 
     const unitsPerPack = Math.max(1, parseUnitsFromPacking(existingItem.packing || '1x1'));
     const { retailBase, roundedRetailPrice } = calculateRetailPriceFromPurchase(newPurchasePrice);
-    const calculatedLooseRate = round2(roundedRetailPrice / unitsPerPack);
+    const requestedRetail =
+      req.body.new_retail_price !== undefined &&
+      Number.isFinite(Number(req.body.new_retail_price)) &&
+      Number(req.body.new_retail_price) > 0
+        ? round2(Number(req.body.new_retail_price))
+        : roundedRetailPrice;
+    const requestedLoose =
+      req.body.new_loose_rate !== undefined &&
+      Number.isFinite(Number(req.body.new_loose_rate)) &&
+      Number(req.body.new_loose_rate) > 0
+        ? round2(Number(req.body.new_loose_rate))
+        : round2(requestedRetail / unitsPerPack);
 
     const oldPurchasePrice = round2(existingItem.purchase_price);
     const oldRetailPrice = round2(existingItem.retail_price);
+    const oldWholesalePrice = round2(existingItem.wholesale_price);
+    const oldTradePrice = round2(existingItem.trade_price);
     const oldLooseRate = round2(
       existingItem.loose_rate && Number(existingItem.loose_rate) > 0
         ? existingItem.loose_rate
@@ -2001,9 +2460,18 @@ itemsRouter.patch('/:id/price-cascade', (req: Request, res: Response) => {
           SET purchase_price = ?,
               retail_price = ?,
               loose_rate = ?,
+              wholesale_price = ?,
+              trade_price = ?,
               updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
-        `).run(newPurchasePrice, roundedRetailPrice, calculatedLooseRate, id);
+        `).run(
+          newPurchasePrice,
+          requestedRetail,
+          requestedLoose,
+          requestedRetail,
+          requestedRetail,
+          id
+        );
       } else {
         db.prepare(`
           UPDATE items
@@ -2032,6 +2500,10 @@ itemsRouter.patch('/:id/price-cascade', (req: Request, res: Response) => {
         retail_base: retailBase,
         old_retail_price: oldRetailPrice,
         new_retail_price: round2(updatedItem.retail_price),
+        old_wholesale_price: oldWholesalePrice,
+        new_wholesale_price: round2(updatedItem.wholesale_price),
+        old_trade_price: oldTradePrice,
+        new_trade_price: round2(updatedItem.trade_price),
         old_loose_rate: oldLooseRate,
         new_loose_rate: round2(
           updatedItem.loose_rate && Number(updatedItem.loose_rate) > 0
@@ -2319,10 +2791,7 @@ itemsRouter.post('/bulk-import', (req: Request, res: Response) => {
           '';
         const genericRaw = group.map((g) => String(g.raw.generic_name || '').trim()).find(Boolean);
         const generic = genericRaw ? genericRaw : existing?.generic_name ?? null;
-        const category =
-          group.map((g) => String(g.raw.category || '').trim()).find(Boolean) ||
-          existing?.category ||
-          'Tablet';
+        const category = classifyItemCategory(name);
         const rawPackingText =
           group.map((g) => String(g.raw.packing || '').trim()).find(Boolean) ||
           existing?.packing ||

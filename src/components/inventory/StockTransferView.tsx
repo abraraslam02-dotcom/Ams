@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../../utils/formatters';
 import React, { useState, useEffect } from 'react';
 import {
   ArrowRightLeft,
@@ -36,7 +37,7 @@ export const StockTransferView: React.FC = () => {
 
   // Form fields
   const [transferDate, setTransferDate] = useState<string>(
-    new Date().toISOString().split('T')[0]
+    getPakistanDateISO()
   );
   const [fromLocation, setFromLocation] = useState<string>('Main Warehouse');
   const [toLocation, setToLocation] = useState<string>('Front Dispensing Counter');
@@ -72,7 +73,7 @@ export const StockTransferView: React.FC = () => {
 
   const openNewModal = () => {
     loadBatchesForPicker();
-    setTransferDate(new Date().toISOString().split('T')[0]);
+    setTransferDate(getPakistanDateISO());
     setFromLocation('Main Warehouse');
     setToLocation('Front Dispensing Counter');
     setReferenceNo('');

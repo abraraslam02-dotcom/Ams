@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
-import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
 import { BookOpen, Download, Printer, Search, X } from 'lucide-react';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -160,7 +160,7 @@ export const AccountLedgersView: React.FC<AccountLedgersViewProps> = ({ ledgerTy
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Account Ledger');
-    XLSX.writeFile(wb, `AMS_${ledgerType}_ledger_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(wb, `AMS_${ledgerType}_ledger_${getPakistanDateISO()}.xlsx`);
   };
 
   return (
@@ -323,7 +323,7 @@ export const AccountLedgersView: React.FC<AccountLedgersViewProps> = ({ ledgerTy
               payload={{
                 documentType: ledgerType === 'statement' ? 'statement' : 'ledger',
                 documentNumber: `${ledgerType.toUpperCase()}-${selectedAccount.account_code || selectedAccount.id}`,
-                documentDate: endDate || new Date().toISOString().slice(0, 10),
+                documentDate: endDate || getPakistanDateISO(),
                 customerAccountId: Number(selectedAccount.id),
                 customerName: String(selectedAccount.account_name || 'Account'),
                 customerPhone: String(selectedAccount.phone || ''),

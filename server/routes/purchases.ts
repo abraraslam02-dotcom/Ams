@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -20,7 +21,10 @@ import {
 } from '../services/ledgerIntegrityService.ts';
 import {
   calculateLineTax,
+  calculateSequentialLineDiscount,
+  clampDiscountPercent,
   resolveItemTaxConfig,
+  resolveLineSequentialDiscounts,
 } from '../utils/taxCalculation.ts';
 
 export const purchasesRouter = Router();
@@ -137,7 +141,7 @@ function getSystemAccountId(accountCode: string): number {
  */
 function computeBatchStatus(packQty: number, expiryDate: string, minStock: number = 0): string {
   if (packQty <= 0) return 'out_of_stock';
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getPakistanDateISO();
   if (expiryDate && expiryDate < today) return 'expired';
   if (minStock > 0 && packQty <= minStock) return 'low_stock';
   return 'in_stock';
@@ -418,6 +422,9 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
     const rawItems = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
     const itemIds = rawItems.map((it) => Number(it.id));
     const variantsByParent = new Map<number, EnrichedVariantRecord[]>();
+    const batchesByItem = new Map<number, Array<Record<string, unknown>>>();
+    const batchesByVariantKey = new Map<string, Array<Record<string, unknown>>>();
+
     if (itemIds.length > 0) {
       const variants = getEnrichedVariants({ parentItemIds: itemIds, includeInactive: false });
       for (const v of variants) {
@@ -425,17 +432,111 @@ purchasesRouter.get('/fast-search', (req: Request, res: Response) => {
         if (!variantsByParent.has(pid)) variantsByParent.set(pid, []);
         variantsByParent.get(pid)!.push(v);
       }
+
+      const placeholders = itemIds.map(() => '?').join(',');
+      const batchRows = db
+        .prepare(`
+          SELECT *
+          FROM inventory
+          WHERE item_id IN (${placeholders})
+          ORDER BY
+            CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+            CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
+            id ASC
+        `)
+        .all(...itemIds) as Array<Record<string, unknown>>;
+
+      for (const b of batchRows) {
+        const iId = Number(b.item_id);
+        const vKey = Number(b.variant_id || 0);
+        if (!batchesByItem.has(iId)) batchesByItem.set(iId, []);
+        batchesByItem.get(iId)!.push(b);
+
+        const vk = `${iId}:${vKey}`;
+        if (!batchesByVariantKey.has(vk)) batchesByVariantKey.set(vk, []);
+        batchesByVariantKey.get(vk)!.push(b);
+      }
     }
+
+    const mapBatchRow = (
+      b: Record<string, unknown>,
+      unitsPerPack: number,
+      retailFallback: number,
+      purchaseFallback: number
+    ) => ({
+      id: Number(b.id),
+      variant_id: b.variant_id ? Number(b.variant_id) : null,
+      batch_number: String(b.batch_number || ''),
+      manufacturing_date: String(b.manufacturing_date || ''),
+      expiry_date: String(b.expiry_date || ''),
+      current_pack_qty: round2(b.current_pack_qty),
+      current_strip_qty: round2(b.current_strip_qty),
+      current_loose_qty: round2(b.current_loose_qty),
+      total_stock_units: round2(b.total_stock_units),
+      units_per_pack: Number(b.units_per_pack || unitsPerPack),
+      mrp_per_pack: round2(b.pack_retail || b.retail_price || retailFallback),
+      purchase_price_per_pack: round2(b.pack_cost || purchaseFallback),
+      status: String(b.status || 'in_stock'),
+    });
 
     const items = rawItems.map((it) => {
       const iid = Number(it.id);
+      const parsed = parsePacking(String(it.packing || '1x1'), it);
       const itemVars = variantsByParent.get(iid) || [];
+      const hasVariants = Number(it.has_variants || 0) === 1;
+      const itemLevelBatches = batchesByVariantKey.get(`${iid}:0`) || [];
+      const allItemBatches = batchesByItem.get(iid) || [];
+      const defaultSourceBatches = hasVariants
+        ? allItemBatches
+        : itemLevelBatches.length > 0
+        ? itemLevelBatches
+        : allItemBatches;
+      const defaultBatch = defaultSourceBatches[0] || null;
+
+      const totalStockUnits =
+        hasVariants && itemVars.length > 0
+          ? itemVars.reduce((sum, v) => {
+              const vb = batchesByVariantKey.get(`${iid}:${v.id}`) || [];
+              return sum + vb.reduce((s2, b) => s2 + Number(b.total_stock_units || 0), 0);
+            }, 0)
+          : allItemBatches.reduce((sum, b) => sum + Number(b.total_stock_units || 0), 0);
+      const totalStockPacks = round2(totalStockUnits / parsed.unitsPerPack);
+
+      const retailPrice = round2(it.retail_price);
+      const purchasePrice = round2(it.purchase_price);
+      const looseRate =
+        Number(it.loose_rate || 0) > 0
+          ? round2(it.loose_rate)
+          : round2(retailPrice / parsed.unitsPerPack);
+
       const itemTaxCfg = resolveItemTaxConfig(it as Record<string, any>);
       return {
         ...it,
         tax_type: itemTaxCfg.tax_type,
         tax_value: itemTaxCfg.tax_value,
         tax_percent: itemTaxCfg.tax_percent,
+        strips_per_box: parsed.stripsPerBox,
+        tablets_per_strip: parsed.tabletsPerStrip,
+        units_per_strip: parsed.unitsPerStrip,
+        units_per_pack: parsed.unitsPerPack,
+        loose_rate: looseRate,
+        retail_loose_rate: looseRate,
+        total_available_units: round2(totalStockUnits),
+        total_available_packs: totalStockPacks,
+        batch_number: defaultBatch ? String(defaultBatch.batch_number || '') : '',
+        expiry_date: defaultBatch ? String(defaultBatch.expiry_date || '') : '',
+        default_batch: defaultBatch
+          ? {
+              inventory_id: Number(defaultBatch.id),
+              batch_number: String(defaultBatch.batch_number || ''),
+              expiry_date: String(defaultBatch.expiry_date || ''),
+              available_packs: round2(defaultBatch.current_pack_qty),
+              available_units: round2(defaultBatch.total_stock_units),
+            }
+          : null,
+        batches: defaultSourceBatches.map((b) =>
+          mapBatchRow(b, parsed.unitsPerPack, retailPrice, purchasePrice)
+        ),
         has_variants: Number(it.has_variants || 0),
         variants: itemVars,
         active_variant_count: itemVars.length,
@@ -745,7 +846,7 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
       });
     }
 
-    const targetReturnDate = String(return_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const targetReturnDate = String(return_date || getPakistanDateISO()).slice(0, 10);
     assertPeriodOpen(targetReturnDate, 'record a purchase return');
 
     const origPurchase = db
@@ -864,8 +965,18 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
 
         const returnRate =
           line.debit_unit_rate !== undefined ? round2(line.debit_unit_rate) : round2(origItem.purchase_rate);
-        const discPct =
-          line.discount_percent !== undefined ? round2(line.discount_percent) : round2(origItem.discount_percent);
+        const origSeq = resolveLineSequentialDiscounts(origItem, returnRate);
+        const hasRetD12 = line.discount_1_percent !== undefined || line.discount_2_percent !== undefined;
+        const retD1 = hasRetD12
+          ? clampDiscountPercent(line.discount_1_percent ?? 0)
+          : line.discount_percent !== undefined
+            ? clampDiscountPercent(line.discount_percent)
+            : origSeq.discount_1_percent;
+        const retD2 = hasRetD12
+          ? clampDiscountPercent(line.discount_2_percent ?? 0)
+          : line.discount_percent !== undefined
+            ? 0
+            : origSeq.discount_2_percent;
         const origTaxCfg = resolveItemTaxConfig({
           tax_type: line.tax_type !== undefined ? line.tax_type : origItem.tax_type,
           tax_value:
@@ -882,12 +993,19 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
 
         const parsedPack = parsePacking(origItem.packing);
         const lineGross = round2(retQty * returnRate);
-        const lineItemDisc = round2(lineGross * (discPct / 100));
+        const retSeq = calculateSequentialLineDiscount({
+          originalRate: returnRate,
+          grossAmount: lineGross,
+          discount1Percent: retD1,
+          discount2Percent: retD2,
+        });
+        const disc1Pct = retSeq.discount_1_percent;
+        const disc2Pct = retSeq.discount_2_percent;
+        const netRate = retSeq.net_rate;
+        const discPct = retSeq.effective_discount_percent;
+        const lineItemDisc = retSeq.discount_amount;
         const lineAfterItemDisc = round2(lineGross - lineItemDisc);
-        const lineProratedInvDisc =
-          line.discount_amount !== undefined
-            ? round2(Number(line.discount_amount) - lineItemDisc)
-            : round2(lineAfterItemDisc * origInvDiscRatio);
+        const lineProratedInvDisc = round2(lineAfterItemDisc * origInvDiscRatio);
         const lineTotalDisc = round2(lineItemDisc + Math.max(0, lineProratedInvDisc));
         const lineTaxable = round2(lineGross - lineTotalDisc);
         // CRITICAL TAX RULE: Tax is ALWAYS calculated on ORIGINAL lineGross BEFORE discounts
@@ -924,6 +1042,9 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           retQty,
           returnUnits,
           returnRate,
+          disc1Pct,
+          disc2Pct,
+          netRate,
           discPct,
           lineTotalDisc,
           lineTaxable,
@@ -958,7 +1079,7 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
         `)
         .run(
           dnNumber,
-          return_date || new Date().toISOString().slice(0, 10),
+          return_date || getPakistanDateISO(),
           origPurchase.id,
           origPurchase.bill_number,
           supplierId,
@@ -985,10 +1106,10 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           item_code, company_name, item_name, packing, units_per_pack,
           batch_number, manufacturing_date, expiry_date,
           purchased_quantity, return_quantity, return_units,
-          debit_unit_rate, discount_percent, discount_amount,
+          debit_unit_rate, discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount,
           taxable_amount, tax_percent, gst_amount,
           advance_tax_rate, advance_tax_amount, line_total, return_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const pl of preparedLines) {
@@ -1012,6 +1133,9 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
           pl.retQty,
           pl.returnUnits,
           pl.returnRate,
+          pl.disc1Pct,
+          pl.disc2Pct,
+          pl.netRate,
           pl.discPct,
           pl.lineTotalDisc,
           pl.lineTaxable,
@@ -1175,7 +1299,7 @@ purchasesRouter.post('/returns', (req: Request, res: Response) => {
         `)
         .run(
           jeNumber,
-          return_date || new Date().toISOString().slice(0, 10),
+          return_date || getPakistanDateISO(),
           createdReturnId,
           `Purchase Return Debit Note ${dnNumber} (Ref Bill: ${origPurchase.bill_number})`,
           sumDr,
@@ -1731,7 +1855,17 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
         WHERE pi.purchase_id = ?
         ORDER BY pi.id ASC
       `)
-      .all(id);
+      .all(id) as Array<Record<string, any>>;
+
+    const enrichedItems = items.map((row) => {
+      const seq = resolveLineSequentialDiscounts(row, Number(row.purchase_rate || 0));
+      return {
+        ...row,
+        discount_1_percent: seq.discount_1_percent,
+        discount_2_percent: seq.discount_2_percent,
+        net_rate: seq.net_rate,
+      };
+    });
 
     let journalEntry = null;
     let journalLines: unknown[] = [];
@@ -1753,7 +1887,7 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
     return res.json({
       success: true,
       purchase,
-      items,
+      items: enrichedItems,
       journalEntry,
       journalLines,
     });
@@ -1826,7 +1960,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         )
       : defaultBatchWisePurchase;
 
-  const invoiceDate = String(bill_date || payload.invoice_date || new Date().toISOString().slice(0, 10)).trim();
+  const invoiceDate = String(bill_date || payload.invoice_date || getPakistanDateISO()).trim();
 
   let existingPurRow: { bill_number: string; status: string } | undefined;
   if (existingPurchaseId) {
@@ -2009,7 +2143,14 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         ? round2(Number(raw.loose_rate))
         : defaultLooseRate;
     const mrpRate = Math.max(0, round2(raw.mrp_rate ?? defaultRetailPrice));
-    const discPct = Math.max(0, Math.min(100, round2(raw.discount_percent ?? 0)));
+    const hasExplicitD12 =
+      (raw.discount_1_percent !== undefined && raw.discount_1_percent !== null && raw.discount_1_percent !== '') ||
+      (raw.discount_2_percent !== undefined && raw.discount_2_percent !== null && raw.discount_2_percent !== '');
+    const d1Input = hasExplicitD12
+      ? clampDiscountPercent(raw.discount_1_percent ?? 0)
+      : clampDiscountPercent(raw.discount_percent ?? 0);
+    const d2Input = hasExplicitD12 ? clampDiscountPercent(raw.discount_2_percent ?? 0) : 0;
+
     const lineTaxCfg = resolveItemTaxConfig({
       tax_type: raw.tax_type !== undefined ? raw.tax_type : defaultTaxCfg.tax_type,
       tax_value:
@@ -2025,18 +2166,19 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     const taxPct = lineTaxCfg.tax_percent;
 
     const lineGross = round2(qty * purchaseRate + looseQty * looseRate);
-    let lineItemDisc = round2(lineGross * (discPct / 100));
-    if (
-      raw.discount_amount !== undefined &&
-      Number(raw.discount_amount) !== 0 &&
-      discPct === 0
-    ) {
-      const rawDiscAmt = Math.abs(round2(raw.discount_amount));
-      const clampedAbsDisc = Math.min(Math.abs(lineGross), rawDiscAmt);
-      lineItemDisc = round2(lineGross >= 0 ? clampedAbsDisc : -clampedAbsDisc);
-    }
-
-    const lineAfterItemDisc = round2(lineGross - lineItemDisc);
+    const seqDisc = calculateSequentialLineDiscount({
+      originalRate: purchaseRate,
+      looseRate,
+      grossAmount: lineGross,
+      discount1Percent: d1Input,
+      discount2Percent: d2Input,
+    });
+    const disc1Pct = seqDisc.discount_1_percent;
+    const disc2Pct = seqDisc.discount_2_percent;
+    const netRate = seqDisc.net_rate;
+    const discPct = seqDisc.effective_discount_percent;
+    const lineItemDisc = seqDisc.discount_amount;
+    const lineAfterItemDisc = seqDisc.taxable_amount;
 
     const totalPacksAdded = round2(qty + bonusQty + looseQty / parsedPack.unitsPerPack);
     const totalLooseUnits = round2((qty + bonusQty) * parsedPack.unitsPerPack + looseQty);
@@ -2070,6 +2212,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       purchaseRate,
       mrpRate,
       lineGross,
+      disc1Pct,
+      disc2Pct,
+      netRate,
       discPct,
       lineItemDisc,
       lineAfterItemDisc,
@@ -2078,6 +2223,14 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       taxPct,
       updateMasterPurchasePrice: raw.update_master_purchase_price === true,
       updateMasterRetailPrice: raw.update_master_retail_price === true,
+      masterRetailPrice:
+        raw.master_retail_price !== undefined && Number(raw.master_retail_price) > 0
+          ? round2(Number(raw.master_retail_price))
+          : null,
+      masterLooseRate:
+        raw.master_loose_rate !== undefined && Number(raw.master_loose_rate) > 0
+          ? round2(Number(raw.master_loose_rate))
+          : null,
       remarks: String(raw.remarks || '').trim(),
     });
   }
@@ -2373,9 +2526,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       batch_number, manufacturing_date, expiry_date,
       quantity, bonus_quantity, pack_quantity, loose_quantity, loose_rate, total_units,
       purchase_rate, mrp_rate, gross_amount,
-      discount_percent, discount_amount, taxable_amount,
+      discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount, taxable_amount,
       tax_type, tax_value, tax_percent, tax_amount, line_total, returned_quantity, remarks
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
   `);
 
   for (const line of processedLines) {
@@ -2613,17 +2766,33 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
         if (line.variantId && line.useVariantCustomPricing) {
           if (line.updateMasterRetailPrice) {
             const roundedRetail =
-              line.purchaseRate > 0 ? round2(line.purchaseRate / 0.85) : line.mrpRate;
+              line.masterRetailPrice && line.masterRetailPrice > 0
+                ? line.masterRetailPrice
+                : line.purchaseRate > 0
+                ? round2(line.purchaseRate / 0.85)
+                : line.mrpRate;
             const unitsPerPack = Math.max(1, Number(line.parsedPack.unitsPerPack) || 1);
-            const nextLooseRate = round2(roundedRetail / unitsPerPack);
+            const nextLooseRate =
+              line.masterLooseRate && line.masterLooseRate > 0
+                ? line.masterLooseRate
+                : round2(roundedRetail / unitsPerPack);
             db.prepare(`
               UPDATE item_variants SET
                 purchase_price = ?,
                 retail_price = ?,
                 loose_rate = ?,
+                wholesale_price = ?,
+                trade_price = ?,
                 updated_at = CURRENT_TIMESTAMP
               WHERE id = ?
-            `).run(line.purchaseRate, roundedRetail, nextLooseRate, line.variantId);
+            `).run(
+              line.purchaseRate,
+              roundedRetail,
+              nextLooseRate,
+              roundedRetail,
+              roundedRetail,
+              line.variantId
+            );
           } else {
             db.prepare(`
               UPDATE item_variants SET
@@ -2634,19 +2803,33 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           }
         } else if (line.updateMasterRetailPrice) {
           const roundedRetail =
-            line.purchaseRate > 0
+            line.masterRetailPrice && line.masterRetailPrice > 0
+              ? line.masterRetailPrice
+              : line.purchaseRate > 0
               ? round2(line.purchaseRate / 0.85)
               : line.mrpRate;
           const unitsPerPack = Math.max(1, Number(line.parsedPack.unitsPerPack) || 1);
-          const nextLooseRate = round2(roundedRetail / unitsPerPack);
+          const nextLooseRate =
+            line.masterLooseRate && line.masterLooseRate > 0
+              ? line.masterLooseRate
+              : round2(roundedRetail / unitsPerPack);
           db.prepare(`
             UPDATE items SET
               purchase_price = ?,
               retail_price = ?,
               loose_rate = ?,
+              wholesale_price = ?,
+              trade_price = ?,
               updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-          `).run(line.purchaseRate, roundedRetail, nextLooseRate, line.itemId);
+          `).run(
+            line.purchaseRate,
+            roundedRetail,
+            nextLooseRate,
+            roundedRetail,
+            roundedRetail,
+            line.itemId
+          );
         } else {
           db.prepare(`
             UPDATE items SET
@@ -2682,6 +2865,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       line.purchaseRate,
       line.mrpRate,
       line.lineGross,
+      line.disc1Pct,
+      line.disc2Pct,
+      line.netRate,
       line.discPct,
       line.lineItemDisc,
       line.lineTaxable,
@@ -3121,7 +3307,7 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
     }
 
     const targetBillDate = String(
-      req.body?.bill_date || req.body?.invoice_date || new Date().toISOString().slice(0, 10)
+      req.body?.bill_date || req.body?.invoice_date || getPakistanDateISO()
     ).slice(0, 10);
     assertPeriodOpen(targetBillDate, 'create a purchase invoice');
 

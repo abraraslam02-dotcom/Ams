@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -34,7 +35,7 @@ function getSystemAccountId(accountCode: string): number {
 
 function computeBatchStatus(packQty: number, expiryDate: string, minStock: number = 0): string {
   if (packQty <= 0) return 'out_of_stock';
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getPakistanDateISO();
   if (expiryDate && expiryDate < today) return 'expired';
   if (minStock > 0 && packQty <= minStock) return 'low_stock';
   return 'in_stock';
@@ -234,7 +235,7 @@ supplyRouter.get('/next-numbers', (_req: Request, res: Response) => {
 supplyRouter.get('/dashboard', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
-    const today = String(req.query.date || new Date().toISOString().slice(0, 10));
+    const today = String(req.query.date || getPakistanDateISO());
 
     const todayOrderForms = db
       .prepare(
@@ -619,7 +620,7 @@ supplyRouter.post('/salesmen', (req: Request, res: Response) => {
 
     const phone = String(body.phone || body.mobile_number || body.mobile || '').trim();
     const address = String(body.address || '').trim();
-    const joiningDate = String(body.joining_date || new Date().toISOString().slice(0, 10)).trim();
+    const joiningDate = String(body.joining_date || getPakistanDateISO()).trim();
     const username = String(body.username || code.toLowerCase()).trim();
     const plainPassword = String(body.password || '123456').trim();
     const { salt, hash } = hashPassword(plainPassword);
@@ -716,7 +717,7 @@ supplyRouter.put('/salesmen/:id', (req: Request, res: Response) => {
     const joiningDate =
       body.joining_date !== undefined && String(body.joining_date).trim()
         ? String(body.joining_date).trim()
-        : String(existing.joining_date || new Date().toISOString().slice(0, 10));
+        : String(existing.joining_date || getPakistanDateISO());
     const username =
       body.username !== undefined && String(body.username).trim()
         ? String(body.username).trim()
@@ -1358,7 +1359,7 @@ supplyRouter.get('/order-forms', (req: Request, res: Response) => {
 
 function upsertOrderForm(orderFormId: number | null, body: Record<string, unknown>) {
   const db = getDatabase();
-  const orderDate = String(body.order_date || new Date().toISOString().slice(0, 10));
+  const orderDate = String(body.order_date || getPakistanDateISO());
   const storeName = String(body.store_name || 'ABRAR MEDICAL STORE').trim();
   const salesmanId = body.salesman_id ? Number(body.salesman_id) : null;
   let salesmanName = String(body.salesman_name || '').trim();
@@ -1616,7 +1617,7 @@ supplyRouter.post('/order-forms/:id/convert-to-booking', (req: Request, res: Res
     }
 
     const bookingNumber = getNextSeqNumber('supply_bookings', 'booking_number', 'BKG');
-    const bookingDate = String(body.booking_date || orderForm.order_date || new Date().toISOString().slice(0, 10));
+    const bookingDate = String(body.booking_date || orderForm.order_date || getPakistanDateISO());
     const salesmanId = Number(body.salesman_id || orderForm.salesman_id || partyRow.assigned_salesman_id || 0) || null;
     const salesmanName = String(
       body.salesman_name || orderForm.salesman_name || partyRow.assigned_salesman_name || ''
@@ -1829,7 +1830,7 @@ supplyRouter.get('/bookings', (req: Request, res: Response) => {
 
 function upsertBooking(bookingId: number | null, body: Record<string, unknown>) {
   const db = getDatabase();
-  const bookingDate = String(body.booking_date || new Date().toISOString().slice(0, 10));
+  const bookingDate = String(body.booking_date || getPakistanDateISO());
   const partyAccountId = Number(body.party_account_id || 0);
   if (!partyAccountId) throw new Error('Party Name is required for Order Booking.');
 
@@ -2057,7 +2058,7 @@ function upsertBooking(bookingId: number | null, body: Record<string, unknown>) 
 supplyRouter.post('/bookings', (req: Request, res: Response) => {
   const db = getDatabase();
   const tx = db.transaction(() => {
-    const bDate = String(req.body?.booking_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const bDate = String(req.body?.booking_date || getPakistanDateISO()).slice(0, 10);
     assertPeriodOpen(bDate, 'create a supply booking');
     return upsertBooking(null, req.body || {});
   });
@@ -2322,7 +2323,7 @@ supplyRouter.get('/supplies/:id', (req: Request, res: Response) => {
 supplyRouter.post('/supplies', (req: Request, res: Response) => {
   const db = getDatabase();
   const tx = db.transaction((body: Record<string, unknown>) => {
-    const supplyDate = String(body.supply_date || new Date().toISOString().slice(0, 10));
+    const supplyDate = String(body.supply_date || getPakistanDateISO());
     assertPeriodOpen(supplyDate, 'create a town supply');
     const supplyNumber =
       String(body.supply_number || '').trim() ||
@@ -2954,7 +2955,7 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
       throw new Error(`Supply ${String(supply.supply_number)} has already been dispatched. Duplicate dispatch is prevented.`);
     }
 
-    const dispatchDate = String(body.dispatch_date || new Date().toISOString().slice(0, 10));
+    const dispatchDate = String(body.dispatch_date || getPakistanDateISO());
     const dispatchNumber =
       String(body.dispatch_number || '').trim() ||
       getNextSeqNumber('supply_dispatches', 'dispatch_number', 'DSP');
@@ -2982,7 +2983,7 @@ supplyRouter.post('/dispatches', (req: Request, res: Response) => {
       const parsed = parsePacking(String(itemRow?.packing || line.packing || '1x1'));
       const totalUnitsToDeduct = round2(totalPackToDeduct * parsed.unitsPerPack);
 
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = getPakistanDateISO();
       const lineVariantKey = line.variant_id ? Number(line.variant_id) : 0;
       const allBatches = db
         .prepare(`
@@ -3340,7 +3341,7 @@ supplyRouter.post('/returns', (req: Request, res: Response) => {
       throw new Error('Cannot record a Salesman Return before the Supply has been Dispatched.');
     }
 
-    const returnDate = String(body.return_date || new Date().toISOString().slice(0, 10));
+    const returnDate = String(body.return_date || getPakistanDateISO());
     assertPeriodOpen(returnDate, 'record a salesman supply return');
     const returnNumber =
       String(body.return_number || '').trim() ||
@@ -3760,7 +3761,7 @@ supplyRouter.post('/supplies/:id/finalize-billing', (req: Request, res: Response
       throw new Error('Please dispatch the Town Supply before generating Final Billing.');
     }
 
-    const invoiceDate = String(body.invoice_date || new Date().toISOString().slice(0, 10));
+    const invoiceDate = String(body.invoice_date || getPakistanDateISO());
     assertPeriodOpen(invoiceDate, 'finalize supply billing');
     const partySupplyIdFilter = body.party_supply_id ? Number(body.party_supply_id) : null;
     const itemOverrides = Array.isArray(body.items) ? (body.items as Array<Record<string, unknown>>) : [];
@@ -4244,7 +4245,7 @@ supplyRouter.post('/recoveries', (req: Request, res: Response) => {
       const remainingBalance = round2(previousOutstanding - recoveryAmount);
 
       const recoveryDate = String(
-        entry.recovery_date || body.recovery_date || new Date().toISOString().slice(0, 10)
+        entry.recovery_date || body.recovery_date || getPakistanDateISO()
       );
       assertPeriodOpen(recoveryDate, 'record a supply recovery receipt');
       const receiptNumber =
@@ -4695,8 +4696,8 @@ supplyRouter.get('/settlements/preview', (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Select a Salesman to preview settlement.' });
     }
 
-    const fromDate = String(req.query.from_date || new Date().toISOString().slice(0, 10));
-    const toDate = String(req.query.to_date || new Date().toISOString().slice(0, 10));
+    const fromDate = String(req.query.from_date || getPakistanDateISO());
+    const toDate = String(req.query.to_date || getPakistanDateISO());
 
     const salesman = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(salesmanId) as Record<string, unknown> | undefined;
     if (!salesman) return res.status(404).json({ success: false, error: 'Salesman not found.' });
@@ -4783,7 +4784,7 @@ supplyRouter.post('/settlements', (req: Request, res: Response) => {
     const salesman = db.prepare('SELECT * FROM salesmen WHERE id = ?').get(salesmanId) as Record<string, unknown> | undefined;
     if (!salesman) throw new Error('Salesman not found.');
 
-    const settlementDate = String(body.settlement_date || new Date().toISOString().slice(0, 10));
+    const settlementDate = String(body.settlement_date || getPakistanDateISO());
     assertPeriodOpen(settlementDate, 'record a salesman settlement');
     const fromDate = String(body.from_date || settlementDate);
     const toDate = String(body.to_date || settlementDate);

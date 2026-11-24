@@ -29,7 +29,11 @@ import {
   Clock,
   Download,
   ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
   MessageCircle,
+  MessageSquare,
   PackageSearch,
   Calculator,
 } from 'lucide-react';
@@ -48,14 +52,20 @@ import {
   JournalEntryLineView,
 } from '../../types/purchase';
 import { api } from '../../services/api';
-import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
-import { findExactBarcodeOrCodeMatch, prepareItemIndex } from '../../utils/itemSearch';
+import { formatPKR, formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
+import {
+  findExactBarcodeOrCodeMatch,
+  prepareItemIndex,
+  resolveItemSelectionFields,
+} from '../../utils/itemSearch';
 import {
   formatItemNameWithRemarks,
   matchesSelectedCompany,
   mergeCompanyMasterOptions,
 } from '../../utils/itemDisplay';
+import { useAuth } from '../../context/AuthContext';
 import { useResizableColumns } from '../../hooks/useResizableColumns';
+import { useColumnOrder } from '../../hooks/useColumnOrder';
 import { PurchasePrintModal } from './PurchasePrintModal';
 import { AdvanceTaxSettingsPanel } from './AdvanceTaxSettingsPanel';
 import { BatchInventoryPanel } from './BatchInventoryPanel';
@@ -76,6 +86,7 @@ import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
 } from '../common/InvoiceRecordSearchInput';
+import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { generatePurchaseOrderSmsText } from '../../utils/invoiceSms';
 import { normalizeWhatsAppNumber } from '../../utils/whatsapp';
 import { openWhatsAppDesktopDirect } from '../../utils/whatsappPdfShare';
@@ -85,7 +96,13 @@ import {
   parsePackingUnits as parseUnitsPerPack,
   round2,
 } from '../../utils/itemPricing';
-import { calculateLineTax, resolveItemTaxConfig } from '../../utils/taxCalculation';
+import {
+  calculateLineTax,
+  calculateSequentialLineDiscount,
+  clampDiscountPercent,
+  resolveItemTaxConfig,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 
 export type PurchaseSubTab =
   | 'new-invoice'
@@ -148,6 +165,10 @@ export const createBlankPurchaseLine = (): PurchaseLineItem => ({
   is_loose_rate_manual: false,
   mrp_rate: 0,
   gross_amount: 0,
+  discount_1_percent: 0,
+  discount_2_percent: 0,
+  net_rate: 0,
+  net_loose_rate: 0,
   discount_percent: 0,
   discount_amount: 0,
   taxable_amount: 0,
@@ -217,6 +238,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   onClearResume,
   onBackToDashboard,
 }) => {
+  const { user } = useAuth();
   const [subTab, setSubTab] = useState<PurchaseSubTab>(initialSubTab);
 
   useEffect(() => {
@@ -258,7 +280,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
     return `PI-001-${String(d.getDate()).padStart(2, '0')}-${months[d.getMonth()]}-${d.getFullYear()}`;
   });
-  const [billDate, setBillDate] = useState(new Date().toISOString().slice(0, 10));
+  const [billDate, setBillDate] = useState(getPakistanDateISO());
   const [supplierId, setSupplierId] = useState<string>('');
   const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState('');
   const [supplierFilerStatus, setSupplierFilerStatus] = useState<FilerStatus>('Filer');
@@ -414,7 +436,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       item_name: 225,
       quantity: 74,
       loose_quantity: 74,
-      discount: 70,
+      discount_1: 64,
+      discount_2: 64,
+      net_rate: 76,
       bonus: 66,
       gross_amount: 92,
       net_amount: 92,
@@ -446,8 +470,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       item_name: 245,
       quantity: 70,
       loose_quantity: 68,
-      discount: 74,
+      discount_1: 66,
+      discount_2: 66,
       purchase_rate: 98,
+      net_rate: 78,
       bonus: 70,
       net_amount: 94,
       gross_amount: 94,
@@ -787,15 +813,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       setCompanyMasterList(Array.isArray(companiesRes?.companies) ? companiesRes.companies : []);
 
-      // Merge items from both endpoints so catalog includes up to 20,000+ active items
+      // Merge items from both endpoints while preserving complete Item Master + Inventory/Batch fields
       const primaryItems: Item[] = itemsRes.items || [];
       const fastItems: Item[] = fastItemsRes.items || fastItemsRes.data || [];
       const itemMap = new Map<number, Item>();
-      for (const it of fastItems) {
-        if (it?.id) itemMap.set(Number(it.id), it);
-      }
       for (const it of primaryItems) {
         if (it?.id) itemMap.set(Number(it.id), it);
+      }
+      for (const it of fastItems) {
+        if (!it?.id) continue;
+        const id = Number(it.id);
+        const existing = itemMap.get(id);
+        itemMap.set(id, existing ? ({ ...existing, ...it } as Item) : it);
       }
       setItems(Array.from(itemMap.values()));
 
@@ -939,15 +968,31 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           const fetched: Item[] = res.items || res.data || [];
           if (fetched.length > 0) {
             setItems((prev) => {
-              const existingIds = new Set(prev.map((i) => Number(i.id)));
+              const indexById = new Map<number, number>();
+              prev.forEach((i, idx) => indexById.set(Number(i.id), idx));
+              let changed = false;
               const merged = [...prev];
               for (const f of fetched) {
-                if (f?.id && !existingIds.has(Number(f.id))) {
+                if (!f?.id) continue;
+                const fid = Number(f.id);
+                const existingIdx = indexById.get(fid);
+                if (existingIdx === undefined) {
+                  indexById.set(fid, merged.length);
                   merged.push(f);
-                  existingIds.add(Number(f.id));
+                  changed = true;
+                } else {
+                  const cur: any = merged[existingIdx];
+                  if (
+                    (!cur.batch_number && (f as any).batch_number) ||
+                    (!cur.expiry_date && (f as any).expiry_date) ||
+                    cur.total_available_packs === undefined
+                  ) {
+                    merged[existingIdx] = { ...cur, ...f } as Item;
+                    changed = true;
+                  }
                 }
               }
-              return merged.length === prev.length ? prev : merged;
+              return changed ? merged : prev;
             });
           }
         })
@@ -1091,6 +1136,56 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
     return map;
   }, [batches]);
+
+  const primaryBatchByItemId = useMemo(() => {
+    const map = new Map<number, { batchNumber: string; expiryDate: string }>();
+    const sorted = [...batches].sort((a, b) => {
+      const aStock = Number(a.total_stock_units || a.current_pack_qty || 0) > 0 ? 0 : 1;
+      const bStock = Number(b.total_stock_units || b.current_pack_qty || 0) > 0 ? 0 : 1;
+      if (aStock !== bStock) return aStock - bStock;
+      const aExp = String(a.expiry_date || '9999-12-31');
+      const bExp = String(b.expiry_date || '9999-12-31');
+      if (aExp !== bExp) return aExp.localeCompare(bExp);
+      return Number(a.id || 0) - Number(b.id || 0);
+    });
+    for (const b of sorted) {
+      const itemId = Number(b.item_id);
+      if (!itemId || map.has(itemId)) continue;
+      map.set(itemId, {
+        batchNumber: String(b.batch_number || '').trim(),
+        expiryDate: String(b.expiry_date || '').trim(),
+      });
+    }
+    return map;
+  }, [batches]);
+
+  const getPurchaseItemStockPacks = useCallback(
+    (it: Item): number => {
+      if (it.consolidated_stock_packs !== undefined && Number(it.has_variants || 0) === 1) {
+        return Number(it.consolidated_stock_packs || 0);
+      }
+      if (stockPacksByItemId.has(Number(it.id))) {
+        return stockPacksByItemId.get(Number(it.id)) || 0;
+      }
+      if ((it as any).total_available_packs !== undefined) {
+        return Number((it as any).total_available_packs || 0);
+      }
+      return Number(it.opening_stock || 0);
+    },
+    [stockPacksByItemId]
+  );
+
+  const getPurchaseItemBatchInfo = useCallback(
+    (it: Item): { batchNumber?: string; expiryDate?: string } => {
+      const anyIt = it as any;
+      const fallback = primaryBatchByItemId.get(Number(it.id));
+      return {
+        batchNumber: String(anyIt.batch_number || '').trim() || fallback?.batchNumber || undefined,
+        expiryDate: String(anyIt.expiry_date || '').trim() || fallback?.expiryDate || undefined,
+      };
+    },
+    [primaryBatchByItemId]
+  );
 
   const computeFilteredItems = useCallback(
     (queryStr: string, showDefaultWhenEmpty: boolean = true): Item[] => {
@@ -1344,23 +1439,33 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setRowItemSearchQuery('');
     setShowPurchaseSearchDropdown(false);
 
-    const prefix: 'pur_cell' | 'pos_row' =
-      purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const el = document.getElementById(
-          `${prefix}_${targetRowIdx}_item_name`
-        ) as HTMLInputElement | null;
-        if (el) {
-          el.focus();
-          el.select?.();
-          el.closest('tr')?.scrollIntoView({ block: 'nearest' });
-        } else {
-          itemSearchInputRef.current?.focus();
-          itemSearchInputRef.current?.select?.();
-        }
-      }, 25);
-    });
+    if (purchaseViewMode === 'pos') {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const barcodeEl =
+            itemSearchInputRef.current ||
+            (document.getElementById('pos_purchase_item_search_input') as HTMLInputElement | null);
+          barcodeEl?.focus();
+          barcodeEl?.select?.();
+        }, 25);
+      });
+    } else {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const el = document.getElementById(
+            `pur_cell_${targetRowIdx}_item_name`
+          ) as HTMLInputElement | null;
+          if (el) {
+            el.focus();
+            el.select?.();
+            el.closest('tr')?.scrollIntoView({ block: 'nearest' });
+          } else {
+            itemSearchInputRef.current?.focus();
+            itemSearchInputRef.current?.select?.();
+          }
+        }, 25);
+      });
+    }
   };
 
   // Select Supplier & automatically focus Item Search in a new empty invoice row
@@ -1589,16 +1694,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       (chosenVariant?.effective_packing || chosenVariant?.packing || found.packing || '1x1').trim() || '1x1';
     const unitsPerPack = Math.max(1, parseUnitsPerPack(packingStr));
     const hasExistingQty =
-      existingRow?.quantity !== undefined && existingRow?.quantity !== null;
-    const qty = hasExistingQty ? round2(parseSignedNumeric(existingRow.quantity)) : 0;
-    const hasExistingDiscount =
-      existingRow?.discount_percent !== undefined && existingRow?.discount_percent !== null;
+      existingRow?.quantity !== undefined &&
+      existingRow?.quantity !== null &&
+      (Number(existingRow.item_id || 0) > 0 || parseSignedNumeric(existingRow.quantity) !== 0);
+    const defaultNewQty = purchaseViewMode === 'pos' ? 1 : 0;
+    const qty = hasExistingQty ? round2(parseSignedNumeric(existingRow.quantity)) : defaultNewQty;
+    const hasExistingDiscount1 =
+      (existingRow?.discount_1_percent !== undefined && existingRow?.discount_1_percent !== null) ||
+      (existingRow?.discount_percent !== undefined && existingRow?.discount_percent !== null);
     const defaultDisc = chosenVariant
       ? Number(chosenVariant.effective_discount_percent ?? found.discount_percent ?? 0)
       : Number(found.discount_percent || 0);
-    const discPct = hasExistingDiscount
-      ? Math.max(0, round2(Number(existingRow.discount_percent) || 0))
-      : round2(defaultDisc);
+    const disc1Pct = hasExistingDiscount1
+      ? clampDiscountPercent(existingRow?.discount_1_percent ?? existingRow?.discount_percent ?? 0)
+      : clampDiscountPercent(defaultDisc);
+    const disc2Pct = clampDiscountPercent(existingRow?.discount_2_percent ?? 0);
 
     const looseQty =
       !preserveQtyAndDiscountOnly &&
@@ -1624,8 +1734,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     const taxValue = resolvedTax.tax_value;
     const taxPct = resolvedTax.tax_percent;
     const gross = round2(qty * rate + looseQty * looseRate);
-    const discAmt = round2(gross * (discPct / 100));
-    const taxable = round2(gross - discAmt);
+    const seq = calculateSequentialLineDiscount({
+      originalRate: rate,
+      looseRate,
+      grossAmount: gross,
+      discount1Percent: disc1Pct,
+      discount2Percent: disc2Pct,
+    });
     const taxAmt = calculateLineTax({
       grossAmount: gross,
       quantity: qty,
@@ -1635,7 +1750,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       taxValue,
       taxPercent: taxPct,
     });
-    const net = round2(gross + taxAmt - discAmt);
+    const net = round2(gross + taxAmt - seq.discount_amount);
     const thumb = chosenVariant
       ? chosenVariant.effective_thumbnail_url ||
         chosenVariant.effective_image_url ||
@@ -1679,9 +1794,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         !preserveQtyAndDiscountOnly && Boolean(existingRow?.is_loose_rate_manual),
       mrp_rate: retailPrice,
       gross_amount: gross,
-      discount_percent: discPct,
-      discount_amount: discAmt,
-      taxable_amount: taxable,
+      discount_1_percent: seq.discount_1_percent,
+      discount_2_percent: seq.discount_2_percent,
+      net_rate: seq.net_rate,
+      net_loose_rate: seq.net_loose_rate,
+      discount_percent: seq.effective_discount_percent,
+      discount_amount: seq.discount_amount,
+      taxable_amount: seq.taxable_amount,
       tax_type: taxType,
       tax_value: taxValue,
       tax_percent: taxPct,
@@ -1953,10 +2072,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       updateRetail
         ? `"${prompt.itemName}": Item Master will be updated when this invoice is saved — Purchase Rs. ${finalPurchase.toFixed(
             2
-          )}, Retail Rs. ${finalRetail.toFixed(2)}, Loose Rs. ${finalLoose.toFixed(2)}.`
+          )}, Retail / Wholesale / Trade Rs. ${finalRetail.toFixed(2)}, Loose Rs. ${finalLoose.toFixed(2)}.`
         : `"${prompt.itemName}": Item Master Purchase Price will be updated to Rs. ${finalPurchase.toFixed(
             2
-          )} when this invoice is saved. Retail Price (Rs. ${prompt.oldRetailPrice.toFixed(2)}) stays unchanged.`
+          )} when this invoice is saved. Retail, Wholesale, Trade & Loose prices stay unchanged.`
     );
     setPriceChangePrompt(null);
     const fallbackTargetId = `${purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell'}_${prompt.rowIndex}_purchase_rate`;
@@ -2037,6 +2156,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         prevRow &&
           (Number(prevRow.quantity || 0) !== 0 ||
             Number(prevRow.loose_quantity || 0) !== 0 ||
+            Number(prevRow.discount_1_percent || 0) > 0 ||
+            Number(prevRow.discount_2_percent || 0) > 0 ||
             Number(prevRow.discount_percent || 0) > 0)
       );
       while (copy.length <= idx) {
@@ -2058,12 +2179,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
     fetchPurchaseItemHistoryByCode(found.item_code, found.id, chosenVariant?.id || null);
-    if (focusQty) {
-      const prefix: 'pur_cell' | 'pos_row' =
-        purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+    if (purchaseViewMode === 'pos') {
+      // In Purchase POS mode, keep cursor on the Barcode / Search input after adding an item for rapid scanning
       requestAnimationFrame(() => {
         setTimeout(() => {
-          focusPurchaseCell(idx, 'quantity', prefix);
+          const rowEl = document.querySelector(`[data-purchase-row-idx="${idx}"]`) as HTMLElement | null;
+          rowEl?.scrollIntoView({ block: 'nearest' });
+          const barcodeEl =
+            itemSearchInputRef.current ||
+            (document.getElementById('pos_purchase_item_search_input') as HTMLInputElement | null);
+          barcodeEl?.focus();
+          barcodeEl?.select?.();
+        }, 35);
+      });
+    } else if (focusQty) {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          focusPurchaseCell(idx, 'quantity', 'pur_cell');
         }, 30);
       });
     }
@@ -2162,9 +2294,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
     requestAnimationFrame(() => {
       setTimeout(() => {
-        const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
-        focusPurchaseCell(targetIdx, 'quantity', prefix);
-      }, 30);
+        if (purchaseViewMode === 'pos') {
+          const rowEl = document.querySelector(`[data-purchase-row-idx="${targetIdx}"]`) as HTMLElement | null;
+          rowEl?.scrollIntoView({ block: 'nearest' });
+          const barcodeEl =
+            itemSearchInputRef.current ||
+            (document.getElementById('pos_purchase_item_search_input') as HTMLInputElement | null);
+          barcodeEl?.focus();
+          barcodeEl?.select?.();
+        } else {
+          focusPurchaseCell(targetIdx, 'quantity', 'pur_cell');
+        }
+      }, 35);
     });
   };
 
@@ -2311,22 +2452,28 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     const looseRate = Math.max(0, round2(Number(row.loose_rate) || 0));
     const gross = round2(qty * rate + looseQty * looseRate);
 
-    let discPct = Math.max(0, Math.min(100, round2(Number(row.discount_percent) || 0)));
-    let discAmt = round2(parseSignedNumeric(row.discount_amount));
+    // Percentage-only sequential discounts: Discount 1 applies first, then Discount 2 to the remaining rate
+    const rawD1 =
+      editedField === 'discount_percent'
+        ? clampDiscountPercent(row.discount_percent)
+        : row.discount_1_percent === undefined &&
+          row.discount_2_percent === undefined &&
+          Number(row.discount_percent || 0) > 0
+        ? clampDiscountPercent(row.discount_percent)
+        : clampDiscountPercent(row.discount_1_percent ?? 0);
+    const rawD2 =
+      row.discount_1_percent === undefined && row.discount_2_percent === undefined
+        ? 0
+        : clampDiscountPercent(row.discount_2_percent ?? 0);
 
-    if (editedField === 'discount_amount') {
-      if (gross >= 0) {
-        discAmt = Math.min(gross, Math.max(0, discAmt));
-        discPct = gross > 0 ? round2((discAmt / gross) * 100) : 0;
-      } else {
-        discAmt = -Math.min(Math.abs(gross), Math.abs(discAmt));
-        discPct = Math.abs(gross) > 0 ? round2((Math.abs(discAmt) / Math.abs(gross)) * 100) : 0;
-      }
-    } else {
-      discAmt = round2(gross * (discPct / 100));
-    }
+    const seq = calculateSequentialLineDiscount({
+      originalRate: rate,
+      looseRate,
+      grossAmount: gross,
+      discount1Percent: rawD1,
+      discount2Percent: rawD2,
+    });
 
-    const taxable = round2(gross - discAmt);
     const resolvedTax = resolveItemTaxConfig(row);
     let taxType = resolvedTax.tax_type;
     let taxValue = resolvedTax.tax_value;
@@ -2353,7 +2500,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       taxValue,
       taxPercent: taxPct,
     });
-    const net = round2(gross + taxAmt - discAmt);
+    const net = round2(gross + taxAmt - seq.discount_amount);
 
     return {
       ...row,
@@ -2363,9 +2510,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       loose_quantity: looseQty,
       loose_rate: looseRate,
       gross_amount: gross,
-      discount_percent: discPct,
-      discount_amount: discAmt,
-      taxable_amount: taxable,
+      discount_1_percent: seq.discount_1_percent,
+      discount_2_percent: seq.discount_2_percent,
+      net_rate: seq.net_rate,
+      net_loose_rate: seq.net_loose_rate,
+      discount_percent: seq.effective_discount_percent,
+      discount_amount: seq.discount_amount,
+      taxable_amount: seq.taxable_amount,
       tax_type: taxType,
       tax_value: taxValue,
       tax_percent: taxPct,
@@ -2472,6 +2623,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         loose_quantity: 0,
         purchase_rate: calculatedPrice,
         loose_rate: looseRate,
+        discount_1_percent: 0,
+        discount_2_percent: 0,
+        net_rate: calculatedPrice,
+        net_loose_rate: looseRate,
         discount_percent: 0,
         discount_amount: 0,
         gross_amount: finalNet,
@@ -2538,7 +2693,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'item_name',
     'quantity',
     'loose_quantity',
-    'discount',
+    'discount_1',
+    'discount_2',
+    'net_rate',
     'bonus',
     'gross_amount',
     'net_amount',
@@ -2558,8 +2715,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     'item_name',
     'quantity',
     'loose_quantity',
-    'discount',
+    'discount_1',
+    'discount_2',
     'purchase_rate',
+    'net_rate',
     'bonus',
     'net_amount',
     'gross_amount',
@@ -2578,7 +2737,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     item_name: 'Item Name',
     quantity: 'Full Qty',
     loose_quantity: 'Loose Qty',
-    discount: 'Discount',
+    discount_1: 'Disc 1 (%)',
+    discount_2: 'Disc 2 (%)',
+    net_rate: 'Net Rate',
     bonus: 'Bonus',
     gross_amount: 'Gross Amount',
     net_amount: 'Net Amount',
@@ -2591,6 +2752,50 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     line_total: 'Line Total',
     remarks: 'Remarks',
   };
+
+  const PURCHASE_ACCESS_COL_META: Record<string, { label: string; cls: string }> = {
+    item_code: { label: 'Item Code', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+    company: { label: 'Company', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+    item_name: { label: 'Item Name', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+    quantity: { label: 'Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950' },
+    loose_quantity: { label: 'Loose Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-teal-100/60 text-teal-950' },
+    discount_1: { label: 'Disc 1 %', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    discount_2: { label: 'Disc 2 %', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    purchase_rate: { label: 'Purchase Rate', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    net_rate: { label: 'Net Rate', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-indigo-50/70 text-indigo-950 font-bold' },
+    bonus: { label: 'Bonus', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950' },
+    net_amount: { label: 'Net Amount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    gross_amount: { label: 'Gross Amount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    packing: { label: 'Packing', cls: 'border-r border-slate-300 px-1 py-0 text-center' },
+    batch_expiry: { label: 'Batch/Expiry', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+    mrp: { label: 'MRP', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    gst: { label: 'GST', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    taxable: { label: 'Taxable', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
+    line_total: { label: 'Line Total', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-slate-300/60 font-black' },
+    remarks: { label: 'Remarks', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
+  };
+
+  const {
+    columnOrder: orderedPurAccessColKeys,
+    isCustomized: isPurAccessColsCustomized,
+    moveColumnsLeft: movePurAccessColsLeft,
+    moveColumnsRight: movePurAccessColsRight,
+    canMoveLeft: canMovePurAccessLeft,
+    canMoveRight: canMovePurAccessRight,
+    resetColumnOrder: resetPurAccessColOrder,
+    draggedColKey: draggedPurAccessCol,
+    dragOverColKey: dragOverPurAccessCol,
+    dragDropSide: purAccessDropSide,
+    handleColDragStart: handlePurAccessColDragStart,
+    handleColDragOver: handlePurAccessColDragOver,
+    handleColDrop: handlePurAccessColDrop,
+    handleColDragEnd: handlePurAccessColDragEnd,
+  } = useColumnOrder({
+    storageKey: 'ams_purchase_access_col_order_v1',
+    defaultOrder: PURCHASE_ACCESS_COL_KEYS,
+    userKey: user?.id ?? user?.username ?? null,
+    legacyExpand: { discount: ['discount_1', 'discount_2', 'net_rate'] },
+  });
 
   const isPurchaseRowInSelectionRange = (rIdx: number): boolean => {
     if (!selectedRowRange) return false;
@@ -2673,7 +2878,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         'item_name',
         'quantity',
         'loose_quantity',
-        'discount',
+        'discount_1',
+        'discount_2',
         'bonus',
         'batch_expiry',
         'purchase_rate',
@@ -2748,9 +2954,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           updated.quantity = 0;
           updated.loose_quantity = 0;
         }
-        if (colSet.has('discount')) {
-          updated.discount_percent = 0;
-          updated.discount_amount = 0;
+        if (colSet.has('discount_1')) {
+          updated.discount_1_percent = 0;
+        }
+        if (colSet.has('discount_2')) {
+          updated.discount_2_percent = 0;
         }
         if (colSet.has('bonus')) updated.bonus_quantity = 0;
         if (colSet.has('batch_expiry')) {
@@ -2901,12 +3109,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseSearchDropdown(false);
     fetchPurchaseItemHistoryByCode(it.item_code, it.id, preMatchedVariant?.id || null);
 
-    // Requirement 9: After selecting an item:
-    // Add it to the invoice, clear search field, automatically focus search field for next item
-    setTimeout(() => {
-      itemSearchInputRef.current?.focus();
-      itemSearchInputRef.current?.select?.();
-    }, 25);
+    // After selecting/scanning an item, keep cursor focused on the Barcode / Search field for continuous scanning
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const rowEl = document.querySelector(`[data-purchase-row-idx="${targetRowIdx}"]`) as HTMLElement | null;
+        rowEl?.scrollIntoView({ block: 'nearest' });
+        const barcodeEl =
+          itemSearchInputRef.current ||
+          (purchaseViewMode === 'pos'
+            ? (document.getElementById('pos_purchase_item_search_input') as HTMLInputElement | null)
+            : null);
+        barcodeEl?.focus();
+        barcodeEl?.select?.();
+      }, 35);
+    });
   };
 
   const handleItemSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -3035,28 +3251,32 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
 
   // Datasheet Cell Keyboard Navigation Sequence (Both POS Table & MS Access Datasheet)
-  // Column Sequence: Item Code -> Item Name -> Qty -> Discount -> Purchase Rate -> Bonus -> Net Amount -> remaining read-only/details columns
-  const purchaseAccessColOrder = [
-    'item_code',
-    'item_name',
-    'quantity',
-    'loose_quantity',
-    'discount_percent',
-    'purchase_rate',
-    'bonus_quantity',
-    'batch_number',
-    'expiry_date',
-    'mrp_rate',
-    'tax_percent',
-    'remarks',
-  ];
+  // MS Access navigation sequence dynamically follows the user's customized column arrangement
+  const purchaseAccessColOrder = useMemo(() => {
+    const colToFocusFields: Record<string, string[]> = {
+      item_code: ['item_code'],
+      item_name: ['item_name'],
+      quantity: ['quantity'],
+      loose_quantity: ['loose_quantity'],
+      discount_1: ['discount_1_percent'],
+      discount_2: ['discount_2_percent'],
+      purchase_rate: ['purchase_rate'],
+      bonus: ['bonus_quantity'],
+      batch_expiry: ['batch_number', 'expiry_date'],
+      mrp: ['mrp_rate'],
+      gst: ['tax_percent'],
+      remarks: ['remarks'],
+    };
+    return orderedPurAccessColKeys.flatMap((k) => colToFocusFields[k] || []);
+  }, [orderedPurAccessColKeys]);
 
   const purchasePosColOrder = [
     'item_code',
     'item_name',
     'quantity',
     'loose_quantity',
-    'discount_percent',
+    'discount_1_percent',
+    'discount_2_percent',
     'bonus_quantity',
     'batch_number',
     'expiry_date',
@@ -3528,7 +3748,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         // ignore
       }
 
-      const resumedDate = p.bill_date || new Date().toISOString().slice(0, 10);
+      const resumedDate = p.bill_date || getPakistanDateISO();
       const nextPreviewRes = await api
         .getNextPurchaseNumbers(resumedDate)
         .catch(() => ({ nextPurchaseNumber: p.bill_number || '' }));
@@ -3590,6 +3810,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           loose_rate: lRate,
           mrp_rate: Number(it.mrp_rate || 0),
           gross_amount: Number(it.gross_amount || 0),
+          ...resolveLineSequentialDiscounts(it, pRate),
           discount_percent: Number(it.discount_percent || 0),
           discount_amount: Number(it.discount_amount || 0),
           taxable_amount: Number(it.taxable_amount || 0),
@@ -3770,6 +3991,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         loose_quantity: Number(l.loose_quantity) || 0,
         bonus_quantity: Number(l.bonus_quantity) || 0,
         loose_rate: Number(l.loose_rate) || 0,
+        discount_1_percent: clampDiscountPercent(l.discount_1_percent ?? 0),
+        discount_2_percent: clampDiscountPercent(l.discount_2_percent ?? 0),
+        net_rate: Number(l.net_rate || 0),
+        discount_percent: Number(l.discount_percent || 0),
+        discount_amount: Number(l.discount_amount || 0),
         tax_type: resolveItemTaxConfig(l).tax_type,
         tax_value: resolveItemTaxConfig(l).tax_value,
         tax_percent: resolveItemTaxConfig(l).tax_percent,
@@ -3965,50 +4191,131 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // Export Purchase Invoices to Formatted Multi-Sheet Excel (.xlsx)
   const [exportingExcel, setExportingExcel] = useState<boolean>(false);
 
-  const handleSendPurchaseOrderWhatsApp = async () => {
-    setFormError(null);
+  const [showPurchaseSmsModal, setShowPurchaseSmsModal] = useState<boolean>(false);
+  const [purchaseSmsPhone, setPurchaseSmsPhone] = useState<string>('');
+  const [purchaseSmsText, setPurchaseSmsText] = useState<string>('');
+  const [purchaseSmsSupplierLabel, setPurchaseSmsSupplierLabel] = useState<string>('');
+
+  const buildSyncedActivePurchaseOrderLines = () => {
     const syncedLines = lines.map((l, idx) => {
       const qtyInput =
         (document.getElementById(`pos_row_${idx}_quantity`) as HTMLInputElement | null) ||
         (document.getElementById(`pur_cell_${idx}_quantity`) as HTMLInputElement | null);
-      const discInput =
-        (document.getElementById(`pos_row_${idx}_discount_percent`) as HTMLInputElement | null) ||
-        (document.getElementById(`pur_cell_${idx}_discount_percent`) as HTMLInputElement | null);
+      const disc1Input =
+        (document.getElementById(`pos_row_${idx}_discount_1_percent`) as HTMLInputElement | null) ||
+        (document.getElementById(`pur_cell_${idx}_discount_1_percent`) as HTMLInputElement | null);
+      const disc2Input =
+        (document.getElementById(`pos_row_${idx}_discount_2_percent`) as HTMLInputElement | null) ||
+        (document.getElementById(`pur_cell_${idx}_discount_2_percent`) as HTMLInputElement | null);
 
       const domQtyRaw = qtyInput?.value?.trim();
-      const domDiscRaw = discInput?.value?.trim();
+      const domDisc1Raw = disc1Input?.value?.trim();
+      const domDisc2Raw = disc2Input?.value?.trim();
       const resolvedQty =
         domQtyRaw !== undefined && domQtyRaw !== '' && Number.isFinite(Number(domQtyRaw))
           ? Number(domQtyRaw)
           : Number(l.quantity || 0);
-      const resolvedDisc =
-        domDiscRaw !== undefined && domDiscRaw !== '' && Number.isFinite(Number(domDiscRaw))
-          ? Number(domDiscRaw)
-          : Number(l.discount_percent || 0);
+      const resolvedD1 =
+        domDisc1Raw !== undefined && domDisc1Raw !== '' && Number.isFinite(Number(domDisc1Raw))
+          ? clampDiscountPercent(domDisc1Raw)
+          : clampDiscountPercent(l.discount_1_percent ?? 0);
+      const resolvedD2 =
+        domDisc2Raw !== undefined && domDisc2Raw !== '' && Number.isFinite(Number(domDisc2Raw))
+          ? clampDiscountPercent(domDisc2Raw)
+          : clampDiscountPercent(l.discount_2_percent ?? 0);
+      const seq = calculateSequentialLineDiscount({
+        originalRate: Number(l.purchase_rate || 0),
+        looseRate: Number(l.loose_rate || 0),
+        grossAmount: round2(resolvedQty * Number(l.purchase_rate || 0) + Number(l.loose_quantity || 0) * Number(l.loose_rate || 0)),
+        discount1Percent: resolvedD1,
+        discount2Percent: resolvedD2,
+      });
 
       return {
         ...l,
         quantity: resolvedQty,
-        discount_percent: resolvedDisc,
+        discount_1_percent: seq.discount_1_percent,
+        discount_2_percent: seq.discount_2_percent,
+        net_rate: seq.net_rate,
+        discount_percent: seq.effective_discount_percent,
       };
     });
 
-    const activePurchaseLines = syncedLines.filter(
+    return syncedLines.filter(
       (l) =>
         Number(l.item_id || 0) > 0 ||
         Boolean(l.item_code?.trim()) ||
         Boolean(l.item_name?.trim())
     );
+  };
+
+  const resolvePurchaseOrderStoreName = async (): Promise<string> => {
+    let resolvedStore = storeDisplayName || 'ABRAR MEDICAL STORE';
+    try {
+      const settingsRes = await api.getCompanySettings();
+      if (settingsRes?.data?.store_name) {
+        resolvedStore = String(settingsRes.data.store_name).trim() || 'ABRAR MEDICAL STORE';
+        setStoreDisplayName(resolvedStore);
+      }
+    } catch {
+      // Keep default ABRAR MEDICAL STORE
+    }
+    return resolvedStore;
+  };
+
+  const handleSendPurchaseOrderSms = async () => {
+    setFormError(null);
+    const activePurchaseLines = buildSyncedActivePurchaseOrderLines();
     if (activePurchaseLines.length === 0) {
       setFormError(
-        'Please add at least one item in the Purchase Invoice before clicking Send WhatsApp Order.'
+        'Please add at least one item in the Purchase Invoice before clicking Send Order via SMS.'
+      );
+      itemSearchInputRef.current?.focus();
+      return;
+    }
+
+    let registeredPhone = String(
+      selectedSupplier?.phone || (selectedSupplier as any)?.mobile || ''
+    ).trim();
+
+    if (!registeredPhone && supplierId) {
+      const parsedSupId = parseInt(supplierId, 10);
+      if (Number.isFinite(parsedSupId) && parsedSupId > 0) {
+        try {
+          const accRes = await api.getAccounts({ status: 'Active' });
+          const allAccs = Array.isArray(accRes?.data) ? accRes.data : [];
+          const matched = allAccs.find((a: any) => Number(a.id) === parsedSupId);
+          if (matched) {
+            registeredPhone = String(matched.phone || matched.mobile || '').trim();
+          }
+        } catch {
+          // Use local selectedSupplier fallback
+        }
+      }
+    }
+
+    const resolvedStore = await resolvePurchaseOrderStoreName();
+    const preparedOrderMessage = generatePurchaseOrderSmsText(activePurchaseLines, resolvedStore);
+
+    setPurchaseSmsPhone(registeredPhone);
+    setPurchaseSmsSupplierLabel(selectedSupplier?.account_name || '');
+    setPurchaseSmsText(preparedOrderMessage);
+    setShowPurchaseSmsModal(true);
+  };
+
+  const handleSendPurchaseOrderWhatsApp = async () => {
+    setFormError(null);
+    const activePurchaseLines = buildSyncedActivePurchaseOrderLines();
+    if (activePurchaseLines.length === 0) {
+      setFormError(
+        'Please add at least one item in the Purchase Invoice before clicking Send Order via WhatsApp.'
       );
       itemSearchInputRef.current?.focus();
       return;
     }
 
     if (!selectedSupplier) {
-      setFormError('Please select a supplier before clicking Send WhatsApp Order.');
+      setFormError('Please select a supplier before clicking Send Order via WhatsApp.');
       supplierSearchInputRef.current?.focus();
       return;
     }
@@ -4021,16 +4328,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       return;
     }
 
-    let resolvedStore = storeDisplayName || 'ABRAR MEDICAL STORE';
-    try {
-      const settingsRes = await api.getCompanySettings();
-      if (settingsRes?.data?.store_name) {
-        resolvedStore = String(settingsRes.data.store_name).trim() || 'ABRAR MEDICAL STORE';
-        setStoreDisplayName(resolvedStore);
-      }
-    } catch {
-      // Keep default ABRAR MEDICAL STORE
-    }
+    const resolvedStore = await resolvePurchaseOrderStoreName();
 
     // Keep the exact existing order message content and format unchanged
     const preparedOrderMessage = generatePurchaseOrderSmsText(activePurchaseLines, resolvedStore);
@@ -4088,6 +4386,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         purchase_rate: Number(l.purchase_rate) || 0,
         loose_rate: Number(l.loose_rate) || 0,
         mrp_rate: Number(l.mrp_rate) || 0,
+        discount_1_percent: clampDiscountPercent(l.discount_1_percent ?? 0),
+        discount_2_percent: clampDiscountPercent(l.discount_2_percent ?? 0),
+        net_rate: Number(l.net_rate) || 0,
         discount_percent: Number(l.discount_percent) || 0,
         discount_amount: Number(l.discount_amount) || 0,
         taxable_amount: Number(l.taxable_amount) || 0,
@@ -4376,7 +4677,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setEditingPurchaseId(p.id);
       setEditingPurchaseStatus(String(p.status || 'completed').trim().toLowerCase());
       setBillNumber(p.bill_number || '');
-      setBillDate(p.bill_date || new Date().toISOString().slice(0, 10));
+      setBillDate(p.bill_date || getPakistanDateISO());
       setSupplierId(p.supplier_account_id ? String(p.supplier_account_id) : '');
       setSupplierInvoiceNumber(p.supplier_invoice_number || '');
       setSupplierFilerStatus(p.supplier_filer_status || 'Filer');
@@ -4413,6 +4714,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           loose_rate: lRate,
           mrp_rate: Number(it.mrp_rate || 0),
           gross_amount: Number(it.gross_amount || 0),
+          ...resolveLineSequentialDiscounts(it, pRate),
           discount_percent: Number(it.discount_percent || 0),
           discount_amount: Number(it.discount_amount || 0),
           taxable_amount: Number(it.taxable_amount || 0),
@@ -4609,12 +4911,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     );
   };
 
-  // Excel-Style Item Search Results Dropdown Table (Top Search Bar)
-  // Columns: Item Name | Company Name | Purchase Price | Sale Price
+  // Excel-Style Item Search Results Dropdown Table (Top Search Bar — 11 Required Fields in Exact Order)
   const renderTopItemSearchDropdown = () => {
     if (!showPurchaseSearchDropdown) return null;
     return (
-      <div className="absolute right-0 top-full mt-1 z-[100] w-[640px] max-w-[92vw] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl overflow-hidden">
+      <div className="absolute right-0 top-full mt-1 z-[100] w-[980px] max-w-[95vw] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl overflow-hidden">
         <div className="px-3 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center">
           <span>
             Matching Items ({purchaseSearchResults.length})
@@ -4626,19 +4927,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             ↑/↓ Navigate • Enter Select • Esc Close
           </span>
         </div>
-        <div ref={itemListRef} className="max-h-[340px] overflow-y-auto">
+        <div ref={itemListRef} className="max-h-[340px] overflow-auto">
           {purchaseSearchResults.length === 0 ? (
             <div className="p-4 text-center text-base font-bold text-slate-600">
               No Item Found{selectedCompanyFilter ? ` in ${selectedCompanyFilter}` : ''}
             </div>
           ) : (
-            <table className="w-full text-left text-[11px] border-collapse">
+            <table className="w-full text-left text-[11px] border-collapse whitespace-nowrap">
               <thead className="bg-slate-200 text-slate-800 sticky top-0 z-10 border-b border-slate-300 text-[10px] font-bold uppercase">
                 <tr>
-                  <th className="px-2.5 py-1 border-r border-slate-300">Item Name</th>
-                  <th className="px-2.5 py-1 border-r border-slate-300">Company Name</th>
-                  <th className="px-2.5 py-1 border-r border-slate-300 text-right">Purchase Price</th>
-                  <th className="px-2.5 py-1 text-right">Sale Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Item Code</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Item Name</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">SPrice</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Purchase Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Loose Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Stock</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Company</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Packing</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Batch Number</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Expiry Date</th>
+                  <th className="px-2 py-1">Generic / Rack</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -4646,12 +4954,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   const isHighlighted = idx === itemHighlightIndex;
                   const activeLine = lines[selectedPurchaseLineIndex];
                   const isCurrentItem = Boolean(activeLine?.item_id && Number(activeLine.item_id) === Number(it.id));
-                  const purRate =
-                    Number(it.purchase_price) ||
-                    Number(it.trade_price) ||
-                    Number(it.retail_price) ||
-                    0;
-                  const saleRate = Number(it.retail_price || 0);
+                  const batchInfo = getPurchaseItemBatchInfo(it);
+                  const resolved = resolveItemSelectionFields(it, {
+                    salePrice: Number(it.retail_price || 0),
+                    purchasePrice: Number(it.purchase_price || 0),
+                    stockPacks: getPurchaseItemStockPacks(it),
+                    batchNumber: batchInfo.batchNumber,
+                    expiryDate: batchInfo.expiryDate,
+                  });
+                  const formattedExpiry =
+                    resolved.expiryDate !== '—'
+                      ? formatAppDate(resolved.expiryDate) || resolved.expiryDate
+                      : '—';
                   return (
                     <tr
                       key={it.id}
@@ -4670,69 +4984,109 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
-                      <td className="px-2.5 py-1 border-r border-slate-200">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono text-[10px] font-bold ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                        }`}
+                      >
+                        {resolved.itemCode}
+                      </td>
+                      <td className="px-2 py-1 border-r border-slate-200">
+                        <div className="flex items-center gap-1.5 min-w-0 max-w-[230px]">
                           <ProductThumb
                             src={it.thumbnail_url || it.image_url}
                             alt={it.item_name}
                             size="xs"
                           />
-                          <div className="truncate">
+                          <span
+                            className={`font-bold truncate ${
+                              isHighlighted ? 'text-white' : 'text-slate-900'
+                            }`}
+                          >
+                            {resolved.itemName}
+                          </span>
+                          {Number(it.has_variants || 0) === 1 && (
                             <span
-                              className={`font-mono text-[10px] font-bold mr-1 ${
-                                isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                              className={`px-1 py-0 rounded border text-[9px] font-bold shrink-0 ${
+                                isHighlighted
+                                  ? 'bg-sky-900 text-amber-200 border-sky-400'
+                                  : 'bg-emerald-100 text-emerald-800 border-emerald-200'
                               }`}
                             >
-                              [{it.item_code}]
+                              {Number(it.active_variant_count || it.variants?.length || 0)} Variants
                             </span>
-                            <span
-                              className={`font-bold ${
-                                isHighlighted ? 'text-white' : 'text-slate-900'
-                              }`}
-                            >
-                              {it.item_name}
-                            </span>
-                            <span
-                              className={`text-[10px] ml-1 ${
-                                isHighlighted ? 'text-sky-100' : 'text-slate-500'
-                              }`}
-                            >
-                              ({it.packing})
-                            </span>
-                            {Number(it.has_variants || 0) === 1 && (
-                              <span
-                                className={`ml-1.5 px-1 py-0 rounded border text-[9px] font-bold ${
-                                  isHighlighted
-                                    ? 'bg-sky-900 text-amber-200 border-sky-400'
-                                    : 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                                }`}
-                              >
-                                {Number(it.active_variant_count || it.variants?.length || 0)} Variants
-                              </span>
-                            )}
-                          </div>
+                          )}
                         </div>
                       </td>
                       <td
-                        className={`px-2.5 py-1 border-r border-slate-200 ${
-                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
-                        }`}
-                      >
-                        {it.company_name || '—'}
-                      </td>
-                      <td
-                        className={`px-2.5 py-1 border-r border-slate-200 text-right font-mono font-black ${
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-bold ${
                           isHighlighted ? 'text-amber-200' : 'text-emerald-800'
                         }`}
                       >
-                        Rs. {purRate.toFixed(2)}
+                        Rs. {resolved.sPrice.toFixed(2)}
                       </td>
                       <td
-                        className={`px-2.5 py-1 text-right font-mono font-semibold ${
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-black ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-800'
+                        }`}
+                      >
+                        Rs. {resolved.purchasePrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-teal-700'
+                        }`}
+                      >
+                        Rs. {resolved.loosePrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-bold ${
+                          isHighlighted
+                            ? resolved.stockPacks > 0
+                              ? 'text-emerald-200'
+                              : 'text-rose-200'
+                            : resolved.stockPacks > 0
+                            ? 'text-emerald-700'
+                            : 'text-rose-600'
+                        }`}
+                      >
+                        {resolved.stockPacks}P
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 truncate max-w-[140px] ${
                           isHighlighted ? 'text-sky-100' : 'text-slate-700'
                         }`}
                       >
-                        Rs. {saleRate.toFixed(2)}
+                        {resolved.company}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {resolved.packing}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        {resolved.batchNumber}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {formattedExpiry}
+                      </td>
+                      <td
+                        className={`px-2 py-1 truncate max-w-[160px] ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                        }`}
+                        title={resolved.otherInfo !== '—' ? resolved.otherInfo : undefined}
+                      >
+                        {resolved.otherInfo}
                       </td>
                     </tr>
                   );
@@ -4745,11 +5099,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     );
   };
 
-  // Excel-Style Item Search Combobox for Datasheet Row Cells (Item Code & Item Name)
+  // Excel-Style Item Search Combobox for Datasheet Row Cells (11 Required Fields in Exact Order)
   const renderRowItemSearchCombobox = (rowIdx: number, fromPosRow: boolean) => {
     if (!ROW_SUGGESTIONS_ENABLED || activeRowItemSearchIdx !== rowIdx) return null;
+    void fromPosRow;
     return (
-      <div className="absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl min-w-[580px] max-w-[720px] overflow-hidden">
+      <div className="absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl w-[960px] max-w-[94vw] overflow-hidden">
         <div className="px-2.5 py-1 bg-slate-100 border-b border-slate-300 text-[10px] font-bold uppercase tracking-wider text-slate-700 flex justify-between items-center">
           <span>
             Matching Items ({rowItemSearchResults.length})
@@ -4759,19 +5114,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           </span>
           <span className="font-mono text-sky-700">↑/↓ Navigate • Enter Select • Esc Close</span>
         </div>
-        <div className="max-h-[340px] overflow-y-auto">
+        <div className="max-h-[340px] overflow-auto">
           {rowItemSearchResults.length === 0 ? (
             <div className="p-4 text-center text-base font-bold text-slate-600">
               No Item Found{selectedCompanyFilter ? ` in ${selectedCompanyFilter}` : ''}
             </div>
           ) : (
-            <table className="w-full text-left text-[11px] border-collapse">
+            <table className="w-full text-left text-[11px] border-collapse whitespace-nowrap">
               <thead className="bg-slate-200 text-slate-800 sticky top-0 z-10 border-b border-slate-300 text-[10px] font-bold uppercase">
                 <tr>
-                  <th className="px-2.5 py-1 border-r border-slate-300">Item Name</th>
-                  <th className="px-2.5 py-1 border-r border-slate-300">Company Name</th>
-                  <th className="px-2.5 py-1 border-r border-slate-300 text-right">Purchase Price</th>
-                  <th className="px-2.5 py-1 text-right">Sale Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Item Code</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Item Name</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">SPrice</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Purchase Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Loose Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Stock</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Company</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Packing</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Batch Number</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Expiry Date</th>
+                  <th className="px-2 py-1">Generic / Rack</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -4779,12 +5141,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   const isHighlighted = iIdx === rowItemHighlightIndex;
                   const rowLine = lines[rowIdx];
                   const isCurrentItem = Boolean(rowLine?.item_id && Number(rowLine.item_id) === Number(it.id));
-                  const purRate =
-                    Number(it.purchase_price) ||
-                    Number(it.trade_price) ||
-                    Number(it.retail_price) ||
-                    0;
-                  const saleRate = Number(it.retail_price || 0);
+                  const batchInfo = getPurchaseItemBatchInfo(it);
+                  const resolved = resolveItemSelectionFields(it, {
+                    salePrice: Number(it.retail_price || 0),
+                    purchasePrice: Number(it.purchase_price || 0),
+                    stockPacks: getPurchaseItemStockPacks(it),
+                    batchNumber: batchInfo.batchNumber,
+                    expiryDate: batchInfo.expiryDate,
+                  });
+                  const formattedExpiry =
+                    resolved.expiryDate !== '—'
+                      ? formatAppDate(resolved.expiryDate) || resolved.expiryDate
+                      : '—';
                   return (
                     <tr
                       key={it.id}
@@ -4803,69 +5171,109 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
-                      <td className="px-2.5 py-1 border-r border-slate-200">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono text-[10px] font-bold ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                        }`}
+                      >
+                        {resolved.itemCode}
+                      </td>
+                      <td className="px-2 py-1 border-r border-slate-200">
+                        <div className="flex items-center gap-1.5 min-w-0 max-w-[230px]">
                           <ProductThumb
                             src={it.thumbnail_url || it.image_url}
                             alt={it.item_name}
                             size="xs"
                           />
-                          <div className="truncate">
+                          <span
+                            className={`font-bold truncate ${
+                              isHighlighted ? 'text-white' : 'text-slate-900'
+                            }`}
+                          >
+                            {resolved.itemName}
+                          </span>
+                          {Number(it.has_variants || 0) === 1 && (
                             <span
-                              className={`font-mono text-[10px] font-bold mr-1 ${
-                                isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                              className={`px-1 py-0 rounded border text-[9px] font-bold shrink-0 ${
+                                isHighlighted
+                                  ? 'bg-sky-900 text-amber-200 border-sky-400'
+                                  : 'bg-emerald-100 text-emerald-800 border-emerald-200'
                               }`}
                             >
-                              [{it.item_code}]
+                              {Number(it.active_variant_count || it.variants?.length || 0)} Variants
                             </span>
-                            <span
-                              className={`font-bold ${
-                                isHighlighted ? 'text-white' : 'text-slate-900'
-                              }`}
-                            >
-                              {it.item_name}
-                            </span>
-                            <span
-                              className={`text-[10px] ml-1 ${
-                                isHighlighted ? 'text-sky-100' : 'text-slate-500'
-                              }`}
-                            >
-                              ({it.packing})
-                            </span>
-                            {Number(it.has_variants || 0) === 1 && (
-                              <span
-                                className={`ml-1.5 px-1 py-0 rounded border text-[9px] font-bold ${
-                                  isHighlighted
-                                    ? 'bg-sky-900 text-amber-200 border-sky-400'
-                                    : 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                                }`}
-                              >
-                                {Number(it.active_variant_count || it.variants?.length || 0)} Variants
-                              </span>
-                            )}
-                          </div>
+                          )}
                         </div>
                       </td>
                       <td
-                        className={`px-2.5 py-1 border-r border-slate-200 truncate max-w-[160px] ${
-                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
-                        }`}
-                      >
-                        {it.company_name || '—'}
-                      </td>
-                      <td
-                        className={`px-2.5 py-1 border-r border-slate-200 text-right font-mono font-black ${
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-bold ${
                           isHighlighted ? 'text-amber-200' : 'text-emerald-800'
                         }`}
                       >
-                        Rs. {purRate.toFixed(2)}
+                        Rs. {resolved.sPrice.toFixed(2)}
                       </td>
                       <td
-                        className={`px-2.5 py-1 text-right font-mono font-semibold ${
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-black ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-800'
+                        }`}
+                      >
+                        Rs. {resolved.purchasePrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-teal-700'
+                        }`}
+                      >
+                        Rs. {resolved.loosePrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-bold ${
+                          isHighlighted
+                            ? resolved.stockPacks > 0
+                              ? 'text-emerald-200'
+                              : 'text-rose-200'
+                            : resolved.stockPacks > 0
+                            ? 'text-emerald-700'
+                            : 'text-rose-600'
+                        }`}
+                      >
+                        {resolved.stockPacks}P
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 truncate max-w-[140px] ${
                           isHighlighted ? 'text-sky-100' : 'text-slate-700'
                         }`}
                       >
-                        Rs. {saleRate.toFixed(2)}
+                        {resolved.company}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {resolved.packing}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        {resolved.batchNumber}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {formattedExpiry}
+                      </td>
+                      <td
+                        className={`px-2 py-1 truncate max-w-[160px] ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                        }`}
+                        title={resolved.otherInfo !== '—' ? resolved.otherInfo : undefined}
+                      >
+                        {resolved.otherInfo}
                       </td>
                     </tr>
                   );
@@ -5003,15 +5411,26 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           </button>
 
           {subTab === 'new-invoice' && (
-            <button
-              type="button"
-              onClick={handleSendPurchaseOrderWhatsApp}
-              className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-              title="Send WhatsApp Order for Current Purchase Invoice"
-            >
-              <MessageCircle className="w-3 h-3" />
-              <span>Send WhatsApp Order</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleSendPurchaseOrderSms}
+                className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                title="Send Order via SMS for Current Purchase Invoice"
+              >
+                <MessageSquare className="w-3 h-3" />
+                <span>Send Order via SMS</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleSendPurchaseOrderWhatsApp}
+                className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                title="Send Order via WhatsApp for Current Purchase Invoice"
+              >
+                <MessageCircle className="w-3 h-3" />
+                <span>Send Order via WhatsApp</span>
+              </button>
+            </>
           )}
 
           <button
@@ -5474,7 +5893,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                       {/* Synchronized Active Line Quick-Entry Inspector */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-12 gap-2 pt-2 border-t border-slate-100 items-end">
-                        <div className="col-span-2 sm:col-span-2 xl:col-span-3 min-w-0">
+                        <div className="col-span-2 sm:col-span-2 xl:col-span-2 min-w-0">
                           <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
                             Selected Line #{selectedPurchaseLineIndex + 1}
                           </div>
@@ -5484,7 +5903,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                 <span className="text-xs font-bold text-slate-900 truncate">
                                   {activePurRow.item_name}
                                 </span>
-                                <span className="text-[11px] font-medium text-slate-500 shrink-0 truncate max-w-[90px]">
+                                <span className="text-[11px] font-medium text-slate-500 shrink-0 truncate max-w-[70px]">
                                   {activePurRow.company_name || '—'}
                                 </span>
                               </div>
@@ -5556,7 +5975,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           />
                         </div>
 
-                        <div className="xl:col-span-2">
+                        <div className="xl:col-span-1">
                           <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
                             Pur. Rate
                           </label>
@@ -5577,20 +5996,54 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                         <div className="xl:col-span-1">
                           <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
-                            Disc %
+                            Disc 1 %
                           </label>
                           <NumericInput
                             disabled={!activePurHasItem}
-                            value={activePurHasItem ? activePurRow.discount_percent : 0}
+                            value={activePurHasItem ? activePurRow.discount_1_percent : 0}
                             onChange={(e) =>
                               handleLineChange(
                                 selectedPurchaseLineIndex,
-                                'discount_percent',
+                                'discount_1_percent',
                                 parseFloat(e.target.value) || 0
                               )
                             }
                             className="w-full px-2 py-1 text-right font-mono font-semibold text-xs text-slate-800 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
                           />
+                        </div>
+
+                        <div className="xl:col-span-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
+                            Disc 2 %
+                          </label>
+                          <NumericInput
+                            disabled={!activePurHasItem}
+                            value={activePurHasItem ? activePurRow.discount_2_percent : 0}
+                            onChange={(e) =>
+                              handleLineChange(
+                                selectedPurchaseLineIndex,
+                                'discount_2_percent',
+                                parseFloat(e.target.value) || 0
+                              )
+                            }
+                            className="w-full px-2 py-1 text-right font-mono font-semibold text-xs text-slate-800 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
+                          />
+                        </div>
+
+                        <div className="xl:col-span-1">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-indigo-700 mb-0.5">
+                            Net Rate
+                          </label>
+                          <div
+                            className="px-2 py-1 rounded-lg border border-indigo-200 bg-indigo-50/70 text-right font-mono font-bold text-xs text-indigo-950 tabular-nums truncate"
+                            title={
+                              activePurHasItem
+                                ? `Net Rate after sequential discounts: Rs. ${Number(activePurRow.net_rate || 0).toFixed(2)}`
+                                : 'Net Rate (read-only)'
+                            }
+                          >
+                            {activePurHasItem ? Number(activePurRow.net_rate || 0).toFixed(2) : '0.00'}
+                          </div>
                         </div>
 
                         <div className="xl:col-span-1">
@@ -5712,7 +6165,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             <col style={{ width: `${purPosColWidths.item_name}px` }} />
                             <col style={{ width: `${purPosColWidths.quantity}px` }} />
                             <col style={{ width: `${purPosColWidths.loose_quantity}px` }} />
-                            <col style={{ width: `${purPosColWidths.discount}px` }} />
+                            <col style={{ width: `${purPosColWidths.discount_1}px` }} />
+                            <col style={{ width: `${purPosColWidths.discount_2}px` }} />
+                            <col style={{ width: `${purPosColWidths.net_rate}px` }} />
                             <col style={{ width: `${purPosColWidths.bonus}px` }} />
                             <col style={{ width: `${purPosColWidths.gross_amount}px` }} />
                             <col style={{ width: `${purPosColWidths.net_amount}px` }} />
@@ -5736,7 +6191,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                   { key: 'item_name', label: 'Item Name', cls: 'py-2 px-2.5 border-r border-slate-200' },
                                   { key: 'quantity', label: 'Full Qty', cls: 'py-2 px-2 text-right bg-emerald-50/70 text-emerald-900 border-r border-slate-200' },
                                   { key: 'loose_quantity', label: 'Loose Qty', cls: 'py-2 px-2 text-right bg-teal-50/70 text-teal-900 border-r border-slate-200' },
-                                  { key: 'discount', label: 'Disc %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'discount_1', label: 'Disc 1 %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'discount_2', label: 'Disc 2 %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                                  { key: 'net_rate', label: 'Net Rate', cls: 'py-2 px-2 text-right bg-indigo-50/70 text-indigo-900 border-r border-slate-200' },
                                   { key: 'bonus', label: 'Bonus', cls: 'py-2 px-2 text-right border-r border-slate-200' },
                                   { key: 'gross_amount', label: 'Gross', cls: 'py-2 px-2 text-right border-r border-slate-200' },
                                   { key: 'net_amount', label: 'Net Amt', cls: 'py-2 px-2 text-right border-r border-slate-200' },
@@ -5803,7 +6260,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     <td className="py-1 px-1.5 text-center font-mono text-slate-300 text-[11px]">
                                       {rIdx + 1}
                                     </td>
-                                    <td colSpan={18} />
+                                    <td colSpan={20} />
                                   </tr>
                                 );
                               }
@@ -6252,28 +6709,66 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     />
                                   </td>
 
-                                  {/* Discount % */}
-                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount')}`}>
+                                  {/* Discount 1 % */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount_1')}`}>
                                     <NumericInput
-                                      id={`pos_row_${rIdx}_discount_percent`}
+                                      id={`pos_row_${rIdx}_discount_1_percent`}
                                       value={
                                         line.item_id || line.item_code?.trim() || line.item_name?.trim()
-                                          ? line.discount_percent
+                                          ? line.discount_1_percent
                                           : 0
                                       }
                                       onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
                                       onChange={(e) =>
                                         handleLineChange(
                                           rIdx,
-                                          'discount_percent',
+                                          'discount_1_percent',
                                           parseFloat(e.target.value) || 0
                                         )
                                       }
                                       onKeyDown={(e) =>
-                                        handlePurchaseCellKeyDown(e, rIdx, 'discount_percent', 'pos_row')
+                                        handlePurchaseCellKeyDown(e, rIdx, 'discount_1_percent', 'pos_row')
                                       }
+                                      title="Discount 1 (%) applied first to Purchase Rate"
                                       className="w-full px-1.5 py-1 text-right font-mono text-xs text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
                                     />
+                                  </td>
+
+                                  {/* Discount 2 % */}
+                                  <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount_2')}`}>
+                                    <NumericInput
+                                      id={`pos_row_${rIdx}_discount_2_percent`}
+                                      value={
+                                        line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                          ? line.discount_2_percent
+                                          : 0
+                                      }
+                                      onFocus={() => setSelectedPurchaseLineIndex(rIdx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          rIdx,
+                                          'discount_2_percent',
+                                          parseFloat(e.target.value) || 0
+                                        )
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, rIdx, 'discount_2_percent', 'pos_row')
+                                      }
+                                      title="Discount 2 (%) applied sequentially after Discount 1"
+                                      className="w-full px-1.5 py-1 text-right font-mono text-xs text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                                    />
+                                  </td>
+
+                                  {/* Net Rate (Read-only) */}
+                                  <td
+                                    className={`px-2 py-1 text-right font-mono font-bold text-xs text-indigo-900 bg-indigo-50/40 border-r border-slate-100 align-middle tabular-nums whitespace-nowrap ${colHighlight('net_rate')}`}
+                                    title={
+                                      hasItem
+                                        ? `Purchase Rate ${Number(line.purchase_rate || 0).toFixed(2)} → Disc 1 (${line.discount_1_percent}%) → Disc 2 (${line.discount_2_percent}%) = Net Rate ${Number(line.net_rate || 0).toFixed(2)}`
+                                        : ''
+                                    }
+                                  >
+                                    {hasItem ? Number(line.net_rate || 0).toFixed(2) : ''}
                                   </td>
 
                                   {/* Bonus */}
@@ -6845,12 +7340,22 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
                         <button
                           type="button"
+                          onClick={handleSendPurchaseOrderSms}
+                          className="py-2 px-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                          title="Send Order via SMS for Current Purchase Invoice"
+                        >
+                          <MessageSquare className="w-3.5 h-3.5" />
+                          <span>SMS Order</span>
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={handleSendPurchaseOrderWhatsApp}
-                          className="py-2 px-2.5 rounded-lg bg-green-600 hover:bg-green-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                          title="Send WhatsApp Order for Current Purchase Invoice"
+                          className="col-span-2 py-2 px-2.5 rounded-lg bg-green-600 hover:bg-green-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                          title="Send Order via WhatsApp for Current Purchase Invoice"
                         >
                           <MessageCircle className="w-3.5 h-3.5" />
-                          <span>WhatsApp</span>
+                          <span>Send Order via WhatsApp</span>
                         </button>
                       </div>
 
@@ -7340,85 +7845,90 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   >
                     <colgroup>
                       <col style={{ width: `${purAccessColWidths.selector}px` }} />
-                      <col style={{ width: `${purAccessColWidths.item_code}px` }} />
-                      <col style={{ width: `${purAccessColWidths.company}px` }} />
-                      <col style={{ width: `${purAccessColWidths.item_name}px` }} />
-                      <col style={{ width: `${purAccessColWidths.quantity}px` }} />
-                      <col style={{ width: `${purAccessColWidths.loose_quantity}px` }} />
-                      <col style={{ width: `${purAccessColWidths.discount}px` }} />
-                      <col style={{ width: `${purAccessColWidths.purchase_rate}px` }} />
-                      <col style={{ width: `${purAccessColWidths.bonus}px` }} />
-                      <col style={{ width: `${purAccessColWidths.net_amount}px` }} />
-                      <col style={{ width: `${purAccessColWidths.gross_amount}px` }} />
-                      <col style={{ width: `${purAccessColWidths.packing}px` }} />
-                      <col style={{ width: `${purAccessColWidths.batch_expiry}px` }} />
-                      <col style={{ width: `${purAccessColWidths.mrp}px` }} />
-                      <col style={{ width: `${purAccessColWidths.gst}px` }} />
-                      <col style={{ width: `${purAccessColWidths.taxable}px` }} />
-                      <col style={{ width: `${purAccessColWidths.line_total}px` }} />
-                      <col style={{ width: `${purAccessColWidths.remarks}px` }} />
+                      {orderedPurAccessColKeys.map((colKey) => (
+                        <col key={colKey} style={{ width: `${purAccessColWidths[colKey]}px` }} />
+                      ))}
                       <col style={{ width: `${purAccessColWidths.actions}px` }} />
                     </colgroup>
                     <thead className="sticky top-0 z-20 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                       <tr className="h-6">
-                        {(
-                          [
-                            { key: 'selector', label: '#', cls: 'bg-slate-300/80 border-r border-slate-400 px-1 py-0 text-center font-mono' },
-                            { key: 'item_code', label: 'Item Code', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
-                            { key: 'company', label: 'Company', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
-                            { key: 'item_name', label: 'Item Name', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
-                            { key: 'quantity', label: 'Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950' },
-                            { key: 'loose_quantity', label: 'Loose Qty', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-teal-100/60 text-teal-950' },
-                            { key: 'discount', label: 'Discount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'purchase_rate', label: 'Purchase Rate', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'bonus', label: 'Bonus', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950' },
-                            { key: 'net_amount', label: 'Net Amount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'gross_amount', label: 'Gross Amount', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'packing', label: 'Packing', cls: 'border-r border-slate-300 px-1 py-0 text-center' },
-                            { key: 'batch_expiry', label: 'Batch/Expiry', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
-                            { key: 'mrp', label: 'MRP', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'gst', label: 'GST', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'taxable', label: 'Taxable', cls: 'border-r border-slate-300 px-1 py-0 text-right' },
-                            { key: 'line_total', label: 'Line Total', cls: 'border-r border-slate-300 px-1 py-0 text-right bg-slate-300/60 font-black' },
-                            { key: 'remarks', label: 'Remarks', cls: 'border-r border-slate-300 px-1 py-0 text-left' },
-                            { key: 'actions', label: 'Del', cls: 'px-1 py-0 text-center' },
-                          ] as const
-                        ).map((col) => {
-                          const isColSelected = selectedColKeys.includes(col.key);
-                          const isSelectableCol = col.key !== 'selector' && col.key !== 'actions';
+                        <th
+                          key="selector"
+                          style={{ width: `${purAccessColWidths.selector}px` }}
+                          className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 text-center font-mono h-6 relative whitespace-nowrap overflow-hidden text-ellipsis"
+                        >
+                          <span className="truncate block">#</span>
+                          <div
+                            data-col-resize-handle="true"
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              handlePurAccessResizeStart('selector', e);
+                            }}
+                            onDoubleClick={(e) => handleResetPurAccessColWidth('selector', e)}
+                            title="Drag border to resize column (double-click to reset)"
+                            className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                              purAccessResizingCol === 'selector'
+                                ? 'bg-emerald-600'
+                                : 'hover:bg-emerald-500/80'
+                            }`}
+                          />
+                        </th>
+
+                        {orderedPurAccessColKeys.map((colKey) => {
+                          const meta = PURCHASE_ACCESS_COL_META[colKey] || {
+                            label: PURCHASE_COL_LABELS[colKey] || colKey,
+                            cls: 'border-r border-slate-300 px-1 py-0 text-left',
+                          };
+                          const isColSelected = selectedColKeys.includes(colKey);
+                          const isDraggingThis = draggedPurAccessCol === colKey;
+                          const isDragOverThis = dragOverPurAccessCol === colKey;
+                          const dropIndicatorCls = isDragOverThis
+                            ? purAccessDropSide === 'left'
+                              ? '!border-l-[3px] !border-l-indigo-600 !bg-indigo-100/80'
+                              : '!border-r-[3px] !border-r-indigo-600 !bg-indigo-100/80'
+                            : '';
                           return (
                             <th
-                              key={col.key}
+                              key={colKey}
+                              draggable={purAccessResizingCol === null}
+                              onDragStart={(e) => {
+                                isDraggingColsRef.current = false;
+                                handlePurAccessColDragStart(colKey, e, purAccessResizingCol !== null);
+                              }}
+                              onDragOver={(e) => handlePurAccessColDragOver(colKey, e)}
+                              onDrop={(e) =>
+                                handlePurAccessColDrop(colKey, e, (movedKey) => {
+                                  setSelectedColKeys([movedKey]);
+                                  colSelectionAnchorRef.current = movedKey;
+                                })
+                              }
+                              onDragEnd={handlePurAccessColDragEnd}
                               onMouseDown={(e) =>
-                                handlePurchaseColHeaderMouseDown(col.key, PURCHASE_ACCESS_COL_KEYS, e)
+                                handlePurchaseColHeaderMouseDown(colKey, orderedPurAccessColKeys, e)
                               }
                               onMouseEnter={() =>
-                                handlePurchaseColHeaderMouseEnter(col.key, PURCHASE_ACCESS_COL_KEYS)
+                                handlePurchaseColHeaderMouseEnter(colKey, orderedPurAccessColKeys)
                               }
-                              style={{ width: `${purAccessColWidths[col.key]}px` }}
-                              title={
-                                isSelectableCol
-                                  ? 'Click or drag to select column(s) · Press Shift+Delete to clear column values'
-                                  : undefined
-                              }
-                              className={`${col.cls} ${
-                                isSelectableCol ? 'cursor-pointer hover:bg-sky-100/70' : ''
-                              } ${
+                              style={{ width: `${purAccessColWidths[colKey]}px` }}
+                              title="Click to select column (Move Left/Right or Shift+Del) · Drag header to reorder"
+                              className={`${meta.cls} cursor-grab active:cursor-grabbing hover:bg-sky-100/70 ${
                                 isColSelected
                                   ? '!bg-sky-200 !text-sky-950 ring-1 ring-inset ring-sky-500'
                                   : ''
-                              } h-6 relative whitespace-nowrap overflow-hidden text-ellipsis`}
+                              } ${isDraggingThis ? 'opacity-50' : ''} ${dropIndicatorCls} h-6 relative whitespace-nowrap overflow-hidden text-ellipsis`}
                             >
-                              <span className="truncate block">{col.label}</span>
+                              <span className="truncate block pr-1">{meta.label}</span>
                               <div
+                                data-col-resize-handle="true"
+                                draggable={false}
                                 onMouseDown={(e) => {
                                   e.stopPropagation();
-                                  handlePurAccessResizeStart(col.key, e);
+                                  handlePurAccessResizeStart(colKey, e);
                                 }}
-                                onDoubleClick={(e) => handleResetPurAccessColWidth(col.key, e)}
+                                onDoubleClick={(e) => handleResetPurAccessColWidth(colKey, e)}
                                 title="Drag border to resize column (double-click to reset)"
                                 className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
-                                  purAccessResizingCol === col.key
+                                  purAccessResizingCol === colKey
                                     ? 'bg-emerald-600'
                                     : 'hover:bg-emerald-500/80'
                                 }`}
@@ -7426,6 +7936,28 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                             </th>
                           );
                         })}
+
+                        <th
+                          key="actions"
+                          style={{ width: `${purAccessColWidths.actions}px` }}
+                          className="px-1 py-0 text-center h-6 relative whitespace-nowrap overflow-hidden text-ellipsis"
+                        >
+                          <span className="truncate block">Del</span>
+                          <div
+                            data-col-resize-handle="true"
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              handlePurAccessResizeStart('actions', e);
+                            }}
+                            onDoubleClick={(e) => handleResetPurAccessColWidth('actions', e)}
+                            title="Drag border to resize column (double-click to reset)"
+                            className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                              purAccessResizingCol === 'actions'
+                                ? 'bg-emerald-600'
+                                : 'hover:bg-emerald-500/80'
+                            }`}
+                          />
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -7436,7 +7968,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                                 {idx + 1}
                               </td>
-                              <td colSpan={18} />
+                              <td colSpan={orderedPurAccessColKeys.length + 1} />
                             </tr>
                           );
                         }
@@ -7455,6 +7987,645 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           selectedColKeys.includes(colKey)
                             ? '!bg-sky-100/80 ring-1 ring-inset ring-sky-400'
                             : '';
+
+                        const renderPurchaseAccessCell = (colKey: string): React.ReactNode => {
+                          switch (colKey) {
+                            case 'item_code':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_code')}`}>
+                                  <input
+                                    id={`pur_cell_${idx}_item_code`}
+                                    type="text"
+                                    value={
+                                      activeRowItemSearchIdx === idx &&
+                                      activeRowItemSearchField === 'item_code'
+                                        ? rowItemSearchQuery
+                                        : line.item_code
+                                    }
+                                    onFocus={() => {
+                                      setSelectedPurchaseLineIndex(idx);
+                                      if (
+                                        activeRowItemSearchIdx !== idx ||
+                                        activeRowItemSearchField !== 'item_code'
+                                      ) {
+                                        setActiveRowItemSearchIdx(null);
+                                        setActiveRowItemSearchField(null);
+                                        setRowItemSearchQuery('');
+                                      }
+                                    }}
+                                    onBlur={() => {
+                                      setTimeout(() => {
+                                        setActiveRowItemSearchIdx((prev) =>
+                                          prev === idx ? null : prev
+                                        );
+                                        setActiveRowItemSearchField(null);
+                                        setRowItemSearchQuery('');
+                                      }, 180);
+                                    }}
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      setSelectedPurchaseLineIndex(idx);
+                                      setRowItemSearchQuery(v);
+                                      setRowItemHighlightIndex(0);
+                                      setActiveRowItemSearchField(v.trim().length > 0 ? 'item_code' : null);
+                                      setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Escape' && (activeRowItemSearchIdx === idx || showPurchaseCompactHistoryPopup)) {
+                                        e.preventDefault();
+                                        setActiveRowItemSearchIdx(null);
+                                        setActiveRowItemSearchField(null);
+                                        setRowItemSearchQuery('');
+                                        setShowPurchaseCompactHistoryPopup(false);
+                                        return;
+                                      }
+                                      if (
+                                        activeRowItemSearchIdx === idx &&
+                                        activeRowItemSearchField === 'item_code' &&
+                                        rowItemSearchResults.length > 0
+                                      ) {
+                                        if (e.key === 'ArrowDown') {
+                                          e.preventDefault();
+                                          setRowItemHighlightIndex((prev) => {
+                                            const next = Math.min(
+                                              prev + 1,
+                                              rowItemSearchResults.length - 1
+                                            );
+                                            setTimeout(() => {
+                                              document
+                                                .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
+                                                ?.scrollIntoView({ block: 'nearest' });
+                                            }, 0);
+                                            return next;
+                                          });
+                                          return;
+                                        }
+                                        if (e.key === 'ArrowUp') {
+                                          e.preventDefault();
+                                          setRowItemHighlightIndex((prev) => {
+                                            const next = Math.max(0, prev - 1);
+                                            setTimeout(() => {
+                                              document
+                                                .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
+                                                ?.scrollIntoView({ block: 'nearest' });
+                                            }, 0);
+                                            return next;
+                                          });
+                                          return;
+                                        }
+                                        if (e.key === 'Enter') {
+                                          e.preventDefault();
+                                          const chosen =
+                                            rowItemSearchResults[rowItemHighlightIndex] ||
+                                            rowItemSearchResults[0];
+                                          if (chosen) {
+                                            populatePurchaseRowWithItem(idx, chosen, true);
+                                          }
+                                          return;
+                                        }
+                                      }
+                                      handlePurchaseCellKeyDown(e, idx, 'item_code', 'pur_cell');
+                                    }}
+                                    placeholder="Code..."
+                                    className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'company':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 p-0 h-[16px] align-middle overflow-hidden text-slate-700 ${colHighlight('company')}`}
+                                  title={hasItem ? line.company_name : selectedCompanyFilter || 'All Companies'}
+                                >
+                                  {hasItem ? (
+                                    <div className="px-1 truncate text-[10.5px] font-medium">
+                                      {line.company_name || ''}
+                                    </div>
+                                  ) : (
+                                    <select
+                                      aria-label={`Classic Purchase Row ${idx + 1} Company Filter`}
+                                      value={selectedCompanyFilter}
+                                      onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                      onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                                      className={`w-full h-[15px] px-1 py-0 text-[10.5px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-blue-600 outline-none truncate ${
+                                        selectedCompanyFilter
+                                          ? 'text-emerald-900 bg-emerald-50/60'
+                                          : 'text-slate-600'
+                                      }`}
+                                    >
+                                      <option value="">All Companies</option>
+                                      {companyOptions.map((c) => (
+                                        <option key={c} value={c}>
+                                          {c}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </td>
+                              );
+                            case 'item_name':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_name')}`}>
+                                  <div className="flex items-center gap-1 h-[15px] px-0.5">
+                                    {line.item_id > 0 && line.thumbnail_url && (
+                                      <ProductThumb
+                                        src={line.thumbnail_url}
+                                        alt={line.item_name}
+                                        size="xs"
+                                        className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
+                                      />
+                                    )}
+                                    <input
+                                      id={`pur_cell_${idx}_item_name`}
+                                      type="text"
+                                      value={
+                                        activeRowItemSearchIdx === idx &&
+                                        activeRowItemSearchField === 'item_name'
+                                          ? rowItemSearchQuery
+                                          : formatItemNameWithRemarks(line.item_name, line.remarks)
+                                      }
+                                      onFocus={() => {
+                                        setSelectedPurchaseLineIndex(idx);
+                                        if (!line.item_id && selectedCompanyFilter) {
+                                          setActiveRowItemSearchIdx(idx);
+                                          setActiveRowItemSearchField('item_name');
+                                          setRowItemSearchQuery('');
+                                          setRowItemHighlightIndex(0);
+                                        } else if (
+                                          activeRowItemSearchIdx !== idx ||
+                                          activeRowItemSearchField !== 'item_name'
+                                        ) {
+                                          setActiveRowItemSearchIdx(null);
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                        }
+                                        if (line.item_code || line.item_id) {
+                                          fetchPurchaseItemHistoryByCode(
+                                            line.item_code,
+                                            Number(line.item_id || 0),
+                                            line.variant_id || null
+                                          );
+                                        }
+                                      }}
+                                      onDoubleClick={(e) => {
+                                        if (!line.item_id) return;
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        setActiveRowItemSearchIdx(null);
+                                        setActiveRowItemSearchField(null);
+                                        setRowItemSearchQuery('');
+                                        setItemLogModalState({
+                                          isOpen: true,
+                                          itemId: Number(line.item_id),
+                                          itemCode: line.item_code,
+                                          itemName: line.item_name,
+                                          returnFocusId: `pur_cell_${idx}_item_name`,
+                                        });
+                                      }}
+                                      title={
+                                        line.item_id
+                                          ? `${formatItemNameWithRemarks(line.item_name, line.remarks)}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                          : selectedCompanyFilter
+                                          ? `Type Item Name or Code in ${selectedCompanyFilter}`
+                                          : 'Type Item Name or Code'
+                                      }
+                                      onBlur={() => {
+                                        setTimeout(() => {
+                                          setActiveRowItemSearchIdx((prev) =>
+                                            prev === idx ? null : prev
+                                          );
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                        }, 180);
+                                      }}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setSelectedPurchaseLineIndex(idx);
+                                        setRowItemSearchQuery(v);
+                                        setRowItemHighlightIndex(0);
+                                        const keepOpen = v.trim().length > 0 || Boolean(selectedCompanyFilter);
+                                        setActiveRowItemSearchField(keepOpen ? 'item_name' : null);
+                                        setActiveRowItemSearchIdx(keepOpen ? idx : null);
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (
+                                          !e.ctrlKey &&
+                                          !e.altKey &&
+                                          !e.metaKey &&
+                                          !e.shiftKey &&
+                                          (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
+                                        ) {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          clearPurchaseItemNameOnly(idx);
+                                          return;
+                                        }
+                                        if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
+                                          e.preventDefault();
+                                          setActiveRowItemSearchIdx(null);
+                                          setActiveRowItemSearchField(null);
+                                          setRowItemSearchQuery('');
+                                          return;
+                                        }
+                                        if (
+                                          activeRowItemSearchIdx === idx &&
+                                          activeRowItemSearchField === 'item_name' &&
+                                          rowItemSearchResults.length > 0
+                                        ) {
+                                          if (e.key === 'ArrowDown') {
+                                            e.preventDefault();
+                                            setRowItemHighlightIndex((prev) => {
+                                              const next = Math.min(
+                                                prev + 1,
+                                                rowItemSearchResults.length - 1
+                                              );
+                                              setTimeout(() => {
+                                                document
+                                                  .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
+                                                  ?.scrollIntoView({ block: 'nearest' });
+                                              }, 0);
+                                              return next;
+                                            });
+                                            return;
+                                          }
+                                          if (e.key === 'ArrowUp') {
+                                            e.preventDefault();
+                                            setRowItemHighlightIndex((prev) => {
+                                              const next = Math.max(0, prev - 1);
+                                              setTimeout(() => {
+                                                document
+                                                  .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
+                                                  ?.scrollIntoView({ block: 'nearest' });
+                                              }, 0);
+                                              return next;
+                                            });
+                                            return;
+                                          }
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            const chosen =
+                                              rowItemSearchResults[rowItemHighlightIndex] ||
+                                              rowItemSearchResults[0];
+                                            if (chosen) {
+                                              populatePurchaseRowWithItem(idx, chosen, true);
+                                            }
+                                            return;
+                                          }
+                                        }
+                                        handlePurchaseCellKeyDown(e, idx, 'item_name', 'pur_cell');
+                                      }}
+                                      placeholder="Type Item Name / Code (or F2)..."
+                                      className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                    />
+                                    {line.variant_name && !(activeRowItemSearchIdx === idx && activeRowItemSearchField === 'item_name') && (
+                                      <span className="shrink-0 px-1 py-0 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[9px] leading-tight">
+                                        {line.variant_name}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {renderRowItemSearchCombobox(idx, false)}
+                                </td>
+                              );
+                            case 'quantity':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 p-0 h-[16px] align-middle ${
+                                    isZeroQty
+                                      ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
+                                      : 'bg-emerald-50/20'
+                                  } ${colHighlight('quantity')}`}
+                                >
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_quantity`}
+                                    allowNegative={true}
+                                    displayZero={hasItem}
+                                    value={
+                                      line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                        ? line.quantity
+                                        : 0
+                                    }
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'quantity',
+                                        parseSignedNumeric(e.target.value)
+                                      )
+                                    }
+                                    onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'quantity')}
+                                    className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
+                                      isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
+                                    }`}
+                                  />
+                                </td>
+                              );
+                            case 'loose_quantity':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 p-0 h-[16px] align-middle bg-teal-50/20 ${colHighlight('loose_quantity')}`}
+                                >
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_loose_quantity`}
+                                    allowNegative={true}
+                                    displayZero={hasItem}
+                                    value={
+                                      line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                        ? line.loose_quantity
+                                        : 0
+                                    }
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'loose_quantity',
+                                        parseSignedNumeric(e.target.value)
+                                      )
+                                    }
+                                    onKeyDown={(e) =>
+                                      handlePurchaseCellKeyDown(e, idx, 'loose_quantity')
+                                    }
+                                    className="w-full px-1 py-0 border border-transparent focus:border-teal-600 focus:bg-white text-right font-mono font-bold text-teal-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'discount_1':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('discount_1')}`}>
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_discount_1_percent`}
+                                    value={
+                                      line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                        ? line.discount_1_percent
+                                        : 0
+                                    }
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'discount_1_percent',
+                                        parseFloat(e.target.value) || 0
+                                      )
+                                    }
+                                    onKeyDown={(e) =>
+                                      handlePurchaseCellKeyDown(e, idx, 'discount_1_percent')
+                                    }
+                                    title="Discount 1 (%) applied first to Purchase Rate"
+                                    className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'discount_2':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('discount_2')}`}>
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_discount_2_percent`}
+                                    value={
+                                      line.item_id || line.item_code?.trim() || line.item_name?.trim()
+                                        ? line.discount_2_percent
+                                        : 0
+                                    }
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'discount_2_percent',
+                                        parseFloat(e.target.value) || 0
+                                      )
+                                    }
+                                    onKeyDown={(e) =>
+                                      handlePurchaseCellKeyDown(e, idx, 'discount_2_percent')
+                                    }
+                                    title="Discount 2 (%) applied sequentially after Discount 1"
+                                    className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'purchase_rate':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('purchase_rate')}`}>
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_purchase_rate`}
+                                    value={line.item_id ? line.purchase_rate : 0}
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'purchase_rate',
+                                        parseFloat(e.target.value) || 0
+                                      )
+                                    }
+                                    onBlur={() => {
+                                      checkAndTriggerPurchasePriceChange(idx);
+                                    }}
+                                    onKeyDown={(e) =>
+                                      handlePurchaseCellKeyDown(e, idx, 'purchase_rate')
+                                    }
+                                    title={
+                                      line.item_id
+                                        ? 'Purchase Price — Press Ctrl to view Item Purchase History'
+                                        : 'Purchase Price'
+                                    }
+                                    className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'net_rate':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-bold text-indigo-900 bg-indigo-50/40 text-[11px] h-[16px] align-middle select-none ${colHighlight('net_rate')}`}
+                                  title={
+                                    hasItem
+                                      ? `Net Rate: ${Number(line.purchase_rate || 0).toFixed(2)} × (1 − ${line.discount_1_percent}%) × (1 − ${line.discount_2_percent}%) = ${Number(line.net_rate || 0).toFixed(2)}`
+                                      : 'Calculated Net Rate (read-only)'
+                                  }
+                                >
+                                  {hasItem ? Number(line.net_rate || 0).toFixed(2) : ''}
+                                </td>
+                              );
+                            case 'bonus':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 bg-emerald-50/40 h-[16px] align-middle ${colHighlight('bonus')}`}>
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_bonus_quantity`}
+                                    value={line.item_id ? line.bonus_quantity : 0}
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'bonus_quantity',
+                                        parseFloat(e.target.value) || 0
+                                      )
+                                    }
+                                    onKeyDown={(e) =>
+                                      handlePurchaseCellKeyDown(e, idx, 'bonus_quantity')
+                                    }
+                                    className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'net_amount':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-[11px] h-[16px] align-middle ${
+                                    isZeroNet
+                                      ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                                      : 'text-slate-900'
+                                  } ${colHighlight('net_amount')}`}
+                                >
+                                  {hasItem ? Number(line.taxable_amount || 0).toFixed(2) : ''}
+                                </td>
+                              );
+                            case 'gross_amount':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('gross_amount')}`}>
+                                  {hasItem ? Number(line.gross_amount || 0).toFixed(2) : ''}
+                                </td>
+                              );
+                            case 'packing':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 px-1 py-0 text-center font-mono text-[9.5px] text-slate-800 h-[16px] align-middle ${colHighlight('packing')}`}>
+                                  {line.item_id ? line.packing : ''}
+                                </td>
+                              );
+                            case 'batch_expiry':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('batch_expiry')}`}>
+                                  <div className="flex items-center gap-0.5 h-[15px]">
+                                    <input
+                                      id={`pur_cell_${idx}_batch_number`}
+                                      type="text"
+                                      placeholder="Batch #"
+                                      value={line.batch_number}
+                                      onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                      onChange={(e) =>
+                                        handleLineChange(idx, 'batch_number', e.target.value)
+                                      }
+                                      onKeyDown={(e) =>
+                                        handlePurchaseCellKeyDown(e, idx, 'batch_number')
+                                      }
+                                      className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
+                                    />
+                                    <input
+                                      id={`pur_cell_${idx}_expiry_date`}
+                                      type="date"
+                                      value={line.item_id ? line.expiry_date : ''}
+                                      onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                      onChange={(e) =>
+                                        handleLineChange(idx, 'expiry_date', e.target.value)
+                                      }
+                                      onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'expiry_date')}
+                                      className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
+                                    />
+                                  </div>
+                                </td>
+                              );
+                            case 'mrp':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('mrp')}`}>
+                                  <NumericInput
+                                    id={`pur_cell_${idx}_mrp_rate`}
+                                    value={line.item_id ? line.mrp_rate : 0}
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) =>
+                                      handleLineChange(
+                                        idx,
+                                        'mrp_rate',
+                                        parseFloat(e.target.value) || 0
+                                      )
+                                    }
+                                    onKeyDown={(e) =>
+                                      handlePurchaseCellKeyDown(e, idx, 'mrp_rate')
+                                    }
+                                    className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-800 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            case 'gst':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('gst')}`}
+                                  title={
+                                    line.item_id
+                                      ? line.tax_type === 'amount'
+                                        ? `Fixed Tax: Rs. ${Number(line.tax_value || 0).toFixed(2)} / unit | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                        : `Tax: ${Number(line.tax_value ?? line.tax_percent ?? 0).toFixed(2)}% on Gross | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
+                                      : ''
+                                  }
+                                >
+                                  <div className="flex items-center h-[15px]">
+                                    {line.item_id && line.tax_type === 'amount' && (
+                                      <span className="pl-0.5 text-[9px] font-bold text-amber-700 select-none">
+                                        Rs
+                                      </span>
+                                    )}
+                                    <NumericInput
+                                      id={`pur_cell_${idx}_tax_percent`}
+                                      value={
+                                        line.item_id
+                                          ? line.tax_type === 'amount'
+                                            ? Number(line.tax_value || 0)
+                                            : Number(line.tax_value ?? line.tax_percent ?? 0)
+                                          : 0
+                                      }
+                                      onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                      onChange={(e) =>
+                                        handleLineChange(
+                                          idx,
+                                          'tax_value',
+                                          parseFloat(e.target.value) || 0
+                                        )
+                                      }
+                                      onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'tax_percent')}
+                                      className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                    />
+                                  </div>
+                                </td>
+                              );
+                            case 'taxable':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('taxable')}`}>
+                                  {hasItem ? Number(line.taxable_amount || 0).toFixed(2) : ''}
+                                </td>
+                              );
+                            case 'line_total':
+                              return (
+                                <td
+                                  key={colKey}
+                                  className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
+                                    isZeroNet
+                                      ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
+                                      : 'text-slate-900 bg-slate-50/50'
+                                  } ${colHighlight('line_total')}`}
+                                >
+                                  {hasItem ? Number(line.line_total || 0).toFixed(2) : ''}
+                                </td>
+                              );
+                            case 'remarks':
+                              return (
+                                <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('remarks')}`}>
+                                  <input
+                                    id={`pur_cell_${idx}_remarks`}
+                                    type="text"
+                                    value={line.remarks || ''}
+                                    onFocus={() => setSelectedPurchaseLineIndex(idx)}
+                                    onChange={(e) => handleLineChange(idx, 'remarks', e.target.value)}
+                                    onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'remarks')}
+                                    placeholder="Remarks..."
+                                    className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                </td>
+                              );
+                            default:
+                              return null;
+                          }
+                        };
+
                         return (
                           <tr
                             key={idx}
@@ -7513,572 +8684,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                               )}
                             </td>
 
-                            {/* 1. Item Code (Direct typing + inline search; Enter on blank opens Item List) */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_code')}`}>
-                              <input
-                                id={`pur_cell_${idx}_item_code`}
-                                type="text"
-                                value={
-                                  activeRowItemSearchIdx === idx &&
-                                  activeRowItemSearchField === 'item_code'
-                                    ? rowItemSearchQuery
-                                    : line.item_code
-                                }
-                                onFocus={() => {
-                                  setSelectedPurchaseLineIndex(idx);
-                                  if (
-                                    activeRowItemSearchIdx !== idx ||
-                                    activeRowItemSearchField !== 'item_code'
-                                  ) {
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }
-                                }}
-                                onBlur={() => {
-                                  setTimeout(() => {
-                                    setActiveRowItemSearchIdx((prev) =>
-                                      prev === idx ? null : prev
-                                    );
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                  }, 180);
-                                }}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  setSelectedPurchaseLineIndex(idx);
-                                  setRowItemSearchQuery(v);
-                                  setRowItemHighlightIndex(0);
-                                  setActiveRowItemSearchField(v.trim().length > 0 ? 'item_code' : null);
-                                  setActiveRowItemSearchIdx(v.trim().length > 0 ? idx : null);
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape' && (activeRowItemSearchIdx === idx || showPurchaseCompactHistoryPopup)) {
-                                    e.preventDefault();
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                    setShowPurchaseCompactHistoryPopup(false);
-                                    return;
-                                  }
-                                  if (
-                                    activeRowItemSearchIdx === idx &&
-                                    activeRowItemSearchField === 'item_code' &&
-                                    rowItemSearchResults.length > 0
-                                  ) {
-                                    if (e.key === 'ArrowDown') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.min(
-                                          prev + 1,
-                                          rowItemSearchResults.length - 1
-                                        );
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'ArrowUp') {
-                                      e.preventDefault();
-                                      setRowItemHighlightIndex((prev) => {
-                                        const next = Math.max(0, prev - 1);
-                                        setTimeout(() => {
-                                          document
-                                            .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
-                                            ?.scrollIntoView({ block: 'nearest' });
-                                        }, 0);
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      const chosen =
-                                        rowItemSearchResults[rowItemHighlightIndex] ||
-                                        rowItemSearchResults[0];
-                                      if (chosen) {
-                                        populatePurchaseRowWithItem(idx, chosen, true);
-                                      }
-                                      return;
-                                    }
-                                  }
-                                  handlePurchaseCellKeyDown(e, idx, 'item_code', 'pur_cell');
-                                }}
-                                placeholder="Code..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* Company (Displays item company on populated rows; accessible Company Master filter on blank rows) */}
-                            <td
-                              className={`border-r border-slate-300 p-0 h-[16px] align-middle overflow-hidden text-slate-700 ${colHighlight('company')}`}
-                              title={hasItem ? line.company_name : selectedCompanyFilter || 'All Companies'}
-                            >
-                              {hasItem ? (
-                                <div className="px-1 truncate text-[10.5px] font-medium">
-                                  {line.company_name || ''}
-                                </div>
-                              ) : (
-                                <select
-                                  aria-label={`Classic Purchase Row ${idx + 1} Company Filter`}
-                                  value={selectedCompanyFilter}
-                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                  onChange={(e) => setSelectedCompanyFilter(e.target.value)}
-                                  className={`w-full h-[15px] px-1 py-0 text-[10.5px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-blue-600 outline-none truncate ${
-                                    selectedCompanyFilter
-                                      ? 'text-emerald-900 bg-emerald-50/60'
-                                      : 'text-slate-600'
-                                  }`}
-                                >
-                                  <option value="">All Companies</option>
-                                  {companyOptions.map((c) => (
-                                    <option key={c} value={c}>
-                                      {c}
-                                    </option>
-                                  ))}
-                                </select>
-                              )}
-                            </td>
-
-                            {/* 2. Item Name (Direct typing + inline search; Enter on blank opens Item List) */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_name')}`}>
-                              <div className="flex items-center gap-1 h-[15px] px-0.5">
-                                {line.item_id > 0 && line.thumbnail_url && (
-                                  <ProductThumb
-                                    src={line.thumbnail_url}
-                                    alt={line.item_name}
-                                    size="xs"
-                                    className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
-                                  />
-                                )}
-                                <input
-                                  id={`pur_cell_${idx}_item_name`}
-                                  type="text"
-                                  value={
-                                    activeRowItemSearchIdx === idx &&
-                                    activeRowItemSearchField === 'item_name'
-                                      ? rowItemSearchQuery
-                                      : formatItemNameWithRemarks(line.item_name, line.remarks)
-                                  }
-                                  onFocus={() => {
-                                    setSelectedPurchaseLineIndex(idx);
-                                    if (!line.item_id && selectedCompanyFilter) {
-                                      setActiveRowItemSearchIdx(idx);
-                                      setActiveRowItemSearchField('item_name');
-                                      setRowItemSearchQuery('');
-                                      setRowItemHighlightIndex(0);
-                                    } else if (
-                                      activeRowItemSearchIdx !== idx ||
-                                      activeRowItemSearchField !== 'item_name'
-                                    ) {
-                                      setActiveRowItemSearchIdx(null);
-                                      setActiveRowItemSearchField(null);
-                                      setRowItemSearchQuery('');
-                                    }
-                                    if (line.item_code || line.item_id) {
-                                      fetchPurchaseItemHistoryByCode(
-                                        line.item_code,
-                                        Number(line.item_id || 0),
-                                        line.variant_id || null
-                                      );
-                                    }
-                                  }}
-                                  onDoubleClick={(e) => {
-                                    if (!line.item_id) return;
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setActiveRowItemSearchIdx(null);
-                                    setActiveRowItemSearchField(null);
-                                    setRowItemSearchQuery('');
-                                    setItemLogModalState({
-                                      isOpen: true,
-                                      itemId: Number(line.item_id),
-                                      itemCode: line.item_code,
-                                      itemName: line.item_name,
-                                      returnFocusId: `pur_cell_${idx}_item_name`,
-                                    });
-                                  }}
-                                  title={
-                                    line.item_id
-                                      ? `${formatItemNameWithRemarks(line.item_name, line.remarks)}${line.variant_name ? ` — ${line.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
-                                      : selectedCompanyFilter
-                                      ? `Type Item Name or Code in ${selectedCompanyFilter}`
-                                      : 'Type Item Name or Code'
-                                  }
-                                  onBlur={() => {
-                                    setTimeout(() => {
-                                      setActiveRowItemSearchIdx((prev) =>
-                                        prev === idx ? null : prev
-                                      );
-                                      setActiveRowItemSearchField(null);
-                                      setRowItemSearchQuery('');
-                                    }, 180);
-                                  }}
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    setSelectedPurchaseLineIndex(idx);
-                                    setRowItemSearchQuery(v);
-                                    setRowItemHighlightIndex(0);
-                                    const keepOpen = v.trim().length > 0 || Boolean(selectedCompanyFilter);
-                                    setActiveRowItemSearchField(keepOpen ? 'item_name' : null);
-                                    setActiveRowItemSearchIdx(keepOpen ? idx : null);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (
-                                      !e.ctrlKey &&
-                                      !e.altKey &&
-                                      !e.metaKey &&
-                                      !e.shiftKey &&
-                                      (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')
-                                    ) {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      clearPurchaseItemNameOnly(idx);
-                                      return;
-                                    }
-                                    if (e.key === 'Escape' && activeRowItemSearchIdx === idx) {
-                                      e.preventDefault();
-                                      setActiveRowItemSearchIdx(null);
-                                      setActiveRowItemSearchField(null);
-                                      setRowItemSearchQuery('');
-                                      return;
-                                    }
-                                    if (
-                                      activeRowItemSearchIdx === idx &&
-                                      activeRowItemSearchField === 'item_name' &&
-                                      rowItemSearchResults.length > 0
-                                    ) {
-                                      if (e.key === 'ArrowDown') {
-                                        e.preventDefault();
-                                        setRowItemHighlightIndex((prev) => {
-                                          const next = Math.min(
-                                            prev + 1,
-                                            rowItemSearchResults.length - 1
-                                          );
-                                          setTimeout(() => {
-                                            document
-                                              .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
-                                              ?.scrollIntoView({ block: 'nearest' });
-                                          }, 0);
-                                          return next;
-                                        });
-                                        return;
-                                      }
-                                      if (e.key === 'ArrowUp') {
-                                        e.preventDefault();
-                                        setRowItemHighlightIndex((prev) => {
-                                          const next = Math.max(0, prev - 1);
-                                          setTimeout(() => {
-                                            document
-                                              .querySelector(`[data-row-item-idx="${idx}-${next}"]`)
-                                              ?.scrollIntoView({ block: 'nearest' });
-                                          }, 0);
-                                          return next;
-                                        });
-                                        return;
-                                      }
-                                      if (e.key === 'Enter') {
-                                        e.preventDefault();
-                                        const chosen =
-                                          rowItemSearchResults[rowItemHighlightIndex] ||
-                                          rowItemSearchResults[0];
-                                        if (chosen) {
-                                          populatePurchaseRowWithItem(idx, chosen, true);
-                                        }
-                                        return;
-                                      }
-                                    }
-                                    handlePurchaseCellKeyDown(e, idx, 'item_name', 'pur_cell');
-                                  }}
-                                  placeholder="Type Item Name / Code (or F2)..."
-                                  className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                                />
-                                {line.variant_name && !(activeRowItemSearchIdx === idx && activeRowItemSearchField === 'item_name') && (
-                                  <span className="shrink-0 px-1 py-0 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[9px] leading-tight">
-                                    {line.variant_name}
-                                  </span>
-                                )}
-                              </div>
-                              {renderRowItemSearchCombobox(idx, false)}
-                            </td>
-
-                            {/* 3. Qty */}
-                            <td
-                              className={`border-r border-slate-300 p-0 h-[16px] align-middle ${
-                                isZeroQty
-                                  ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
-                                  : 'bg-emerald-50/20'
-                              } ${colHighlight('quantity')}`}
-                            >
-                              <NumericInput
-                                id={`pur_cell_${idx}_quantity`}
-                                allowNegative={true}
-                                displayZero={hasItem}
-                                value={
-                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
-                                    ? line.quantity
-                                    : 0
-                                }
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'quantity',
-                                    parseSignedNumeric(e.target.value)
-                                  )
-                                }
-                                onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'quantity')}
-                                className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
-                                  isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
-                                }`}
-                              />
-                            </td>
-
-                            {/* 3b. Loose Qty */}
-                            <td
-                              className={`border-r border-slate-300 p-0 h-[16px] align-middle bg-teal-50/20 ${colHighlight('loose_quantity')}`}
-                            >
-                              <NumericInput
-                                id={`pur_cell_${idx}_loose_quantity`}
-                                allowNegative={true}
-                                displayZero={hasItem}
-                                value={
-                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
-                                    ? line.loose_quantity
-                                    : 0
-                                }
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'loose_quantity',
-                                    parseSignedNumeric(e.target.value)
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'loose_quantity')
-                                }
-                                className="w-full px-1 py-0 border border-transparent focus:border-teal-600 focus:bg-white text-right font-mono font-bold text-teal-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 4. Discount */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('discount')}`}>
-                              <NumericInput
-                                id={`pur_cell_${idx}_discount_percent`}
-                                value={
-                                  line.item_id || line.item_code?.trim() || line.item_name?.trim()
-                                    ? line.discount_percent
-                                    : 0
-                                }
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'discount_percent',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'discount_percent')
-                                }
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 10. Purchase Rate */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('purchase_rate')}`}>
-                              <NumericInput
-                                id={`pur_cell_${idx}_purchase_rate`}
-                                value={line.item_id ? line.purchase_rate : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'purchase_rate',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onBlur={() => {
-                                  checkAndTriggerPurchasePriceChange(idx);
-                                }}
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'purchase_rate')
-                                }
-                                title={
-                                  line.item_id
-                                    ? 'Purchase Price — Press Ctrl to view Item Purchase History'
-                                    : 'Purchase Price'
-                                }
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 5. Bonus */}
-                            <td className={`border-r border-slate-300 p-0 bg-emerald-50/40 h-[16px] align-middle ${colHighlight('bonus')}`}>
-                              <NumericInput
-                                id={`pur_cell_${idx}_bonus_quantity`}
-                                value={line.item_id ? line.bonus_quantity : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'bonus_quantity',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'bonus_quantity')
-                                }
-                                className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 7. Net Amount */}
-                            <td
-                              className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-[11px] h-[16px] align-middle ${
-                                isZeroNet
-                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
-                                  : 'text-slate-900'
-                              } ${colHighlight('net_amount')}`}
-                            >
-                              {hasItem ? Number(line.taxable_amount || 0).toFixed(2) : ''}
-                            </td>
-
-                            {/* 6. Gross Amount */}
-                            <td className={`border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('gross_amount')}`}>
-                              {hasItem ? Number(line.gross_amount || 0).toFixed(2) : ''}
-                            </td>
-
-                            {/* 8. Packing */}
-                            <td className={`border-r border-slate-300 px-1 py-0 text-center font-mono text-[9.5px] text-slate-800 h-[16px] align-middle ${colHighlight('packing')}`}>
-                              {line.item_id ? line.packing : ''}
-                            </td>
-
-                            {/* 9. Batch/Expiry */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('batch_expiry')}`}>
-                              <div className="flex items-center gap-0.5 h-[15px]">
-                                <input
-                                  id={`pur_cell_${idx}_batch_number`}
-                                  type="text"
-                                  placeholder="Batch #"
-                                  value={line.batch_number}
-                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                  onChange={(e) =>
-                                    handleLineChange(idx, 'batch_number', e.target.value)
-                                  }
-                                  onKeyDown={(e) =>
-                                    handlePurchaseCellKeyDown(e, idx, 'batch_number')
-                                  }
-                                  className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
-                                />
-                                <input
-                                  id={`pur_cell_${idx}_expiry_date`}
-                                  type="date"
-                                  value={line.item_id ? line.expiry_date : ''}
-                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                  onChange={(e) =>
-                                    handleLineChange(idx, 'expiry_date', e.target.value)
-                                  }
-                                  onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'expiry_date')}
-                                  className="flex-1 min-w-0 px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono text-slate-900 bg-transparent text-[10px] h-[15px] leading-none outline-none"
-                                />
-                              </div>
-                            </td>
-
-                            {/* 11. MRP */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('mrp')}`}>
-                              <NumericInput
-                                id={`pur_cell_${idx}_mrp_rate`}
-                                value={line.item_id ? line.mrp_rate : 0}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) =>
-                                  handleLineChange(
-                                    idx,
-                                    'mrp_rate',
-                                    parseFloat(e.target.value) || 0
-                                  )
-                                }
-                                onKeyDown={(e) =>
-                                  handlePurchaseCellKeyDown(e, idx, 'mrp_rate')
-                                }
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-800 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
-
-                            {/* 12. GST / Tax */}
-                            <td
-                              className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('gst')}`}
-                              title={
-                                line.item_id
-                                  ? line.tax_type === 'amount'
-                                    ? `Fixed Tax: Rs. ${Number(line.tax_value || 0).toFixed(2)} / unit | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
-                                    : `Tax: ${Number(line.tax_value ?? line.tax_percent ?? 0).toFixed(2)}% on Gross | Tax Amt: Rs. ${Number(line.tax_amount || 0).toFixed(2)}`
-                                  : ''
-                              }
-                            >
-                              <div className="flex items-center h-[15px]">
-                                {line.item_id && line.tax_type === 'amount' && (
-                                  <span className="pl-0.5 text-[9px] font-bold text-amber-700 select-none">
-                                    Rs
-                                  </span>
-                                )}
-                                <NumericInput
-                                  id={`pur_cell_${idx}_tax_percent`}
-                                  value={
-                                    line.item_id
-                                      ? line.tax_type === 'amount'
-                                        ? Number(line.tax_value || 0)
-                                        : Number(line.tax_value ?? line.tax_percent ?? 0)
-                                      : 0
-                                  }
-                                  onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                  onChange={(e) =>
-                                    handleLineChange(
-                                      idx,
-                                      'tax_value',
-                                      parseFloat(e.target.value) || 0
-                                    )
-                                  }
-                                  onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'tax_percent')}
-                                  className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                                />
-                              </div>
-                            </td>
-
-                            {/* 13. Taxable */}
-                            <td className={`border-r border-slate-300 px-1 py-0 text-right font-mono text-slate-800 text-[11px] h-[16px] align-middle ${colHighlight('taxable')}`}>
-                              {hasItem ? Number(line.taxable_amount || 0).toFixed(2) : ''}
-                            </td>
-
-                            {/* 14. Line Total */}
-                            <td
-                              className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-[11px] h-[16px] align-middle ${
-                                isZeroNet
-                                  ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300'
-                                  : 'text-slate-900 bg-slate-50/50'
-                              } ${colHighlight('line_total')}`}
-                            >
-                              {hasItem ? Number(line.line_total || 0).toFixed(2) : ''}
-                            </td>
-
-                            {/* 15. Remarks */}
-                            <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('remarks')}`}>
-                              <input
-                                id={`pur_cell_${idx}_remarks`}
-                                type="text"
-                                value={line.remarks || ''}
-                                onFocus={() => setSelectedPurchaseLineIndex(idx)}
-                                onChange={(e) => handleLineChange(idx, 'remarks', e.target.value)}
-                                onKeyDown={(e) => handlePurchaseCellKeyDown(e, idx, 'remarks')}
-                                placeholder="Remarks..."
-                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                            </td>
+                            {orderedPurAccessColKeys.map((colKey) => renderPurchaseAccessCell(colKey))}
 
                             {/* Select Item List / Delete Row */}
                             <td className="px-1 py-0 text-center h-[16px] align-middle whitespace-nowrap">
@@ -8119,40 +8725,109 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </table>
                 </div>
 
-                {/* Microsoft Access Record Navigator Bar + Invoice Item Search */}
+                {/* Microsoft Access Record Navigator Bar + Column Arrangement + Invoice Item Search */}
                 <div className="ams-access-record-bar bg-slate-200 border-t border-slate-400 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-                  {(selectedRowRange || selectedColKeys.length > 0) && (
-                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-sky-100 border border-sky-300 text-sky-900 font-bold">
-                      <span>
-                        {selectedColKeys.length > 0
-                          ? `Selected ${selectedColKeys.length} col(s): ${selectedColKeys
-                              .map((k) => PURCHASE_COL_LABELS[k] || k)
-                              .join(', ')}`
-                          : `Selected ${
-                              Math.abs((selectedRowRange?.end ?? 0) - (selectedRowRange?.start ?? 0)) + 1
-                            } row(s)`}
-                      </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(selectedRowRange || selectedColKeys.length > 0) && (
+                      <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-sky-100 border border-sky-300 text-sky-900 font-bold">
+                        <span>
+                          {selectedColKeys.length > 0
+                            ? `Selected ${selectedColKeys.length} col(s): ${selectedColKeys
+                                .map((k) => PURCHASE_COL_LABELS[k] || k)
+                                .join(', ')}`
+                            : `Selected ${
+                                Math.abs((selectedRowRange?.end ?? 0) - (selectedRowRange?.start ?? 0)) + 1
+                              } row(s)`}
+                        </span>
+                        {selectedColKeys.length > 0 && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={!canMovePurAccessLeft(selectedColKeys)}
+                              onClick={() => movePurAccessColsLeft(selectedColKeys)}
+                              title="Move selected column(s) left"
+                              className="px-1.5 py-0 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white cursor-pointer inline-flex items-center gap-0.5"
+                            >
+                              <ChevronLeft className="w-3 h-3" />
+                              <span>Move Left</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!canMovePurAccessRight(selectedColKeys)}
+                              onClick={() => movePurAccessColsRight(selectedColKeys)}
+                              title="Move selected column(s) right"
+                              className="px-1.5 py-0 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white cursor-pointer inline-flex items-center gap-0.5"
+                            >
+                              <span>Move Right</span>
+                              <ChevronRight className="w-3 h-3" />
+                            </button>
+                          </>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => requestPurchaseDeleteConfirm(selectedPurchaseLineIndex)}
+                          className="px-1.5 py-0 rounded bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                        >
+                          Shift+Del
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedRowRange(null);
+                            rowSelectionAnchorRef.current = null;
+                            setSelectedColKeys([]);
+                            colSelectionAnchorRef.current = null;
+                          }}
+                          className="px-1 py-0 rounded bg-white border border-sky-300 text-sky-800 cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-1 px-1.5 py-0 rounded bg-slate-100 border border-slate-300">
+                      <span className="font-bold text-slate-600">Cols:</span>
                       <button
                         type="button"
-                        onClick={() => requestPurchaseDeleteConfirm(selectedPurchaseLineIndex)}
-                        className="px-1.5 py-0 rounded bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                        disabled={!canMovePurAccessLeft(selectedColKeys)}
+                        onClick={() => movePurAccessColsLeft(selectedColKeys)}
+                        title={
+                          selectedColKeys.length > 0
+                            ? 'Move selected column left'
+                            : 'Click a column header first, or drag any column header'
+                        }
+                        className="px-1 py-0 rounded bg-white hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-400 text-slate-800 font-bold cursor-pointer inline-flex items-center gap-0.5"
                       >
-                        Shift+Del
+                        <ChevronLeft className="w-2.5 h-2.5" />
+                        <span>Left</span>
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          setSelectedRowRange(null);
-                          rowSelectionAnchorRef.current = null;
-                          setSelectedColKeys([]);
-                          colSelectionAnchorRef.current = null;
-                        }}
-                        className="px-1 py-0 rounded bg-white border border-sky-300 text-sky-800 cursor-pointer"
+                        disabled={!canMovePurAccessRight(selectedColKeys)}
+                        onClick={() => movePurAccessColsRight(selectedColKeys)}
+                        title={
+                          selectedColKeys.length > 0
+                            ? 'Move selected column right'
+                            : 'Click a column header first, or drag any column header'
+                        }
+                        className="px-1 py-0 rounded bg-white hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-400 text-slate-800 font-bold cursor-pointer inline-flex items-center gap-0.5"
                       >
-                        Clear
+                        <span>Right</span>
+                        <ChevronRight className="w-2.5 h-2.5" />
                       </button>
+                      {isPurAccessColsCustomized && (
+                        <button
+                          type="button"
+                          onClick={resetPurAccessColOrder}
+                          title="Restore default Purchase column arrangement"
+                          className="px-1 py-0 rounded bg-white hover:bg-amber-50 border border-slate-400 text-amber-800 font-bold cursor-pointer inline-flex items-center gap-0.5"
+                        >
+                          <RotateCcw className="w-2.5 h-2.5" />
+                          <span>Reset</span>
+                        </button>
+                      )}
                     </div>
-                  )}
+                  </div>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <div className="flex items-center gap-1">
                       <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
@@ -8440,12 +9115,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </button>
                     <button
                       type="button"
+                      onClick={handleSendPurchaseOrderSms}
+                      className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer"
+                      title="Send Order via SMS for Current Purchase Invoice"
+                    >
+                      <MessageSquare className="w-3 h-3 text-indigo-100" />
+                      <span>Send Order via SMS</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={handleSendPurchaseOrderWhatsApp}
                       className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Send WhatsApp Order for Current Purchase Invoice"
+                      title="Send Order via WhatsApp for Current Purchase Invoice"
                     >
                       <MessageCircle className="w-3 h-3 text-green-100" />
-                      <span>Send WhatsApp Order</span>
+                      <span>Send Order via WhatsApp</span>
                     </button>
                   </div>
                   <div className="flex items-center gap-1">
@@ -9366,7 +10050,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       Do you also want to update Retail Price?
                     </h3>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Formula: Retail = New Purchase Price ÷ 0.85 (2 decimals) &amp; Loose Rate = Retail ÷ Units Per Pack.
+                      Formula: Retail = New Purchase Price ÷ 0.85 (2 decimals), Loose Rate = Retail ÷ Units Per Pack, and Wholesale &amp; Trade Price = Updated Retail Price.
                     </p>
                   </div>
                 </div>
@@ -9509,13 +10193,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               0
           )
         }
-        getItemStock={(it) =>
-          it.consolidated_stock_packs !== undefined && Number(it.has_variants || 0) === 1
-            ? Number(it.consolidated_stock_packs || 0)
-            : stockPacksByItemId.has(Number(it.id))
-            ? stockPacksByItemId.get(Number(it.id)) || 0
-            : Number(it.opening_stock || 0)
-        }
+        getItemSalePrice={(it) => round2(Number(it.retail_price || 0))}
+        getItemPurchasePrice={(it) => round2(Number(it.purchase_price || 0))}
+        getItemStock={getPurchaseItemStockPacks}
+        getItemBatchInfo={getPurchaseItemBatchInfo}
         onSelectItem={handleSelectItemFromPurchaseListModal}
         onSwitchToAddNewLine={() => setPurchaseItemListTargetRowIdx(null)}
         onClose={closePurchaseItemListModal}
@@ -9641,9 +10322,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                 const qty = round2(parseSignedNumeric(l.quantity));
                 const looseQty = round2(parseSignedNumeric(l.loose_quantity));
                 const gross = round2(qty * nextRate + looseQty * nextLooseRate);
-                const discPct = Math.max(0, round2(Number(l.discount_percent) || 0));
-                const discAmt = round2(gross * (discPct / 100));
-                const taxable = round2(gross - discAmt);
+                const resolvedSeq = resolveLineSequentialDiscounts(l, nextRate);
+                const seq = calculateSequentialLineDiscount({
+                  originalRate: nextRate,
+                  looseRate: nextLooseRate,
+                  grossAmount: gross,
+                  discount1Percent: resolvedSeq.discount_1_percent,
+                  discount2Percent: resolvedSeq.discount_2_percent,
+                });
                 const resolvedTax = resolveItemTaxConfig(matchedVar || updatedItem);
                 const taxType = resolvedTax.tax_type;
                 const taxValue = resolvedTax.tax_value;
@@ -9657,7 +10343,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   taxValue,
                   taxPercent: taxPct,
                 });
-                const net = round2(gross + taxAmt - discAmt);
+                const net = round2(gross + taxAmt - seq.discount_amount);
 
                 return {
                   ...l,
@@ -9674,8 +10360,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   master_retail_price: masterRetailPrice,
                   last_prompted_purchase_rate: nextRate,
                   gross_amount: gross,
-                  discount_amount: discAmt,
-                  taxable_amount: taxable,
+                  discount_1_percent: seq.discount_1_percent,
+                  discount_2_percent: seq.discount_2_percent,
+                  net_rate: seq.net_rate,
+                  net_loose_rate: seq.net_loose_rate,
+                  discount_percent: seq.effective_discount_percent,
+                  discount_amount: seq.discount_amount,
+                  taxable_amount: seq.taxable_amount,
                   tax_type: taxType,
                   tax_value: taxValue,
                   tax_percent: taxPct,
@@ -9874,6 +10565,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* ================= SEND PURCHASE ORDER SMS ================= */}
+      {showPurchaseSmsModal && (
+        <InvoiceSmsModal
+          isOpen={showPurchaseSmsModal}
+          mode="purchase"
+          title="Send Order via SMS — Purchase Invoice"
+          initialPhone={purchaseSmsPhone}
+          isPhoneFromAccounts={Boolean(purchaseSmsPhone)}
+          customerLabel={purchaseSmsSupplierLabel}
+          initialMessage={purchaseSmsText}
+          onClose={() => setShowPurchaseSmsModal(false)}
+        />
       )}
     </div>
   );

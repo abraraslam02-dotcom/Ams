@@ -13,6 +13,7 @@ import {
   parsePackingUnits,
 } from '../../utils/itemPricing';
 import { resolveItemTaxConfig } from '../../utils/taxCalculation';
+import { ITEM_CATEGORIES, classifyItemCategory } from '../../utils/itemCategory';
 
 interface ItemFormModalProps {
   isOpen: boolean;
@@ -23,19 +24,7 @@ interface ItemFormModalProps {
   editingItem?: Item | null;
 }
 
-const DEFAULT_CATEGORIES = [
-  'Tablet',
-  'Syrup / Suspension',
-  'Capsule',
-  'Injection',
-  'Ointment / Cream',
-  'Eye / Ear Drops',
-  'Inhaler / Resp',
-  'Surgical / Disposable',
-  'Infusion / Drip',
-  'Powder / Sachet',
-  'Other',
-];
+const DEFAULT_CATEGORIES = [...ITEM_CATEGORIES];
 
 export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   isOpen,
@@ -53,7 +42,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     company_name: '',
     item_name: '',
     generic_name: '',
-    category: 'Tablet',
+    category: 'Other',
     packing: '10x10',
     carton: null,
     boxes_per_carton: null,
@@ -124,7 +113,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
       company_name: source.company_name,
       item_name: source.item_name,
       generic_name: source.generic_name || '',
-      category: source.category,
+      category: classifyItemCategory(source.item_name),
       packing: source.packing,
       carton:
         source.carton !== undefined && source.carton !== null && Number(source.carton) > 0
@@ -396,6 +385,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
       });
       const payload = {
         ...formData,
+        category: classifyItemCategory(formData.item_name),
         tax_type: resolvedTax.tax_type,
         tax_value: resolvedTax.tax_value,
         tax_percent: resolvedTax.tax_percent,
@@ -567,7 +557,13 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   value={formData.item_name}
                   required
                   selectedExistingItemId={activeEditingItem?.id ?? null}
-                  onChange={(name) => setFormData((prev) => ({ ...prev, item_name: name }))}
+                  onChange={(name) =>
+                    setFormData((prev) => ({
+                      ...prev,
+                      item_name: name,
+                      category: classifyItemCategory(name),
+                    }))
+                  }
                   onSelectExistingItem={handleSelectExistingItemFromDropdown}
                   placeholder="Click to search existing items or type new item name..."
                 />

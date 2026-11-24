@@ -51,9 +51,15 @@ export interface FastSearchItem {
   loose_rate?: number;
   retail_loose_rate: number;
   wholesale_loose_rate: number;
+  weighted_avg_pack_cost?: number | null;
+  applicable_pack_cost?: number | null;
+  has_valid_cost?: boolean;
+  cost_source?: 'weighted_avg_purchase' | 'item_pprice' | 'none';
   cost_price_per_unit: number;
   total_available_units: number;
   total_available_packs: number;
+  batch_number?: string;
+  expiry_date?: string;
   default_batch: {
     inventory_id: number | null;
     batch_number: string;
@@ -93,6 +99,10 @@ export interface DatasheetRow {
   quantity: number; // Full Box/Pack Quantity
   bonus_quantity?: number; // Free bonus items deducted from stock
   unit_price: number; // Price per Pack
+  discount_1_percent: number;
+  discount_2_percent: number;
+  net_rate: number;
+  net_loose_rate?: number;
   discount_percent: number;
   discount_amount: number;
   loose_quantity: number; // Loose Units (Tablets / Capsules)
@@ -116,6 +126,8 @@ export interface DatasheetRow {
   rateSuggestionSource?: 'customer_last_sale' | 'standard_retail' | 'standard_wholesale' | 'manual';
   lastCustomerSaleRate?: number | null;
   lastCustomerDiscountPercent?: number | null;
+  lastCustomerDiscount1Percent?: number | null;
+  lastCustomerDiscount2Percent?: number | null;
   lastCustomerSaleDate?: string | null;
   lastCustomerInvoiceNo?: string | null;
   lastCustomerSoldQty?: number | null;
@@ -123,6 +135,10 @@ export interface DatasheetRow {
   lastPurchaseCostRate?: number | null;
   lastPurchaseDate?: string | null;
   lastSupplierName?: string | null;
+  weighted_avg_pack_cost?: number | null;
+  item_pprice?: number | null;
+  saved_cost_price_per_unit?: number | null;
+  saved_fifo_batches_json?: string | null;
 }
 
 export interface SalesInvoiceRecord {
@@ -210,6 +226,9 @@ export interface CustomerSaleHistoryEntry {
   total_units: number;
   unit_price: number;
   loose_rate: number;
+  discount_1_percent?: number;
+  discount_2_percent?: number;
+  net_rate?: number;
   discount_percent: number;
   discount_amount: number;
   tax_percent: number;
@@ -245,6 +264,9 @@ export interface ItemPurchaseHistoryEntry {
   trade_price: number;
   wholesale_price: number;
   retail_price: number;
+  discount_1_percent?: number;
+  discount_2_percent?: number;
+  net_rate?: number;
   discount_percent: number;
   discount_amount: number;
   tax_percent: number;
@@ -284,6 +306,9 @@ export interface SalesPriceHistoryEntry {
   quantity: number;
   loose_quantity: number;
   unit_price: number;
+  discount_1_percent?: number;
+  discount_2_percent?: number;
+  net_rate?: number;
   discount_percent: number;
   discount_amount: number;
   line_total: number;
@@ -334,6 +359,9 @@ export interface ItemLogSaleRow {
   bonus_quantity: number;
   unit_price: number;
   loose_rate: number;
+  discount_1_percent?: number;
+  discount_2_percent?: number;
+  net_rate?: number;
   discount_percent: number;
   discount_amount: number;
   tax_amount: number;
@@ -363,6 +391,9 @@ export interface ItemLogPurchaseRow {
   expiry_date: string;
   purchase_price: number;
   trade_price: number;
+  discount_1_percent?: number;
+  discount_2_percent?: number;
+  net_rate?: number;
   discount_percent: number;
   discount_amount: number;
   tax_percent: number;

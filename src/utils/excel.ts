@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import { Item, ItemPackingLevel, ItemPurchaseUnitConfig, ItemTaxType, ItemVariant } from '../types/item';
 import { resolveItemTaxConfig } from './taxCalculation';
+import { classifyItemCategory } from './itemCategory';
 
 export const EXCEL_COLUMNS = [
   // Original 17 Items Master Columns + Tax Type & Tax Value (preserved order; NO Loose Rate column)
@@ -103,7 +104,7 @@ export function exportItemsToExcel(items: Item[], filename: string = 'Abrar_Medi
         'Company Name': item.company_name,
         'Item Name': item.item_name,
         'Generic Name': item.generic_name || '',
-        Category: item.category,
+        Category: classifyItemCategory(item.item_name),
         Packing: variant ? variant.packing || item.packing : item.packing,
         Barcode: variant ? variant.barcode || '' : item.barcode || '',
         'Purchase Price': Number(
@@ -544,7 +545,6 @@ export async function parseExcelFile(file: File): Promise<{
           const rawCompany = findVal(['Company Name', 'company_name', 'Company', 'Manufacturer']);
           const rawItemName = findVal(['Item Name', 'item_name', 'Item', 'Medicine Name', 'Brand Name']);
           const rawGeneric = findVal(['Generic Name', 'generic_name', 'Generic', 'Formula']);
-          const rawCategory = findVal(['Category', 'category', 'Type', 'Dosage Form']);
           const rawPacking = findVal(['Packing', 'packing', 'Pack', 'Pack Size']);
           const barcode = findVal(['Barcode', 'barcode']);
           const rawRack = findVal(['Rack Number', 'rack_number', 'Rack', 'Shelf']);
@@ -618,7 +618,7 @@ export async function parseExcelFile(file: File): Promise<{
           const company_name = rawCompany || (baseSnapshot ? baseSnapshot.company_name : '');
           const item_name = rawItemName || (baseSnapshot ? baseSnapshot.item_name : '');
           const generic_name = rawGeneric || (baseSnapshot ? baseSnapshot.generic_name : '');
-          const category = rawCategory || (baseSnapshot ? baseSnapshot.category : 'Tablet');
+          const category = classifyItemCategory(item_name);
           const packing = rawPacking || (baseSnapshot ? baseSnapshot.packing : '1x1');
           const rack_number = rawRack || (baseSnapshot ? baseSnapshot.rack_number : '');
           const status: 'Active' | 'Inactive' = statusRaw

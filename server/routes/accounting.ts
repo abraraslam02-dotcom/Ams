@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -677,7 +678,7 @@ accountingRouter.post('/vouchers', (req: Request, res: Response) => {
       });
     }
 
-    const vDate = String(voucher_date || new Date().toISOString().slice(0, 10)).trim();
+    const vDate = String(voucher_date || getPakistanDateISO()).trim();
     checkPeriodOpen(vDate);
 
     if (!Array.isArray(lines) || lines.length === 0) {
@@ -1055,7 +1056,7 @@ accountingRouter.post('/vouchers/:id/reverse', (req: Request, res: Response) => 
 
     const tx = db.transaction(() => {
       const revVoucherNo = getNextAccountingVoucherNumber('JV');
-      const revDate = new Date().toISOString().slice(0, 10);
+      const revDate = getPakistanDateISO();
       checkPeriodOpen(revDate);
 
       const insRev = db

@@ -209,7 +209,8 @@ export function recalculateAccountBalance(accountId: number): void {
       customer_debit = ?,
       customer_credit = ?,
       supplier_debit = ?,
-      supplier_credit = ?
+      supplier_credit = ?,
+      updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(
     totalDebit,

@@ -53,7 +53,7 @@ import { api } from './services/api';
 import { offlineSyncManager } from './services/offlineSyncManager';
 import { initGlobalDateInputFormatting } from './utils/globalDateDisplay';
 import { DatabaseDiagnostics, TableDetail } from './types/database';
-import { HealthResponse, CompanySettings } from './types/system';
+import { HealthResponse, CompanySettings, OperatingModeStatus } from './types/system';
 import {
   AlertCircle,
   RefreshCw,
@@ -127,6 +127,7 @@ function AppContent() {
   }, [isSalesInvoiceTab, isPurchaseInvoiceTab]);
 
   const [, setHealth] = useState<HealthResponse | null>(null);
+  const [operatingModeStatus, setOperatingModeStatus] = useState<OperatingModeStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<DatabaseDiagnostics | null>(null);
   const [syncOnline, setSyncOnline] = useState<boolean>(() => offlineSyncManager.getState().isOnline);
   const [tables, setTables] = useState<TableDetail[]>([]);
@@ -268,10 +269,11 @@ function AppContent() {
       setLoading(true);
       setError(null);
 
-      const [healthData, dbData, settingsData] = await Promise.all([
+      const [healthData, dbData, settingsData, opModeRes] = await Promise.all([
         api.getHealth(),
         api.getDatabaseStatus(),
         api.getCompanySettings(),
+        api.getOperatingModeStatus().catch(() => null),
       ]);
 
       setHealth(healthData);
@@ -279,10 +281,19 @@ function AppContent() {
       setTables(dbData.tables || []);
       setSettings(settingsData.data);
 
-      const isBlocked =
-        healthData?.database?.connected === false ||
-        Boolean(healthData?.connectionBlocked) ||
-        Boolean(healthData?.cloudPersistence?.connectionBlocked);
+      const resolvedOpMode = opModeRes?.data || healthData?.operatingMode || null;
+      if (resolvedOpMode) {
+        setOperatingModeStatus(resolvedOpMode);
+        offlineSyncManager.setOperatingMode(resolvedOpMode.mode);
+      }
+
+      const isOfflineModeActive = resolvedOpMode?.mode === 'OFFLINE';
+      const isBlocked = isOfflineModeActive
+        ? healthData?.database?.connected === false
+        : healthData?.database?.connected === false ||
+          Boolean(healthData?.connectionBlocked) ||
+          Boolean(healthData?.cloudPersistence?.connectionBlocked);
+
       if (isBlocked) {
         setDbConnectionIssue({
           message:
@@ -311,7 +322,6 @@ function AppContent() {
       if (res.success && res.connected && !res.blocked) {
         setDbConnectionIssue(null);
         await fetchSystemData();
-        offlineSyncManager.syncNow().catch(() => {});
       } else {
         setDbConnectionIssue({
           message:
@@ -331,6 +341,13 @@ function AppContent() {
 
   useEffect(() => {
     const onDbErr = (e: Event) => {
+      try {
+        if (window.localStorage.getItem('ams_system_operating_mode') === 'OFFLINE') {
+          return;
+        }
+      } catch {
+        // ignore storage error
+      }
       const detail = (e as CustomEvent<{ message?: string; databaseIdentity?: string }>).detail;
       setDbConnectionIssue({
         message:
@@ -342,18 +359,24 @@ function AppContent() {
     const onDbRestored = () => {
       setDbConnectionIssue(null);
     };
-    const onOnline = () => {
-      void handleReconnectDatabase();
+    const onOperatingModeChanged = (e: Event) => {
+      const detail = (e as CustomEvent<{ mode?: string; status?: OperatingModeStatus }>).detail;
+      if (detail?.status) {
+        setOperatingModeStatus(detail.status);
+      }
+      if (detail?.mode === 'OFFLINE') {
+        setDbConnectionIssue(null);
+      }
     };
     window.addEventListener('ams-db-connection-error', onDbErr as EventListener);
     window.addEventListener('ams-db-connection-restored', onDbRestored);
-    window.addEventListener('online', onOnline);
+    window.addEventListener('ams-operating-mode-changed', onOperatingModeChanged as EventListener);
     return () => {
       window.removeEventListener('ams-db-connection-error', onDbErr as EventListener);
       window.removeEventListener('ams-db-connection-restored', onDbRestored);
-      window.removeEventListener('online', onOnline);
+      window.removeEventListener('ams-operating-mode-changed', onOperatingModeChanged as EventListener);
     };
-  }, [handleReconnectDatabase]);
+  }, []);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -650,9 +673,22 @@ function AppContent() {
         return { title: 'Item Sales Reports — Item-Wise Quantity & Revenue Breakdown', crumbs: ['Reports & Analytics', 'Item Sales Reports'] };
       case 'report-item-purchases':
         return { title: 'Item Purchase Reports — Item-Wise Procurement & Cost History', crumbs: ['Reports & Analytics', 'Item Purchase Reports'] };
+      case 'invoice-profit-report':
+        return {
+          title: 'Invoice-wise Profit Report — Actual Purchase / FIFO Cost, Discounts & Returns vs Net Invoice Profit',
+          crumbs: ['Reports & Analytics', 'Invoice-wise Profit Report'],
+        };
       case 'sales-profit-report':
       case 'report-profit':
-        return { title: 'Item Profit Reports — Actual Purchase Cost vs Net Sales Profit', crumbs: ['Reports & Analytics', 'Item Profit Reports'] };
+        return {
+          title: 'Item-wise Profit Report — Actual Purchase / FIFO Cost, Full/Loose Units & Net Sales Profit',
+          crumbs: ['Reports & Analytics', 'Item-wise Profit Report'],
+        };
+      case 'detailed-profit-report':
+        return {
+          title: 'Detailed Profit Report — Line-by-Line Invoice, Batch, Cost, Discount, Bonus & Return Profit Audit',
+          crumbs: ['Reports & Analytics', 'Detailed Profit Report'],
+        };
       case 'report-quarterly':
         return { title: 'Item Full Quarterly Report — Multi-Month Sales & Profit Performance', crumbs: ['Reports & Analytics', 'Item Full Quarterly Report'] };
       case 'report-account-profit':
@@ -889,10 +925,12 @@ function AppContent() {
             currentViewTitle={headerInfo.title}
             breadcrumbs={headerInfo.crumbs}
             diagnostics={diagnostics}
+            operatingModeStatus={operatingModeStatus}
             loading={loading}
             onRefresh={fetchSystemData}
             onNavigateToUsers={() => handleSelectTab('users')}
             onNavigateToMoreOptions={() => handleSelectTab('more-options')}
+            onNavigateToOperatingMode={() => handleSelectTab('system-admin')}
             onNavigateToAudit={() => handleSelectTab('audit-logs')}
             onNavigateToClearDemoData={() => handleSelectTab('database')}
             compact={false}
@@ -1222,12 +1260,20 @@ function AppContent() {
                 <SalesReportsView initialReport="item-wise-sales" />
               )}
               {(activeTab === 'report-customer-sales' ||
-                activeTab === 'sales-customer-wise' ||
-                activeTab === 'report-account-profit') && (
+                activeTab === 'sales-customer-wise') && (
                 <SalesReportsView initialReport="customer-wise-sales" />
+              )}
+              {activeTab === 'report-account-profit' && (
+                <SalesReportsView initialReport="account-profit-report" />
               )}
               {(activeTab === 'report-profit' || activeTab === 'sales-profit-report') && (
                 <SalesReportsView initialReport="profit-report" />
+              )}
+              {activeTab === 'invoice-profit-report' && (
+                <SalesReportsView initialReport="invoice-profit-report" />
+              )}
+              {activeTab === 'detailed-profit-report' && (
+                <SalesReportsView initialReport="detailed-profit-report" />
               )}
               {(activeTab === 'report-discount' || activeTab === 'sales-discount-report') && (
                 <SalesReportsView initialReport="discount-report" />
@@ -1357,6 +1403,8 @@ function AppContent() {
                   key="system-settings"
                   settings={settings}
                   initialSubTab="store-printing"
+                  hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
+                  onOperatingModeChanged={(st) => setOperatingModeStatus(st)}
                   onSettingsUpdated={(updated) => setSettings(updated)}
                   onNavigateToAuditLogs={() => setActiveTab('audit-logs')}
                 />
@@ -1366,6 +1414,8 @@ function AppContent() {
                   key="backup-restore"
                   settings={settings}
                   initialSubTab="backup-restore"
+                  hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
+                  onOperatingModeChanged={(st) => setOperatingModeStatus(st)}
                   onSettingsUpdated={(updated) => setSettings(updated)}
                   onNavigateToAuditLogs={() => setActiveTab('audit-logs')}
                 />
@@ -1383,6 +1433,8 @@ function AppContent() {
                   key="system-admin"
                   settings={settings}
                   initialSubTab="system-admin"
+                  hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
+                  onOperatingModeChanged={(st) => setOperatingModeStatus(st)}
                   onSettingsUpdated={(updated) => setSettings(updated)}
                   onNavigateToAuditLogs={() => setActiveTab('audit-logs')}
                 />

@@ -1,4 +1,5 @@
 import { getDatabase } from '../db/connection.ts';
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 
 export type InvoiceModuleType = 'SALE' | 'PURCHASE';
 
@@ -94,11 +95,7 @@ export function normalizeInvoiceDateKey(dateStr?: string | null): string {
     }
   }
 
-  const nowPkt = new Date(Date.now() + 5 * 60 * 60 * 1000);
-  const yyyy = nowPkt.getUTCFullYear();
-  const mm = String(nowPkt.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(nowPkt.getUTCDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return getPakistanDateISO();
 }
 
 /**

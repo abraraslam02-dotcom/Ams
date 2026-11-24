@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StockAdjustment, StockDatasheetItem } from '../../types/inventory';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 
 interface AdjustmentFormItem {
   inventory_id: number;
@@ -50,7 +50,7 @@ export const StockAdjustmentView: React.FC = () => {
 
   // Form fields
   const [adjustmentDate, setAdjustmentDate] = useState<string>(
-    new Date().toISOString().split('T')[0]
+    getPakistanDateISO()
   );
   const [reasonCategory, setReasonCategory] = useState<
     'INCREASE' | 'DECREASE' | 'DAMAGE' | 'EXPIRED' | 'PHYSICAL_DIFFERENCE' | 'CORRECTION'
@@ -109,7 +109,7 @@ export const StockAdjustmentView: React.FC = () => {
 
   const openNewModal = () => {
     loadBatchesForPicker();
-    setAdjustmentDate(new Date().toISOString().split('T')[0]);
+    setAdjustmentDate(getPakistanDateISO());
     setReasonCategory('DAMAGE');
     setDescription('');
     setReferenceNo('');

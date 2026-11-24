@@ -21,7 +21,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { StockDatasheetItem } from '../../types/inventory';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
@@ -210,7 +210,7 @@ export const StockDatasheetView: React.FC<StockDatasheetViewProps> = ({
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Stock Datasheet');
 
-      const dateStr = new Date().toISOString().split('T')[0];
+      const dateStr = getPakistanDateISO();
       XLSX.writeFile(workbook, `AMS_Stock_Datasheet_${dateStr}.xlsx`);
     } catch (err: unknown) {
       setError(`Excel Export Failed: ${err instanceof Error ? err.message : String(err)}`);

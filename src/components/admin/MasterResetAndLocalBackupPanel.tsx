@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { offlineStorage } from '../../services/offlineStorage';
 import { offlineSyncManager } from '../../services/offlineSyncManager';
-import { formatAppDateTime } from '../../utils/formatters';
+import { formatAppDateTime, getPakistanDateISO } from '../../utils/formatters';
 
 export const MasterResetAndLocalBackupPanel: React.FC<{
   initialSection?: 'backup-restore' | 'master-reset' | 'protected-logs';
@@ -33,9 +33,9 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
   );
 
   // Local Backup Settings & History
-  const [backupFolder, setBackupFolder] = useState('D:\\Abrar Medical Store Backups');
-  const [autoDaily, setAutoDaily] = useState(true);
-  const [autoWeekly, setAutoWeekly] = useState(true);
+  const [backupFolder, setBackupFolder] = useState('D:\\AbrarMedicalStore\\Backups');
+  const [autoDaily, setAutoDaily] = useState(false);
+  const [autoWeekly, setAutoWeekly] = useState(false);
   const [keepDailyCount, setKeepDailyCount] = useState(7);
   const [keepWeeklyCount, setKeepWeeklyCount] = useState(4);
   const [superAdminEmail, setSuperAdminEmail] = useState('abrar.aslam02@gmail.com');
@@ -70,9 +70,14 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
         fetch('/api/enhancements/protected-audit-logs').then((r) => r.json()),
       ]);
       if (bRes.success) {
-        setBackupFolder(bRes.settings?.local_backup_folder || 'D:\\Abrar Medical Store Backups');
-        setAutoDaily(Boolean(bRes.settings?.auto_daily_backup));
-        setAutoWeekly(Boolean(bRes.settings?.auto_weekly_backup));
+        const rawDir = String(bRes.settings?.local_backup_folder || '').trim();
+        setBackupFolder(
+          !rawDir || rawDir === 'D:\\Abrar Medical Store Backups'
+            ? 'D:\\AbrarMedicalStore\\Backups'
+            : rawDir
+        );
+        setAutoDaily(false);
+        setAutoWeekly(false);
         setKeepDailyCount(Number(bRes.settings?.keep_daily_backups || 7));
         setKeepWeeklyCount(Number(bRes.settings?.keep_weekly_backups || 4));
         setSuperAdminEmail(bRes.settings?.super_admin_email || 'abrar.aslam02@gmail.com');
@@ -190,7 +195,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
       if (!createdOnlineDb) {
         // Offline Local Backup: export complete IndexedDB snapshot to laptop hard drive
         const snapshot = await offlineStorage.exportFullDatabaseSnapshot();
-        const dateStr = new Date().toISOString().slice(0, 10);
+        const dateStr = getPakistanDateISO();
         const fileName = `Abrar_Offline_Backup_${dateStr}_${Date.now().toString().slice(-4)}.ams.json`;
         const jsonText = JSON.stringify(snapshot, null, 2);
         const blob = new Blob([jsonText], { type: 'application/json' });

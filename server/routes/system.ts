@@ -5,6 +5,7 @@ import type { Request, Response } from 'express';
 import { checkDatabaseConnection, getDatabase } from '../db/connection.ts';
 import { MODULE_CATALOG } from '../db/schema.ts';
 import { config } from '../config.ts';
+import { getPakistanDateISO, addDaysToIsoDate } from '../utils/pakistanTime.ts';
 import { authenticateToken, requireRole } from '../middleware/authMiddleware.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
 import {
@@ -13,7 +14,6 @@ import {
   createDatabaseBackup,
   verifyBackupFile,
   restoreDatabaseFromBackup,
-  ensureDailyAutomaticBackup,
   triggerPreChangeBackupIfEnabled,
   logSystemError,
   getLocalNetworkAddresses,
@@ -25,6 +25,15 @@ import {
   syncDatabaseToCloudSQL,
   reconnectToCurrentDatabase,
 } from '../services/cloudPersistenceService.ts';
+import { isOfflineOperatingMode } from '../services/operatingModeStore.ts';
+import {
+  getOperatingModeFullStatus,
+  switchOperatingMode,
+  executeManualBackupAndSync,
+  listSyncConflicts,
+  resolveSyncConflict,
+  resolveAllSyncConflicts,
+} from '../services/operatingModeService.ts';
 import { APP_VERSION as SHARED_APP_VERSION, getBuildMetadata } from '../utils/buildInfo.ts';
 
 export const systemRouter = Router();
@@ -43,7 +52,11 @@ function canAdministerSystem(req: Request): boolean {
 systemRouter.get('/health', (_req: Request, res: Response) => {
   const dbStatus = checkDatabaseConnection();
   const cloudStatus = getCloudPersistenceStatus();
-  const dbHealthy = dbStatus.connected && !cloudStatus.connectionBlocked;
+  const offlineMode = isOfflineOperatingMode();
+  const operatingMode = getOperatingModeFullStatus();
+  const dbHealthy = offlineMode
+    ? dbStatus.connected
+    : dbStatus.connected && !cloudStatus.connectionBlocked;
   const uptimeSeconds = Math.floor(process.uptime());
 
   let lastBackup: Record<string, unknown> | null = null;
@@ -70,6 +83,13 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
     }
   }
 
+  let backupDirDisplay = config.primaryBackupDir;
+  try {
+    backupDirDisplay = getBackupDirectory();
+  } catch {
+    backupDirDisplay = config.primaryBackupDir;
+  }
+
   res.status(dbHealthy ? 200 : 503).json({
     status: dbHealthy ? 'healthy' : 'degraded',
     service: 'Abrar Medical Store API',
@@ -78,6 +98,7 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
     uptimeSeconds,
     nodeVersion: process.version,
     timestamp: new Date().toISOString(),
+    operatingMode,
     database: {
       connected: dbHealthy,
       driver: dbStatus.driver,
@@ -86,17 +107,17 @@ systemRouter.get('/health', (_req: Request, res: Response) => {
       integrity: dbStatus.integrityCheck,
       journalMode: dbStatus.journalMode,
       foreignKeys: dbStatus.foreignKeysEnabled,
-      error: cloudStatus.connectionError || dbStatus.error,
+      error: offlineMode ? dbStatus.error : cloudStatus.connectionError || dbStatus.error,
     },
     backup: {
-      backupDirectory: getBackupDirectory(),
+      backupDirectory: backupDirDisplay,
       totalBackups,
       lastBackup,
       unresolvedErrors,
     },
     cloudPersistence: cloudStatus,
-    connectionBlocked: Boolean(cloudStatus.connectionBlocked),
-    connectionError: cloudStatus.connectionError || null,
+    connectionBlocked: offlineMode ? false : Boolean(cloudStatus.connectionBlocked),
+    connectionError: offlineMode ? null : cloudStatus.connectionError || null,
     databaseIdentity: cloudStatus.databaseIdentity || cloudStatus.externalLocation,
     localization: {
       currency: config.appCurrency,
@@ -877,9 +898,7 @@ systemRouter.patch('/batch-settings', authenticateToken, (req: AuthenticatedRequ
  */
 systemRouter.get('/backups', authenticateToken, (_req: Request, res: Response) => {
   try {
-    // Ensure automatic daily backup has run for today if enabled
-    ensureDailyAutomaticBackup();
-
+    // Manual Control Only: never trigger automatic backups on list fetch
     const backups = listBackups();
     const backupDir = getBackupDirectory();
     const db = getDatabase();
@@ -893,8 +912,9 @@ systemRouter.get('/backups', authenticateToken, (_req: Request, res: Response) =
       success: true,
       backupDirectory: backupDir,
       configuredDirectory: settings?.backup_directory || '',
-      autoDailyBackup: Boolean(settings?.auto_daily_backup ?? 1),
-      autoBackupBeforeChanges: Boolean(settings?.auto_backup_before_changes ?? 1),
+      autoDailyBackup: false,
+      autoBackupBeforeChanges: false,
+      manualControlOnly: true,
       backupRetentionDays: Number(settings?.backup_retention_days || 30),
       backups,
     });
@@ -1723,8 +1743,7 @@ systemRouter.post('/demo-logs/clear', authenticateToken, (req: Request, res: Res
 systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: Response) => {
   try {
     const db = getDatabase();
-    const now = new Date();
-    const todayIso = now.toISOString().slice(0, 10);
+    const todayIso = getPakistanDateISO();
     const currentMonthPrefix = todayIso.slice(0, 7); // YYYY-MM
     const firstOfMonth = `${currentMonthPrefix}-01`;
 
@@ -1789,14 +1808,23 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
 
     // 3. Actual Gross Profit (Today & Selected Period)
     // Net Revenue = taxable_amount adjusted for returned_total_units
-    // Cost of Goods Sold = (total_units - returned_total_units) * cost_price_per_unit
+    // Cost of Goods Sold = (total_units - returned_total_units) * effective_unit_cost
+    const effectiveUnitCostSql = `CASE
+      WHEN COALESCE(si.cost_price_per_unit, 0) > 0 THEN si.cost_price_per_unit
+      WHEN COALESCE(inv.pack_cost, 0) > 0 THEN inv.pack_cost * 1.0 / CASE WHEN COALESCE(si.units_per_pack, i.units_per_pack, 1) > 0 THEN COALESCE(si.units_per_pack, i.units_per_pack, 1) ELSE 1 END
+      WHEN COALESCE(i.purchase_price, 0) > 0 THEN i.purchase_price * 1.0 / CASE WHEN COALESCE(si.units_per_pack, i.units_per_pack, 1) > 0 THEN COALESCE(si.units_per_pack, i.units_per_pack, 1) ELSE 1 END
+      ELSE 0
+    END`;
+
     const todayProfitRow = db
       .prepare(
         `SELECT
            COALESCE(SUM(CASE WHEN si.total_units > 0 THEN si.taxable_amount * ((si.total_units - COALESCE(si.returned_total_units, 0)) * 1.0 / si.total_units) ELSE 0 END), 0) AS netRevenue,
-           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * COALESCE(si.cost_price_per_unit, 0)), 0) AS totalCost
+           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * (${effectiveUnitCostSql})), 0) AS totalCost
          FROM sale_items si
          INNER JOIN sales s ON s.id = si.sale_id
+         LEFT JOIN items i ON i.id = si.item_id
+         LEFT JOIN inventory inv ON inv.id = si.inventory_id
          WHERE LOWER(s.status) = 'completed' AND date(s.invoice_date) = date(?)`
       )
       .get(todayIso) as { netRevenue: number; totalCost: number };
@@ -1805,9 +1833,11 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
       .prepare(
         `SELECT
            COALESCE(SUM(CASE WHEN si.total_units > 0 THEN si.taxable_amount * ((si.total_units - COALESCE(si.returned_total_units, 0)) * 1.0 / si.total_units) ELSE 0 END), 0) AS netRevenue,
-           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * COALESCE(si.cost_price_per_unit, 0)), 0) AS totalCost
+           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * (${effectiveUnitCostSql})), 0) AS totalCost
          FROM sale_items si
          INNER JOIN sales s ON s.id = si.sale_id
+         LEFT JOIN items i ON i.id = si.item_id
+         LEFT JOIN inventory inv ON inv.id = si.inventory_id
          WHERE LOWER(s.status) = 'completed' AND date(s.invoice_date) BETWEEN date(?) AND date(?)`
       )
       .get(startDate, endDate) as { netRevenue: number; totalCost: number };
@@ -1896,17 +1926,17 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
            inv.expiry_date,
            inv.total_stock_units,
            inv.current_pack_qty,
-           CAST(julianday(inv.expiry_date) - julianday(date('now')) AS INTEGER) AS days_remaining
+           CAST(julianday(inv.expiry_date) - julianday(?) AS INTEGER) AS days_remaining
          FROM inventory inv
          INNER JOIN items i ON i.id = inv.item_id
          WHERE inv.total_stock_units > 0
            AND inv.expiry_date IS NOT NULL
            AND inv.expiry_date != ''
-           AND date(inv.expiry_date) <= date('now', '+90 days')
+           AND date(inv.expiry_date) <= date(?)
          ORDER BY date(inv.expiry_date) ASC
          LIMIT 50`
       )
-      .all() as Array<{
+      .all(todayIso, addDaysToIsoDate(todayIso, 90)) as Array<{
       batch_id: number;
       item_id: number;
       item_code: string;
@@ -2013,9 +2043,11 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
         `SELECT
            date(s.invoice_date) AS label,
            COALESCE(SUM(CASE WHEN si.total_units > 0 THEN si.taxable_amount * ((si.total_units - COALESCE(si.returned_total_units, 0)) * 1.0 / si.total_units) ELSE 0 END), 0) AS revenue,
-           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * COALESCE(si.cost_price_per_unit, 0)), 0) AS cost
+           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * (${effectiveUnitCostSql})), 0) AS cost
          FROM sale_items si
          INNER JOIN sales s ON s.id = si.sale_id
+         LEFT JOIN items i ON i.id = si.item_id
+         LEFT JOIN inventory inv ON inv.id = si.inventory_id
          WHERE LOWER(s.status) = 'completed' AND date(s.invoice_date) BETWEEN date(?) AND date(?)
          GROUP BY date(s.invoice_date)
          ORDER BY date(s.invoice_date) ASC`
@@ -2039,9 +2071,11 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
         `SELECT
            strftime('%Y-%m', s.invoice_date) AS label,
            COALESCE(SUM(CASE WHEN si.total_units > 0 THEN si.taxable_amount * ((si.total_units - COALESCE(si.returned_total_units, 0)) * 1.0 / si.total_units) ELSE 0 END), 0) AS revenue,
-           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * COALESCE(si.cost_price_per_unit, 0)), 0) AS cost
+           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * (${effectiveUnitCostSql})), 0) AS cost
          FROM sale_items si
          INNER JOIN sales s ON s.id = si.sale_id
+         LEFT JOIN items i ON i.id = si.item_id
+         LEFT JOIN inventory inv ON inv.id = si.inventory_id
          WHERE LOWER(s.status) = 'completed'
          GROUP BY strftime('%Y-%m', s.invoice_date)
          ORDER BY label ASC
@@ -2069,9 +2103,11 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
            COALESCE(a.account_name, COALESCE(NULLIF(s.customer_name, ''), 'Walk-in Customer')) AS accountName,
            COUNT(DISTINCT s.id) AS invoiceCount,
            COALESCE(SUM(CASE WHEN si.total_units > 0 THEN si.taxable_amount * ((si.total_units - COALESCE(si.returned_total_units, 0)) * 1.0 / si.total_units) ELSE 0 END), 0) AS revenue,
-           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * COALESCE(si.cost_price_per_unit, 0)), 0) AS cost
+           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * (${effectiveUnitCostSql})), 0) AS cost
          FROM sale_items si
          INNER JOIN sales s ON s.id = si.sale_id
+         LEFT JOIN items i ON i.id = si.item_id
+         LEFT JOIN inventory inv ON inv.id = si.inventory_id
          LEFT JOIN accounts a ON a.id = s.customer_account_id
          WHERE LOWER(s.status) = 'completed' AND date(s.invoice_date) BETWEEN date(?) AND date(?)
          GROUP BY COALESCE(s.customer_account_id, 0), COALESCE(a.account_name, COALESCE(NULLIF(s.customer_name, ''), 'Walk-in Customer'))
@@ -2104,10 +2140,11 @@ systemRouter.get('/dashboard-analytics', authenticateToken, (req: Request, res: 
            COALESCE(i.item_name, si.item_name) AS itemName,
            SUM(si.total_units - COALESCE(si.returned_total_units, 0)) AS netUnitsSold,
            COALESCE(SUM(CASE WHEN si.total_units > 0 THEN si.taxable_amount * ((si.total_units - COALESCE(si.returned_total_units, 0)) * 1.0 / si.total_units) ELSE 0 END), 0) AS revenue,
-           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * COALESCE(si.cost_price_per_unit, 0)), 0) AS cost
+           COALESCE(SUM((si.total_units - COALESCE(si.returned_total_units, 0)) * (${effectiveUnitCostSql})), 0) AS cost
          FROM sale_items si
          INNER JOIN sales s ON s.id = si.sale_id
          LEFT JOIN items i ON i.id = si.item_id
+         LEFT JOIN inventory inv ON inv.id = si.inventory_id
          WHERE LOWER(s.status) = 'completed' AND date(s.invoice_date) BETWEEN date(?) AND date(?)
          GROUP BY si.item_id
          ORDER BY (revenue - cost) DESC
@@ -2786,5 +2823,186 @@ systemRouter.delete('/export-templates/:id', authenticateToken, (req: Request, r
   }
 });
 
+/**
+ * GET /api/system/operating-mode
+ * Returns active System Operating Mode (ONLINE / OFFLINE), permanent storage diagnostics,
+ * last manual backup & cloud sync timestamps/statuses, and unresolved conflict count.
+ * Makes ZERO Cloud DB requests when in OFFLINE MODE.
+ */
+systemRouter.get('/operating-mode', authenticateToken, (_req: Request, res: Response) => {
+  try {
+    const status = getOperatingModeFullStatus();
+    return res.json({
+      success: true,
+      data: status,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * POST /api/system/operating-mode/switch
+ * Strictly restricted to Super Admin.
+ * Verifies target database availability and flushes WAL before switching ONLINE <-> OFFLINE.
+ */
+systemRouter.post(
+  '/operating-mode/switch',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const rawMode = String(req.body?.mode || '').trim().toUpperCase();
+      if (rawMode !== 'ONLINE' && rawMode !== 'OFFLINE') {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid operating mode. Must be "ONLINE" or "OFFLINE".',
+        });
+      }
+
+      const result = await switchOperatingMode({
+        targetMode: rawMode,
+        username: req.user?.username || 'Super Admin',
+        userId: req.user?.id || null,
+        ipAddress: req.ip || '',
+        allowWithPendingOfflineChanges: Boolean(req.body?.allowWithPendingOfflineChanges),
+      });
+
+      const httpStatus = result.success ? 200 : result.requiresConfirmation ? 409 : 503;
+      return res.status(httpStatus).json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
+ * POST /api/system/backup-and-sync-now
+ * Strictly restricted to Super Admin.
+ * Manual Control Only:
+ *   Step 1: Complete verified Local Backup in permanent Backups folder
+ *   Step 2: Conflict-aware Cloud Database synchronization (only after Step 1 succeeds)
+ *   Step 3: Separate status report for Local Backup and Cloud Sync
+ */
+systemRouter.post(
+  '/backup-and-sync-now',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const notes = req.body?.notes ? String(req.body.notes).trim().slice(0, 200) : undefined;
+      const result = await executeManualBackupAndSync({
+        username: req.user?.username || 'Super Admin',
+        userId: req.user?.id || null,
+        ipAddress: req.ip || '',
+        notes,
+      });
+
+      return res.status(result.step1LocalBackup.status === 'Successful' ? 200 : 500).json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
+ * GET /api/system/sync-conflicts
+ * Strictly restricted to Super Admin. Lists detected Local vs Cloud record conflicts.
+ */
+systemRouter.get(
+  '/sync-conflicts',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const filterRaw = String(req.query?.status || 'unresolved').trim().toLowerCase();
+      const filter: 'unresolved' | 'resolved' | 'all' =
+        filterRaw === 'all' ? 'all' : filterRaw === 'resolved' ? 'resolved' : 'unresolved';
+      const conflicts = listSyncConflicts(filter);
+      return res.json({
+        success: true,
+        conflicts,
+        count: conflicts.length,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
+ * POST /api/system/sync-conflicts/resolve-all
+ * Strictly restricted to Super Admin. Resolves all unresolved conflicts using 'keep_local' or 'keep_cloud'.
+ */
+systemRouter.post(
+  '/sync-conflicts/resolve-all',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const resolutionRaw = String(req.body?.resolution || '').trim().toLowerCase();
+      if (resolutionRaw !== 'keep_local' && resolutionRaw !== 'keep_cloud') {
+        return res.status(400).json({
+          success: false,
+          error: 'Resolution must be "keep_local" or "keep_cloud".',
+        });
+      }
+
+      const result = resolveAllSyncConflicts({
+        resolution: resolutionRaw,
+        username: req.user?.username || 'Super Admin',
+        userId: req.user?.id || null,
+        ipAddress: req.ip || '',
+      });
+      return res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(400).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
+ * POST /api/system/sync-conflicts/:id/resolve
+ * Strictly restricted to Super Admin. Resolves a conflict using 'keep_local' or 'keep_cloud'.
+ */
+systemRouter.post(
+  '/sync-conflicts/:id/resolve',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const conflictId = Number(req.params.id);
+      if (!Number.isFinite(conflictId) || conflictId <= 0) {
+        return res.status(400).json({ success: false, error: 'Invalid conflict ID.' });
+      }
+      const resolutionRaw = String(req.body?.resolution || '').trim().toLowerCase();
+      if (resolutionRaw !== 'keep_local' && resolutionRaw !== 'keep_cloud') {
+        return res.status(400).json({
+          success: false,
+          error: 'Resolution must be "keep_local" or "keep_cloud".',
+        });
+      }
+
+      const result = resolveSyncConflict({
+        conflictId,
+        resolution: resolutionRaw,
+        username: req.user?.username || 'Super Admin',
+        userId: req.user?.id || null,
+        ipAddress: req.ip || '',
+      });
+      return res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(400).json({ success: false, error: msg });
+    }
+  }
+);
+
 export { triggerPreChangeBackupIfEnabled, logSystemError };
+
 

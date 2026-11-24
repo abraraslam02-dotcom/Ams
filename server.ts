@@ -22,17 +22,23 @@ import { payrollRouter } from './server/routes/payroll.ts';
 import { lookupRouter } from './server/routes/lookup.ts';
 import { authenticateToken, enforceModulePermissions } from './server/middleware/authMiddleware.ts';
 import { runMigrations } from './server/db/migrations.ts';
-import { checkDatabaseConnection, getDatabase } from './server/db/connection.ts';
+import {
+  checkDatabaseConnection,
+  getDatabase,
+  closeDatabaseConnection,
+  getWasDatabaseQuarantinedOnBoot,
+} from './server/db/connection.ts';
 import { ensureAuthTables } from './server/services/authService.ts';
-import { ensureDailyAutomaticBackup } from './server/services/backupService.ts';
 import { reconcileHeldAndDuplicateLedgerEntries } from './server/services/ledgerIntegrityService.ts';
 import {
   initCloudPersistence,
   syncDatabaseToCloudSQL,
   cloudPersistenceMiddleware,
   runPreDeploymentSafetyChecks,
-  startCloudPersistenceBackgroundLoop,
+  stopCloudPersistenceBackgroundLoop,
 } from './server/services/cloudPersistenceService.ts';
+import { isOfflineOperatingMode, getSystemOperatingMode } from './server/services/operatingModeStore.ts';
+import { syncModeMetadataToDb } from './server/services/operatingModeService.ts';
 import { handleServeProductImage } from './server/services/productMediaService.ts';
 import { getBuildMetadata } from './server/utils/buildInfo.ts';
 
@@ -82,43 +88,53 @@ async function startServer() {
     return counts;
   };
 
+  let deferredBootVerificationForCloudRecovery = false;
+
   try {
-    const preBootCounts = captureCoreTableCounts(getDatabase());
-    const migration = runMigrations();
-    console.log(`[AMS DB] ${migration.message}`);
-
-    const postBootCounts = captureCoreTableCounts(getDatabase());
-    const droppedTables = Object.keys(preBootCounts).filter(
-      (tbl) => preBootCounts[tbl] > 0 && postBootCounts[tbl] < preBootCounts[tbl]
-    );
-    if (droppedTables.length > 0) {
-      throw new Error(
-        `[AMS Publish Guard] Aborted boot because migration caused unexpected record drop in [${droppedTables.join(', ')}] (${JSON.stringify(preBootCounts)} -> ${JSON.stringify(postBootCounts)}).`
+    const activeDb = getDatabase();
+    if (getWasDatabaseQuarantinedOnBoot()) {
+      deferredBootVerificationForCloudRecovery = true;
+      console.warn(
+        '[AMS DB] Local database file failed integrity verification and was safely quarantined. Deferring migration & audit until verified Cloud Firestore hydration completes.'
       );
+    } else {
+      const preBootCounts = captureCoreTableCounts(activeDb);
+      const migration = runMigrations();
+      console.log(`[AMS DB] ${migration.message}`);
+
+      const postBootCounts = captureCoreTableCounts(getDatabase());
+      const droppedTables = Object.keys(preBootCounts).filter(
+        (tbl) => preBootCounts[tbl] > 0 && postBootCounts[tbl] < preBootCounts[tbl]
+      );
+      if (droppedTables.length > 0) {
+        throw new Error(
+          `[AMS Publish Guard] Aborted boot because migration caused unexpected record drop in [${droppedTables.join(', ')}] (${JSON.stringify(preBootCounts)} -> ${JSON.stringify(postBootCounts)}).`
+        );
+      }
+
+      ensureAuthTables(getDatabase());
+      const auditReport = reconcileHeldAndDuplicateLedgerEntries();
+      if (
+        auditReport.removedNonPostedSaleJEs > 0 ||
+        auditReport.removedNonPostedPurchaseJEs > 0 ||
+        auditReport.removedDuplicateSaleJEs > 0 ||
+        auditReport.removedDuplicatePurchaseJEs > 0 ||
+        auditReport.recalculatedAccounts > 0
+      ) {
+        console.log('[AMS Ledger Audit]', auditReport);
+      }
+
+      const verifiedCounts = captureCoreTableCounts(getDatabase());
+      console.log(
+        `[AMS Publish Guard] Record count verification passed: items=${verifiedCounts.items}, accounts=${verifiedCounts.accounts}, sales=${verifiedCounts.sales}, purchases=${verifiedCounts.purchases}, inventory=${verifiedCounts.inventory}, users=${verifiedCounts.users}`
+      );
+
+      const connectionTest = checkDatabaseConnection();
+      console.log(`[AMS DB] Connection verification: ${connectionTest.connected ? 'SUCCESS' : 'FAILED'}`);
+      console.log(`[AMS DB] Storage: ${connectionTest.databasePath} (${connectionTest.fileSizeBytes} bytes)`);
+      console.log(`[AMS DB] Journal Mode: ${connectionTest.journalMode}, Foreign Keys: ${connectionTest.foreignKeysEnabled}`);
+      console.log(`[AMS DB] Verified Tables: ${connectionTest.tables.length} tables active and ready`);
     }
-
-    ensureAuthTables(getDatabase());
-    const auditReport = reconcileHeldAndDuplicateLedgerEntries();
-    if (
-      auditReport.removedNonPostedSaleJEs > 0 ||
-      auditReport.removedNonPostedPurchaseJEs > 0 ||
-      auditReport.removedDuplicateSaleJEs > 0 ||
-      auditReport.removedDuplicatePurchaseJEs > 0 ||
-      auditReport.recalculatedAccounts > 0
-    ) {
-      console.log('[AMS Ledger Audit]', auditReport);
-    }
-
-    const verifiedCounts = captureCoreTableCounts(getDatabase());
-    console.log(
-      `[AMS Publish Guard] Record count verification passed: items=${verifiedCounts.items}, accounts=${verifiedCounts.accounts}, sales=${verifiedCounts.sales}, purchases=${verifiedCounts.purchases}, inventory=${verifiedCounts.inventory}, users=${verifiedCounts.users}`
-    );
-
-    const connectionTest = checkDatabaseConnection();
-    console.log(`[AMS DB] Connection verification: ${connectionTest.connected ? 'SUCCESS' : 'FAILED'}`);
-    console.log(`[AMS DB] Storage: ${connectionTest.databasePath} (${connectionTest.fileSizeBytes} bytes)`);
-    console.log(`[AMS DB] Journal Mode: ${connectionTest.journalMode}, Foreign Keys: ${connectionTest.foreignKeysEnabled}`);
-    console.log(`[AMS DB] Verified Tables: ${connectionTest.tables.length} tables active and ready`);
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error(`[AMS DB ERROR] Migration or connection failed: ${errorMsg}`);
@@ -510,48 +526,75 @@ self.addEventListener('fetch', (event) => {
   }
 
   const server = app.listen(config.port, '0.0.0.0', () => {
+    const activeOperatingMode = getSystemOperatingMode();
     console.log(`[AMS Ready] Listening on http://0.0.0.0:${config.port}`);
+    console.log(
+      `[AMS Mode] System Operating Mode: ${activeOperatingMode} MODE (Manual Control Only for Backup & Cloud Sync)`
+    );
 
-    void (async () => {
-      try {
-        await initCloudPersistence();
-        const safetyReport = await runPreDeploymentSafetyChecks();
-        console.log(`[AMS Deployment Safety] ${safetyReport.message}`);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[AMS Cloud] Startup persistence check warning: ${msg}`);
-      }
+    syncModeMetadataToDb();
 
-      startCloudPersistenceBackgroundLoop();
-
-      try {
-        const dailyBackup = ensureDailyAutomaticBackup();
-        if (dailyBackup) {
-          console.log(`[AMS Backup] Automatic daily backup created: ${dailyBackup.filename}`);
+    if (isOfflineOperatingMode()) {
+      console.log(
+        `[AMS Mode] Starting in OFFLINE MODE — using permanent local SQLite database (${config.databasePath}) with 0 Cloud Database requests.`
+      );
+    } else {
+      void (async () => {
+        try {
+          await initCloudPersistence();
+          const safetyReport = await runPreDeploymentSafetyChecks();
+          console.log(`[AMS Deployment Safety] ${safetyReport.message}`);
+          if (safetyReport.localIntegrityOk) {
+            ensureAuthTables(getDatabase());
+            syncModeMetadataToDb();
+            if (deferredBootVerificationForCloudRecovery) {
+              const recoveredCounts = captureCoreTableCounts(getDatabase());
+              console.log(
+                `[AMS Publish Guard] Post-recovery record count verification passed: items=${recoveredCounts.items}, accounts=${recoveredCounts.accounts}, sales=${recoveredCounts.sales}, purchases=${recoveredCounts.purchases}, inventory=${recoveredCounts.inventory}, users=${recoveredCounts.users}`
+              );
+            }
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[AMS Cloud] Startup persistence check warning: ${msg}`);
         }
-      } catch {
-        // ignore non-critical backup error on startup
-      }
-    })();
-
-    setInterval(() => {
-      try {
-        ensureDailyAutomaticBackup();
-      } catch {
-        // ignore scheduled backup error
-      }
-    }, 60 * 60 * 1000);
+      })();
+    }
   });
 
+  let isShuttingDown = false;
   const handleGracefulShutdown = (signal: string) => {
-    console.log(`[AMS Shutdown] Received ${signal}. Flushing live database to Firestore before exit...`);
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`[AMS Shutdown] Received ${signal}. Flushing live database and checkpointing WAL before exit...`);
+    stopCloudPersistenceBackgroundLoop();
+
+    const finishExit = () => {
+      try {
+        closeDatabaseConnection();
+      } catch {
+        // ignore close errors on exit
+      }
+      server.close(() => {
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(0), 1000).unref();
+    };
+
+    if (isOfflineOperatingMode()) {
+      // STRICT OFFLINE MODE: Zero Cloud DB requests on shutdown — checkpoint & close local DB cleanly
+      finishExit();
+      return;
+    }
+
+    const timeoutGuard = setTimeout(finishExit, 4500);
+    timeoutGuard.unref();
+
     syncDatabaseToCloudSQL(`shutdown_${signal}`)
       .catch(() => {})
       .finally(() => {
-        server.close(() => {
-          process.exit(0);
-        });
-        setTimeout(() => process.exit(0), 2000).unref();
+        clearTimeout(timeoutGuard);
+        finishExit();
       });
   };
 

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Boxes, Search, RefreshCw, Download, Layers, AlertTriangle } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { BatchInventoryItem } from '../../types/purchase';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 
 interface BatchInventoryPanelProps {
   batches: BatchInventoryItem[];
@@ -57,7 +57,7 @@ export const BatchInventoryPanel: React.FC<BatchInventoryPanelProps> = ({
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Batch_Inventory');
-    XLSX.writeFile(wb, `AMS_Batch_Inventory_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(wb, `AMS_Batch_Inventory_${getPakistanDateISO()}.xlsx`);
   };
 
   const totalValuation = filtered.reduce(

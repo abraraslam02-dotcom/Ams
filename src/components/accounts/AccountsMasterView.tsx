@@ -34,7 +34,7 @@ import { AccountViewModal } from './AccountViewModal';
 import { OpeningBalanceModal } from './OpeningBalanceModal';
 import { AccountsExcelImportModal } from './AccountsExcelImportModal';
 import { exportAccountsToExcel } from '../../utils/accountExcel';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, getPakistanDateISO } from '../../utils/formatters';
 
 interface AccountsMasterViewProps {
   initialLedgerView?: 'all' | 'customer' | 'supplier';
@@ -265,7 +265,7 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
     if (accounts.length === 0) return;
     exportAccountsToExcel(
       accounts,
-      `Abrar_Medical_Store_Accounts_${new Date().toISOString().slice(0, 10)}.xlsx`
+      `Abrar_Medical_Store_Accounts_${getPakistanDateISO()}.xlsx`
     );
   };
 

@@ -16,7 +16,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { PhysicalVerification, StockDatasheetItem } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
@@ -48,7 +48,7 @@ export const PhysicalVerificationView: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [verificationDate, setVerificationDate] = useState<string>(
-    new Date().toISOString().split('T')[0]
+    getPakistanDateISO()
   );
   const [remarks, setRemarks] = useState<string>('');
   const [modalError, setModalError] = useState<string | null>(null);
@@ -117,7 +117,7 @@ export const PhysicalVerificationView: React.FC = () => {
   };
 
   const openNewCountSheet = async () => {
-    setVerificationDate(new Date().toISOString().split('T')[0]);
+    setVerificationDate(getPakistanDateISO());
     setRemarks('');
     setModalError(null);
     setSelectedCompanies([]);

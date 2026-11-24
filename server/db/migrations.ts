@@ -4,11 +4,13 @@ import Database from 'better-sqlite3';
 import { getDatabase } from './connection.ts';
 import { SCHEMA_SQL } from './schema.ts';
 import { config } from '../config.ts';
+import { getPakistanFilenameStamp } from '../utils/pakistanTime.ts';
 import { ensureSalesmanSequenceTable } from '../utils/salesmanCodeGenerator.ts';
 import { ensureItemCodeSequenceTable } from '../utils/itemCodeGenerator.ts';
 import { ensureCitiesTableAndSync } from '../routes/accounts.ts';
 import { ensureItemCompaniesTableAndSync } from '../routes/items.ts';
 import { getDbResetEpoch } from './resetState.ts';
+import { classifyItemCategory } from '../utils/itemCategory.ts';
 
 export interface MigrationResult {
   success: boolean;
@@ -25,22 +27,32 @@ function createVerifiedPreMigrationBackup(db: Database.Database): string {
   if (!fs.existsSync(backupDir)) {
     fs.mkdirSync(backupDir, { recursive: true });
   }
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}-${String(now.getMilliseconds()).padStart(3, '0')}`;
+  const stamp = getPakistanFilenameStamp();
   const filename = `Pre_Migration_${stamp}.db`;
   const backupPath = path.join(backupDir, filename);
 
   try {
-    db.pragma('wal_checkpoint(PASSIVE)');
+    db.pragma('wal_checkpoint(TRUNCATE)');
   } catch {
-    // ignore passive checkpoint warning
+    try {
+      db.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // ignore passive checkpoint warning
+    }
   }
 
   try {
     const escaped = backupPath.replace(/'/g, "''");
     db.exec(`VACUUM INTO '${escaped}';`);
-  } catch {
+  } catch (vacuumErr) {
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // ignore
+    }
+    if (!fs.existsSync(config.databasePath)) {
+      throw vacuumErr;
+    }
     fs.copyFileSync(config.databasePath, backupPath);
   }
 
@@ -152,6 +164,9 @@ export function runMigrations(): MigrationResult {
     '033_invoice_line_remarks',
     '034_item_packing_configuration',
     '035_item_variant_group_and_packing_purchase_units',
+    '036_item_tax_type_and_value',
+    '037_auto_item_category_classification',
+    '038_sequential_line_discounts',
   ];
 
   // CRITICAL DB PROTECTION: Before executing any pending migration on an existing database,
@@ -4606,50 +4621,53 @@ export function runMigrations(): MigrationResult {
         WHERE id = ?
       `);
 
-      for (const row of existingItemsForPacking) {
-        const clean = String(row.packing || '1x1').trim();
-        let stripsPerBox: number | null = null;
-        let tabletsPerStrip: number | null = null;
-        let unitsPerStrip = 1;
-        let unitsPerPack = 1;
+      const applyPackingTx = db.transaction(() => {
+        for (const row of existingItemsForPacking) {
+          const clean = String(row.packing || '1x1').trim();
+          let stripsPerBox: number | null = null;
+          let tabletsPerStrip: number | null = null;
+          let unitsPerStrip = 1;
+          let unitsPerPack = 1;
 
-        const matrixMatch = clean.match(/(\d+)\s*[xX*×]\s*(\d+)/);
-        if (matrixMatch) {
-          stripsPerBox = Math.max(1, parseInt(matrixMatch[1], 10) || 1);
-          tabletsPerStrip = Math.max(1, parseInt(matrixMatch[2], 10) || 1);
-          unitsPerStrip = tabletsPerStrip;
-          unitsPerPack = stripsPerBox * tabletsPerStrip;
-        } else {
-          const singleNum = clean.match(
-            /(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc|pill|softgel|lozenge|'s|s\b)s?/i
-          );
-          if (singleNum) {
-            const units = Math.max(1, parseInt(singleNum[1], 10) || 1);
-            stripsPerBox = 1;
-            tabletsPerStrip = units;
-            unitsPerStrip = units;
-            unitsPerPack = units;
-          } else if (
-            !/ml|mg|gm|g\b|kg|l\b|oz|drop|syr|susp|cream|oint|gel|lotion|inj|inf/i.test(clean)
-          ) {
-            const plainNum = clean.match(/^(\d+)$/);
-            if (plainNum) {
-              const units = Math.max(1, parseInt(plainNum[1], 10) || 1);
+          const matrixMatch = clean.match(/(\d+)\s*[xX*×]\s*(\d+)/);
+          if (matrixMatch) {
+            stripsPerBox = Math.max(1, parseInt(matrixMatch[1], 10) || 1);
+            tabletsPerStrip = Math.max(1, parseInt(matrixMatch[2], 10) || 1);
+            unitsPerStrip = tabletsPerStrip;
+            unitsPerPack = stripsPerBox * tabletsPerStrip;
+          } else {
+            const singleNum = clean.match(
+              /(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc|pill|softgel|lozenge|'s|s\b)s?/i
+            );
+            if (singleNum) {
+              const units = Math.max(1, parseInt(singleNum[1], 10) || 1);
               stripsPerBox = 1;
               tabletsPerStrip = units;
               unitsPerStrip = units;
               unitsPerPack = units;
+            } else if (
+              !/ml|mg|gm|g\b|kg|l\b|oz|drop|syr|susp|cream|oint|gel|lotion|inj|inf/i.test(clean)
+            ) {
+              const plainNum = clean.match(/^(\d+)$/);
+              if (plainNum) {
+                const units = Math.max(1, parseInt(plainNum[1], 10) || 1);
+                stripsPerBox = 1;
+                tabletsPerStrip = units;
+                unitsPerStrip = units;
+                unitsPerPack = units;
+              }
             }
           }
+
+          updatePackingStmt.run(stripsPerBox, tabletsPerStrip, unitsPerStrip, unitsPerPack, row.id);
         }
 
-        updatePackingStmt.run(stripsPerBox, tabletsPerStrip, unitsPerStrip, unitsPerPack, row.id);
-      }
-
-      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
-        migrationName34,
-        34
-      );
+        db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+          migrationName34,
+          34
+        );
+      });
+      applyPackingTx();
     }
 
     // Migration 35: Add variant_group on item_variants + item_packing_levels + item_purchase_units (non-destructive)
@@ -4747,6 +4765,128 @@ export function runMigrations(): MigrationResult {
       );
     }
 
+    // Migration 37: Automatically classify existing items.category from items.item_name (never modifies item_name or any other column)
+    const migrationName37 = '037_auto_item_category_classification';
+    const applied37 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName37);
+
+    if (!applied37) {
+      const existingItemsForCategory = db
+        .prepare('SELECT id, item_name, category FROM items')
+        .all() as Array<{ id: number; item_name: string | null; category: string | null }>;
+
+      const updateCatStmt = db.prepare('UPDATE items SET category = ? WHERE id = ?');
+      const applyCatTx = db.transaction(() => {
+        for (const row of existingItemsForCategory) {
+          const classified = classifyItemCategory(row.item_name);
+          if (row.category !== classified) {
+            updateCatStmt.run(classified, row.id);
+          }
+        }
+
+        db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+          migrationName37,
+          37
+        );
+      });
+      applyCatTx();
+    }
+
+    // Migration 38: Add sequential line discount columns (discount_1_percent, discount_2_percent, net_rate)
+    // Strictly additive only — never modifies or rewrites historical invoice rows.
+    const migrationName38 = '038_sequential_line_discounts';
+    const applied38 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName38);
+
+    const ensureSequentialDiscountColumns = (tableName: string) => {
+      const cols = (
+        db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (cols.length === 0) return;
+      if (!cols.includes('discount_1_percent')) {
+        db.exec(`ALTER TABLE ${tableName} ADD COLUMN discount_1_percent REAL NOT NULL DEFAULT 0.0;`);
+      }
+      if (!cols.includes('discount_2_percent')) {
+        db.exec(`ALTER TABLE ${tableName} ADD COLUMN discount_2_percent REAL NOT NULL DEFAULT 0.0;`);
+      }
+      if (!cols.includes('net_rate')) {
+        db.exec(`ALTER TABLE ${tableName} ADD COLUMN net_rate REAL NOT NULL DEFAULT 0.0;`);
+      }
+    };
+
+    ensureSequentialDiscountColumns('sale_items');
+    ensureSequentialDiscountColumns('purchase_items');
+    ensureSequentialDiscountColumns('sale_return_items');
+    ensureSequentialDiscountColumns('purchase_return_items');
+
+    if (!applied38) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+        migrationName38,
+        38
+      );
+    }
+
+    // Migration 39: Super Admin Operating Mode (ONLINE / OFFLINE), Manual Backup & Sync metadata,
+    // and Sync Conflict Tracking table (strictly additive — preserves 100% of existing records).
+    const migrationName39 = '039_operating_mode_and_sync_conflicts';
+    const applied39 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName39);
+
+    const csCols39 = (
+      db.prepare('PRAGMA table_info(company_settings)').all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (csCols39.length > 0) {
+      if (!csCols39.includes('system_operating_mode')) {
+        db.exec("ALTER TABLE company_settings ADD COLUMN system_operating_mode TEXT NOT NULL DEFAULT 'ONLINE';");
+      }
+      if (!csCols39.includes('last_successful_backup_at')) {
+        db.exec('ALTER TABLE company_settings ADD COLUMN last_successful_backup_at TEXT;');
+      }
+      if (!csCols39.includes('last_successful_cloud_sync_at')) {
+        db.exec('ALTER TABLE company_settings ADD COLUMN last_successful_cloud_sync_at TEXT;');
+      }
+      if (!csCols39.includes('last_backup_status')) {
+        db.exec("ALTER TABLE company_settings ADD COLUMN last_backup_status TEXT NOT NULL DEFAULT 'Not Run';");
+      }
+      if (!csCols39.includes('last_cloud_sync_status')) {
+        db.exec("ALTER TABLE company_settings ADD COLUMN last_cloud_sync_status TEXT NOT NULL DEFAULT 'Not Run';");
+      }
+      if (!csCols39.includes('pending_local_changes_count')) {
+        db.exec('ALTER TABLE company_settings ADD COLUMN pending_local_changes_count INTEGER NOT NULL DEFAULT 0;');
+      }
+    }
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sync_conflicts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        record_label TEXT NOT NULL DEFAULT '',
+        local_updated_at TEXT,
+        cloud_updated_at TEXT,
+        local_snapshot_json TEXT NOT NULL,
+        cloud_snapshot_json TEXT NOT NULL,
+        changed_fields_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'unresolved',
+        resolution_choice TEXT,
+        resolved_by TEXT,
+        resolved_at TEXT,
+        detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_conflicts_status ON sync_conflicts(status);
+      CREATE INDEX IF NOT EXISTS idx_sync_conflicts_table_rec ON sync_conflicts(table_name, record_id);
+    `);
+
+    if (!applied39) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(
+        migrationName39,
+        39
+      );
+    }
+
     const tables = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
@@ -4760,7 +4900,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}, ${migrationName35}, ${migrationName36}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}, ${migrationName31}, ${migrationName32}, ${migrationName33}, ${migrationName34}, ${migrationName35}, ${migrationName36}, ${migrationName37}, ${migrationName38}, ${migrationName39}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       preMigrationBackupPath,

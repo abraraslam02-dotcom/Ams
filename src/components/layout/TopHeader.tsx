@@ -1,31 +1,34 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   RefreshCw, ChevronRight, Home, Wifi, WifiOff, Clock, ChevronDown,
-  Users2, ShieldCheck, Trash2, LogOut, CheckCircle2, AlertTriangle, CloudUpload, Download, Database, SlidersHorizontal, Cloud,
+  Users2, ShieldCheck, LogOut, CheckCircle2, AlertTriangle, Download, Database, SlidersHorizontal, Cloud, HardDrive,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useFirebase } from '../../context/FirebaseContext';
 import { DatabaseDiagnostics } from '../../types/database';
+import { OperatingModeStatus } from '../../types/system';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
 import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
-import { formatAppDate, formatAppDateTime } from '../../utils/formatters';
+import { formatAppDate, formatAppDateTime, formatPKTShortTime } from '../../utils/formatters';
 
 interface TopHeaderProps {
   currentViewTitle: string;
   breadcrumbs: string[];
   diagnostics: DatabaseDiagnostics | null;
+  operatingModeStatus?: OperatingModeStatus | null;
   loading: boolean;
   onRefresh: () => void;
   onNavigateToUsers?: () => void;
   onNavigateToMoreOptions?: () => void;
+  onNavigateToOperatingMode?: () => void;
   onNavigateToAudit: () => void;
   onNavigateToClearDemoData: () => void;
   compact?: boolean;
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
-  currentViewTitle, breadcrumbs, diagnostics, loading, onRefresh,
-  onNavigateToUsers, onNavigateToMoreOptions, onNavigateToAudit, onNavigateToClearDemoData, compact = false,
+  currentViewTitle, breadcrumbs, operatingModeStatus, loading, onRefresh,
+  onNavigateToUsers, onNavigateToMoreOptions, onNavigateToOperatingMode, onNavigateToAudit, onNavigateToClearDemoData, compact = false,
 }) => {
   const { user, isSuperAdmin, logout } = useAuth();
   const { firebaseUser, firestoreStatus, signInWithGoogle, signOutFirebase } = useFirebase();
@@ -77,46 +80,49 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const name: string = u?.full_name ?? u?.fullName ?? u?.name ?? u?.username ?? 'User';
 
   const date = formatAppDate(now);
-  const time = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  const time = formatPKTShortTime(now);
+
+  const activeMode = operatingModeStatus?.mode || syncState.operatingMode || 'ONLINE';
+  const isOfflineMode = activeMode === 'OFFLINE';
+  const pendingChanges = operatingModeStatus?.pendingLocalChangesCount ?? syncState.pendingCount;
+  const unresolvedConflicts = operatingModeStatus?.unresolvedConflictsCount ?? 0;
 
   const getSyncBadgeInfo = () => {
-    if (!syncState.isOnline || syncState.syncStatus === 'offline') {
+    if (isOfflineMode) {
       return {
-        label: syncState.statusMessage,
-        badgeClass: 'bg-amber-50 text-amber-800 border border-amber-300',
-        icon: <WifiOff className="w-3.5 h-3.5 text-amber-600" />,
+        label: 'OFFLINE MODE • Local DB',
+        badgeClass: 'bg-amber-100 text-amber-950 border border-amber-400',
+        icon: <HardDrive className="w-3.5 h-3.5 text-amber-700" />,
       };
     }
-    if (syncState.syncStatus === 'syncing') {
+    if (!syncState.isOnline) {
       return {
-        label: syncState.statusMessage,
-        badgeClass: 'bg-blue-50 text-blue-800 border border-blue-200',
-        icon: <CloudUpload className="w-3.5 h-3.5 text-blue-600" />,
-      };
-    }
-    if (syncState.syncStatus === 'failed' || syncState.failedCount > 0) {
-      return {
-        label: syncState.statusMessage,
+        label: 'ONLINE MODE • Network Disconnected',
         badgeClass: 'bg-rose-50 text-rose-800 border border-rose-300',
-        icon: <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />,
+        icon: <WifiOff className="w-3.5 h-3.5 text-rose-600" />,
       };
     }
-    if (syncState.justCompletedSync) {
+    if (unresolvedConflicts > 0) {
       return {
-        label: syncState.statusMessage,
-        badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-300',
-        icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />,
+        label: 'ONLINE MODE • Conflicts Pending',
+        badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300',
+        icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />,
       };
     }
     return {
-      label: syncState.statusMessage,
-      badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-200',
+      label: 'ONLINE MODE • Cloud DB',
+      badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-300',
       icon: <Wifi className="w-3.5 h-3.5 text-emerald-600" />,
     };
   };
 
   const badgeInfo = getSyncBadgeInfo();
-  const formattedLastSync = syncState.lastSyncedAt
+  const formattedLastBackup = operatingModeStatus?.lastSuccessfulBackupAt
+    ? formatAppDateTime(operatingModeStatus.lastSuccessfulBackupAt)
+    : 'Not run yet';
+  const formattedLastSync = operatingModeStatus?.lastSuccessfulCloudSyncAt
+    ? formatAppDateTime(operatingModeStatus.lastSuccessfulCloudSyncAt)
+    : syncState.lastSyncedAt
     ? formatAppDateTime(syncState.lastSyncedAt)
     : 'Not synced yet';
 
@@ -174,69 +180,79 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           <span className="font-semibold text-slate-800">{time}</span>
         </div>
 
-        {/* Simple Sync Status Indicator & Popover */}
+        {/* Operating Mode & Manual Backup/Sync Indicator Popover */}
         <div className="relative" ref={syncRef}>
           <button
             type="button"
             onClick={() => setSyncPopoverOpen((v) => !v)}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-all ${badgeInfo.badgeClass}`}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-extrabold cursor-pointer transition-all ${badgeInfo.badgeClass}`}
           >
             {badgeInfo.icon}
             <span className="whitespace-nowrap">{badgeInfo.label}</span>
-            <span
-              className={`ml-1 px-1.5 py-0.5 rounded text-[11px] font-bold ${
-                syncState.pendingCount > 0
-                  ? 'bg-amber-600 text-white'
-                  : 'bg-white/80 text-slate-700 border border-slate-200'
-              }`}
-            >
-              Pending: {syncState.pendingCount}
-            </span>
-            {syncState.failedCount > 0 && (
+            {pendingChanges > 0 && (
+              <span className="ml-0.5 px-1.5 py-0.5 rounded text-[11px] font-bold bg-amber-600 text-white">
+                Pending: {pendingChanges}
+              </span>
+            )}
+            {unresolvedConflicts > 0 && (
               <span className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-rose-600 text-white">
-                Failed: {syncState.failedCount}
+                Conflicts: {unresolvedConflicts}
               </span>
             )}
           </button>
 
           {syncPopoverOpen && (
-            <div className="absolute right-0 top-full mt-2 w-80 bg-white rounded-xl border border-slate-200 shadow-2xl p-4 z-50 text-xs text-slate-700">
+            <div className="absolute right-0 top-full mt-2 w-84 bg-white rounded-xl border border-slate-200 shadow-2xl p-4 z-50 text-xs text-slate-700">
               <div className="space-y-2 mb-3">
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Connection Status:</span>
-                  <span className={`font-bold ${syncState.isOnline ? 'text-emerald-700' : 'text-amber-700'}`}>
-                    {syncState.isOnline ? 'Online' : 'Offline'}
+                  <span className="text-slate-500 font-medium">Operating Mode:</span>
+                  <span className={`font-extrabold ${isOfflineMode ? 'text-amber-700' : 'text-emerald-700'}`}>
+                    {activeMode} MODE
                   </span>
                 </div>
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Status:</span>
-                  <span className="font-semibold text-slate-800">{syncState.statusMessage}</span>
+                  <span className="text-slate-500 font-medium">Active Database:</span>
+                  <span className="font-semibold text-slate-800">
+                    {isOfflineMode ? 'Permanent Local SQLite' : 'Cloud Database'}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Last Successful Sync:</span>
+                  <span className="text-slate-500 font-medium">Last Local Backup:</span>
+                  <span className="font-semibold text-slate-800">{formattedLastBackup}</span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
+                  <span className="text-slate-500 font-medium">Last Cloud Sync:</span>
                   <span className="font-semibold text-slate-800">{formattedLastSync}</span>
                 </div>
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Pending Records:</span>
-                  <span className="font-mono font-bold text-slate-900">{syncState.pendingCount}</span>
+                  <span className="text-slate-500 font-medium">Pending Local Changes:</span>
+                  <span className="font-mono font-bold text-slate-900">{pendingChanges}</span>
                 </div>
-                <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Failed Records:</span>
-                  <span className={`font-mono font-bold ${syncState.failedCount > 0 ? 'text-rose-700' : 'text-slate-900'}`}>
-                    {syncState.failedCount}
-                  </span>
-                </div>
+                {unresolvedConflicts > 0 && (
+                  <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-rose-50 border border-rose-200">
+                    <span className="text-rose-700 font-semibold">Unresolved Conflicts:</span>
+                    <span className="font-mono font-bold text-rose-800">{unresolvedConflicts}</span>
+                  </div>
+                )}
               </div>
 
-              <button
-                type="button"
-                disabled={syncState.syncStatus === 'syncing' || !syncState.isOnline}
-                onClick={() => offlineSyncManager.syncNow()}
-                className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold cursor-pointer transition-colors"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
-                <span>SYNC NOW</span>
-              </button>
+              {isSuperAdmin && onNavigateToOperatingMode ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSyncPopoverOpen(false);
+                    onNavigateToOperatingMode();
+                  }}
+                  className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold cursor-pointer transition-colors"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Open Super Admin Mode &amp; Backup Panel</span>
+                </button>
+              ) : (
+                <div className="text-[11px] text-slate-500 bg-slate-50 rounded-lg p-2 text-center">
+                  Manual Control Only — Mode switching &amp; Backup/Sync are controlled by Super Admin.
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -245,13 +261,12 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
       <button
         type="button"
         onClick={() => {
-          offlineSyncManager.syncNow();
           onRefresh();
         }}
-        title="Refresh & Sync"
+        title="Refresh View"
         className="p-2 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100 cursor-pointer transition-colors"
       >
-        <RefreshCw className={`w-4 h-4 ${loading || syncState.syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+        <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
       </button>
 
       {/* User & System menu */}

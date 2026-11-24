@@ -63,6 +63,10 @@ export interface ItemVariant {
   current_stock_packs?: number;
   current_stock_units?: number;
   units_per_pack?: number;
+  weighted_avg_pack_cost?: number | null;
+  applicable_pack_cost?: number | null;
+  has_valid_cost?: boolean;
+  cost_source?: 'weighted_avg_purchase' | 'item_pprice' | 'none';
   default_batch?: {
     inventory_id: number | null;
     batch_number: string;

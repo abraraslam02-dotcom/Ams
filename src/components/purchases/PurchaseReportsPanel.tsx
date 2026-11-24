@@ -18,7 +18,7 @@ import { Account } from '../../types/account';
 import { Item } from '../../types/item';
 import { PurchaseReportType } from '../../types/purchase';
 import { api } from '../../services/api';
-import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
 import { TopPerformanceReportsView } from '../reports/TopPerformanceReportsView';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -138,7 +138,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
     XLSX.utils.book_append_sheet(wb, ws, activeReport.slice(0, 30));
     XLSX.writeFile(
       wb,
-      `AMS_Report_${activeReport}_${new Date().toISOString().slice(0, 10)}.xlsx`
+      `AMS_Report_${activeReport}_${getPakistanDateISO()}.xlsx`
     );
   };
 
@@ -283,7 +283,7 @@ export const PurchaseReportsPanel: React.FC<PurchaseReportsPanelProps> = ({
             payload={{
               documentType: 'report',
               documentNumber: activeTabInfo.label,
-              documentDate: new Date().toISOString().slice(0, 10),
+              documentDate: getPakistanDateISO(),
               customerName: activeTabInfo.label,
               totalAmount: 0,
               paidAmount: 0,

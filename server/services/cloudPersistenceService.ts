@@ -4,17 +4,26 @@ import crypto from 'crypto';
 import zlib from 'zlib';
 import Database from 'better-sqlite3';
 import { config } from '../config.ts';
+import { getPakistanDateISO, parseUtcTimestamp } from '../utils/pakistanTime.ts';
 import {
   getDatabase,
+  isDatabaseOpen,
   closeDatabaseConnection,
   reopenDatabaseConnection,
   syncRuntimeToSeedDatabase,
   getWasDatabaseCreatedOnBoot,
+  getWasDatabaseQuarantinedOnBoot,
   markDatabaseHydratedFromCloud,
 } from '../db/connection.ts';
 import { runMigrations } from '../db/migrations.ts';
 import { bumpDbResetEpoch } from '../db/resetState.ts';
 import { reconcileHeldAndDuplicateLedgerEntries } from './ledgerIntegrityService.ts';
+import { ensureAuthTables } from './authService.ts';
+import {
+  isOfflineOperatingMode,
+  recordLocalPendingMutation,
+  updatePersistedOperatingModeState,
+} from './operatingModeStore.ts';
 
 function loadFirebaseConfig(): { projectId?: string; firestoreDatabaseId?: string; apiKey?: string } {
   try {
@@ -136,6 +145,9 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 function computeLocalSqliteSha256(): string | null {
+  if (getWasDatabaseQuarantinedOnBoot()) {
+    return null;
+  }
   const dataDir = path.dirname(config.databasePath);
   const tempPath = path.join(dataDir, `ams_hash_chk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.db`);
   try {
@@ -149,6 +161,11 @@ function computeLocalSqliteSha256(): string | null {
       const escaped = tempPath.replace(/'/g, "''");
       db.exec(`VACUUM INTO '${escaped}';`);
     } catch {
+      try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {
+        // ignore
+      }
       if (!fs.existsSync(config.databasePath)) return null;
       fs.copyFileSync(config.databasePath, tempPath);
     }
@@ -248,7 +265,7 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
       const response = await fetch(url, {
         method: 'GET',
         headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(6000),
+        signal: AbortSignal.timeout(20000),
       });
 
       if (response.status === 404) {
@@ -261,7 +278,7 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
         const errText = await response.text().catch(() => '');
         const isDailyQuota = /quota exceeded/i.test(errText);
         if (!isDailyQuota && attempt < maxAttempts) {
-          await sleepMs(650 * attempt);
+          await sleepMs(750 * attempt);
           continue;
         }
         readCooldownUntil = Date.now() + (isDailyQuota ? 5 * 60 * 1000 : 15 * 1000);
@@ -271,6 +288,11 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
           : 'Active database connection temporarily rate-limited (HTTP 429). Retrying automatically.';
         lastError = msg;
         return { status: 'unreachable', error: msg };
+      }
+
+      if (response.status >= 500 && attempt < maxAttempts) {
+        await sleepMs(600 * attempt);
+        continue;
       }
 
       if (!response.ok) {
@@ -304,7 +326,7 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
       };
     } catch (err: unknown) {
       if (attempt < maxAttempts) {
-        await sleepMs(400 * attempt);
+        await sleepMs(500 * attempt);
         continue;
       }
       isConnected = false;
@@ -325,6 +347,7 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
 
 async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
   if (Date.now() < writeCooldownUntil) {
+    lastError = 'Cloud database write temporarily cooling down after rate limit (HTTP 429). Please retry shortly.';
     return false;
   }
   const url = buildFirestoreDocUrl(doc.docId);
@@ -342,40 +365,60 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
       updatedAt: { stringValue: doc.updatedAt || new Date().toISOString() },
     },
   };
+  const serializedBody = JSON.stringify(body);
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const response = await fetch(url, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
-    });
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: serializedBody,
+        signal: AbortSignal.timeout(25000),
+      });
 
-    if (response.status === 429) {
-      const errText = await response.text().catch(() => '');
-      const isDailyQuota = /quota exceeded/i.test(errText);
-      if (!isDailyQuota && attempt < 2) {
-        await sleepMs(1200);
+      if (response.status === 429) {
+        const errText = await response.text().catch(() => '');
+        const isDailyQuota = /quota exceeded/i.test(errText);
+        if (!isDailyQuota && attempt < maxAttempts) {
+          await sleepMs(1200 * attempt);
+          continue;
+        }
+        writeCooldownUntil = Date.now() + (isDailyQuota ? 10 * 60 * 1000 : 60 * 1000);
+        lastError = isDailyQuota
+          ? 'Firestore daily write quota exceeded. Local database remains active and protected.'
+          : 'Cloud database temporarily rate-limited (HTTP 429). Please retry in a moment.';
+        if (isDailyQuota) {
+          console.warn(
+            `[AMS Cloud Persistence] Firestore write quota exceeded; local database remains active & protected.`
+          );
+        }
+        return false;
+      }
+
+      if (response.status >= 500 && attempt < maxAttempts) {
+        await sleepMs(800 * attempt);
         continue;
       }
-      writeCooldownUntil = Date.now() + (isDailyQuota ? 10 * 60 * 1000 : 60 * 1000);
-      if (isDailyQuota) {
-        console.warn(
-          `[AMS Cloud Persistence] Firestore write quota exceeded; local database remains active & protected.`
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(
+          `Firestore PATCH ${doc.docId} failed (${response.status}): ${errText.slice(0, 240)}`
         );
       }
-      return false;
+      isConnected = true;
+      writeCooldownUntil = 0;
+      return true;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isHttpClientError = /failed \(4\d\d\)/.test(msg);
+      if (!isHttpClientError && attempt < maxAttempts) {
+        await sleepMs(800 * attempt);
+        continue;
+      }
+      throw err;
     }
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(
-        `Firestore PATCH ${doc.docId} failed (${response.status}): ${errText.slice(0, 240)}`
-      );
-    }
-    isConnected = true;
-    writeCooldownUntil = 0;
-    return true;
   }
   return false;
 }
@@ -383,7 +426,63 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
 /**
  * Inspects a SQLite file on disk and returns detailed record counts and validity.
  */
-function inspectSqliteSnapshot(filePath: string): {
+function inspectOpenSqliteHandle(dbHandle: Database.Database, emptyCounts: CloudRecordCounts): {
+  valid: boolean;
+  counts: CloudRecordCounts;
+} {
+  const integrity = String(dbHandle.pragma('integrity_check', { simple: true }) || '');
+  if (integrity.toLowerCase() !== 'ok') {
+    return { valid: false, counts: emptyCounts };
+  }
+
+  const tables = dbHandle
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    .all() as Array<{ name: string }>;
+  const tableSet = new Set(tables.map((t) => t.name));
+  const required = ['items', 'accounts', 'sales', 'purchases', 'inventory'];
+  if (required.some((r) => !tableSet.has(r))) {
+    return { valid: false, counts: emptyCounts };
+  }
+
+  const countTable = (name: string): number => {
+    if (!tableSet.has(name)) return 0;
+    const row = dbHandle.prepare(`SELECT COUNT(*) as cnt FROM "${name}"`).get() as { cnt: number };
+    return Number(row?.cnt || 0);
+  };
+
+  let customAccounts = 0;
+  try {
+    const caRow = dbHandle
+      .prepare('SELECT COUNT(*) as cnt FROM accounts WHERE is_system_account = 0')
+      .get() as { cnt: number };
+    customAccounts = Number(caRow?.cnt || 0);
+  } catch {
+    customAccounts = Math.max(0, countTable('accounts') - 35);
+  }
+
+  const counts: CloudRecordCounts = {
+    items: countTable('items'),
+    accounts: countTable('accounts'),
+    customAccounts,
+    purchases: countTable('purchases'),
+    sales: countTable('sales'),
+    inventoryBatches: countTable('inventory'),
+    journalEntries: countTable('journal_entries'),
+    cashBookEntries: countTable('cash_book_vouchers'),
+    users: countTable('users'),
+    saleReturns: countTable('sale_returns'),
+    purchaseReturns: countTable('purchase_returns'),
+    supplySheets: countTable('town_supplies'),
+    tombstonesTotal: countTable('sync_tombstones'),
+  };
+
+  return { valid: true, counts };
+}
+
+function inspectSqliteSnapshot(
+  filePath: string,
+  options?: { immutable?: boolean }
+): {
   valid: boolean;
   counts: CloudRecordCounts;
 } {
@@ -411,57 +510,36 @@ function inspectSqliteSnapshot(filePath: string): {
     return { valid: false, counts: emptyCounts };
   }
 
+  // If inspecting the currently active live database file while our primary connection is open,
+  // inspect through the open WAL-safe handle directly instead of opening a competing readonly handle.
+  const isActiveLiveDb = path.resolve(filePath) === path.resolve(config.databasePath);
+  if (isActiveLiveDb && isDatabaseOpen()) {
+    try {
+      const liveDb = getDatabase();
+      return inspectOpenSqliteHandle(liveDb, emptyCounts);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn(`[AMS Cloud Persistence] inspectSqliteSnapshot (live handle) failed for ${path.basename(filePath)}: ${errMsg}`);
+      return { valid: false, counts: emptyCounts };
+    }
+  }
+
+  const walSidecarPath = `${filePath}-wal`;
+  const shmSidecarPath = `${filePath}-shm`;
+  const hadWalBefore = fs.existsSync(walSidecarPath);
+  const hadShmBefore = fs.existsSync(shmSidecarPath);
+
   let tempDb: Database.Database | null = null;
   try {
-    tempDb = new Database(filePath, { readonly: true, fileMustExist: true });
-    const integrity = String(tempDb.pragma('integrity_check', { simple: true }) || '');
-    if (integrity.toLowerCase() !== 'ok') {
-      return { valid: false, counts: emptyCounts };
-    }
-
-    const tables = tempDb
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-      .all() as Array<{ name: string }>;
-    const tableSet = new Set(tables.map((t) => t.name));
-    const required = ['items', 'accounts', 'sales', 'purchases', 'inventory'];
-    if (required.some((r) => !tableSet.has(r))) {
-      return { valid: false, counts: emptyCounts };
-    }
-
-    const countTable = (name: string): number => {
-      if (!tableSet.has(name)) return 0;
-      const row = tempDb!.prepare(`SELECT COUNT(*) as cnt FROM "${name}"`).get() as { cnt: number };
-      return Number(row?.cnt || 0);
-    };
-
-    let customAccounts = 0;
-    try {
-      const caRow = tempDb
-        .prepare('SELECT COUNT(*) as cnt FROM accounts WHERE is_system_account = 0')
-        .get() as { cnt: number };
-      customAccounts = Number(caRow?.cnt || 0);
-    } catch {
-      customAccounts = Math.max(0, countTable('accounts') - 35);
-    }
-
-    const counts: CloudRecordCounts = {
-      items: countTable('items'),
-      accounts: countTable('accounts'),
-      customAccounts,
-      purchases: countTable('purchases'),
-      sales: countTable('sales'),
-      inventoryBatches: countTable('inventory'),
-      journalEntries: countTable('journal_entries'),
-      cashBookEntries: countTable('cash_book_vouchers'),
-      users: countTable('users'),
-      saleReturns: countTable('sale_returns'),
-      purchaseReturns: countTable('purchase_returns'),
-      supplySheets: countTable('town_supplies'),
-      tombstonesTotal: countTable('sync_tombstones'),
-    };
-
-    return { valid: true, counts };
-  } catch {
+    // If uncheckpointed WAL exists on a closed DB file, SQLite readonly mode cannot run WAL recovery.
+    // Open read-write only when not marked immutable and a WAL sidecar is present; otherwise readonly.
+    const shouldOpenReadOnly = Boolean(options?.immutable) || !hadWalBefore;
+    tempDb = new Database(filePath, { readonly: shouldOpenReadOnly, fileMustExist: true });
+    tempDb.pragma('busy_timeout = 5000');
+    return inspectOpenSqliteHandle(tempDb, emptyCounts);
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[AMS Cloud Persistence] inspectSqliteSnapshot failed for ${path.basename(filePath)}: ${errMsg}`);
     return { valid: false, counts: emptyCounts };
   } finally {
     if (tempDb) {
@@ -469,6 +547,18 @@ function inspectSqliteSnapshot(filePath: string): {
         tempDb.close();
       } catch {
         // ignore
+      }
+    }
+    if (!hadWalBefore && !hadShmBefore) {
+      try {
+        if (fs.existsSync(walSidecarPath) && fs.statSync(walSidecarPath).size === 0) {
+          fs.unlinkSync(walSidecarPath);
+        }
+        if (fs.existsSync(shmSidecarPath) && (!fs.existsSync(walSidecarPath) || fs.statSync(walSidecarPath).size === 0)) {
+          fs.unlinkSync(shmSidecarPath);
+        }
+      } catch {
+        // ignore sidecar cleanup warning
       }
     }
   }
@@ -512,27 +602,30 @@ function getBusinessRecordScore(counts: Partial<CloudRecordCounts> | Record<stri
 
 export function getCloudPersistenceStatus(): CloudPersistenceStatus {
   const localInspect = inspectSqliteSnapshot(config.databasePath);
+  const offlineMode = isOfflineOperatingMode();
   return {
     enabled: Boolean(FIRESTORE_PROJECT_ID && FIRESTORE_DATABASE_ID && FIRESTORE_API_KEY),
-    connected: isConnected,
+    connected: offlineMode ? false : isConnected,
     provider: 'firestore-enterprise-vault',
     externalLocation: EXTERNAL_DB_LOCATION,
     projectId: FIRESTORE_PROJECT_ID,
     databaseId: FIRESTORE_DATABASE_ID,
     collectionPath: `/${VAULT_COLLECTION}`,
     initialized: isInitialized,
-    hydrationComplete: isHydrationComplete,
+    hydrationComplete: offlineMode ? true : isHydrationComplete,
     lastSyncAt,
     lastRestoreAt,
     lastVersionSeq,
     lastSha256,
-    lastError,
+    lastError: offlineMode ? null : lastError,
     cloudRecordCounts,
     localRecordCounts: localInspect.counts as unknown as Record<string, number>,
     protectionLockActive: true,
-    connectionBlocked: dbConnectionBlocked,
-    connectionError: dbConnectionErrorMessage,
-    offlineWarning: !isConnected
+    connectionBlocked: offlineMode ? false : dbConnectionBlocked,
+    connectionError: offlineMode ? null : dbConnectionErrorMessage,
+    offlineWarning: offlineMode
+      ? null
+      : !isConnected
       ? lastError ||
         'Cloud database server is unreachable. Existing local data remains safe and unchanged without switching or resetting.'
       : null,
@@ -784,20 +877,22 @@ function mergeMissingRowsFromCloudDb(cloudDbFilePath: string, reason: string): n
           ).run();
         }
 
-        // Reconcile custom account balances and city where cloud has newer updated_at
+        // Reconcile custom account balances and city where cloud has newer normalized UTC updated_at
+        const normCloudTs = "REPLACE(REPLACE(SUBSTR(COALESCE(c.updated_at, ''), 1, 19), 'T', ' '), 'Z', '')";
         if (localTables.has('accounts') && cloudTables.has('accounts')) {
+          const normMainAccTs = "REPLACE(REPLACE(SUBSTR(COALESCE(main.accounts.updated_at, ''), 1, 19), 'T', ' '), 'Z', '')";
           db.prepare(
             `UPDATE main.accounts
              SET current_balance = COALESCE(
-                   (SELECT c.current_balance FROM cloud_snap.accounts c WHERE c.id = main.accounts.id AND COALESCE(c.updated_at, '') > COALESCE(main.accounts.updated_at, '')),
+                   (SELECT c.current_balance FROM cloud_snap.accounts c WHERE c.id = main.accounts.id AND ${normCloudTs} > ${normMainAccTs}),
                    main.accounts.current_balance
                  ),
                  total_debit = COALESCE(
-                   (SELECT c.total_debit FROM cloud_snap.accounts c WHERE c.id = main.accounts.id AND COALESCE(c.updated_at, '') > COALESCE(main.accounts.updated_at, '')),
+                   (SELECT c.total_debit FROM cloud_snap.accounts c WHERE c.id = main.accounts.id AND ${normCloudTs} > ${normMainAccTs}),
                    main.accounts.total_debit
                  ),
                  total_credit = COALESCE(
-                   (SELECT c.total_credit FROM cloud_snap.accounts c WHERE c.id = main.accounts.id AND COALESCE(c.updated_at, '') > COALESCE(main.accounts.updated_at, '')),
+                   (SELECT c.total_credit FROM cloud_snap.accounts c WHERE c.id = main.accounts.id AND ${normCloudTs} > ${normMainAccTs}),
                    main.accounts.total_credit
                  ),
                  city = COALESCE(
@@ -807,20 +902,21 @@ function mergeMissingRowsFromCloudDb(cloudDbFilePath: string, reason: string): n
           ).run();
         }
 
-        // Reconcile inventory stock where cloud has newer updated_at
+        // Reconcile inventory stock where cloud has newer normalized UTC updated_at
         if (localTables.has('inventory') && cloudTables.has('inventory')) {
+          const normMainInvTs = "REPLACE(REPLACE(SUBSTR(COALESCE(main.inventory.updated_at, ''), 1, 19), 'T', ' '), 'Z', '')";
           db.prepare(
             `UPDATE main.inventory
              SET current_pack_qty = COALESCE(
-                   (SELECT c.current_pack_qty FROM cloud_snap.inventory c WHERE c.id = main.inventory.id AND COALESCE(c.updated_at, '') > COALESCE(main.inventory.updated_at, '')),
+                   (SELECT c.current_pack_qty FROM cloud_snap.inventory c WHERE c.id = main.inventory.id AND ${normCloudTs} > ${normMainInvTs}),
                    main.inventory.current_pack_qty
                  ),
                  current_loose_qty = COALESCE(
-                   (SELECT c.current_loose_qty FROM cloud_snap.inventory c WHERE c.id = main.inventory.id AND COALESCE(c.updated_at, '') > COALESCE(main.inventory.updated_at, '')),
+                   (SELECT c.current_loose_qty FROM cloud_snap.inventory c WHERE c.id = main.inventory.id AND ${normCloudTs} > ${normMainInvTs}),
                    main.inventory.current_loose_qty
                  ),
                  total_stock_units = COALESCE(
-                   (SELECT c.total_stock_units FROM cloud_snap.inventory c WHERE c.id = main.inventory.id AND COALESCE(c.updated_at, '') > COALESCE(main.inventory.updated_at, '')),
+                   (SELECT c.total_stock_units FROM cloud_snap.inventory c WHERE c.id = main.inventory.id AND ${normCloudTs} > ${normMainInvTs}),
                    main.inventory.total_stock_units
                  )`
           ).run();
@@ -881,7 +977,7 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
     const stagedCloudPath = path.join(dataDir, `ams_cloud_staged_${Date.now()}.db`);
     fs.writeFileSync(stagedCloudPath, rawBuffer);
 
-    const stagedInspect = inspectSqliteSnapshot(stagedCloudPath);
+    const stagedInspect = inspectSqliteSnapshot(stagedCloudPath, { immutable: true });
     if (!stagedInspect.valid) {
       try {
         fs.unlinkSync(stagedCloudPath);
@@ -892,7 +988,7 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
     }
 
     try {
-      const freshlyBootedContainerDb = getWasDatabaseCreatedOnBoot();
+      const freshlyBootedContainerDb = getWasDatabaseCreatedOnBoot() || getWasDatabaseQuarantinedOnBoot();
       const shouldAuthoritativelyRestoreFromVault =
         config.envScope !== 'test' &&
         !hasHydratedFromCloudThisProcess &&
@@ -900,33 +996,55 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
         cloudScore > 0;
 
       if ((localScore === 0 || freshlyBootedContainerDb || shouldAuthoritativelyRestoreFromVault) && cloudScore > 0) {
-        // Freshly booted server (or empty DB) -> Full authoritative restoration from live Firestore vault!
+        // Checkpoint and close active connection FIRST so any WAL frames are flushed cleanly before safety snapshot
+        closeDatabaseConnection();
+
         const backupDir = path.join(dataDir, 'backups');
+        const quarantineDir = path.join(dataDir, 'quarantine');
         if (!fs.existsSync(backupDir)) {
           fs.mkdirSync(backupDir, { recursive: true });
         }
+
         if (fs.existsSync(config.databasePath)) {
-          const preHydrateSafetyPath = path.join(
-            backupDir,
-            `Pre_CloudHydrate_${Date.now()}.db`
-          );
-          try {
-            fs.copyFileSync(config.databasePath, preHydrateSafetyPath);
-          } catch {
-            // ignore
+          const postCloseInspect = inspectSqliteSnapshot(config.databasePath);
+          const postCloseScore = getBusinessRecordScore(postCloseInspect.counts);
+          if (postCloseInspect.valid && postCloseScore > 0) {
+            const preHydrateSafetyPath = path.join(
+              backupDir,
+              `Pre_CloudHydrate_${Date.now()}.db`
+            );
+            try {
+              fs.copyFileSync(config.databasePath, preHydrateSafetyPath);
+            } catch {
+              // ignore non-critical safety copy warning
+            }
+          } else if (!postCloseInspect.valid && fs.statSync(config.databasePath).size >= 4096) {
+            try {
+              if (!fs.existsSync(quarantineDir)) {
+                fs.mkdirSync(quarantineDir, { recursive: true });
+              }
+              fs.copyFileSync(
+                config.databasePath,
+                path.join(quarantineDir, `Pre_CloudHydrate_Corrupt_${Date.now()}.db`)
+              );
+            } catch {
+              // ignore non-critical quarantine copy warning
+            }
           }
         }
 
-        closeDatabaseConnection();
         const walPath = `${config.databasePath}-wal`;
         const shmPath = `${config.databasePath}-shm`;
         if (fs.existsSync(walPath)) fs.unlinkSync(walPath);
         if (fs.existsSync(shmPath)) fs.unlinkSync(shmPath);
 
-        fs.copyFileSync(stagedCloudPath, config.databasePath);
+        const atomicRestoreTmp = `${config.databasePath}.hydrate_${Date.now()}.tmp`;
+        fs.copyFileSync(stagedCloudPath, atomicRestoreTmp);
+        fs.renameSync(atomicRestoreTmp, config.databasePath);
 
-        reopenDatabaseConnection();
+        const restoredDb = reopenDatabaseConnection();
         runMigrations();
+        ensureAuthTables(restoredDb);
         reconcileHeldAndDuplicateLedgerEntries();
         if (config.envScope === 'development') {
           syncRuntimeToSeedDatabase();
@@ -979,14 +1097,26 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
  */
 async function uploadLocalDbToCloud(
   reason: string,
-  options?: { forceOverwrite?: boolean }
+  options?: {
+    forceOverwrite?: boolean;
+    bypassOfflineGuard?: boolean;
+    allowVerifiedPostMergeSync?: boolean;
+  }
 ): Promise<boolean> {
+  const isManualExplicitTrigger = Boolean(options?.bypassOfflineGuard || options?.allowVerifiedPostMergeSync);
+
+  // Strict Offline Mode guard: never make Cloud DB requests in OFFLINE mode unless explicitly triggered by manual Backup & Sync
+  if (isOfflineOperatingMode() && !options?.bypassOfflineGuard) {
+    return false;
+  }
+
   // Safety guard: never allow an un-hydrated server process to overwrite the live Firestore vault
   // before verifying/hydrating against Firestore first.
   if (
     config.envScope !== 'test' &&
     !hasHydratedFromCloudThisProcess &&
     !options?.forceOverwrite &&
+    !options?.bypassOfflineGuard &&
     reason !== 'initial_vault_bootstrap'
   ) {
     console.warn(
@@ -999,9 +1129,21 @@ async function uploadLocalDbToCloud(
   }
 
   if (isSyncInFlight) {
-    pendingUploadAfterInFlight = true;
-    pendingUploadReason = reason;
-    return false;
+    if (isManualExplicitTrigger) {
+      // Wait cleanly up to 15s for any background/online upload to finish rather than immediately failing manual sync
+      const waitDeadline = Date.now() + 15000;
+      while (isSyncInFlight && Date.now() < waitDeadline) {
+        await sleepMs(250);
+      }
+    }
+    if (isSyncInFlight) {
+      pendingUploadAfterInFlight = true;
+      pendingUploadReason = reason;
+      if (isManualExplicitTrigger) {
+        lastError = 'Another Cloud Database upload is currently in progress. Please retry in a few seconds.';
+      }
+      return false;
+    }
   }
 
   isSyncInFlight = true;
@@ -1022,10 +1164,15 @@ async function uploadLocalDbToCloud(
       const escaped = tempSnapPath.replace(/'/g, "''");
       db.exec(`VACUUM INTO '${escaped}';`);
     } catch {
+      try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {
+        // ignore
+      }
       fs.copyFileSync(config.databasePath, tempSnapPath);
     }
 
-    const localInspection = inspectSqliteSnapshot(tempSnapPath);
+    const localInspection = inspectSqliteSnapshot(tempSnapPath, { immutable: true });
     if (!localInspection.valid) {
       throw new Error('Local SQLite snapshot failed integrity verification before cloud upload.');
     }
@@ -1038,22 +1185,36 @@ async function uploadLocalDbToCloud(
     const initialRawBuffer = fs.readFileSync(tempSnapPath);
     const initialSha256 = crypto.createHash('sha256').update(initialRawBuffer).digest('hex');
 
-    // Fast path: if local SQLite binary is identical to last synced hash, skip Firestore network calls completely
-    if (lastSha256 && lastSha256 === initialSha256 && !options?.forceOverwrite) {
+    // Fast path for background ONLINE uploads only: skip network if binary hash already matches
+    if (
+      !isManualExplicitTrigger &&
+      lastSha256 &&
+      lastSha256 === initialSha256 &&
+      !options?.forceOverwrite
+    ) {
       return true;
     }
 
-    // If Firestore write quota cooldown is active, skip remote upload cleanly while local persistent DB is saved
+    // If Firestore write quota cooldown is active
     if (Date.now() < writeCooldownUntil) {
+      if (isManualExplicitTrigger) {
+        lastError =
+          lastError ||
+          'Cloud database write is temporarily rate-limited (HTTP 429). Please retry in a minute.';
+        return false;
+      }
       lastSha256 = initialSha256;
       lastSyncAt = new Date().toISOString();
       cloudRecordCounts = localInspection.counts as unknown as Record<string, number>;
       return true;
     }
 
-    // 2. Check existing cloud manifest BEFORE uploading to prevent overwriting live data
-    const existingManifest =
-      cachedManifest && Date.now() - lastManifestFetchAt < 25000 && !options?.forceOverwrite
+    // 2. Check existing cloud manifest BEFORE uploading (always fetch fresh on manual trigger / forceOverwrite)
+    let existingManifest =
+      cachedManifest &&
+      Date.now() - lastManifestFetchAt < 25000 &&
+      !options?.forceOverwrite &&
+      !isManualExplicitTrigger
         ? cachedManifest
         : await fetchCloudManifest();
     const localScore = getBusinessRecordScore(localInspection.counts);
@@ -1062,6 +1223,7 @@ async function uploadLocalDbToCloud(
     if (existingManifest && !options?.forceOverwrite) {
       // CRITICAL PROTECTION #1: Never let an empty container database overwrite a non-empty cloud database!
       if (cloudScore > 0 && localScore === 0) {
+        lastError = `Safety lock blocked upload: local database has 0 business records while Cloud Database has ${cloudScore} record(s).`;
         console.warn(
           `[AMS Cloud Persistence] SAFETY LOCK ENGAGED: Blocked empty container database from overwriting live Firestore database (cloudScore=${cloudScore}, localScore=0). Hydrating from Firestore instead!`
         );
@@ -1094,10 +1256,15 @@ async function uploadLocalDbToCloud(
         'supplySheets',
       ];
       const hasMissingCloudItems = coreCountKeys.some(
-        (k) => Number(existingManifest.counts?.[k] || 0) > Number(localInspection.counts[k] || 0)
+        (k) => Number(existingManifest?.counts?.[k] || 0) > Number(localInspection.counts[k] || 0)
       );
 
-      if (hasMissingCloudItems && localTombstones <= cloudTombstones && Date.now() >= readCooldownUntil) {
+      if (
+        hasMissingCloudItems &&
+        !options?.allowVerifiedPostMergeSync &&
+        localTombstones <= cloudTombstones &&
+        Date.now() >= readCooldownUntil
+      ) {
         try {
           const cloudBuf = await downloadVerifiedCloudSqliteBuffer(existingManifest);
           const mergeTempPath = path.join(dataDir, `ams_preupload_merge_${Date.now()}.db`);
@@ -1118,11 +1285,14 @@ async function uploadLocalDbToCloud(
       }
     }
 
-    const finalInspection = inspectSqliteSnapshot(tempSnapPath);
+    const finalInspection = inspectSqliteSnapshot(tempSnapPath, { immutable: true });
+    if (!finalInspection.valid) {
+      throw new Error('Final SQLite snapshot failed integrity verification before cloud upload.');
+    }
 
     // CRITICAL PROTECTION #3: Even after pre-upload reconcile, NEVER overwrite a larger cloud vault
-    // with fewer core records unless explicit forceOverwrite or matching sync tombstones exist.
-    if (existingManifest && !options?.forceOverwrite) {
+    // with fewer core records unless explicit forceOverwrite, verified post-merge sync (with non-empty local), or matching tombstones exist.
+    if (existingManifest && !options?.forceOverwrite && !options?.allowVerifiedPostMergeSync) {
       const finalTombstones = Number(finalInspection.counts.tombstonesTotal || 0);
       const cloudTombstones = Number(existingManifest.counts?.tombstonesTotal || 0);
       const guardedKeys: Array<keyof CloudRecordCounts> = [
@@ -1137,11 +1307,20 @@ async function uploadLocalDbToCloud(
         'users',
       ];
       const shrunkTables = guardedKeys.filter(
-        (k) => Number(finalInspection.counts[k] || 0) < Number(existingManifest.counts?.[k] || 0)
+        (k) => Number(finalInspection.counts[k] || 0) < Number(existingManifest?.counts?.[k] || 0)
       );
       if (shrunkTables.length > 0 && finalTombstones <= cloudTombstones) {
+        const details = shrunkTables
+          .map(
+            (k) =>
+              `${k} (local=${Number(finalInspection.counts[k] || 0)} < cloud=${Number(
+                existingManifest?.counts?.[k] || 0
+              )})`
+          )
+          .join(', ');
+        lastError = `Safety lock blocked upload because local table(s) have fewer records than Cloud Database without deletion tombstones: ${details}.`;
         console.warn(
-          `[AMS Cloud Persistence] SAFETY LOCK ENGAGED: Blocked upload (${reason}) because local table(s) [${shrunkTables.join(', ')}] have fewer records than cloud vault without tombstones.`
+          `[AMS Cloud Persistence] SAFETY LOCK ENGAGED: Blocked upload (${reason}) because local table(s) [${details}] have fewer records than cloud vault without tombstones.`
         );
         return false;
       }
@@ -1156,8 +1335,9 @@ async function uploadLocalDbToCloud(
       !options?.forceOverwrite
     ) {
       lastSha256 = sha256Hash;
-      lastVersionSeq = existingManifest.versionSeq;
+      lastVersionSeq = Math.max(lastVersionSeq, existingManifest.versionSeq || 0);
       lastSyncAt = new Date().toISOString();
+      lastError = null;
       cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
       return true;
     }
@@ -1167,81 +1347,131 @@ async function uploadLocalDbToCloud(
     const encryptedString = encryptBuffer(compressedBuffer);
 
     const totalChunks = Math.max(1, Math.ceil(encryptedString.length / MAX_CHUNK_CHARS));
-    const nextVersionSeq = Math.max(
-      1,
-      lastVersionSeq + 1,
-      (existingManifest?.versionSeq || 0) + 1
-    );
-    const targetSlot: 'slot0' | 'slot1' = nextVersionSeq % 2 === 0 ? 'slot0' : 'slot1';
-    const nowIso = new Date().toISOString();
     const countsJson = JSON.stringify(finalInspection.counts);
     const envLabel = `${config.nodeEnv}:${reason}`.slice(0, 110);
 
-    // 4. Write all chunks to targetSlot FIRST (leaving previous slot untouched until manifest commits)
-    for (let i = 0; i < totalChunks; i++) {
-      const slice = encryptedString.slice(i * MAX_CHUNK_CHARS, (i + 1) * MAX_CHUNK_CHARS);
-      const chunkOk = await writeVaultDocument({
-        vaultKey: VAULT_SERVER_KEY,
-        docId: `${ENV_SCOPE_PREFIX}_${targetSlot}_chunk_${i}`,
-        chunkIndex: i,
-        totalChunks,
-        versionSeq: nextVersionSeq,
-        sha256Hash,
-        payload: slice,
-        recordCounts: countsJson,
-        updatedByEnv: envLabel,
-        updatedAt: nowIso,
-      });
-      if (!chunkOk) {
-        // Quota cooldown activated gracefully; local persistent SQLite & seed DB are already saved
-        lastSha256 = sha256Hash;
-        lastSyncAt = nowIso;
-        cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
-        return true;
+    // 4 & 5. Write chunks + commit atomic manifest, retrying once on HTTP 403 versionSeq race
+    let committedVersionSeq = 0;
+    let committedTargetSlot: 'slot0' | 'slot1' = 'slot0';
+    let committedNowIso = new Date().toISOString();
+    let manifestOk = false;
+
+    for (let versionAttempt = 1; versionAttempt <= 2; versionAttempt++) {
+      const nextVersionSeq = Math.max(
+        1,
+        lastVersionSeq + 1,
+        (existingManifest?.versionSeq || 0) + 1
+      );
+      const targetSlot: 'slot0' | 'slot1' = nextVersionSeq % 2 === 0 ? 'slot0' : 'slot1';
+      const nowIso = new Date().toISOString();
+      committedVersionSeq = nextVersionSeq;
+      committedTargetSlot = targetSlot;
+      committedNowIso = nowIso;
+
+      try {
+        // Write all chunks to targetSlot FIRST (leaving previous slot untouched until manifest commits)
+        for (let i = 0; i < totalChunks; i++) {
+          const slice = encryptedString.slice(i * MAX_CHUNK_CHARS, (i + 1) * MAX_CHUNK_CHARS);
+          const chunkOk = await writeVaultDocument({
+            vaultKey: VAULT_SERVER_KEY,
+            docId: `${ENV_SCOPE_PREFIX}_${targetSlot}_chunk_${i}`,
+            chunkIndex: i,
+            totalChunks,
+            versionSeq: nextVersionSeq,
+            sha256Hash,
+            payload: slice,
+            recordCounts: countsJson,
+            updatedByEnv: envLabel,
+            updatedAt: nowIso,
+          });
+          if (!chunkOk) {
+            if (isManualExplicitTrigger) {
+              lastError =
+                lastError ||
+                `Cloud upload could not write chunk ${i + 1}/${totalChunks} due to Firestore write rate limit.`;
+              return false;
+            }
+            // Background online mode: quota cooldown activated gracefully; local SQLite is saved
+            lastSha256 = sha256Hash;
+            lastSyncAt = nowIso;
+            cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
+            return true;
+          }
+        }
+
+        // Commit the atomic manifest pointing to targetSlot
+        const manifestMeta: ManifestMetadata = {
+          slot: targetSlot,
+          totalChunks,
+          sha256Hash,
+          rawSizeBytes: rawBuffer.length,
+          compressedSizeBytes: compressedBuffer.length,
+          versionSeq: nextVersionSeq,
+          counts: finalInspection.counts,
+          updatedAt: nowIso,
+          updatedByEnv: envLabel,
+        };
+
+        const encryptedManifestPayload = encryptBuffer(
+          Buffer.from(JSON.stringify(manifestMeta), 'utf8')
+        );
+
+        manifestOk = await writeVaultDocument({
+          vaultKey: VAULT_SERVER_KEY,
+          docId: MANIFEST_DOC_ID,
+          chunkIndex: 0,
+          totalChunks,
+          versionSeq: nextVersionSeq,
+          sha256Hash,
+          payload: encryptedManifestPayload,
+          recordCounts: countsJson,
+          updatedByEnv: envLabel,
+          updatedAt: nowIso,
+        });
+
+        if (!manifestOk) {
+          if (isManualExplicitTrigger) {
+            lastError =
+              lastError || 'Cloud upload could not commit manifest due to Firestore write rate limit.';
+            return false;
+          }
+        } else {
+          cachedManifest = manifestMeta;
+          lastManifestFetchAt = Date.now();
+          lastVersionSeq = nextVersionSeq;
+        }
+        break;
+      } catch (writeErr: unknown) {
+        const writeMsg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+        // If another terminal bumped versionSeq concurrently, Firestore returns HTTP 403 -> refresh manifest & retry once
+        if (versionAttempt === 1 && /failed \(403\)/.test(writeMsg)) {
+          const fresh = await fetchCloudManifest().catch(() => null);
+          if (fresh && fresh.versionSeq >= nextVersionSeq) {
+            existingManifest = fresh;
+            lastVersionSeq = Math.max(lastVersionSeq, fresh.versionSeq);
+            continue;
+          }
+        }
+        throw writeErr;
       }
     }
 
-    // 5. Commit the atomic manifest pointing to targetSlot
-    const manifestMeta: ManifestMetadata = {
-      slot: targetSlot,
-      totalChunks,
-      sha256Hash,
-      rawSizeBytes: rawBuffer.length,
-      compressedSizeBytes: compressedBuffer.length,
-      versionSeq: nextVersionSeq,
-      counts: finalInspection.counts,
-      updatedAt: nowIso,
-      updatedByEnv: envLabel,
-    };
-
-    const encryptedManifestPayload = encryptBuffer(
-      Buffer.from(JSON.stringify(manifestMeta), 'utf8')
-    );
-
-    const manifestOk = await writeVaultDocument({
-      vaultKey: VAULT_SERVER_KEY,
-      docId: MANIFEST_DOC_ID,
-      chunkIndex: 0,
-      totalChunks,
-      versionSeq: nextVersionSeq,
-      sha256Hash,
-      payload: encryptedManifestPayload,
-      recordCounts: countsJson,
-      updatedByEnv: envLabel,
-      updatedAt: nowIso,
-    });
-
     if (manifestOk) {
-      cachedManifest = manifestMeta;
-      lastVersionSeq = nextVersionSeq;
       console.log(
-        `[AMS Cloud Persistence] Synced production DB to Firestore (${reason}) -> v${nextVersionSeq} (${targetSlot}, ${totalChunks} chunk(s), ${compressedBuffer.length}B gz):`,
+        `[AMS Cloud Persistence] Synced production DB to Firestore (${reason}) -> v${committedVersionSeq} (${committedTargetSlot}, ${totalChunks} chunk(s), ${compressedBuffer.length}B gz):`,
         finalInspection.counts
       );
+      if (!isOfflineOperatingMode()) {
+        updatePersistedOperatingModeState({
+          cloudSyncStatus: 'Successful',
+          lastSuccessfulCloudSyncAt: committedNowIso,
+          lastCloudSyncError: null,
+        });
+      }
     }
 
     lastSha256 = sha256Hash;
-    lastSyncAt = nowIso;
+    lastSyncAt = committedNowIso;
     lastError = null;
     cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
 
@@ -1284,7 +1514,7 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     // Never fall back to an empty, backup, seed, or stale container-bundled database when active remote vault is unreachable on boot!
     const unhydratedProdContainer =
       config.envScope === 'production' && !hasHydratedFromCloudThisProcess;
-    if (localScore === 0 || getWasDatabaseCreatedOnBoot() || unhydratedProdContainer) {
+    if (localScore === 0 || getWasDatabaseCreatedOnBoot() || getWasDatabaseQuarantinedOnBoot() || unhydratedProdContainer) {
       dbConnectionBlocked = true;
       dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${manifestRes.error}. Database switching is disabled to protect your data. Restore network and reconnect to resume using the same database.`;
     } else {
@@ -1310,7 +1540,10 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     );
 
     // Fast SHA-256 verification: if local active DB already matches cloud hash byte-for-byte, skip downloading chunks
-    const localHash = !getWasDatabaseCreatedOnBoot() && localScore > 0 ? computeLocalSqliteSha256() : null;
+    const localHash =
+      !getWasDatabaseCreatedOnBoot() && !getWasDatabaseQuarantinedOnBoot() && localScore > 0
+        ? computeLocalSqliteSha256()
+        : null;
     if (localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) {
       hasHydratedFromCloudThisProcess = true;
       lastVersionSeq = manifest.versionSeq;
@@ -1323,11 +1556,14 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
       const restored = await restoreOrMergeFromCloud(reason);
       if (
         !restored &&
-        config.envScope === 'production' &&
         !hasHydratedFromCloudThisProcess &&
-        cloudScore > 0
+        cloudScore > 0 &&
+        (config.envScope === 'production' ||
+          localScore === 0 ||
+          getWasDatabaseCreatedOnBoot() ||
+          getWasDatabaseQuarantinedOnBoot())
       ) {
-        // Downloading/verifying authoritative production chunks failed — block serving stale bundled file & auto-retry
+        // Downloading/verifying authoritative production chunks failed — block serving stale/empty file & auto-retry
         dbConnectionBlocked = true;
         dbConnectionErrorMessage = `Failed to load latest production database v${manifest.versionSeq} from ${EXTERNAL_DB_LOCATION}${lastError ? `: ${lastError}` : ''}. Retrying automatically so stale data is never shown.`;
         return;
@@ -1343,7 +1579,7 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
       (config.envScope !== 'production' || hasLocalMutationsSinceBoot)
     ) {
       await uploadLocalDbToCloud(`${reason}_superset_sync`);
-    } else {
+    } else if (hasHydratedFromCloudThisProcess) {
       lastVersionSeq = manifest.versionSeq;
       lastSha256 = manifest.sha256Hash;
     }
@@ -1364,6 +1600,16 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
  * Safe to call multiple times; returns the same initialization promise.
  */
 export async function initCloudPersistence(): Promise<void> {
+  if (isOfflineOperatingMode()) {
+    isInitialized = true;
+    isHydrationComplete = true;
+    dbConnectionBlocked = false;
+    dbConnectionErrorMessage = null;
+    console.log(
+      '[AMS Cloud Persistence] OFFLINE MODE active — using permanent local SQLite database with zero Cloud DB requests.'
+    );
+    return;
+  }
   if (initPromise) {
     return initPromise;
   }
@@ -1375,7 +1621,11 @@ export async function initCloudPersistence(): Promise<void> {
       isConnected = false;
       lastError = err instanceof Error ? err.message : String(err);
       const localInspect = inspectSqliteSnapshot(config.databasePath);
-      if (getBusinessRecordScore(localInspect.counts) === 0 || getWasDatabaseCreatedOnBoot()) {
+      if (
+        getBusinessRecordScore(localInspect.counts) === 0 ||
+        getWasDatabaseCreatedOnBoot() ||
+        getWasDatabaseQuarantinedOnBoot()
+      ) {
         dbConnectionBlocked = true;
         dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${lastError}. Reconnect to resume using the same database.`;
       }
@@ -1397,6 +1647,16 @@ export async function reconnectToCurrentDatabase(force = true): Promise<{
   error: string | null;
   status: CloudPersistenceStatus;
 }> {
+  if (isOfflineOperatingMode()) {
+    dbConnectionBlocked = false;
+    dbConnectionErrorMessage = null;
+    return {
+      connected: true,
+      blocked: false,
+      error: null,
+      status: getCloudPersistenceStatus(),
+    };
+  }
   if (force) {
     readCooldownUntil = 0;
     writeCooldownUntil = 0;
@@ -1415,6 +1675,12 @@ export async function reconnectToCurrentDatabase(force = true): Promise<{
  * Middleware / route helper ensuring startup cloud hydration has finished before serving API requests.
  */
 export async function ensureCloudPersistenceReady(): Promise<void> {
+  if (isOfflineOperatingMode()) {
+    isHydrationComplete = true;
+    dbConnectionBlocked = false;
+    dbConnectionErrorMessage = null;
+    return;
+  }
   if (isHydrationComplete) return;
   await initCloudPersistence();
 }
@@ -1484,6 +1750,7 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
  * Pulls newer changes from Firestore if another instance or deployment updated the vault.
  */
 export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check'): Promise<boolean> {
+  if (isOfflineOperatingMode()) return false;
   try {
     const manifest = await fetchCloudManifest();
     if (!manifest) return false;
@@ -1498,14 +1765,19 @@ export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check')
 }
 
 /**
- * Schedules a debounced upload (8s) after any database mutation to avoid Firestore write bursts.
+ * Schedules a debounced upload (8s) after any database mutation ONLY when in ONLINE MODE.
+ * In OFFLINE MODE, zero cloud requests are scheduled.
  */
 export function scheduleCloudUpload(reason = 'mutation'): void {
+  if (isOfflineOperatingMode()) {
+    return;
+  }
   if (uploadTimer) {
     clearTimeout(uploadTimer);
   }
   uploadTimer = setTimeout(() => {
     uploadTimer = null;
+    if (isOfflineOperatingMode()) return;
     void uploadLocalDbToCloud(reason);
   }, 8000);
 }
@@ -1515,8 +1787,11 @@ export function scheduleCloudUpload(reason = 'mutation'): void {
  */
 export async function syncDatabaseToCloudSQL(
   reason = 'manual_sync',
-  options?: { forceOverwrite?: boolean }
+  options?: { forceOverwrite?: boolean; bypassOfflineGuard?: boolean }
 ): Promise<boolean> {
+  if (isOfflineOperatingMode() && !options?.bypassOfflineGuard) {
+    return false;
+  }
   if (uploadTimer) {
     clearTimeout(uploadTimer);
     uploadTimer = null;
@@ -1571,6 +1846,9 @@ export async function ensureLocalBackupFileFromCloudSQL(
   filename: string,
   targetPath: string
 ): Promise<boolean> {
+  if (isOfflineOperatingMode()) {
+    return fs.existsSync(targetPath);
+  }
   try {
     if (fs.existsSync(targetPath)) return true;
     const safeDocId = `${ENV_SCOPE_PREFIX}_bkp_${filename.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 90)}`;
@@ -1596,7 +1874,9 @@ export async function ensureLocalBackupFileFromCloudSQL(
 export async function resetCloudPersistenceState(reason = 'master_reset'): Promise<void> {
   const db = getDatabase();
   bumpDbResetEpoch(db, reason);
-  await uploadLocalDbToCloud(`authorized_${reason}`, { forceOverwrite: true });
+  if (!isOfflineOperatingMode()) {
+    await uploadLocalDbToCloud(`authorized_${reason}`, { forceOverwrite: true });
+  }
 }
 
 const NON_MUTATING_SYNC_ROUTES = new Set([
@@ -1616,12 +1896,14 @@ const NON_MUTATING_SYNC_ROUTES = new Set([
   '/api/system/integrity-check',
   '/api/system/reconnect-db',
   '/api/system/cloud-sync-now',
+  '/api/system/operating-mode/switch',
+  '/api/system/backup-and-sync-now',
 ]);
 
 /**
  * Express middleware that:
- * 1. Guarantees startup cloud hydration from Firestore has finished before any API route executes.
- * 2. Automatically schedules a debounced cloud snapshot upload after any business write request.
+ * 1. In OFFLINE MODE: makes ZERO Cloud Database requests and tracks local mutations for manual BACKUP & SYNC NOW.
+ * 2. In ONLINE MODE: guarantees startup cloud hydration has finished and persists writes to the active Cloud DB.
  */
 export async function cloudPersistenceMiddleware(
   req: { method?: string; path?: string; originalUrl?: string },
@@ -1632,32 +1914,58 @@ export async function cloudPersistenceMiddleware(
   },
   next: () => void
 ): Promise<void> {
+  const routeLabel = String(req.originalUrl || req.path || '').split('?')[0];
+  const method = String(req.method || 'GET').toUpperCase();
+
+  // STRICT OFFLINE MODE: zero Cloud DB calls; all reads/writes hit permanent local SQLite only
+  if (isOfflineOperatingMode()) {
+    dbConnectionBlocked = false;
+    dbConnectionErrorMessage = null;
+    isHydrationComplete = true;
+
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+      res.on('finish', () => {
+        if (res.statusCode >= 200 && res.statusCode < 400) {
+          if (
+            !NON_MUTATING_SYNC_ROUTES.has(routeLabel) &&
+            !routeLabel.startsWith('/api/system/sync-conflicts/')
+          ) {
+            hasLocalMutationsSinceBoot = true;
+            recordLocalPendingMutation();
+          }
+        }
+      });
+    }
+
+    next();
+    return;
+  }
+
   try {
     await ensureCloudPersistenceReady();
   } catch {
     // Proceed cleanly to check connectionBlocked status
   }
 
-  const routeLabel = String(req.originalUrl || req.path || '').split('?')[0];
   const bypassBlockRoutes = new Set([
     '/api/system/health',
     '/api/system/reconnect-db',
     '/api/system/deployment-safety',
+    '/api/system/operating-mode',
+    '/api/system/operating-mode/switch',
+    '/api/system/backup-and-sync-now',
+    '/api/system/sync-conflicts',
     '/api/auth/status',
     '/api/auth/login',
     '/api/auth/logout',
   ]);
 
   if (dbConnectionBlocked) {
-    // Periodically auto-probe when traffic resumes so recovery happens automatically on the SAME current DB
-    if (Date.now() - lastReconnectAttemptAt > 5000) {
-      try {
-        await reconnectToCurrentDatabase(false);
-      } catch {
-        // remain blocked
-      }
-    }
-    if (dbConnectionBlocked && !bypassBlockRoutes.has(routeLabel)) {
+    if (
+      dbConnectionBlocked &&
+      !bypassBlockRoutes.has(routeLabel) &&
+      !routeLabel.startsWith('/api/system/sync-conflicts/')
+    ) {
       res.status(503).json({
         success: false,
         dbConnectionError: true,
@@ -1670,13 +1978,19 @@ export async function cloudPersistenceMiddleware(
     }
   }
 
-  const method = String(req.method || 'GET').toUpperCase();
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
-        if (!NON_MUTATING_SYNC_ROUTES.has(routeLabel)) {
+        if (
+          !NON_MUTATING_SYNC_ROUTES.has(routeLabel) &&
+          !routeLabel.startsWith('/api/system/sync-conflicts/')
+        ) {
           hasLocalMutationsSinceBoot = true;
-          scheduleCloudUpload(`http:${method}:${routeLabel}`);
+          if (!isOfflineOperatingMode()) {
+            scheduleCloudUpload(`http:${method}:${routeLabel}`);
+          } else {
+            recordLocalPendingMutation();
+          }
         }
       }
     });
@@ -1910,7 +2224,7 @@ export function hydrateSqliteFromCloudRecords(
             )
             .run(
               invNo,
-              String(s.invoice_date || new Date().toISOString().slice(0, 10)),
+              String(s.invoice_date || getPakistanDateISO()),
               s.customer_account_id || null,
               String(s.customer_name || 'Walk-in Cash Customer'),
               String(s.buyer_name || ''),
@@ -2055,7 +2369,7 @@ export function hydrateSqliteFromCloudRecords(
             .run(
               billNo,
               p.supplier_invoice_number || null,
-              String(p.bill_date || new Date().toISOString().slice(0, 10)),
+              String(p.bill_date || getPakistanDateISO()),
               p.supplier_account_id || 1,
               Number(p.gross_total || p.net_total || 0),
               Number(p.discount_amount || 0),
@@ -2186,7 +2500,7 @@ export function hydrateSqliteFromCloudRecords(
           .run(
             vNo,
             Number(v.sequence_number || 0),
-            String(v.voucher_date || new Date().toISOString().slice(0, 10)),
+            String(v.voucher_date || getPakistanDateISO()),
             String(v.transaction_type || 'Receipt'),
             String(v.category || 'General'),
             v.head_account_id || null,
@@ -2225,24 +2539,809 @@ export function hydrateSqliteFromCloudRecords(
 }
 
 /**
- * Starts a background safety check loop that ensures any local changes are synced to Firestore.
+ * Manual Control Policy: Automatic background cloud synchronization loop is intentionally disabled.
+ * Cloud synchronization occurs ONLY when Super Admin explicitly initiates BACKUP & SYNC NOW
+ * or during normal ONLINE MODE operations.
  */
 export function startCloudPersistenceBackgroundLoop(): void {
-  if (backgroundInterval) return;
-  let lastHealthyPollAt = Date.now();
-  backgroundInterval = setInterval(() => {
-    void (async () => {
-      if (!isHydrationComplete || isSyncInFlight) return;
-      if (dbConnectionBlocked) {
-        if (Date.now() >= readCooldownUntil) {
-          await reconnectToCurrentDatabase(false);
-        }
-        return;
+  // Intentionally disabled — Manual Control Only (no automatic background polling/sync)
+}
+
+export function stopCloudPersistenceBackgroundLoop(): void {
+  if (uploadTimer) {
+    clearTimeout(uploadTimer);
+    uploadTimer = null;
+  }
+  if (backgroundInterval) {
+    clearInterval(backgroundInterval);
+    backgroundInterval = null;
+  }
+}
+
+export interface ConflictTableRule {
+  table: string;
+  labelCol: string;
+  naturalKeyCol: string | null;
+  compareCols: string[];
+}
+
+export const ALLOWED_CONFLICT_TABLES: readonly ConflictTableRule[] = [
+  {
+    table: 'items',
+    labelCol: 'item_name',
+    naturalKeyCol: 'item_code',
+    compareCols: [
+      'item_name',
+      'generic_name',
+      'company_name',
+      'category',
+      'packing',
+      'purchase_price',
+      'trade_price',
+      'wholesale_price',
+      'retail_price',
+      'discount_percent',
+      'tax_percent',
+      'status',
+    ],
+  },
+  {
+    table: 'accounts',
+    labelCol: 'account_name',
+    naturalKeyCol: 'account_code',
+    compareCols: [
+      'account_name',
+      'account_group',
+      'phone',
+      'address',
+      'city',
+      'opening_balance',
+      'credit_limit',
+      'status',
+    ],
+  },
+  {
+    table: 'sales',
+    labelCol: 'invoice_number',
+    naturalKeyCol: 'invoice_number',
+    compareCols: [
+      'invoice_date',
+      'customer_name',
+      'payment_mode',
+      'gross_total',
+      'discount_amount',
+      'tax_amount',
+      'net_total',
+      'paid_amount',
+      'balance_amount',
+      'status',
+      'remarks',
+    ],
+  },
+  {
+    table: 'purchases',
+    labelCol: 'bill_number',
+    naturalKeyCol: 'bill_number',
+    compareCols: [
+      'bill_date',
+      'supplier_account_id',
+      'payment_mode',
+      'gross_total',
+      'discount_amount',
+      'tax_amount',
+      'net_total',
+      'paid_amount',
+      'remaining_balance',
+      'status',
+      'remarks',
+    ],
+  },
+  {
+    table: 'inventory',
+    labelCol: 'batch_number',
+    naturalKeyCol: null,
+    compareCols: [
+      'batch_number',
+      'expiry_date',
+      'cost_price',
+      'trade_price',
+      'retail_price',
+      'current_pack_qty',
+      'current_loose_qty',
+      'total_stock_units',
+      'status',
+    ],
+  },
+  {
+    table: 'cash_book_vouchers',
+    labelCol: 'voucher_number',
+    naturalKeyCol: 'voucher_number',
+    compareCols: [
+      'voucher_date',
+      'transaction_type',
+      'category',
+      'head_account_name',
+      'receipt_amount',
+      'payment_amount',
+      'net_amount',
+      'narration',
+      'status',
+    ],
+  },
+  {
+    table: 'sale_returns',
+    labelCol: 'return_number',
+    naturalKeyCol: 'return_number',
+    compareCols: ['return_date', 'net_total', 'status', 'remarks'],
+  },
+  {
+    table: 'purchase_returns',
+    labelCol: 'return_number',
+    naturalKeyCol: 'return_number',
+    compareCols: ['return_date', 'net_total', 'status', 'remarks'],
+  },
+];
+
+function normalizeCompareValue(val: unknown): string {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return '0';
+    return String(Math.round(val * 10000) / 10000);
+  }
+  return String(val).trim();
+}
+
+function parseComparableTimestamp(raw: unknown): number {
+  if (!raw) return 0;
+  const parsed = parseUtcTimestamp(raw as string | Date | number);
+  return parsed ? parsed.getTime() : 0;
+}
+
+export interface CloudReachabilityResult {
+  reachable: boolean;
+  exists: boolean;
+  versionSeq: number;
+  counts: CloudRecordCounts | null;
+  error: string | null;
+  location: string;
+}
+
+/**
+ * Performs a live Cloud Database (Firestore) reachability verification.
+ * Used before switching from OFFLINE -> ONLINE and during manual BACKUP & SYNC NOW.
+ */
+export async function checkCloudDatabaseReachability(): Promise<CloudReachabilityResult> {
+  readCooldownUntil = 0;
+  const res = await fetchCloudManifestDetailed();
+  if (res.status === 'unreachable') {
+    return {
+      reachable: false,
+      exists: false,
+      versionSeq: lastVersionSeq,
+      counts: null,
+      error: res.error,
+      location: EXTERNAL_DB_LOCATION,
+    };
+  }
+  if (res.status === 'not_found') {
+    return {
+      reachable: true,
+      exists: false,
+      versionSeq: 0,
+      counts: null,
+      error: null,
+      location: EXTERNAL_DB_LOCATION,
+    };
+  }
+  cloudRecordCounts = res.manifest.counts as unknown as Record<string, number>;
+  if (res.manifest.versionSeq > lastVersionSeq) {
+    lastVersionSeq = res.manifest.versionSeq;
+  }
+  return {
+    reachable: true,
+    exists: true,
+    versionSeq: res.manifest.versionSeq,
+    counts: res.manifest.counts,
+    error: null,
+    location: EXTERNAL_DB_LOCATION,
+  };
+}
+
+export interface ConflictAwareMergeReport {
+  mergedFromCloud: number;
+  updatedFromCloud: number;
+  conflictsDetected: number;
+  unresolvedConflictsCount: number;
+}
+
+/**
+ * Compares the active local SQLite database against a verified Cloud SQLite snapshot:
+ * - Detects genuine conflicting modifications on the same record without silently overwriting either side.
+ * - Never overwrites newer local records with older cloud data.
+ * - Auto-reconciles stale unresolved conflicts when both sides already match and honors Super Admin resolutions
+ *   without infinite re-conflict loops.
+ * - Non-destructively merges missing non-duplicate records, advances sequences, and recalculates ledger balances.
+ */
+export function detectAndMergeCloudSnapshotWithConflicts(
+  cloudDbFilePath: string,
+  options: {
+    lastSyncedAt: string | null;
+    switchedAt?: string | null;
+    hasLocalPendingChanges?: boolean;
+  }
+): ConflictAwareMergeReport {
+  const db = getDatabase();
+  const escapedPath = cloudDbFilePath.replace(/'/g, "''");
+  const CLOCK_TOLERANCE_MS = 1000;
+
+  let dbBaselineSyncMs = 0;
+  try {
+    const csRow = db
+      .prepare('SELECT last_successful_cloud_sync_at FROM company_settings ORDER BY id ASC LIMIT 1')
+      .get() as { last_successful_cloud_sync_at?: string | null } | undefined;
+    dbBaselineSyncMs = parseComparableTimestamp(csRow?.last_successful_cloud_sync_at);
+  } catch {
+    dbBaselineSyncMs = 0;
+  }
+
+  const effectiveLastSyncMs = Math.max(
+    parseComparableTimestamp(options.lastSyncedAt),
+    dbBaselineSyncMs,
+    parseComparableTimestamp(options.switchedAt)
+  );
+  const nowAutoResolveIso = new Date().toISOString();
+
+  let mergedFromCloud = 0;
+  let updatedFromCloud = 0;
+  let conflictsDetected = 0;
+
+  db.exec(`ATTACH DATABASE '${escapedPath}' AS cloud_snap;`);
+  try {
+    const localTables = new Set(
+      (
+        db
+          .prepare("SELECT name FROM main.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+          .all() as Array<{ name: string }>
+      ).map((t) => t.name)
+    );
+    const cloudTables = new Set(
+      (
+        db
+          .prepare("SELECT name FROM cloud_snap.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+          .all() as Array<{ name: string }>
+      ).map((t) => t.name)
+    );
+
+    const conflictedIdsByTable = new Map<string, Set<string>>();
+    const activeConflictKeys = new Set<string>();
+
+    // 1. Conflict Detection & Non-Conflicting Newer Cloud Update Pass on Core Business Tables
+    for (const rule of ALLOWED_CONFLICT_TABLES) {
+      const tableName = rule.table;
+      if (!localTables.has(tableName) || !cloudTables.has(tableName)) continue;
+
+      const localCols = (
+        db.prepare(`PRAGMA main.table_info("${tableName}")`).all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      const cloudColsSet = new Set(
+        (
+          db.prepare(`PRAGMA cloud_snap.table_info("${tableName}")`).all() as Array<{ name: string }>
+        ).map((c) => c.name)
+      );
+      const sharedCols = localCols.filter((c) => cloudColsSet.has(c));
+      if (!sharedCols.includes('id')) continue;
+
+      const activeCompareCols = rule.compareCols.filter((c) => sharedCols.includes(c));
+      if (activeCompareCols.length === 0) continue;
+
+      const hasUpdatedAt = sharedCols.includes('updated_at');
+      const hasCreatedAt = sharedCols.includes('created_at');
+      const selectCols = Array.from(
+        new Set([
+          'id',
+          ...(sharedCols.includes(rule.labelCol) ? [rule.labelCol] : []),
+          ...(hasUpdatedAt ? ['updated_at'] : []),
+          ...(hasCreatedAt ? ['created_at'] : []),
+          ...activeCompareCols,
+        ])
+      );
+      const quotedSelect = selectCols.map((c) => `"${c}"`).join(', ');
+
+      const localRows = db
+        .prepare(`SELECT ${quotedSelect} FROM main."${tableName}"`)
+        .all() as Array<Record<string, unknown>>;
+      const cloudRows = db
+        .prepare(`SELECT ${quotedSelect} FROM cloud_snap."${tableName}"`)
+        .all() as Array<Record<string, unknown>>;
+
+      const localById = new Map<string, Record<string, unknown>>();
+      for (const r of localRows) {
+        localById.set(String(r.id), r);
       }
-      if (Date.now() < readCooldownUntil) return;
-      if (Date.now() - lastHealthyPollAt < 120000) return;
-      lastHealthyPollAt = Date.now();
-      await pullFromCloudPersistenceIfNewer('background_poll');
-    })();
-  }, 15000);
+
+      const conflictIdSet = new Set<string>();
+      conflictedIdsByTable.set(tableName, conflictIdSet);
+
+      const safeCloudUpdateIds: string[] = [];
+
+      for (const cloudRow of cloudRows) {
+        const recId = String(cloudRow.id);
+        const localRow = localById.get(recId);
+        if (!localRow) continue;
+
+        const changedFields = activeCompareCols.filter(
+          (col) => normalizeCompareValue(localRow[col]) !== normalizeCompareValue(cloudRow[col])
+        );
+        if (changedFields.length === 0) {
+          // Values already match cleanly — auto-clear any stale unresolved conflict row for this record
+          db.prepare(
+            `UPDATE main.sync_conflicts
+             SET status = 'resolved',
+                 resolution_choice = COALESCE(resolution_choice, 'keep_local'),
+                 resolved_by = COALESCE(resolved_by, 'System (Auto-Reconciled)'),
+                 resolved_at = COALESCE(resolved_at, ?)
+             WHERE table_name = ? AND record_id = ? AND status = 'unresolved'`
+          ).run(nowAutoResolveIso, tableName, recId);
+          continue;
+        }
+
+        const localTsStr = String(localRow.updated_at || localRow.created_at || '');
+        const cloudTsStr = String(cloudRow.updated_at || cloudRow.created_at || '');
+        const localMs = parseComparableTimestamp(localTsStr);
+        const cloudMs = parseComparableTimestamp(cloudTsStr);
+
+        // Honor Super Admin's explicit resolution for this exact Cloud version so resolving a conflict
+        // and clicking BACKUP & SYNC NOW again NEVER triggers an infinite re-conflict loop!
+        const alreadyResolved = db
+          .prepare(
+            `SELECT id, resolution_choice, local_updated_at, cloud_updated_at, resolved_at
+             FROM main.sync_conflicts
+             WHERE table_name = ? AND record_id = ? AND status = 'resolved'
+               AND COALESCE(cloud_updated_at, '') = ?
+             ORDER BY id DESC LIMIT 1`
+          )
+          .get(tableName, recId, cloudTsStr) as
+          | {
+              id: number;
+              resolution_choice: string;
+              local_updated_at: string | null;
+              cloud_updated_at: string | null;
+              resolved_at: string | null;
+            }
+          | undefined;
+
+        if (alreadyResolved) {
+          if (alreadyResolved.resolution_choice === 'keep_local') {
+            // Super Admin explicitly chose Local over this exact Cloud version -> keep local intact
+            continue;
+          }
+          if (alreadyResolved.resolution_choice === 'keep_cloud') {
+            // Re-apply cloud safely if local wasn't newly edited after resolution
+            const resolvedMs = parseComparableTimestamp(alreadyResolved.resolved_at);
+            if (localMs <= resolvedMs + 2000) {
+              safeCloudUpdateIds.push(recId);
+              continue;
+            }
+          }
+        }
+
+        let isConflict = false;
+        let cloudIsStrictlyNewerSafe = false;
+
+        if (effectiveLastSyncMs > 0) {
+          const localModifiedSinceSync = localMs > effectiveLastSyncMs + CLOCK_TOLERANCE_MS;
+          const cloudModifiedSinceSync = cloudMs > effectiveLastSyncMs + CLOCK_TOLERANCE_MS;
+
+          if (localModifiedSinceSync && cloudModifiedSinceSync) {
+            // Genuine 2-way concurrent edit after last sync -> require Super Admin choice
+            isConflict = true;
+          } else if (cloudModifiedSinceSync && !localModifiedSinceSync) {
+            cloudIsStrictlyNewerSafe = true;
+          } else if (localModifiedSinceSync && !cloudModifiedSinceSync) {
+            // Local is strictly newer since last sync -> keep local intact
+            isConflict = false;
+          } else if (localMs > cloudMs + CLOCK_TOLERANCE_MS) {
+            // Both timestamps pre-date baseline, but Local is strictly newer -> keep local
+            isConflict = false;
+          } else if (cloudMs > localMs + CLOCK_TOLERANCE_MS) {
+            // Both timestamps pre-date baseline, but Cloud is strictly newer -> pull cloud safely
+            cloudIsStrictlyNewerSafe = true;
+          } else {
+            // Equal or missing timestamps yet business fields genuinely differ -> safe conflict
+            isConflict = true;
+          }
+        } else {
+          // First manual sync baseline: rely strictly on normalized UTC timestamps (never blindly flag newer local edits!)
+          if (localMs > cloudMs + CLOCK_TOLERANCE_MS) {
+            // Local is strictly newer -> keep local
+            isConflict = false;
+          } else if (cloudMs > localMs + CLOCK_TOLERANCE_MS) {
+            // Cloud is strictly newer -> safe pull from cloud
+            cloudIsStrictlyNewerSafe = true;
+          } else {
+            // Equal or missing timestamps yet values differ -> safe conflict
+            isConflict = true;
+          }
+        }
+
+        if (isConflict) {
+          conflictIdSet.add(recId);
+          activeConflictKeys.add(`${tableName}:${recId}`);
+          const existingUnresolved = db
+            .prepare(
+              `SELECT id FROM main.sync_conflicts
+               WHERE table_name = ? AND record_id = ? AND status = 'unresolved' LIMIT 1`
+            )
+            .get(tableName, recId) as { id: number } | undefined;
+
+          const label = String(localRow[rule.labelCol] || cloudRow[rule.labelCol] || `#${recId}`);
+          if (existingUnresolved) {
+            db.prepare(
+              `UPDATE main.sync_conflicts
+               SET record_label = ?, local_updated_at = ?, cloud_updated_at = ?,
+                   local_snapshot_json = ?, cloud_snapshot_json = ?, changed_fields_json = ?
+               WHERE id = ?`
+            ).run(
+              label,
+              localTsStr || null,
+              cloudTsStr || null,
+              JSON.stringify(localRow),
+              JSON.stringify(cloudRow),
+              JSON.stringify(changedFields),
+              existingUnresolved.id
+            );
+          } else {
+            db.prepare(
+              `INSERT INTO main.sync_conflicts (
+                 table_name, record_id, record_label,
+                 local_updated_at, cloud_updated_at,
+                 local_snapshot_json, cloud_snapshot_json,
+                 changed_fields_json, status
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unresolved')`
+            ).run(
+              tableName,
+              recId,
+              label,
+              localTsStr || null,
+              cloudTsStr || null,
+              JSON.stringify(localRow),
+              JSON.stringify(cloudRow),
+              JSON.stringify(changedFields)
+            );
+          }
+          conflictsDetected += 1;
+        } else if (cloudIsStrictlyNewerSafe) {
+          safeCloudUpdateIds.push(recId);
+        }
+      }
+
+      // Apply strictly newer non-conflicting cloud updates only
+      if (safeCloudUpdateIds.length > 0) {
+        const updateCols = sharedCols.filter((c) => c !== 'id');
+        if (updateCols.length > 0) {
+          const setClause = updateCols.map((c) => `"${c}" = ?`).join(', ');
+          const updateStmt = db.prepare(`UPDATE main."${tableName}" SET ${setClause} WHERE id = ?`);
+          const fetchCloudFullStmt = db.prepare(
+            `SELECT ${sharedCols.map((c) => `"${c}"`).join(', ')} FROM cloud_snap."${tableName}" WHERE id = ?`
+          );
+          db.pragma('foreign_keys = OFF');
+          try {
+            const applyTx = db.transaction(() => {
+              for (const recId of safeCloudUpdateIds) {
+                const fullCloud = fetchCloudFullStmt.get(recId) as Record<string, unknown> | undefined;
+                if (!fullCloud) continue;
+                const values = updateCols.map((c) => fullCloud[c]);
+                updateStmt.run(...values, recId);
+                updatedFromCloud += 1;
+              }
+            });
+            applyTx();
+          } finally {
+            db.pragma('foreign_keys = ON');
+          }
+        }
+      }
+    }
+
+    // 2. Merge tombstones & missing non-duplicate records across all shared tables
+    if (cloudTables.has('sync_tombstones') && localTables.has('sync_tombstones')) {
+      db.prepare(
+        `INSERT OR IGNORE INTO main.sync_tombstones (table_name, record_id, client_tx_id, deleted_at)
+         SELECT table_name, record_id, client_tx_id, deleted_at FROM cloud_snap.sync_tombstones`
+      ).run();
+    }
+
+    const skipTables = new Set([
+      'user_sessions',
+      'database_migrations',
+      'device_registry',
+      'sync_tombstones',
+      'sync_conflicts',
+      'backup_history',
+    ]);
+
+    const allSharedTables = Array.from(localTables).filter(
+      (t) => !skipTables.has(t) && cloudTables.has(t)
+    );
+
+    db.pragma('foreign_keys = OFF');
+    try {
+      const mergeTx = db.transaction(() => {
+        for (const tableName of allSharedTables) {
+          const localCols = (
+            db.prepare(`PRAGMA main.table_info("${tableName}")`).all() as Array<{ name: string }>
+          ).map((c) => c.name);
+          const cloudColsSet = new Set(
+            (
+              db
+                .prepare(`PRAGMA cloud_snap.table_info("${tableName}")`)
+                .all() as Array<{ name: string }>
+            ).map((c) => c.name)
+          );
+          const sharedCols = localCols.filter((c) => cloudColsSet.has(c));
+          if (sharedCols.length === 0) continue;
+
+          const quotedCols = sharedCols.map((c) => `"${c}"`).join(', ');
+          const hasId = sharedCols.includes('id');
+          const rule = ALLOWED_CONFLICT_TABLES.find((r) => r.table === tableName);
+          const natKey = rule?.naturalKeyCol && sharedCols.includes(rule.naturalKeyCol) ? rule.naturalKeyCol : null;
+
+          const whereParts: string[] = [];
+          const params: unknown[] = [];
+
+          if (hasId && localTables.has('sync_tombstones')) {
+            whereParts.push(
+              `CAST(c.id AS TEXT) NOT IN (SELECT CAST(record_id AS TEXT) FROM main.sync_tombstones WHERE table_name = ?)`
+            );
+            params.push(tableName);
+          }
+          if (hasId) {
+            whereParts.push(`c.id NOT IN (SELECT id FROM main."${tableName}")`);
+          }
+          if (natKey) {
+            whereParts.push(
+              `(c."${natKey}" IS NULL OR c."${natKey}" = '' OR c."${natKey}" NOT IN (SELECT "${natKey}" FROM main."${tableName}" WHERE "${natKey}" IS NOT NULL))`
+            );
+          }
+
+          const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
+          const selectExpr = sharedCols.map((c) => `c."${c}"`).join(', ');
+          const stmt = db.prepare(
+            `INSERT OR IGNORE INTO main."${tableName}" (${quotedCols})
+             SELECT ${selectExpr} FROM cloud_snap."${tableName}" c ${whereSql}`
+          );
+          const res = stmt.run(...params);
+          mergedFromCloud += Number(res.changes || 0);
+        }
+
+        // Advance sequence counters to MAX(local, cloud) so invoice/item/voucher codes never duplicate
+        if (localTables.has('invoice_sequences') && cloudTables.has('invoice_sequences')) {
+          db.prepare(
+            `UPDATE main.invoice_sequences
+             SET last_seq = MAX(
+               main.invoice_sequences.last_seq,
+               COALESCE((SELECT c.last_seq FROM cloud_snap.invoice_sequences c WHERE c.period_key = main.invoice_sequences.period_key), 0)
+             )`
+          ).run();
+        }
+        if (localTables.has('item_code_sequences') && cloudTables.has('item_code_sequences')) {
+          db.prepare(
+            `UPDATE main.item_code_sequences
+             SET last_number = MAX(
+               main.item_code_sequences.last_number,
+               COALESCE((SELECT c.last_number FROM cloud_snap.item_code_sequences c WHERE c.sequence_key = main.item_code_sequences.sequence_key), 0)
+             )`
+          ).run();
+        }
+        if (localTables.has('cash_book_sequences') && cloudTables.has('cash_book_sequences')) {
+          db.prepare(
+            `UPDATE main.cash_book_sequences
+             SET last_sequence = MAX(
+               main.cash_book_sequences.last_sequence,
+               COALESCE((SELECT c.last_sequence FROM cloud_snap.cash_book_sequences c WHERE c.sequence_key = main.cash_book_sequences.sequence_key), 0)
+             )`
+          ).run();
+        }
+      });
+      mergeTx();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+
+    if (mergedFromCloud > 0 || updatedFromCloud > 0) {
+      reconcileHeldAndDuplicateLedgerEntries();
+    }
+
+    // Auto-clear any stale unresolved sync_conflicts that are no longer conflicting against the live cloud snapshot
+    // (for example, legacy false-positive conflicts on derived accounts.current_balance or deleted records)
+    const remainingUnresolved = db
+      .prepare("SELECT id, table_name, record_id FROM main.sync_conflicts WHERE status = 'unresolved'")
+      .all() as Array<{ id: number; table_name: string; record_id: string }>;
+    for (const stale of remainingUnresolved) {
+      const key = `${stale.table_name}:${stale.record_id}`;
+      if (!activeConflictKeys.has(key)) {
+        db.prepare(
+          `UPDATE main.sync_conflicts
+           SET status = 'resolved',
+               resolution_choice = COALESCE(resolution_choice, 'keep_local'),
+               resolved_by = COALESCE(resolved_by, 'System (Auto-Reconciled)'),
+               resolved_at = COALESCE(resolved_at, ?)
+           WHERE id = ?`
+        ).run(nowAutoResolveIso, stale.id);
+      }
+    }
+  } finally {
+    try {
+      db.exec('DETACH DATABASE cloud_snap;');
+    } catch {
+      // ignore
+    }
+  }
+
+  const unresolvedRow = db
+    .prepare("SELECT COUNT(*) as cnt FROM sync_conflicts WHERE status = 'unresolved'")
+    .get() as { cnt: number } | undefined;
+
+  return {
+    mergedFromCloud,
+    updatedFromCloud,
+    conflictsDetected,
+    unresolvedConflictsCount: Number(unresolvedRow?.cnt || 0),
+  };
+}
+
+export interface ManualCloudSyncResult {
+  status: 'Successful' | 'Pending' | 'Failed';
+  reachable: boolean;
+  mergedFromCloud: number;
+  updatedFromCloud: number;
+  conflictsDetected: number;
+  unresolvedConflictsCount: number;
+  uploaded: boolean;
+  cloudVersionSeq: number;
+  message: string;
+  error: string | null;
+}
+
+/**
+ * Explicit Super Admin Manual Cloud Synchronization (Step 2 of BACKUP & SYNC NOW).
+ * Works safely from BOTH ONLINE MODE and OFFLINE MODE without enabling background sync.
+ */
+export async function runConflictAwareBidirectionalCloudSync(options: {
+  lastSyncedAt: string | null;
+  switchedAt?: string | null;
+  hasLocalPendingChanges?: boolean;
+  initiatedBy: string;
+}): Promise<ManualCloudSyncResult> {
+  // Clear cooldowns for explicit Super Admin manual trigger
+  readCooldownUntil = 0;
+  writeCooldownUntil = 0;
+
+  const reachability = await checkCloudDatabaseReachability();
+  if (!reachability.reachable) {
+    return {
+      status: 'Pending',
+      reachable: false,
+      mergedFromCloud: 0,
+      updatedFromCloud: 0,
+      conflictsDetected: 0,
+      unresolvedConflictsCount: 0,
+      uploaded: false,
+      cloudVersionSeq: lastVersionSeq,
+      message:
+        'Cloud Database is currently unreachable (offline or no internet). Local backup succeeded; Cloud Sync remains Pending until you run BACKUP & SYNC NOW again when internet is available.',
+      error: reachability.error,
+    };
+  }
+
+  let mergedFromCloud = 0;
+  let updatedFromCloud = 0;
+  let conflictsDetected = 0;
+  let unresolvedConflictsCount = 0;
+  let verifiedLiveMerge = false;
+
+  if (reachability.exists && cachedManifest) {
+    const dataDir = path.dirname(config.databasePath);
+    const stagedPath = path.join(dataDir, `ams_manual_sync_staged_${Date.now()}.db`);
+    try {
+      const cloudBuffer = await downloadVerifiedCloudSqliteBuffer(cachedManifest);
+      fs.writeFileSync(stagedPath, cloudBuffer);
+      const stagedInspect = inspectSqliteSnapshot(stagedPath, { immutable: true });
+      if (!stagedInspect.valid) {
+        throw new Error('Downloaded Cloud Database snapshot failed integrity check.');
+      }
+
+      const mergeReport = detectAndMergeCloudSnapshotWithConflicts(stagedPath, {
+        lastSyncedAt: options.lastSyncedAt,
+        switchedAt: options.switchedAt,
+        hasLocalPendingChanges: options.hasLocalPendingChanges,
+      });
+      mergedFromCloud = mergeReport.mergedFromCloud;
+      updatedFromCloud = mergeReport.updatedFromCloud;
+      conflictsDetected = mergeReport.conflictsDetected;
+      unresolvedConflictsCount = mergeReport.unresolvedConflictsCount;
+      verifiedLiveMerge = true;
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return {
+        status: 'Failed',
+        reachable: true,
+        mergedFromCloud,
+        updatedFromCloud,
+        conflictsDetected,
+        unresolvedConflictsCount,
+        uploaded: false,
+        cloudVersionSeq: lastVersionSeq,
+        message: `Cloud synchronization failed while verifying cloud records: ${errMsg}`,
+        error: errMsg,
+      };
+    } finally {
+      try {
+        if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
+      } catch {
+        // ignore cleanup warning
+      }
+    }
+  } else {
+    const db = getDatabase();
+    const unresolvedRow = db
+      .prepare("SELECT COUNT(*) as cnt FROM sync_conflicts WHERE status = 'unresolved'")
+      .get() as { cnt: number } | undefined;
+    unresolvedConflictsCount = Number(unresolvedRow?.cnt || 0);
+  }
+
+  if (unresolvedConflictsCount > 0) {
+    return {
+      status: 'Pending',
+      reachable: true,
+      mergedFromCloud,
+      updatedFromCloud,
+      conflictsDetected,
+      unresolvedConflictsCount,
+      uploaded: false,
+      cloudVersionSeq: Math.max(lastVersionSeq, reachability.versionSeq),
+      message: `${unresolvedConflictsCount} record conflict(s) detected between Local and Cloud databases. Neither version was overwritten. Please resolve the conflict(s) below and click BACKUP & SYNC NOW again.`,
+      error: null,
+    };
+  }
+
+  // Verified and reconciled with live Cloud DB — mark hydrated and commit reconciled DB safely
+  hasHydratedFromCloudThisProcess = true;
+  const uploaded = await uploadLocalDbToCloud(`manual_backup_sync_by_${options.initiatedBy}`, {
+    forceOverwrite: false,
+    bypassOfflineGuard: true,
+    allowVerifiedPostMergeSync: verifiedLiveMerge,
+  });
+
+  if (!uploaded) {
+    return {
+      status: 'Pending',
+      reachable: true,
+      mergedFromCloud,
+      updatedFromCloud,
+      conflictsDetected: 0,
+      unresolvedConflictsCount: 0,
+      uploaded: false,
+      cloudVersionSeq: Math.max(lastVersionSeq, reachability.versionSeq),
+      message: `Cloud upload could not complete right now${lastError ? `: ${lastError}` : ''}. Local backup is safe and Cloud Sync remains Pending.`,
+      error: lastError,
+    };
+  }
+
+  return {
+    status: 'Successful',
+    reachable: true,
+    mergedFromCloud,
+    updatedFromCloud,
+    conflictsDetected: 0,
+    unresolvedConflictsCount: 0,
+    uploaded: true,
+    cloudVersionSeq: Math.max(lastVersionSeq, reachability.versionSeq),
+    message: `Cloud Database synchronized successfully (Version #${Math.max(lastVersionSeq, reachability.versionSeq)}${
+      mergedFromCloud > 0 || updatedFromCloud > 0
+        ? `; merged ${mergedFromCloud} new and ${updatedFromCloud} updated cloud record(s)`
+        : ''
+    }).`,
+    error: null,
+  };
 }

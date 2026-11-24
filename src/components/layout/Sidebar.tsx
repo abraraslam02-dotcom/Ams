@@ -145,6 +145,8 @@ export type NavTabId =
   | 'sales-item-wise'
   | 'report-item-purchases'
   | 'sales-profit-report'
+  | 'invoice-profit-report'
+  | 'detailed-profit-report'
   | 'report-quarterly'
   | 'report-account-profit'
   | 'sales-daily-summary'
@@ -428,6 +430,8 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'sales-item-wise': 'box',
   'report-item-purchases': 'bag',
   'sales-profit-report': 'trendUp',
+  'invoice-profit-report': 'doc',
+  'detailed-profit-report': 'clipboard',
   'report-quarterly': 'chart',
   'report-account-profit': 'scale',
   'sales-daily-summary': 'chart',
@@ -643,7 +647,9 @@ const MENU: MenuNode[] = [
       { id: 'report-item-reports', label: 'Detailed Item Stock Report' },
       { id: 'sales-item-wise', label: 'Item Sales Reports' },
       { id: 'report-item-purchases', label: 'Item Purchase Reports' },
-      { id: 'sales-profit-report', label: 'Item Profit Reports' },
+      { id: 'invoice-profit-report', label: 'Invoice-wise Profit Report' },
+      { id: 'sales-profit-report', label: 'Item-wise Profit Report' },
+      { id: 'detailed-profit-report', label: 'Detailed Profit Report' },
       { id: 'report-quarterly', label: 'Item Full Quarterly Report' },
       { id: 'report-account-profit', label: 'Account Profit Reports' },
       { id: 'sales-daily-summary', label: 'Sales Analysis' },

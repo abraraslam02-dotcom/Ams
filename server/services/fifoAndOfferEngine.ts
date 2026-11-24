@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { getDatabase } from '../db/connection.ts';
 
 export function round2(val: unknown): number {
@@ -190,7 +191,7 @@ export function getItemBatchesWithFIFOStatus(itemId?: number, variantId?: number
     .prepare('SELECT near_expiry_days FROM company_settings LIMIT 1')
     .get() as { near_expiry_days?: number } | undefined;
   const nearExpiryDays = Number(settings?.near_expiry_days || 90);
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getPakistanDateISO();
   const todayDate = new Date(`${todayStr}T00:00:00`);
 
   const conds: string[] = [];
@@ -567,7 +568,7 @@ export function recordBatchStockMovement(params: {
       balance_after_packs, remarks, performed_by
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    params.movementDate || params.movement_date || new Date().toISOString().slice(0, 10),
+    params.movementDate || params.movement_date || getPakistanDateISO(),
     Number(params.itemId ?? params.item_id ?? 0),
     resolvedVariantId,
     resolvedVariantCode,
@@ -699,7 +700,7 @@ export function evaluateLineOfferAndPartyDiscount(
     )
   );
   const grossAmount = round2(saleQty * tradePrice);
-  const invoiceDate = String(input.invoiceDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const invoiceDate = String(input.invoiceDate || getPakistanDateISO()).slice(0, 10);
 
   const settings = db
     .prepare('SELECT discount_stacking_rule FROM company_settings LIMIT 1')

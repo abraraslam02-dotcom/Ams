@@ -32,7 +32,7 @@ import {
 } from 'lucide-react';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
-import { formatAppDate } from '../../utils/formatters';
+import { formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 
 export type PayrollTabId =
   | 'payroll-dashboard'
@@ -3490,7 +3490,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                   payload={{
                     documentType: 'statement',
                     documentNumber: String(salarySlipData.payroll?.payroll_code || 'Salary Slip'),
-                    documentDate: new Date().toISOString().slice(0, 10),
+                    documentDate: getPakistanDateISO(),
                     customerName: String(salarySlipData.payroll?.full_name || 'Employee Salary Slip'),
                     customerPhone: String(salarySlipData.payroll?.phone || ''),
                     totalAmount: Number(salarySlipData.payroll?.net_salary || 0),
@@ -3783,7 +3783,7 @@ export const PayrollHRWorkspace: React.FC<PayrollHRWorkspaceProps> = ({
                     payload={{
                       documentType: 'report',
                       documentNumber: String(reportData?.title || 'Payroll & HR Report'),
-                      documentDate: new Date().toISOString().slice(0, 10),
+                      documentDate: getPakistanDateISO(),
                       customerName: String(reportData?.title || 'Payroll & HR Report'),
                       totalAmount: 0,
                       paidAmount: 0,

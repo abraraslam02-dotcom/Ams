@@ -87,6 +87,8 @@ export interface WhatsAppDocumentPayload {
     bonus_quantity?: number;
     unit_price?: number;
     loose_rate?: number;
+    gross_amount?: number;
+    discount_percent?: number;
     discount_amount?: number;
     line_total?: number;
   }>;
@@ -497,12 +499,12 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
   vLine(ML + labW, metaTop, y);
 
   // 3. Items table: # | Item Details | Qty | Bonus | Rate | Disc | Amount
-  const wNo = 12;
-  const wQty = 22;
-  const wBonus = 22;
-  const wRate = 26;
-  const wDisc = 22;
-  const wAmt = 36;
+  const wNo = is58 ? 10 : 12;
+  const wQty = is58 ? 16 : 20;
+  const wBonus = is58 ? 16 : 20;
+  const wRate = is58 ? 20 : 25;
+  const wDisc = is58 ? 26 : 34;
+  const wAmt = is58 ? 26 : 35;
   const wItem = CW - (wNo + wQty + wBonus + wRate + wDisc + wAmt);
   const xNo = ML;
   const xItem = xNo + wNo;
@@ -531,6 +533,23 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
     const looseQty = Number(it.loose_quantity ?? 0);
     const bonusQty = Number(it.bonus_quantity ?? 0);
     const discAmt = Number(it.discount_amount ?? 0);
+    const rawDiscPct = Number(it.discount_percent ?? 0);
+    const lineGross = Number(
+      it.gross_amount ??
+        packQty * Number(it.unit_price || 0) + looseQty * Number(it.loose_rate || 0)
+    );
+    const effectiveDiscPct =
+      rawDiscPct > 0
+        ? rawDiscPct
+        : discAmt > 0 && lineGross > 0
+        ? Math.round((discAmt / lineGross) * 10000) / 100
+        : 0;
+    const discText =
+      discAmt > 0 || effectiveDiscPct > 0
+        ? `${Number(effectiveDiscPct.toFixed(2))}%(${
+            discAmt % 1 === 0 ? discAmt.toFixed(0) : Number(discAmt.toFixed(2))
+          })`
+        : '-';
     totalQtyCount += packQty + looseQty + bonusQty;
 
     const qtyText =
@@ -568,7 +587,7 @@ function generateThermalInvoicePdf(payload: WhatsAppDocumentPayload): {
     cell(qtyText, xQty, wQty, 8, 'c');
     cell(bonusQty > 0 ? String(bonusQty) : '-', xBonus, wBonus, 7.5, 'c');
     cell(rateText, xRate, wRate, 7.5, 'c');
-    cell(discAmt > 0 ? discAmt.toFixed(0) : '-', xDisc, wDisc, 7.5, 'c');
+    cell(discText, xDisc, wDisc, 7, 'c');
     cell(Number(it.line_total || 0).toFixed(1), xAmt, wAmt - 2, 8, 'r');
 
     y += rowH;

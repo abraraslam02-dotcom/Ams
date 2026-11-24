@@ -17,7 +17,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { ExpiryAlertItem } from '../../types/inventory';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -111,7 +111,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Expiry Alerts');
-    XLSX.writeFile(workbook, `AMS_Expiry_Alerts_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.writeFile(workbook, `AMS_Expiry_Alerts_${getPakistanDateISO()}.xlsx`);
   };
 
   return (
@@ -249,7 +249,7 @@ export const ExpiryManagementView: React.FC<ExpiryManagementViewProps> = ({
             payload={{
               documentType: 'report',
               documentNumber: 'Expiry & Quarantine Report',
-              documentDate: new Date().toISOString().slice(0, 10),
+              documentDate: getPakistanDateISO(),
               customerName: 'Expiry & Quarantine Report',
               totalAmount: 0,
               paidAmount: 0,

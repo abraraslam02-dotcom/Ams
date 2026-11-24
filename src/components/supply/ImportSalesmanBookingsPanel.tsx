@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../../utils/formatters';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import {
@@ -167,7 +168,7 @@ export const ImportSalesmanBookingsPanel: React.FC<ImportSalesmanBookingsPanelPr
               booking_uuid: bUuid,
               booking_no: bNo,
               booking_number: bNo,
-              booking_date: String(row.Booking_Date || row.booking_date || new Date().toISOString().slice(0, 10)),
+              booking_date: String(row.Booking_Date || row.booking_date || getPakistanDateISO()),
               salesman_id: Number(row.Salesman_ID || row.salesman_id || 0),
               salesman_code: String(row.Salesman_Code || row.salesman_code || ''),
               salesman_name: String(row.Salesman_Name || row.salesman_name || ''),

@@ -20,7 +20,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { api } from '../../services/api';
-import { formatPKR, formatPKTDateTime } from '../../utils/formatters';
+import { formatPKR, formatPKTDateTime, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
@@ -97,7 +97,7 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
   initialRanking = '10',
   embedded = false,
 }) => {
-  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const todayIso = useMemo(() => getPakistanDateISO(), []);
   const firstOfMonthIso = useMemo(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
@@ -770,7 +770,7 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
               payload={{
                 documentType: 'report',
                 documentNumber: `Top Performance Report (${rankingTitleBadge})`,
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName: `Top Performance & Overall Report (${rankingTitleBadge})`,
                 totalAmount: 0,
                 paidAmount: 0,
@@ -1735,7 +1735,7 @@ export const TopPerformanceReportsView: React.FC<TopPerformanceReportsViewProps>
                   payload={{
                     documentType: 'report',
                     documentNumber: `Top Performance Report (${rankingTitleBadge})`,
-                    documentDate: new Date().toISOString().slice(0, 10),
+                    documentDate: getPakistanDateISO(),
                     customerName: `Top Performance & Overall Report (${rankingTitleBadge})`,
                     totalAmount: 0,
                     paidAmount: 0,

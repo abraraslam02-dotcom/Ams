@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -313,7 +314,7 @@ inventoryRouter.get('/overview', (_req: Request, res: Response) => {
       `)
       .get() as Record<string, number>;
 
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getPakistanDateISO();
     const targetNearDate = new Date();
     targetNearDate.setDate(targetNearDate.getDate() + nearExpiryThreshold);
     const nearExpiryDateStr = targetNearDate.toISOString().slice(0, 10);
@@ -474,7 +475,7 @@ inventoryRouter.get('/datasheet', (req: Request, res: Response) => {
       conditions.push('inv.current_pack_qty > 0');
     }
 
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getPakistanDateISO();
     const date30 = new Date();
     date30.setDate(date30.getDate() + 30);
     const str30 = date30.toISOString().slice(0, 10);
@@ -1174,7 +1175,7 @@ inventoryRouter.get('/item-stock-report', (req: Request, res: Response) => {
 inventoryRouter.get('/stock-statement', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getPakistanDateISO();
     const fromDate = req.query.fromDate ? String(req.query.fromDate).trim() : '';
     const toDate = req.query.toDate ? String(req.query.toDate).trim() : todayIso;
     const companiesFilter = parseListParam(req.query.companies || req.query.companyNames);
@@ -1541,7 +1542,7 @@ inventoryRouter.get('/stock-statement', (req: Request, res: Response) => {
 inventoryRouter.get('/detailed-stock-report', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getPakistanDateISO();
     const fromDate = req.query.fromDate ? String(req.query.fromDate).trim() : '';
     const toDate = req.query.toDate ? String(req.query.toDate).trim() : todayIso;
     const companies = parseListParam(req.query.companies || req.query.companyNames);
@@ -2228,7 +2229,7 @@ inventoryRouter.post('/adjustments', (req: AuthenticatedRequest, res: Response) 
     const currentUser = req.user?.username || 'Super Admin';
     const currentUserId = req.user?.id || null;
 
-    const adjustmentDate = String(body.adjustment_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const adjustmentDate = String(body.adjustment_date || getPakistanDateISO()).slice(0, 10);
     assertPeriodOpen(adjustmentDate, 'create a stock adjustment');
     const rawType = body.adjustment_type || body.reason_category || 'Physical Difference';
     const adjustmentType = toDbAdjustmentType(String(rawType));
@@ -2610,7 +2611,7 @@ inventoryRouter.post('/transfers', (req: AuthenticatedRequest, res: Response) =>
     const currentUser = req.user?.username || 'Super Admin';
 
     const {
-      transfer_date = new Date().toISOString().slice(0, 10),
+      transfer_date = getPakistanDateISO(),
       from_location,
       to_location,
       reference_no = null,
@@ -3593,7 +3594,7 @@ inventoryRouter.post('/physical-verifications', (req: AuthenticatedRequest, res:
     const currentUser = req.user?.username || 'Super Admin';
 
     const {
-      verification_date = new Date().toISOString().slice(0, 10),
+      verification_date = getPakistanDateISO(),
       remarks,
       idempotency_key,
       items,
@@ -3840,7 +3841,7 @@ inventoryRouter.post('/physical-verifications/:id/reconcile', (req: Authenticate
           `)
           .run(
             adjNumber,
-            String(ver.verification_date || new Date().toISOString().slice(0, 10)),
+            String(ver.verification_date || getPakistanDateISO()),
             discrepancyItems.length,
             currentUserId,
             currentUser,

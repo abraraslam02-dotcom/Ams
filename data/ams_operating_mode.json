@@ -1,0 +1,17 @@
+{
+  "mode": "ONLINE",
+  "switchedAt": null,
+  "switchedBy": null,
+  "localBackupStatus": "Never",
+  "lastSuccessfulBackupAt": null,
+  "lastBackupFilename": null,
+  "lastBackupPath": null,
+  "lastBackupSizeBytes": null,
+  "lastBackupSha256": null,
+  "lastBackupError": null,
+  "cloudSyncStatus": "Never",
+  "lastSuccessfulCloudSyncAt": null,
+  "lastCloudSyncError": null,
+  "pendingLocalChangesCount": 0,
+  "manualControlOnly": true
+}

@@ -20,8 +20,14 @@ import {
   PurchaseReturnLineItem,
 } from '../../types/purchase';
 import { api } from '../../services/api';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
-import { calculateLineTax, resolveItemTaxConfig } from '../../utils/taxCalculation';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
+import {
+  calculateLineTax,
+  calculateSequentialLineDiscount,
+  clampDiscountPercent,
+  resolveItemTaxConfig,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 import { NumericInput } from '../common/NumericInput';
 
 interface PurchaseReturnPanelProps {
@@ -46,7 +52,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
   onPrintReturn,
 }) => {
   const [debitNoteNumber, setDebitNoteNumber] = useState(nextReturnNumber);
-  const [returnDate, setReturnDate] = useState(new Date().toISOString().slice(0, 10));
+  const [returnDate, setReturnDate] = useState(getPakistanDateISO());
   const [selectedSupplierId, setSelectedSupplierId] = useState<string>('');
   const [selectedPurchaseId, setSelectedPurchaseId] = useState<string>('');
   const [settlementMode, setSettlementMode] = useState<
@@ -152,6 +158,7 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
         const alreadyRet = round2(it.returned_quantity || 0);
         const eligible = Math.max(0, round2(purchasedQty - alreadyRet));
         const resolvedTax = resolveItemTaxConfig(it);
+        const seq = resolveLineSequentialDiscounts(it, round2(it.purchase_rate));
         return {
           original_purchase_item_id: it.id!,
           item_id: it.item_id,
@@ -169,7 +176,10 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
           eligible_quantity: eligible,
           return_quantity: 0,
           debit_unit_rate: round2(it.purchase_rate),
-          discount_percent: round2(it.discount_percent),
+          discount_1_percent: seq.discount_1_percent,
+          discount_2_percent: seq.discount_2_percent,
+          discount_percent: seq.discount_percent,
+          net_rate: seq.net_rate,
           discount_amount: 0,
           taxable_amount: 0,
           tax_type: resolvedTax.tax_type,
@@ -197,12 +207,19 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
   ): PurchaseReturnLineItem => {
     const qty = Math.max(0, round2(line.return_quantity));
     const rate = Math.max(0, round2(line.debit_unit_rate));
-    const discPct = Math.max(0, round2(line.discount_percent));
+    const disc1Pct = clampDiscountPercent(line.discount_1_percent ?? line.discount_percent ?? 0);
+    const disc2Pct = clampDiscountPercent(line.discount_2_percent ?? 0);
     const gstPct = Math.max(0, round2(line.tax_percent));
     const advPct = Math.max(0, round2(line.advance_tax_rate));
 
     const gross = round2(qty * rate);
-    const itemDisc = round2(gross * (discPct / 100));
+    const seqLine = calculateSequentialLineDiscount({
+      originalRate: rate,
+      grossAmount: gross,
+      discount1Percent: disc1Pct,
+      discount2Percent: disc2Pct,
+    });
+    const itemDisc = seqLine.discount_amount;
 
     // Also include prorated invoice discount if original invoice had invoice_discount_amount > 0
     let invDiscShare = 0;
@@ -242,7 +259,10 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
       ...line,
       return_quantity: qty,
       debit_unit_rate: rate,
-      discount_percent: discPct,
+      discount_1_percent: seqLine.discount_1_percent,
+      discount_2_percent: seqLine.discount_2_percent,
+      discount_percent: seqLine.effective_discount_percent,
+      net_rate: seqLine.net_rate,
       discount_amount: totalDisc,
       taxable_amount: taxable,
       tax_percent: gstPct,
@@ -633,8 +653,10 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
                       <th className="py-2.5 px-2.5 text-right">Prev. Returned</th>
                       <th className="py-2.5 px-2.5 text-right">Max Eligible</th>
                       <th className="py-2.5 px-2.5 text-right w-28">Return Qty</th>
-                      <th className="py-2.5 px-2.5 text-right w-28">Return Rate</th>
-                      <th className="py-2.5 px-2.5 text-right w-20">Disc %</th>
+                      <th className="py-2.5 px-2.5 text-right w-24">Return Rate</th>
+                      <th className="py-2.5 px-2 text-right w-18">Disc 1 %</th>
+                      <th className="py-2.5 px-2 text-right w-18">Disc 2 %</th>
+                      <th className="py-2.5 px-2 text-right">Net Rate</th>
                       <th className="py-2.5 px-2.5 text-right">GST Adj.</th>
                       <th className="py-2.5 px-2.5 text-right">Adv Tax Adj.</th>
                       <th className="py-2.5 px-3 text-right">Auto Return Amt</th>
@@ -705,21 +727,43 @@ export const PurchaseReturnPanel: React.FC<PurchaseReturnPanelProps> = ({
                               className="w-full px-2 py-1 text-right font-mono rounded border border-slate-300 bg-white text-slate-900"
                             />
                           </td>
-                          <td className="py-2 px-2.5">
+                          <td className="py-2 px-2">
                             <NumericInput
                               step="0.01"
                               min="0"
                               max="100"
-                              value={line.discount_percent}
+                              value={line.discount_1_percent ?? line.discount_percent ?? 0}
                               onChange={(e) =>
                                 updateLineField(
                                   idx,
-                                  'discount_percent',
+                                  'discount_1_percent',
                                   parseFloat(e.target.value) || 0
                                 )
                               }
-                              className="w-full px-2 py-1 text-right font-mono rounded border border-slate-300 bg-white text-slate-900"
+                              className="w-full px-1.5 py-1 text-right font-mono rounded border border-slate-300 bg-white text-slate-900"
                             />
+                          </td>
+                          <td className="py-2 px-2">
+                            <NumericInput
+                              step="0.01"
+                              min="0"
+                              max="100"
+                              value={line.discount_2_percent ?? 0}
+                              onChange={(e) =>
+                                updateLineField(
+                                  idx,
+                                  'discount_2_percent',
+                                  parseFloat(e.target.value) || 0
+                                )
+                              }
+                              className="w-full px-1.5 py-1 text-right font-mono rounded border border-slate-300 bg-white text-slate-900"
+                            />
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono font-semibold text-teal-800 whitespace-nowrap">
+                            {formatPKR(
+                              line.net_rate ??
+                                resolveLineSequentialDiscounts(line, line.debit_unit_rate).net_rate
+                            )}
                           </td>
                           <td className="py-2 px-2.5 text-right font-mono text-[11px]">
                             <div>{line.gst_amount.toFixed(2)}</div>

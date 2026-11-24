@@ -32,7 +32,8 @@ import {
 } from '../../utils/printEngine';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
-import { formatAppDate } from '../../utils/formatters';
+import { formatAppDate, formatPKT24Time } from '../../utils/formatters';
+import { resolveLineSequentialDiscounts } from '../../utils/taxCalculation';
 
 interface SalesPrintModalProps {
   isOpen?: boolean;
@@ -977,7 +978,20 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                     <th className="py-2.5 px-1.5 text-right border border-slate-700">Loose</th>
                     <th className="py-2.5 px-1.5 text-right border border-slate-700">Rate</th>
                     {fields.showDiscount && (
-                      <th className="py-2.5 px-1.5 text-right border border-slate-700">Disc</th>
+                      <>
+                        <th className="py-2.5 px-1 text-right border border-slate-700 whitespace-nowrap">
+                          Disc 1%
+                        </th>
+                        <th className="py-2.5 px-1 text-right border border-slate-700 whitespace-nowrap">
+                          Disc 2%
+                        </th>
+                        <th className="py-2.5 px-1 text-right border border-slate-700 whitespace-nowrap">
+                          Net Rate
+                        </th>
+                        <th className="py-2.5 px-1.5 text-right border border-slate-700 whitespace-nowrap">
+                          Disc Amt
+                        </th>
+                      </>
                     )}
                     {fields.showTax && (
                       <th className="py-2.5 px-1.5 text-right border border-slate-700">Tax</th>
@@ -994,7 +1008,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                       ? Number(line.return_loose_quantity ?? line.loose_quantity ?? 0)
                       : Number(line.loose_quantity ?? 0);
                     const discAmt = Number(line.discount_amount ?? 0);
-                    const discPct = Number(line.discount_percent ?? 0);
+                    const seq = resolveLineSequentialDiscounts(line, Number(line.unit_price || 0));
                     const taxAmt = isReturn
                       ? Number(line.gst_amount ?? line.tax_amount ?? 0)
                       : Number(line.tax_amount ?? 0);
@@ -1050,9 +1064,20 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                           {fmtMoney(line.unit_price)}
                         </td>
                         {fields.showDiscount && (
-                          <td className="py-2 px-1.5 border border-slate-200 text-right font-mono">
-                            {discAmt > 0 ? `${fmtMoney(discAmt)} (${discPct}%)` : '-'}
-                          </td>
+                          <>
+                            <td className="py-2 px-1 border border-slate-200 text-right font-mono">
+                              {seq.discount_1_percent > 0 ? `${seq.discount_1_percent}%` : '-'}
+                            </td>
+                            <td className="py-2 px-1 border border-slate-200 text-right font-mono">
+                              {seq.discount_2_percent > 0 ? `${seq.discount_2_percent}%` : '-'}
+                            </td>
+                            <td className="py-2 px-1 border border-slate-200 text-right font-mono font-semibold">
+                              {fmtMoney(seq.net_rate)}
+                            </td>
+                            <td className="py-2 px-1.5 border border-slate-200 text-right font-mono">
+                              {discAmt > 0 ? fmtMoney(discAmt) : '-'}
+                            </td>
+                          </>
                         )}
                         {fields.showTax && (
                           <td className="py-2 px-1.5 border border-slate-200 text-right font-mono">
@@ -1068,7 +1093,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   {items.length === 0 && (
                     <tr>
                       <td
-                        colSpan={12}
+                        colSpan={15}
                         className="py-5 px-3 text-center text-xs font-semibold text-amber-800 bg-amber-50/60 border border-slate-200"
                       >
                         {loadingDetails
@@ -1350,17 +1375,7 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
               {(() => {
                 const rawDate = isReturn ? docRecord.return_date : docRecord.invoice_date;
                 const timeStr = docRecord.created_at
-                  ? (() => {
-                      const d = new Date(docRecord.created_at);
-                      return !Number.isNaN(d.getTime())
-                        ? d.toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: false,
-                          })
-                        : '';
-                    })()
+                  ? formatPKT24Time(docRecord.created_at)
                   : '';
                 const dateTimeDisplay = [formatAppDate(rawDate, ''), timeStr].filter(Boolean).join(' ');
 
@@ -1482,7 +1497,37 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                           ? Number(line.return_loose_quantity ?? line.loose_quantity ?? 0)
                           : Number(line.loose_quantity ?? 0);
                         const bonusQty = !isReturn ? Number(line.bonus_quantity ?? 0) : 0;
+                        const rateVal =
+                          packQty === 0 && looseQty > 0 && Number(line.loose_rate || 0) > 0
+                            ? Number(line.loose_rate)
+                            : Number(line.unit_price || 0);
+                        const seq = resolveLineSequentialDiscounts(line, rateVal);
                         const discAmt = Number(line.discount_amount ?? 0);
+                        const lineGross = Number(
+                          line.gross_amount ??
+                            packQty * Number(line.unit_price || 0) +
+                              looseQty * Number(line.loose_rate || 0)
+                        );
+                        const effectiveDiscPct =
+                          seq.discount_percent > 0
+                            ? seq.discount_percent
+                            : discAmt > 0 && lineGross > 0
+                            ? Math.round((discAmt / lineGross) * 10000) / 100
+                            : 0;
+                        const seqPctText =
+                          seq.discount_1_percent > 0 && seq.discount_2_percent > 0
+                            ? `${Number(seq.discount_1_percent.toFixed(2))}%+${Number(
+                                seq.discount_2_percent.toFixed(2)
+                              )}%`
+                            : `${Number(effectiveDiscPct.toFixed(2))}%`;
+                        const discDisplay =
+                          discAmt > 0 || effectiveDiscPct > 0
+                            ? `${seqPctText}(${
+                                discAmt % 1 === 0
+                                  ? discAmt.toFixed(0)
+                                  : Number(discAmt.toFixed(2))
+                              })`
+                            : '-';
                         const taxAmt = isReturn
                           ? Number(line.gst_amount ?? line.tax_amount ?? 0)
                           : Number(line.tax_amount ?? 0);
@@ -1497,11 +1542,6 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                             : '0';
 
                         const rawPacking = String(line.packing || '').trim();
-
-                        const rateVal =
-                          packQty === 0 && looseQty > 0 && Number(line.loose_rate || 0) > 0
-                            ? Number(line.loose_rate)
-                            : Number(line.unit_price || 0);
 
                         const rateFormatted =
                           rateVal % 1 === 0 ? rateVal.toFixed(0) : rateVal.toFixed(1);
@@ -1531,6 +1571,8 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                                 (showPacking && rawPacking) ||
                                 (showBatch && line.batch_number) ||
                                 (showExpiry && line.expiry_date) ||
+                                (showDiscount &&
+                                  (seq.discount_1_percent > 0 || seq.discount_2_percent > 0)) ||
                                 (showTax && taxAmt > 0)) && (
                                 <div
                                   className={`text-black font-medium leading-tight mt-0.5 ${
@@ -1541,6 +1583,10 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                                   {showPacking && rawPacking ? `${rawPacking} ` : ''}
                                   {showBatch && line.batch_number ? `B:${line.batch_number} ` : ''}
                                   {showExpiry && line.expiry_date ? `Exp:${formatAppDate(line.expiry_date)} ` : ''}
+                                  {showDiscount &&
+                                  (seq.discount_1_percent > 0 || seq.discount_2_percent > 0)
+                                    ? `Net:${seq.net_rate.toFixed(2)} `
+                                    : ''}
                                   {showTax && taxAmt > 0 ? `Tax:+${taxAmt.toFixed(0)}` : ''}
                                 </div>
                               )}
@@ -1557,7 +1603,13 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                             )}
                             <td className={numCell}>{rateFormatted}</td>
                             {showDiscCol && (
-                              <td className={numCell}>{discAmt > 0 ? discAmt.toFixed(0) : '-'}</td>
+                              <td
+                                className={`border border-black px-0.5 py-1 text-center font-mono font-bold whitespace-nowrap ${
+                                  format === '80mm' ? 'text-[10px]' : 'text-[8.5px]'
+                                }`}
+                              >
+                                {discDisplay}
+                              </td>
                             )}
                             <td
                               className={`border border-black px-1 py-1 text-right font-mono font-black whitespace-nowrap ${

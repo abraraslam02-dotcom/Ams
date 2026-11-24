@@ -24,7 +24,7 @@ import { NumericInput } from '../common/NumericInput';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
-import { formatAppDate } from '../../utils/formatters';
+import { formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 
 interface VoucherManagementViewProps {
   initialVoucherType?: VoucherTypeCode;
@@ -90,7 +90,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
   const [editingVoucherId, setEditingVoucherId] = useState<number | null>(null);
   const [voucherType, setVoucherType] = useState<VoucherTypeCode>(initialVoucherType);
   const [voucherNumber, setVoucherNumber] = useState('');
-  const [voucherDate, setVoucherDate] = useState(new Date().toISOString().slice(0, 10));
+  const [voucherDate, setVoucherDate] = useState(getPakistanDateISO());
   const [referenceNumber, setReferenceNumber] = useState('');
   const [narration, setNarration] = useState('');
   const [createdBy, setCreatedBy] = useState('Super Admin');
@@ -488,7 +488,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Abrar_Medical_Voucher_Register_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `Abrar_Medical_Voucher_Register_${getPakistanDateISO()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1060,7 +1060,7 @@ export const VoucherManagementView: React.FC<VoucherManagementViewProps> = ({
                   payload={{
                     documentType: 'report',
                     documentNumber: String(printVoucher.voucher_number || 'Voucher'),
-                    documentDate: String(printVoucher.voucher_date || new Date().toISOString().slice(0, 10)),
+                    documentDate: String(printVoucher.voucher_date || getPakistanDateISO()),
                     customerName: String(printVoucher.voucher_number || 'Accounting Voucher'),
                     totalAmount: Number(printVoucher.total_debit || 0),
                     paidAmount: 0,

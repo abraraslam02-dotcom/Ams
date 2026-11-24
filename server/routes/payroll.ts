@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import type Database from 'better-sqlite3';
@@ -729,7 +730,7 @@ payrollRouter.get('/dashboard', (req: Request, res: Response) => {
     const db = getDatabase();
     ensurePayrollSystemAccounts(db);
 
-    const today = (req.query.date as string) || new Date().toISOString().slice(0, 10);
+    const today = (req.query.date as string) || getPakistanDateISO();
     const now = new Date();
     const month = Number(req.query.month) || now.getMonth() + 1;
     const year = Number(req.query.year) || now.getFullYear();
@@ -979,7 +980,7 @@ payrollRouter.post('/employees', (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Employee name is required.' });
     }
 
-    const joiningDate = String(body.joining_date || new Date().toISOString().slice(0, 10)).trim();
+    const joiningDate = String(body.joining_date || getPakistanDateISO()).trim();
     const basicSalary = round2(Number(body.basic_salary) || 0);
     const paymentMethod = ['Cash', 'Bank', 'Cheque', 'Online'].includes(body.payment_method)
       ? body.payment_method
@@ -1218,7 +1219,7 @@ payrollRouter.patch('/employees/:id/status', (req: Request, res: Response) => {
     const status = req.body?.employment_status === 'Inactive' ? 'Inactive' : 'Active';
     const leavingDate =
       status === 'Inactive'
-        ? String(req.body?.leaving_date || existing.leaving_date || new Date().toISOString().slice(0, 10))
+        ? String(req.body?.leaving_date || existing.leaving_date || getPakistanDateISO())
         : '';
 
     db.prepare(`
@@ -1728,7 +1729,7 @@ payrollRouter.post('/attendance/bulk', (req: Request, res: Response) => {
     }
     const db = getDatabase();
     const actor = getActor(req);
-    const attendanceDate = String(req.body?.attendance_date || new Date().toISOString().slice(0, 10)).trim();
+    const attendanceDate = String(req.body?.attendance_date || getPakistanDateISO()).trim();
     const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
 
     if (entries.length === 0) {
@@ -2624,7 +2625,7 @@ function finalizeSinglePayrollRecord(
   const loanRecovery = round2(Number(payroll.loan_recovery) || 0);
   const salaryExpenseAmount = round2(netSalary + advanceRecovery + loanRecovery);
 
-  const entryDate = new Date().toISOString().slice(0, 10);
+  const entryDate = getPakistanDateISO();
   let journalEntryId: number | null = null;
 
   if (salaryExpenseAmount > 0) {
@@ -2996,7 +2997,7 @@ payrollRouter.post('/processing/:id/reopen', (req: Request, res: Response) => {
 
       appendEmployeeLedgerEntry(db, {
         employeeId: Number(existing.employee_id),
-        transactionDate: new Date().toISOString().slice(0, 10),
+        transactionDate: getPakistanDateISO(),
         transactionType: 'Payroll_Reopened',
         referenceCode: existing.payroll_code,
         referenceId: id,
@@ -3107,7 +3108,7 @@ payrollRouter.post('/payments', (req: Request, res: Response) => {
 
     const payrollId = Number(body.payroll_id);
     const paymentAmount = round2(Number(body.payment_amount) || 0);
-    const paymentDate = String(body.payment_date || new Date().toISOString().slice(0, 10)).trim();
+    const paymentDate = String(body.payment_date || getPakistanDateISO()).trim();
     const paymentMode = ['Cash', 'Bank', 'Cheque', 'Online', 'Other'].includes(body.payment_mode)
       ? body.payment_mode
       : 'Cash';
@@ -3401,7 +3402,7 @@ payrollRouter.post('/advances-loans', (req: Request, res: Response) => {
 
     const employeeId = Number(body.employee_id);
     const transactionType = body.transaction_type === 'Loan' ? 'Loan' : 'Advance';
-    const disbursementDate = String(body.disbursement_date || new Date().toISOString().slice(0, 10)).trim();
+    const disbursementDate = String(body.disbursement_date || getPakistanDateISO()).trim();
     const principalAmount = round2(Number(body.principal_amount) || 0);
     const monthlyInstallment = round2(Number(body.monthly_installment) || principalAmount);
     const autoRecover = body.auto_recover_in_payroll !== undefined ? (Number(body.auto_recover_in_payroll) ? 1 : 0) : 1;
@@ -3609,7 +3610,7 @@ payrollRouter.post('/advances-loans/:id/recover', (req: Request, res: Response) 
     }
 
     const amount = round2(Number(body.amount) || 0);
-    const recoveryDate = String(body.recovery_date || new Date().toISOString().slice(0, 10)).trim();
+    const recoveryDate = String(body.recovery_date || getPakistanDateISO()).trim();
     const financialAccountId = Number(body.financial_account_id) || Number(existing.financial_account_id);
     const remarks = String(body.remarks || 'Direct cash/bank recovery receipt').trim();
 

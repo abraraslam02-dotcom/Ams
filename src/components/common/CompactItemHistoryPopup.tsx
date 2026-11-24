@@ -8,6 +8,10 @@ import {
 
 import { ProductThumb } from './ProductThumb';
 import { formatAppDate } from '../../utils/formatters';
+import {
+  formatSequentialDiscountLabel,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 
 export interface CompactItemHistoryPopupProps {
   isOpen: boolean;
@@ -23,7 +27,7 @@ export interface CompactItemHistoryPopupProps {
   historyData: CustomerItemHistoryResponse | null | undefined;
   loading?: boolean;
   onClose: () => void;
-  onApplySaleRate?: (rate: number, discountPercent: number) => void;
+  onApplySaleRate?: (rate: number, discount1Percent: number, discount2Percent?: number) => void;
 }
 
 const formatNumber = (val: unknown, decimals = 2): string => {
@@ -35,14 +39,24 @@ const formatNumber = (val: unknown, decimals = 2): string => {
   });
 };
 
-const formatDisc = (pctVal: unknown, amtVal: unknown): string => {
-  const pct = Number(pctVal || 0);
-  const amt = Number(amtVal || 0);
-  if (pct > 0 && amt > 0) {
-    return `${Number(pct.toFixed(2))}% (Rs. ${formatNumber(amt)})`;
+const formatDisc = (
+  row: {
+    discount_1_percent?: number | string | null;
+    discount_2_percent?: number | string | null;
+    discount_percent?: number | string | null;
+    net_rate?: number | string | null;
+    discount_amount?: number | string | null;
+  },
+  baseRate: number
+): string => {
+  const seq = resolveLineSequentialDiscounts(row, baseRate);
+  const label = formatSequentialDiscountLabel(seq.discount_1_percent, seq.discount_2_percent);
+  const amt = Number(row.discount_amount || 0);
+  if ((seq.discount_1_percent > 0 || seq.discount_2_percent > 0) && amt > 0) {
+    return `${label} (Rs. ${formatNumber(amt)})`;
   }
-  if (pct > 0) {
-    return `${Number(pct.toFixed(2))}%`;
+  if (seq.discount_1_percent > 0 || seq.discount_2_percent > 0) {
+    return label;
   }
   if (amt > 0) {
     return `Rs. ${formatNumber(amt)}`;
@@ -274,7 +288,19 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                 <span className="text-slate-600">
                   Discount:{' '}
                   <strong className="text-rose-700">
-                    {formatDisc(lastCustomerSale.discount_percent, lastCustomerSale.discount_amount)}
+                    {formatDisc(lastCustomerSale, Number(lastCustomerSale.unit_price || 0))}
+                  </strong>
+                </span>
+                <span className="text-slate-600">
+                  Net Rate:{' '}
+                  <strong className="text-teal-800">
+                    Rs.{' '}
+                    {formatNumber(
+                      resolveLineSequentialDiscounts(
+                        lastCustomerSale,
+                        Number(lastCustomerSale.unit_price || 0)
+                      ).net_rate
+                    )}
                   </strong>
                 </span>
                 <span className="text-slate-600">
@@ -287,12 +313,17 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
               {onApplySaleRate && (
                 <button
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    const seq = resolveLineSequentialDiscounts(
+                      lastCustomerSale,
+                      Number(lastCustomerSale.unit_price || 0)
+                    );
                     onApplySaleRate(
                       Number(lastCustomerSale.unit_price || 0),
-                      Number(lastCustomerSale.discount_percent || 0)
-                    )
-                  }
+                      seq.discount_1_percent,
+                      seq.discount_2_percent
+                    );
+                  }}
                   className="px-2 py-0 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-[9.5px] cursor-pointer"
                 >
                   Apply Customer Rate
@@ -332,20 +363,21 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Quantity</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Loose Qty</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Rate</th>
-                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Discount</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Disc 1+2</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Net Rate</th>
                 <th className="px-2 py-0.5 text-right">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 font-mono">
               {mode === 'sales' && !hasSelectedCustomer ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-2 text-center font-sans text-amber-700 font-semibold">
+                  <td colSpan={10} className="px-3 py-2 text-center font-sans text-amber-700 font-semibold">
                     Please select a customer first.
                   </td>
                 </tr>
               ) : latestSales.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-2 text-center font-sans text-slate-500 italic">
+                  <td colSpan={10} className="px-3 py-2 text-center font-sans text-slate-500 italic">
                     {loading
                       ? `Loading sales history for Item Code [${itemCode}]...`
                       : mode === 'sales'
@@ -363,6 +395,7 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                     lastCustomerSale &&
                     Number(s.sale_item_id) === Number(lastCustomerSale.sale_item_id) &&
                     String(s.invoice_number) === String(lastCustomerSale.invoice_number);
+                  const seq = resolveLineSequentialDiscounts(s, Number(s.unit_price || 0));
 
                   return (
                     <tr
@@ -399,7 +432,10 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                         Rs. {formatNumber(s.unit_price)}
                       </td>
                       <td className="px-2 py-0.5 border-r border-slate-200 text-right text-rose-700 whitespace-nowrap">
-                        {formatDisc(s.discount_percent, s.discount_amount)}
+                        {formatDisc(s, Number(s.unit_price || 0))}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right font-semibold text-teal-800 whitespace-nowrap">
+                        Rs. {formatNumber(seq.net_rate)}
                       </td>
                       <td className="px-2 py-0.5 text-right font-bold text-slate-900 whitespace-nowrap">
                         Rs. {formatNumber(s.line_total)}
@@ -423,52 +459,59 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Quantity</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Bonus</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Rate</th>
-                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Discount</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Disc 1+2</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Net Rate</th>
                 <th className="px-2 py-0.5 text-right">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 font-mono">
               {latestPurchases.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-3 py-2 text-center font-sans text-slate-500 italic">
+                  <td colSpan={9} className="px-3 py-2 text-center font-sans text-slate-500 italic">
                     {loading
                       ? `Loading purchase history for Item Code [${itemCode}]...`
                       : `No previous purchase transactions found for Item Code [${itemCode}].`}
                   </td>
                 </tr>
               ) : (
-                latestPurchases.map((p, idx) => (
-                  <tr
-                    key={`${p.purchase_id}-${p.purchase_item_id || idx}`}
-                    data-testid={`compact-purchase-history-row-${idx}`}
-                    className="hover:bg-slate-50 text-slate-800"
-                  >
-                    <td className="px-2 py-0.5 border-r border-slate-200 whitespace-nowrap">
-                      {formatAppDate(p.bill_date || p.invoice_date)}
-                    </td>
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-sky-800 whitespace-nowrap">
-                      {p.bill_number || p.invoice_number}
-                    </td>
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-sans truncate max-w-[220px]">
-                      {p.supplier_name || 'Supplier'}
-                    </td>
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold">
-                      {Number(p.quantity || 0)}
-                    </td>
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-right">
-                      {Number(p.bonus_quantity || 0)}
-                    </td>
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold text-sky-900">
-                      Rs. {formatNumber(p.purchase_price)}
-                    </td>
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-right text-rose-700 whitespace-nowrap">
-                      {formatDisc(p.discount_percent, p.discount_amount)}
-                    </td>
-                    <td className="px-2 py-0.5 text-right font-bold text-slate-900 whitespace-nowrap">
-                      Rs. {formatNumber(p.line_total)}
-                    </td>
-                  </tr>
-                ))
+                latestPurchases.map((p, idx) => {
+                  const seq = resolveLineSequentialDiscounts(p, Number(p.purchase_price || 0));
+                  return (
+                    <tr
+                      key={`${p.purchase_id}-${p.purchase_item_id || idx}`}
+                      data-testid={`compact-purchase-history-row-${idx}`}
+                      className="hover:bg-slate-50 text-slate-800"
+                    >
+                      <td className="px-2 py-0.5 border-r border-slate-200 whitespace-nowrap">
+                        {formatAppDate(p.bill_date || p.invoice_date)}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-sky-800 whitespace-nowrap">
+                        {p.bill_number || p.invoice_number}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 font-sans truncate max-w-[220px]">
+                        {p.supplier_name || 'Supplier'}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold">
+                        {Number(p.quantity || 0)}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right">
+                        {Number(p.bonus_quantity || 0)}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold text-sky-900">
+                        Rs. {formatNumber(p.purchase_price)}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right text-rose-700 whitespace-nowrap">
+                        {formatDisc(p, Number(p.purchase_price || 0))}
+                      </td>
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right font-semibold text-teal-800 whitespace-nowrap">
+                        Rs. {formatNumber(seq.net_rate)}
+                      </td>
+                      <td className="px-2 py-0.5 text-right font-bold text-slate-900 whitespace-nowrap">
+                        Rs. {formatNumber(p.line_total)}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

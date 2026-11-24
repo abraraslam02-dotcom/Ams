@@ -10,7 +10,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { StockLedgerEntry, ReportMetaItem } from '../../types/inventory';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
@@ -160,7 +160,7 @@ export const StockLedgerView: React.FC = () => {
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Item Log Ledger');
     XLSX.writeFile(
       workbook,
-      `AMS_Item_Log_${selectedItemObj?.item_code || 'All'}_${new Date().toISOString().split('T')[0]}.xlsx`
+      `AMS_Item_Log_${selectedItemObj?.item_code || 'All'}_${getPakistanDateISO()}.xlsx`
     );
   };
 
@@ -261,7 +261,7 @@ export const StockLedgerView: React.FC = () => {
               payload={{
                 documentType: 'ledger',
                 documentNumber: `Item Stock Log (${selectedItemObj ? selectedItemObj.item_name : 'All Items'})`,
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName: selectedItemObj ? selectedItemObj.item_name : 'Item Stock Ledger',
                 totalAmount: 0,
                 paidAmount: 0,

@@ -36,7 +36,7 @@ import { SupplyPrintModal, type SupplyDocumentPrintType } from './SupplyPrintMod
 import { SupplyReportsAndRecoverySection } from './SupplyReportsAndRecoverySection';
 import { ImportSalesmanBookingsPanel } from './ImportSalesmanBookingsPanel';
 import { exportSupplyTableToExcel } from '../../utils/supplyExcelExport';
-import { formatAppDate } from '../../utils/formatters';
+import { formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 
 export type SupplySubView =
   | 'supply-dashboard'
@@ -80,7 +80,7 @@ export const SupplyDistributionWorkspace: React.FC<SupplyDistributionWorkspacePr
   initialView = 'supply-dashboard',
   onNavigate,
 }) => {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getPakistanDateISO();
   const [activeTab, setActiveTab] = useState<SupplySubView>(initialView);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [loading, setLoading] = useState(false);

@@ -1,8 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../services/api';
 import { SalesInvoiceRecord, SaleReturnRecord } from '../../types/sales';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
-import { calculateLineTax } from '../../utils/taxCalculation';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
+import {
+  calculateLineTax,
+  calculateSequentialLineDiscount,
+  formatSequentialDiscountLabel,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 import { RotateCcw, CheckCircle2, AlertCircle, Eye, X, Printer } from 'lucide-react';
 import { SalesPrintModal } from './SalesPrintModal';
 import { NumericInput } from '../common/NumericInput';
@@ -18,7 +23,7 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
   const [selectedSaleDetails, setSelectedSaleDetails] = useState<SalesInvoiceRecord | null>(null);
 
   const [returnNumber, setReturnNumber] = useState<string>('SRN-2026-0001');
-  const [returnDate, setReturnDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [returnDate, setReturnDate] = useState<string>(getPakistanDateISO());
   const [refundMode, setRefundMode] = useState<'Account Adjustment' | 'Cash Refund' | 'Bank Refund'>(
     'Account Adjustment'
   );
@@ -166,14 +171,21 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
     }
   };
 
-  // Automatic calculation preview (Tax strictly on original gross BEFORE discounts)
+  // Automatic calculation preview (Sequential discounts; Tax strictly on original gross BEFORE discounts)
   const previewRefundTotal = (selectedSaleDetails?.items || []).reduce((sum: number, line: any) => {
     const inp = returnInputs[line.id];
     if (!inp) return sum;
     const unitsPerPack = Math.max(1, Number(line.units_per_pack || 1));
     const looseRate = Number(line.loose_rate || inp.returnRate / unitsPerPack);
     const gross = inp.returnPackQty * inp.returnRate + inp.returnLooseQty * looseRate;
-    const disc = (gross * Number(line.discount_percent || 0)) / 100;
+    const seqOrig = resolveLineSequentialDiscounts(line, inp.returnRate);
+    const seqLine = calculateSequentialLineDiscount({
+      originalRate: inp.returnRate,
+      looseRate,
+      grossAmount: gross,
+      discount1Percent: seqOrig.discount_1_percent,
+      discount2Percent: seqOrig.discount_2_percent,
+    });
     const tax = calculateLineTax({
       grossAmount: gross,
       quantity: inp.returnPackQty,
@@ -183,7 +195,7 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
       taxValue: line.tax_value,
       taxPercent: line.tax_percent,
     });
-    return sum + gross + tax - disc;
+    return sum + gross + tax - seqLine.discount_amount;
   }, 0);
 
   return (
@@ -342,6 +354,8 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
                       <th className="p-2 text-right bg-emerald-950">Return Pack Qty</th>
                       <th className="p-2 text-right bg-teal-950">Return Loose Qty</th>
                       <th className="p-2 text-right">Return Rate (Pack)</th>
+                      <th className="p-2 text-right">Disc 1+2</th>
+                      <th className="p-2 text-right">Net Rate</th>
                       <th className="p-2 text-right">Return Amount</th>
                     </tr>
                   </thead>
@@ -360,8 +374,27 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
                       const looseRate = Number(line.loose_rate || inp.returnRate / unitsPerPack);
                       const lineGross =
                         inp.returnPackQty * inp.returnRate + inp.returnLooseQty * looseRate;
-                      const lineDisc = (lineGross * Number(line.discount_percent || 0)) / 100;
-                      const lineTotal = Math.max(0, lineGross - lineDisc);
+                      const seqOrig = resolveLineSequentialDiscounts(line, inp.returnRate);
+                      const seqLine = calculateSequentialLineDiscount({
+                        originalRate: inp.returnRate,
+                        looseRate,
+                        grossAmount: lineGross,
+                        discount1Percent: seqOrig.discount_1_percent,
+                        discount2Percent: seqOrig.discount_2_percent,
+                      });
+                      const lineTax = calculateLineTax({
+                        grossAmount: lineGross,
+                        quantity: inp.returnPackQty,
+                        looseQuantity: inp.returnLooseQty,
+                        unitsPerPack,
+                        taxType: line.tax_type,
+                        taxValue: line.tax_value,
+                        taxPercent: line.tax_percent,
+                      });
+                      const lineTotal = Math.max(
+                        0,
+                        lineGross + lineTax - seqLine.discount_amount
+                      );
 
                       return (
                         <tr key={line.id} className="border-b border-slate-200">
@@ -417,6 +450,15 @@ export const SalesReturnView: React.FC<SalesReturnViewProps> = ({ initialMode = 
                             />
                           </td>
                           <td className="p-2 text-right font-mono">{formatPKR(inp.returnRate)}</td>
+                          <td className="p-2 text-right font-mono text-rose-700 whitespace-nowrap">
+                            {formatSequentialDiscountLabel(
+                              seqOrig.discount_1_percent,
+                              seqOrig.discount_2_percent
+                            )}
+                          </td>
+                          <td className="p-2 text-right font-mono font-semibold text-teal-800 whitespace-nowrap">
+                            {formatPKR(seqLine.net_rate)}
+                          </td>
                           <td className="p-2 text-right font-mono font-bold">
                             {formatPKR(lineTotal)}
                           </td>

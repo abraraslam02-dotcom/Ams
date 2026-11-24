@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -185,7 +186,7 @@ staffRouter.post('/salesmen', (req: Request, res: Response) => {
 
     const mobile = String(body.mobile || body.phone || body.mobile_number || '').trim();
     const address = String(body.address || '').trim();
-    const joiningDate = String(body.joining_date || new Date().toISOString().slice(0, 10)).trim();
+    const joiningDate = String(body.joining_date || getPakistanDateISO()).trim();
     const commissionType =
       body.commission_type === 'Fixed Amount' ? 'Fixed Amount' : 'Percentage';
     const commissionRate = round2(Math.max(0, Number(body.commission_rate || 0)));
@@ -426,7 +427,7 @@ staffRouter.post('/salesmen/:id/pay-commission', (req: Request, res: Response) =
     }
 
     const paymentNumber = String(body.payment_number || '').trim() || getNextCommissionPaymentNumber();
-    const paymentDate = String(body.payment_date || new Date().toISOString().slice(0, 10)).trim();
+    const paymentDate = String(body.payment_date || getPakistanDateISO()).trim();
     const periodStart = body.period_start ? String(body.period_start).trim() : null;
     const periodEnd = body.period_end ? String(body.period_end).trim() : null;
     const paymentMode = ['Cash', 'Bank', 'Cheque', 'Online'].includes(String(body.payment_mode))
@@ -883,7 +884,7 @@ staffRouter.post('/deliverymen', (req: Request, res: Response) => {
 
     const mobile = String(body.mobile || '').trim();
     const address = String(body.address || '').trim();
-    const joiningDate = String(body.joining_date || new Date().toISOString().slice(0, 10)).trim();
+    const joiningDate = String(body.joining_date || getPakistanDateISO()).trim();
     const status = body.status === 'Inactive' ? 'Inactive' : 'Active';
     const notes = String(body.notes || '').trim();
 
@@ -1212,7 +1213,7 @@ staffRouter.patch('/deliveries/:saleId', (req: Request, res: Response) => {
         : existing.delivery_date
         ? String(existing.delivery_date)
         : deliveryStatus === 'Delivered'
-        ? new Date().toISOString().slice(0, 10)
+        ? getPakistanDateISO()
         : null;
 
     const deliveryTime =

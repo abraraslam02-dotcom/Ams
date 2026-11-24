@@ -38,7 +38,7 @@ import {
   CashBookBreakdownResponse,
   CashBookAccountsResponse,
 } from '../../types/cashBook';
-import { formatPKR, formatPKTDate, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatPKTDate, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { executePrintElement } from '../../utils/printEngine';
 import { normalizeWhatsAppNumber } from '../../utils/whatsapp';
 import {
@@ -86,7 +86,7 @@ export const CashBookModuleView: React.FC<CashBookModuleViewProps> = ({
   const isAdmin = isSuperAdmin || user?.role === 'Super Admin' || user?.role === 'Administrator';
 
   // Date Range state (defaults to today)
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getPakistanDateISO();
   const [startDate, setStartDate] = useState<string>(todayStr);
   const [endDate, setEndDate] = useState<string>(todayStr);
   const [activeDatePreset, setActiveDatePreset] = useState<'today' | 'yesterday' | 'week' | 'month' | 'custom'>('today');

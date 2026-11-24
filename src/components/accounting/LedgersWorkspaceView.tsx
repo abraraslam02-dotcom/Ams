@@ -18,7 +18,7 @@ import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
-import { formatAppDate, formatDateRange } from '../../utils/formatters';
+import { formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
 
 export type LedgerWorkspaceTab =
   | 'customer'
@@ -275,7 +275,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
     a.href = url;
     a.download = `Abrar_Medical_${activeTab.toUpperCase()}_Ledger_${
       ledger.account.account_code
-    }_${new Date().toISOString().slice(0, 10)}.csv`;
+    }_${getPakistanDateISO()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -363,7 +363,7 @@ export const LedgersWorkspaceView: React.FC<LedgersWorkspaceViewProps> = ({
               payload={{
                 documentType: 'ledger',
                 documentNumber: `${activeTab.toUpperCase()}-LEDGER-${ledger.account.account_code || ledger.account.id}`,
-                documentDate: endDate || new Date().toISOString().slice(0, 10),
+                documentDate: endDate || getPakistanDateISO(),
                 customerAccountId: Number(ledger.account.id),
                 customerName: String(ledger.account.account_name || 'Account'),
                 customerPhone: String(ledger.account.phone || ''),

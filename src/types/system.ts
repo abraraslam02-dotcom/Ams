@@ -6,6 +6,7 @@ export interface HealthResponse {
   uptimeSeconds: number;
   nodeVersion: string;
   timestamp: string;
+  operatingMode?: OperatingModeStatus;
   database: {
     connected: boolean;
     driver: string;
@@ -193,3 +194,111 @@ export function parseFieldVisibility(jsonStr?: string | null): InvoiceFieldVisib
     return { ...DEFAULT_FIELD_VISIBILITY };
   }
 }
+
+export type SystemOperatingMode = 'ONLINE' | 'OFFLINE';
+export type LocalBackupStatus = 'Successful' | 'Failed' | 'Not Run';
+export type CloudSyncStatus = 'Successful' | 'Pending' | 'Failed' | 'Not Run';
+
+export interface SyncConflictRecord {
+  id: number;
+  table_name: string;
+  record_id: string;
+  record_label: string | null;
+  local_updated_at: string | null;
+  cloud_updated_at: string | null;
+  local_snapshot: Record<string, unknown>;
+  cloud_snapshot: Record<string, unknown>;
+  changed_fields: string[];
+  status: 'unresolved' | 'resolved';
+  resolution_choice: 'keep_local' | 'keep_cloud' | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  detected_at: string;
+}
+
+export interface OperatingModeStatus {
+  mode: SystemOperatingMode;
+  activeDatabaseLabel: string;
+  switchedAt: string | null;
+  switchedBy: string | null;
+  manualControlOnly: boolean;
+  localBackupStatus: LocalBackupStatus;
+  lastSuccessfulBackupAt: string | null;
+  lastBackupFilename: string | null;
+  lastBackupPath: string | null;
+  lastBackupSizeBytes: number;
+  lastBackupSha256: string | null;
+  lastBackupError: string | null;
+  cloudSyncStatus: CloudSyncStatus;
+  lastSuccessfulCloudSyncAt: string | null;
+  lastCloudSyncError: string | null;
+  pendingLocalChangesCount: number;
+  unresolvedConflictsCount: number;
+  storage: {
+    platform: string;
+    isWindows: boolean;
+    available: boolean;
+    activeDatabasePath: string;
+    activeDatabaseDir: string;
+    activeBackupDir: string;
+    windowsPermanentDatabaseDir: string;
+    windowsPermanentBackupDir: string;
+    localIntegrityOk: boolean;
+    localDbConnected: boolean;
+    localFileSizeBytes: number;
+    warning: string | null;
+  };
+  cloud: {
+    enabled: boolean;
+    connected: boolean;
+    databaseIdentity: string;
+    lastVersionSeq: number;
+    lastError: string | null;
+  };
+}
+
+export interface SwitchOperatingModeResponse {
+  success: boolean;
+  switched: boolean;
+  requiresConfirmation?: boolean;
+  mode: SystemOperatingMode;
+  previousMode: SystemOperatingMode;
+  message: string;
+  warning?: string | null;
+  pendingLocalChangesCount: number;
+  unresolvedConflictsCount: number;
+  status: OperatingModeStatus;
+  error?: string;
+}
+
+export interface BackupAndSyncNowResponse {
+  success: boolean;
+  step1LocalBackup: {
+    status: 'Successful' | 'Failed';
+    filename: string | null;
+    filePath: string | null;
+    fileSizeBytes: number;
+    integrityStatus: string;
+    sha256: string | null;
+    completedAt: string | null;
+    error: string | null;
+  };
+  step2CloudSync: {
+    status: 'Successful' | 'Pending' | 'Failed';
+    reachable: boolean;
+    mergedFromCloud: number;
+    updatedFromCloud: number;
+    conflictsDetected: number;
+    unresolvedConflictsCount: number;
+    cloudVersionSeq: number;
+    completedAt: string | null;
+    message: string;
+    error: string | null;
+  };
+  lastSuccessfulBackupAt: string | null;
+  lastSuccessfulCloudSyncAt: string | null;
+  conflicts: SyncConflictRecord[];
+  status: OperatingModeStatus;
+  error?: string;
+}
+

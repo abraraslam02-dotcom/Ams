@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../../utils/formatters';
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   FileSpreadsheet,
@@ -452,7 +453,7 @@ export const CustomExcelExportModal: React.FC<CustomExcelExportModalProps> = ({
       const tplSlug = activeTemplate
         ? `_${activeTemplate.template_name.replace(/[^a-zA-Z0-9_-]/g, '_')}`
         : '';
-      const dateStr = new Date().toISOString().slice(0, 10);
+      const dateStr = getPakistanDateISO();
       const customFileName = `${
         moduleType === 'PURCHASE' ? 'Purchase' : 'Sales'
       }_Custom_Export${tplSlug}_${dateStr}.xlsx`;

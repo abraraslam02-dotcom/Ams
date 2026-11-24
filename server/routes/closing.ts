@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -1222,7 +1223,7 @@ closingRouter.get('/overview', (_req: Request, res: Response) => {
  */
 closingRouter.get('/daily/preview', (req: Request, res: Response) => {
   try {
-    const targetDate = String(req.query.date || new Date().toISOString().slice(0, 10)).trim().slice(0, 10);
+    const targetDate = String(req.query.date || getPakistanDateISO()).trim().slice(0, 10);
     const preview = computeFinancialPeriodClosingPreview(
       targetDate,
       targetDate,
@@ -1250,7 +1251,7 @@ closingRouter.post('/daily/execute', (req: Request, res: Response) => {
   try {
     const db = getDatabase();
     const body = req.body || {};
-    const targetDate = String(body.date || body.period_start_date || new Date().toISOString().slice(0, 10))
+    const targetDate = String(body.date || body.period_start_date || getPakistanDateISO())
       .trim()
       .slice(0, 10);
 
@@ -1573,7 +1574,7 @@ closingRouter.post('/monthly/execute', (req: Request, res: Response) => {
     }
 
     // Never allow locking a period whose start date is strictly in the future
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getPakistanDateISO();
     if (lockPeriod && startDate > todayIso) {
       return res.status(400).json({
         success: false,
@@ -2105,7 +2106,7 @@ closingRouter.post('/yearly/execute', (req: Request, res: Response) => {
       });
     }
 
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getPakistanDateISO();
     if (lockPeriod && startDate > todayIso) {
       return res.status(400).json({
         success: false,

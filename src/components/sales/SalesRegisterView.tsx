@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../services/api';
 import { SalesInvoiceRecord } from '../../types/sales';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
+import { resolveLineSequentialDiscounts } from '../../utils/taxCalculation';
 import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { SalesPrintModal } from './SalesPrintModal';
 import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
@@ -162,13 +163,13 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
       if (records.length === 0) return;
       exportSalesInvoicesToExcel(
         records,
-        `AMS_Sales_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`
+        `AMS_Sales_Invoices_${getPakistanDateISO()}.xlsx`
       );
     } catch {
       if (invoices.length > 0) {
         exportSalesInvoicesToExcel(
           invoices,
-          `AMS_Sales_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`
+          `AMS_Sales_Invoices_${getPakistanDateISO()}.xlsx`
         );
       }
     } finally {
@@ -665,33 +666,48 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                   <th className="p-2 text-right">Pack Price</th>
                   <th className="p-2 text-right">Loose Qty</th>
                   <th className="p-2 text-right">Loose Rate</th>
-                  <th className="p-2 text-right">Disc</th>
+                  <th className="p-2 text-right">Disc 1 %</th>
+                  <th className="p-2 text-right">Disc 2 %</th>
+                  <th className="p-2 text-right text-emerald-300">Net Rate</th>
+                  <th className="p-2 text-right">Disc Amt</th>
                   <th className="p-2 text-right">Line Total</th>
                 </tr>
               </thead>
               <tbody>
-                {(viewInvoice.items || []).map((item: any) => (
-                  <tr key={item.id} className="border-b border-slate-200">
-                    <td className="p-2 font-bold">
-                      {item.item_name} ({item.item_code})
-                    </td>
-                    <td className="p-2 text-center font-mono">{item.packing}</td>
-                    <td className="p-2 text-center font-mono">
-                      {item.batch_number} • {item.expiry_date}
-                    </td>
-                    <td className="p-2 text-right font-mono">{item.quantity}</td>
-                    <td className="p-2 text-right font-mono font-semibold text-emerald-700">
-                      {item.bonus_quantity || 0}
-                    </td>
-                    <td className="p-2 text-right font-mono">{formatPKR(item.unit_price)}</td>
-                    <td className="p-2 text-right font-mono">{item.loose_quantity}</td>
-                    <td className="p-2 text-right font-mono">{formatPKR(item.loose_rate)}</td>
-                    <td className="p-2 text-right font-mono">{formatPKR(item.discount_amount)}</td>
-                    <td className="p-2 text-right font-mono font-bold">
-                      {formatPKR(item.line_total)}
-                    </td>
-                  </tr>
-                ))}
+                {(viewInvoice.items || []).map((item: any) => {
+                  const seq = resolveLineSequentialDiscounts(item, Number(item.unit_price || 0));
+                  return (
+                    <tr key={item.id} className="border-b border-slate-200">
+                      <td className="p-2 font-bold">
+                        {item.item_name} ({item.item_code})
+                      </td>
+                      <td className="p-2 text-center font-mono">{item.packing}</td>
+                      <td className="p-2 text-center font-mono">
+                        {item.batch_number} • {item.expiry_date}
+                      </td>
+                      <td className="p-2 text-right font-mono">{item.quantity}</td>
+                      <td className="p-2 text-right font-mono font-semibold text-emerald-700">
+                        {item.bonus_quantity || 0}
+                      </td>
+                      <td className="p-2 text-right font-mono">{formatPKR(item.unit_price)}</td>
+                      <td className="p-2 text-right font-mono">{item.loose_quantity}</td>
+                      <td className="p-2 text-right font-mono">{formatPKR(item.loose_rate)}</td>
+                      <td className="p-2 text-right font-mono text-rose-700">
+                        {seq.discount_1_percent}%
+                      </td>
+                      <td className="p-2 text-right font-mono text-rose-700">
+                        {seq.discount_2_percent}%
+                      </td>
+                      <td className="p-2 text-right font-mono font-semibold text-emerald-800">
+                        {formatPKR(seq.net_rate)}
+                      </td>
+                      <td className="p-2 text-right font-mono">{formatPKR(item.discount_amount)}</td>
+                      <td className="p-2 text-right font-mono font-bold">
+                        {formatPKR(item.line_total)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
 

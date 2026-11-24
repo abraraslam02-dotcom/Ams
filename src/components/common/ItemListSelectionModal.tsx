@@ -4,9 +4,10 @@ import {
   BaseSearchableItem,
   IndexedItem,
   prepareItemIndex,
+  resolveItemSelectionFields,
   searchItems,
 } from '../../utils/itemSearch';
-import { formatPKR } from '../../utils/formatters';
+import { formatAppDate, formatPKR } from '../../utils/formatters';
 
 export interface ItemListSelectionModalProps<T extends BaseSearchableItem> {
   isOpen: boolean;
@@ -21,7 +22,10 @@ export interface ItemListSelectionModalProps<T extends BaseSearchableItem> {
   invoiceLabel?: string;
   rateColumnLabel?: string;
   getItemRate: (item: T) => number;
+  getItemSalePrice?: (item: T) => number;
+  getItemPurchasePrice?: (item: T) => number;
   getItemStock?: (item: T) => number;
+  getItemBatchInfo?: (item: T) => { batchNumber?: string; expiryDate?: string };
   activeCompanyFilter?: string;
   onClearCompanyFilter?: () => void;
   onSelectItem: (item: T) => void;
@@ -36,9 +40,11 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
   targetRowIndex,
   targetRowItem,
   invoiceLabel = 'Sales Invoice',
-  rateColumnLabel = 'Rate',
   getItemRate,
+  getItemSalePrice,
+  getItemPurchasePrice,
   getItemStock,
+  getItemBatchInfo,
   activeCompanyFilter,
   onClearCompanyFilter,
   onSelectItem,
@@ -142,7 +148,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3"
       onKeyDown={handleModalKeyDown}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) {
@@ -150,7 +156,7 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
         }
       }}
     >
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-4xl p-5 text-xs space-y-3 max-h-[85vh] flex flex-col">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-[96vw] xl:max-w-[1380px] p-5 text-xs space-y-3 max-h-[85vh] flex flex-col">
         <div className="flex items-center justify-between border-b border-slate-200 pb-3 shrink-0">
           <div>
             <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
@@ -228,33 +234,50 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
 
         <div
           ref={tableContainerRef}
-          className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl"
+          className="flex-1 min-h-0 overflow-auto border border-slate-200 rounded-xl"
         >
-          <table className="w-full text-left border-collapse text-[11px]">
+          <table className="w-full text-left border-collapse text-[11px] whitespace-nowrap">
             <thead className="bg-slate-900 text-white sticky top-0 z-10">
               <tr>
-                <th className="px-3 py-2">Code</th>
-                <th className="px-3 py-2">Item Name</th>
-                <th className="px-3 py-2">Company</th>
-                <th className="px-3 py-2">Packing</th>
-                <th className="px-3 py-2 text-right">Stock</th>
-                <th className="px-3 py-2 text-right">{rateColumnLabel}</th>
-                <th className="px-3 py-2 text-right">Action</th>
+                <th className="px-2.5 py-2">Item Code</th>
+                <th className="px-2.5 py-2">Item Name</th>
+                <th className="px-2.5 py-2 text-right">SPrice</th>
+                <th className="px-2.5 py-2 text-right">Purchase Price</th>
+                <th className="px-2.5 py-2 text-right">Loose Price</th>
+                <th className="px-2.5 py-2 text-right">Stock</th>
+                <th className="px-2.5 py-2">Company</th>
+                <th className="px-2.5 py-2">Packing</th>
+                <th className="px-2.5 py-2">Batch Number</th>
+                <th className="px-2.5 py-2">Expiry Date</th>
+                <th className="px-2.5 py-2">Generic / Rack</th>
+                <th className="px-2.5 py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {results.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-500 font-semibold">
+                  <td colSpan={12} className="px-4 py-8 text-center text-slate-500 font-semibold">
                     No matching items found.
                   </td>
                 </tr>
               ) : (
                 results.map((it, idx) => {
-                  const rate = getItemRate(it);
-                  const stockPacks = getItemStock
-                    ? getItemStock(it)
-                    : Number(it.total_available_packs ?? it.consolidated_stock_packs ?? it.default_batch?.available_packs ?? 0);
+                  const batchOverride = getItemBatchInfo ? getItemBatchInfo(it) : undefined;
+                  const resolved = resolveItemSelectionFields(it, {
+                    salePrice: getItemSalePrice
+                      ? getItemSalePrice(it)
+                      : invoiceLabel.toLowerCase().includes('sale')
+                      ? getItemRate(it)
+                      : Number(it.retail_price || 0),
+                    purchasePrice: getItemPurchasePrice ? getItemPurchasePrice(it) : undefined,
+                    stockPacks: getItemStock ? getItemStock(it) : undefined,
+                    batchNumber: batchOverride?.batchNumber,
+                    expiryDate: batchOverride?.expiryDate,
+                  });
+                  const formattedExpiry =
+                    resolved.expiryDate !== '—'
+                      ? formatAppDate(resolved.expiryDate) || resolved.expiryDate
+                      : '—';
                   const isHighlighted = idx === highlightIdx;
                   const activeVariantsCount = Array.isArray(it.variants)
                     ? it.variants.filter((v: any) => String(v?.status || 'Active') !== 'Inactive').length
@@ -286,15 +309,15 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                       }`}
                     >
                       <td
-                        className={`px-3 py-2 font-mono font-bold ${
+                        className={`px-2.5 py-2 font-mono font-bold ${
                           isHighlighted ? 'text-amber-200' : 'text-emerald-700'
                         }`}
                       >
-                        {it.item_code}
+                        {resolved.itemCode}
                       </td>
-                      <td className={`px-3 py-2 font-semibold ${isHighlighted ? 'text-white' : 'text-slate-900'}`}>
+                      <td className={`px-2.5 py-2 font-semibold ${isHighlighted ? 'text-white' : 'text-slate-900'}`}>
                         <div className="flex items-center gap-1.5">
-                          <span>{it.item_name}</span>
+                          <span>{resolved.itemName}</span>
                           {hasVariants && (
                             <span
                               className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
@@ -308,19 +331,69 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
                           )}
                         </div>
                       </td>
-                      <td className={`px-3 py-2 ${isHighlighted ? 'text-sky-100' : 'text-slate-600'}`}>
-                        {it.company_name || '—'}
+                      <td
+                        className={`px-2.5 py-2 text-right font-mono font-bold ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-800'
+                        }`}
+                      >
+                        {formatPKR(resolved.sPrice)}
                       </td>
-                      <td className={`px-3 py-2 ${isHighlighted ? 'text-sky-100' : 'text-slate-500'}`}>
-                        {it.packing || '1x1'}
+                      <td
+                        className={`px-2.5 py-2 text-right font-mono font-semibold ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        {formatPKR(resolved.purchasePrice)}
                       </td>
-                      <td className={`px-3 py-2 text-right font-mono ${isHighlighted ? 'text-white' : 'text-slate-800'}`}>
-                        {stockPacks}P
+                      <td
+                        className={`px-2.5 py-2 text-right font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-teal-700'
+                        }`}
+                      >
+                        {formatPKR(resolved.loosePrice)}
                       </td>
-                      <td className={`px-3 py-2 text-right font-mono font-bold ${isHighlighted ? 'text-amber-200' : 'text-slate-900'}`}>
-                        {formatPKR(rate)}
+                      <td
+                        className={`px-2.5 py-2 text-right font-mono font-bold ${
+                          isHighlighted
+                            ? resolved.stockPacks > 0
+                              ? 'text-emerald-200'
+                              : 'text-rose-200'
+                            : resolved.stockPacks > 0
+                            ? 'text-emerald-700'
+                            : 'text-rose-600'
+                        }`}
+                      >
+                        {resolved.stockPacks}P
                       </td>
-                      <td className="px-3 py-2 text-right">
+                      <td className={`px-2.5 py-2 ${isHighlighted ? 'text-sky-100' : 'text-slate-600'}`}>
+                        {resolved.company}
+                      </td>
+                      <td className={`px-2.5 py-2 ${isHighlighted ? 'text-sky-100' : 'text-slate-500'}`}>
+                        {resolved.packing}
+                      </td>
+                      <td
+                        className={`px-2.5 py-2 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        {resolved.batchNumber}
+                      </td>
+                      <td
+                        className={`px-2.5 py-2 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {formattedExpiry}
+                      </td>
+                      <td
+                        className={`px-2.5 py-2 max-w-[180px] truncate ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                        }`}
+                        title={resolved.otherInfo !== '—' ? resolved.otherInfo : undefined}
+                      >
+                        {resolved.otherInfo}
+                      </td>
+                      <td className="px-2.5 py-2 text-right">
                         <button
                           type="button"
                           onClick={(e) => {

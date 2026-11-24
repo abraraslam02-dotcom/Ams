@@ -1,4 +1,5 @@
 import { HealthResponse, SettingsResponse } from '../types/system';
+import { getPakistanDateISO, getPakistanDateParts } from '../utils/formatters';
 import { DatabaseStatusResponse, ModulesResponse } from '../types/database';
 import {
   AuthStatusResponse,
@@ -26,6 +27,7 @@ import type {
   SalesPriceHistoryEntry,
   SalesPriceHistoryResponse,
 } from '../types/sales';
+import { resolveLineSequentialDiscounts } from '../utils/taxCalculation';
 
 const LEGACY_TOKEN_KEY = 'ams_session_token';
 const LEGACY_CACHED_SESSION_KEY = 'ams_cached_auth_session';
@@ -309,7 +311,15 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     throw err;
   }
 
-  if (typeof window !== 'undefined' && res.status === 503 && url.startsWith('/api/')) {
+  const isOfflineModeCached = (() => {
+    try {
+      return typeof window !== 'undefined' && window.localStorage.getItem('ams_system_operating_mode') === 'OFFLINE';
+    } catch {
+      return false;
+    }
+  })();
+
+  if (typeof window !== 'undefined' && res.status === 503 && url.startsWith('/api/') && !isOfflineModeCached) {
     try {
       const errBody = await res.clone().json().catch(() => null);
       if (errBody && (errBody.dbConnectionError || errBody.connectionBlocked)) {
@@ -342,19 +352,7 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     window.dispatchEvent(new CustomEvent('ams-session-expired'));
   }
 
-  // Whenever an online mutation succeeds, schedule a fast background sync so IndexedDB always holds the latest records
-  if (
-    res.ok &&
-    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) &&
-    url.startsWith('/api/') &&
-    !url.startsWith('/api/sync/') &&
-    !url.startsWith('/api/auth/logout')
-  ) {
-    setTimeout(() => {
-      offlineSyncManager.syncNow().catch(() => {});
-    }, 200);
-  }
-
+  // Manual Control Policy: Never trigger automatic background sync after API mutations.
   return res;
 }
 
@@ -571,7 +569,7 @@ export const api = {
       offlineStorage.getAll<any>('cash_book'),
     ]);
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getPakistanDateISO();
     const start = params?.startDate || today;
     const end = params?.endDate || today;
 
@@ -1687,6 +1685,8 @@ export const api = {
       new_purchase_price: number;
       update_purchase_price: boolean;
       update_retail_price: boolean;
+      new_retail_price?: number;
+      new_loose_rate?: number;
     }
   ): Promise<{
     success: boolean;
@@ -1702,6 +1702,10 @@ export const api = {
       retail_base: number;
       old_retail_price: number;
       new_retail_price: number;
+      old_wholesale_price?: number;
+      new_wholesale_price?: number;
+      old_trade_price?: number;
+      new_trade_price?: number;
       old_loose_rate: number;
       new_loose_rate: number;
       updated_purchase_price: boolean;
@@ -1731,6 +1735,8 @@ export const api = {
       item_name: 'Item',
       packing: '1x1',
       purchase_price: 0,
+      wholesale_price: 0,
+      trade_price: 0,
       retail_price: 0,
       loose_rate: 0,
     };
@@ -1746,6 +1752,8 @@ export const api = {
 
     const oldPur = round2Local(existing.purchase_price || 0);
     const oldRet = round2Local(existing.retail_price || 0);
+    const oldWholesale = round2Local(existing.wholesale_price || 0);
+    const oldTrade = round2Local(existing.trade_price || 0);
     const oldLoose =
       Number(existing.loose_rate || 0) > 0
         ? round2Local(existing.loose_rate)
@@ -1753,16 +1761,29 @@ export const api = {
 
     const newPur = round2Local(payload.new_purchase_price);
     const retailBase = newPur > 0 ? round2Local(newPur / 0.85) : 0;
-    const calcRetail = retailBase;
+    const calcRetail =
+      payload.new_retail_price !== undefined && Number(payload.new_retail_price) > 0
+        ? round2Local(payload.new_retail_price)
+        : retailBase;
 
-    const finalPur = payload.update_purchase_price ? newPur : oldPur;
-    const finalRet = payload.update_retail_price ? calcRetail : oldRet;
-    const finalLoose = round2Local(finalRet / unitsPerPack);
+    const shouldUpdatePur = Boolean(payload.update_purchase_price);
+    const shouldUpdateRet = shouldUpdatePur && Boolean(payload.update_retail_price);
+
+    const finalPur = shouldUpdatePur ? newPur : oldPur;
+    const finalRet = shouldUpdateRet ? calcRetail : oldRet;
+    const finalWholesale = shouldUpdateRet ? finalRet : oldWholesale;
+    const finalTrade = shouldUpdateRet ? finalRet : oldTrade;
+    const finalLoose = shouldUpdateRet
+      ? payload.new_loose_rate !== undefined && Number(payload.new_loose_rate) > 0
+        ? round2Local(payload.new_loose_rate)
+        : round2Local(finalRet / unitsPerPack)
+      : oldLoose;
 
     const updatedItem = {
       ...existing,
       purchase_price: finalPur,
-      trade_price: finalPur,
+      wholesale_price: finalWholesale,
+      trade_price: finalTrade,
       retail_price: finalRet,
       loose_rate: finalLoose,
       updated_at: new Date().toISOString(),
@@ -1795,10 +1816,14 @@ export const api = {
         retail_base: retailBase,
         old_retail_price: oldRet,
         new_retail_price: finalRet,
+        old_wholesale_price: oldWholesale,
+        new_wholesale_price: finalWholesale,
+        old_trade_price: oldTrade,
+        new_trade_price: finalTrade,
         old_loose_rate: oldLoose,
         new_loose_rate: finalLoose,
-        updated_purchase_price: Boolean(payload.update_purchase_price),
-        updated_retail_price: Boolean(payload.update_retail_price),
+        updated_purchase_price: shouldUpdatePur,
+        updated_retail_price: shouldUpdateRet,
       },
     };
   },
@@ -1831,6 +1856,59 @@ export const api = {
       throw new Error((data.error || 'Import failed') + detailMsg);
     }
     return data;
+  },
+
+  /**
+   * Items Master - Controlled Bulk Datasheet Update
+   */
+  async bulkUpdateItems(
+    updates: Array<{
+      id: number;
+      changes: Record<string, unknown>;
+      expected_updated_at?: string;
+    }>
+  ): Promise<{
+    success: boolean;
+    partial: boolean;
+    updatedCount: number;
+    errorCount: number;
+    updatedItems: any[];
+    errors: Array<{ id: number; item_code: string; item_name: string; error: string }>;
+    message?: string;
+    error?: string;
+  }> {
+    const res = await authFetch('/api/items/bulk-update', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates }),
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok && !Array.isArray(data?.errors)) {
+      throw new Error(data?.error || `Bulk update failed (HTTP ${res.status})`);
+    }
+    if (Array.isArray(data?.updatedItems) && data.updatedItems.length > 0) {
+      const nowIso = new Date().toISOString();
+      const syncedList = data.updatedItems.map((it: any) => ({
+        ...it,
+        sync_status: 'synced' as const,
+        local_modified: false,
+        sync_error: null,
+        updated_at: it.updated_at || nowIso,
+      }));
+      await offlineStorage.bulkPut('items', syncedList).catch(() => {});
+      await offlineSyncManager.refreshPendingCount().catch(() => {});
+      data.updatedItems = syncedList;
+    }
+    return {
+      success: Boolean(data?.success),
+      partial: Boolean(data?.partial),
+      updatedCount: Number(data?.updatedCount || 0),
+      errorCount: Number(data?.errorCount || (Array.isArray(data?.errors) ? data.errors.length : 0)),
+      updatedItems: Array.isArray(data?.updatedItems) ? data.updatedItems : [],
+      errors: Array.isArray(data?.errors) ? data.errors : [],
+      message: data?.message,
+      error: data?.error,
+    };
   },
 
   /**
@@ -2415,12 +2493,15 @@ export const api = {
     } catch {
       // Offline fallback
     }
-    const now = date ? new Date(date) : new Date();
+    const targetDateIso = String(date || getPakistanDateISO()).slice(0, 10);
+    const m = targetDateIso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const pkP = getPakistanDateParts();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-    const dd = String(now.getUTCDate()).padStart(2, '0');
-    const mmm = months[now.getUTCMonth()] || 'JAN';
-    const yyyy = now.getUTCFullYear();
-    const ym = `${yyyy}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const dd = m ? m[3] : String(pkP.day).padStart(2, '0');
+    const monNum = m ? Number(m[2]) : pkP.month;
+    const mmm = months[monNum - 1] || 'JAN';
+    const yyyy = m ? Number(m[1]) : pkP.year;
+    const ym = `${yyyy}-${String(monNum).padStart(2, '0')}`;
     const localPurchases = await offlineStorage.getAll<any>('purchases');
     const nextSeq = localPurchases.length + 1;
     return {
@@ -3150,12 +3231,15 @@ export const api = {
     } catch {
       // Offline fallback
     }
-    const d = date ? new Date(date) : new Date();
+    const targetDateIso = String(date || getPakistanDateISO()).slice(0, 10);
+    const m = targetDateIso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const pkP = getPakistanDateParts();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-    const dd = String(d.getUTCDate()).padStart(2, '0');
-    const mmm = months[d.getUTCMonth()] || 'JAN';
-    const yyyy = d.getUTCFullYear();
-    const ym = `${yyyy}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    const dd = m ? m[3] : String(pkP.day).padStart(2, '0');
+    const monNum = m ? Number(m[2]) : pkP.month;
+    const mmm = months[monNum - 1] || 'JAN';
+    const yyyy = m ? Number(m[1]) : pkP.year;
+    const ym = `${yyyy}-${String(monNum).padStart(2, '0')}`;
     const localSales = await offlineStorage.getAll<any>('sales');
     const nextSeq = String(localSales.length + 1).padStart(3, '0');
     return {
@@ -4026,7 +4110,7 @@ export const api = {
       // Offline fallback
     }
     const offlineVoucher = await offlineSyncManager.queueOfflineCashBookVoucher({
-      voucher_date: payload.voucher_date || new Date().toISOString().split('T')[0],
+      voucher_date: payload.voucher_date || getPakistanDateISO(),
       transaction_type: payload.voucher_type === 'Payment' ? 'Payment' : 'Receipt',
       transaction_category: payload.voucher_type === 'Payment' ? 'Supplier Payment' : 'Customer Receipt',
       head_account_id: payload.party_account_id || payload.account_id,
@@ -4100,6 +4184,7 @@ export const api = {
       salesmanId?: string;
       townName?: string;
       areaName?: string;
+      invoiceNumber?: string;
       year1?: string;
       year2?: string;
     }
@@ -4132,6 +4217,9 @@ export const api = {
     }
     if (params?.areaName && params.areaName !== 'ALL') {
       query.append('areaName', params.areaName);
+    }
+    if (params?.invoiceNumber && params.invoiceNumber.trim().length > 0) {
+      query.append('invoiceNumber', params.invoiceNumber.trim());
     }
     if (params?.year1) query.append('year1', params.year1);
     if (params?.year2) query.append('year2', params.year2);
@@ -4810,7 +4898,7 @@ export const api = {
       offlineStorage.getAll<any>('items'),
       offlineStorage.getAll<any>('inventory'),
     ]);
-    const now = new Date().toISOString().split('T')[0];
+    const now = getPakistanDateISO();
     let totalCostVal = 0;
     let totalRetailVal = 0;
     let expiredCount = 0;
@@ -5391,7 +5479,7 @@ export const api = {
         totalIn += packs;
         ledger.push({
           id: Number(p.id) || Date.now(),
-          movement_date: p.invoice_date || p.created_at || new Date().toISOString().split('T')[0],
+          movement_date: p.invoice_date || p.created_at || getPakistanDateISO(),
           movement_type: 'PURCHASE',
           reference_no: p.invoice_number || 'PUR',
           item_id: Number(line.item_id),
@@ -5415,7 +5503,7 @@ export const api = {
         totalOut += packs;
         ledger.push({
           id: Number(s.id) || Date.now(),
-          movement_date: s.sale_date || s.created_at || new Date().toISOString().split('T')[0],
+          movement_date: s.sale_date || s.created_at || getPakistanDateISO(),
           movement_type: 'SALE',
           reference_no: s.invoice_number || 'INV',
           item_id: Number(line.item_id),
@@ -6290,7 +6378,7 @@ export const api = {
           total_units: Number(ln.total_units || 0),
           unit_price: Number(ln.unit_price || 0),
           loose_rate: Number(ln.loose_rate || 0),
-          discount_percent: Number(ln.discount_percent || 0),
+          ...resolveLineSequentialDiscounts(ln, Number(ln.unit_price || 0)),
           discount_amount: Number(ln.discount_amount || 0),
           tax_percent: Number(ln.tax_percent || 0),
           tax_amount: Number(ln.tax_amount || 0),
@@ -6365,7 +6453,7 @@ export const api = {
           trade_price: Number(ln.trade_price ?? item.trade_price ?? 0),
           wholesale_price: Number(ln.wholesale_price ?? item.wholesale_price ?? 0),
           retail_price: Number(ln.mrp_rate ?? ln.retail_price ?? item.retail_price ?? 0),
-          discount_percent: Number(ln.discount_percent || 0),
+          ...resolveLineSequentialDiscounts(ln, pRate),
           discount_amount: Number(ln.discount_amount || 0),
           tax_percent: Number(ln.tax_percent || 0),
           tax_amount: Number(ln.tax_amount || 0),
@@ -6453,7 +6541,7 @@ export const api = {
             quantity: round2Local(Number(ln.quantity || 0)),
             loose_quantity: round2Local(Number(ln.loose_quantity || 0)),
             unit_price: round2Local(Number(ln.unit_price || 0)),
-            discount_percent: round2Local(Number(ln.discount_percent || 0)),
+            ...resolveLineSequentialDiscounts(ln, Number(ln.unit_price || 0)),
             discount_amount: round2Local(Number(ln.discount_amount || 0)),
             line_total: round2Local(Number(ln.line_total || 0)),
           });
@@ -6549,7 +6637,7 @@ export const api = {
           bonus_quantity: round2Local(Number(ln.bonus_quantity || 0)),
           unit_price: round2Local(Number(ln.unit_price || 0)),
           loose_rate: round2Local(Number(ln.loose_rate || 0)),
-          discount_percent: round2Local(Number(ln.discount_percent || 0)),
+          ...resolveLineSequentialDiscounts(ln, Number(ln.unit_price || 0)),
           discount_amount: round2Local(Number(ln.discount_amount || 0)),
           tax_amount: taxAmt,
           line_total: lineTotal,
@@ -6592,7 +6680,7 @@ export const api = {
           expiry_date: String(ln.expiry_date || ''),
           purchase_price: round2Local(Number(ln.purchase_rate ?? ln.purchase_price ?? 0)),
           trade_price: round2Local(Number(ln.trade_price ?? item.trade_price ?? 0)),
-          discount_percent: round2Local(Number(ln.discount_percent || 0)),
+          ...resolveLineSequentialDiscounts(ln, Number(ln.purchase_rate ?? ln.purchase_price ?? 0)),
           discount_amount: round2Local(Number(ln.discount_amount || 0)),
           tax_percent: round2Local(Number(ln.tax_percent || 0)),
           tax_amount: round2Local(Number(ln.tax_amount || 0)),
@@ -7077,8 +7165,8 @@ export const api = {
       success: true,
       offline: true,
       summary: {
-        startDate: params?.startDate || new Date().toISOString().split('T')[0],
-        endDate: params?.endDate || new Date().toISOString().split('T')[0],
+        startDate: params?.startDate || getPakistanDateISO(),
+        endDate: params?.endDate || getPakistanDateISO(),
         openingCashBalance,
         totalCashReceipts,
         totalCashPayments,
@@ -8614,7 +8702,130 @@ export const api = {
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load variant demand & alerts report.');
     return data;
   },
+
+  // =========================================================================
+  // SUPER ADMIN OPERATING MODE (ONLINE / OFFLINE) & MANUAL BACKUP + CLOUD SYNC
+  // =========================================================================
+  async getOperatingModeStatus(): Promise<{ success: boolean; data: import('../types/system').OperatingModeStatus }> {
+    const { res, data } = await authFetchRetryHtml('/api/system/operating-mode');
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load System Operating Mode status.');
+    }
+    if (data?.data?.mode) {
+      offlineSyncManager.setOperatingMode(data.data.mode);
+    }
+    return data;
+  },
+
+  async switchOperatingMode(payload: {
+    mode: 'ONLINE' | 'OFFLINE';
+    allowWithPendingOfflineChanges?: boolean;
+  }): Promise<import('../types/system').SwitchOperatingModeResponse> {
+    const res = await authFetch('/api/system/operating-mode/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await parseJsonSafe(res);
+    if (data?.status?.mode) {
+      offlineSyncManager.setOperatingMode(data.status.mode);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('ams-operating-mode-changed', {
+            detail: { mode: data.status.mode, status: data.status },
+          })
+        );
+      }
+    }
+    return data;
+  },
+
+  async runBackupAndSyncNow(notes?: string): Promise<import('../types/system').BackupAndSyncNowResponse> {
+    const res = await authFetch('/api/system/backup-and-sync-now', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes }),
+    });
+    const data = await parseJsonSafe(res);
+    if (data?.status?.mode && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-operating-mode-changed', {
+          detail: { mode: data.status.mode, status: data.status },
+        })
+      );
+    }
+    return data;
+  },
+
+  async getSyncConflicts(status: 'unresolved' | 'resolved' | 'all' = 'unresolved'): Promise<{
+    success: boolean;
+    conflicts: import('../types/system').SyncConflictRecord[];
+    count: number;
+  }> {
+    const { res, data } = await authFetchRetryHtml(`/api/system/sync-conflicts?status=${encodeURIComponent(status)}`);
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load sync conflicts.');
+    }
+    return data;
+  },
+
+  async resolveSyncConflict(
+    conflictId: number,
+    resolution: 'keep_local' | 'keep_cloud'
+  ): Promise<{
+    success: boolean;
+    message: string;
+    unresolvedConflictsCount: number;
+    status: import('../types/system').OperatingModeStatus;
+  }> {
+    const res = await authFetch(`/api/system/sync-conflicts/${conflictId}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolution }),
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to resolve sync conflict.');
+    }
+    if (data?.status?.mode && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-operating-mode-changed', {
+          detail: { mode: data.status.mode, status: data.status },
+        })
+      );
+    }
+    return data;
+  },
+
+  async resolveAllSyncConflicts(
+    resolution: 'keep_local' | 'keep_cloud'
+  ): Promise<{
+    success: boolean;
+    resolvedCount: number;
+    message: string;
+    unresolvedConflictsCount: number;
+    status: import('../types/system').OperatingModeStatus;
+  }> {
+    const res = await authFetch('/api/system/sync-conflicts/resolve-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolution }),
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to resolve sync conflicts.');
+    }
+    if (data?.status?.mode && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-operating-mode-changed', {
+          detail: { mode: data.status.mode, status: data.status },
+        })
+      );
+    }
+    return data;
+  },
 };
+
 
 
 

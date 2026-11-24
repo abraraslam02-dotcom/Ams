@@ -63,6 +63,10 @@ export interface PurchaseLineItem {
   purchase_rate: number;
   mrp_rate: number;
   gross_amount: number;
+  discount_1_percent: number;
+  discount_2_percent: number;
+  net_rate: number;
+  net_loose_rate?: number;
   discount_percent: number;
   discount_amount: number;
   taxable_amount: number;
@@ -153,6 +157,9 @@ export interface PurchaseReturnLineItem {
   return_quantity: number;
   return_units?: number;
   debit_unit_rate: number;
+  discount_1_percent?: number;
+  discount_2_percent?: number;
+  net_rate?: number;
   discount_percent: number;
   discount_amount: number;
   taxable_amount: number;

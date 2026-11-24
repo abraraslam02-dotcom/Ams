@@ -19,13 +19,16 @@ import {
   Layers,
   MapPin,
   Printer,
+  Table2,
+  ClipboardList,
 } from 'lucide-react';
 import { Item, ItemStats } from '../../types/item';
 import { api } from '../../services/api';
 import { ItemFormModal } from './ItemFormModal';
 import { ExcelImportModal } from './ExcelImportModal';
+import { ItemMasterDatasheetView } from './ItemMasterDatasheetView';
 import { exportItemsToExcel } from '../../utils/excel';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
@@ -75,6 +78,21 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(initialOpenImport);
   const [deletingItem, setDeletingItem] = useState<Item | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
+
+  // View Switcher: Item Registration vs Item Master Datasheet
+  const [viewMode, setViewMode] = useState<'registration' | 'datasheet'>('registration');
+  const [datasheetDirtyCount, setDatasheetDirtyCount] = useState<number>(0);
+  const [confirmSwitchToRegistration, setConfirmSwitchToRegistration] = useState<boolean>(false);
+
+  const handleRequestViewMode = (target: 'registration' | 'datasheet') => {
+    if (target === viewMode) return;
+    if (target === 'registration' && datasheetDirtyCount > 0) {
+      setConfirmSwitchToRegistration(true);
+      return;
+    }
+    setConfirmSwitchToRegistration(false);
+    setViewMode(target);
+  };
 
   useEffect(() => {
     setIsImportModalOpen(initialOpenImport);
@@ -157,7 +175,7 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
       alert('No items to export.');
       return;
     }
-    exportItemsToExcel(items, `Abrar_Medical_Store_Items_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    exportItemsToExcel(items, `Abrar_Medical_Store_Items_${getPakistanDateISO()}.xlsx`);
   };
 
   // Inline Loose Rate editing state
@@ -202,66 +220,102 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
   };
 
   return (
-    <div className="space-y-5 max-w-7xl mx-auto pb-12">
-      {/* Top Title & Primary Actions */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
-              <Package className="w-4 h-4" />
+    <div className={`space-y-4 mx-auto pb-8 ${viewMode === 'datasheet' ? 'max-w-full' : 'max-w-7xl'}`}>
+      {/* Top Title, View Switcher & Primary Actions */}
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
+                <Package className="w-4 h-4" />
+              </div>
+              <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+                Item Registration &amp; Items Master (Abrar Medical Store)
+              </h2>
             </div>
-            <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-              Item Registration &amp; Items Master (Abrar Medical Store)
-            </h2>
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-              Multi-Level Packing Active
-            </span>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Multi-Level Packing (Carton, Boxes/Carton, Strips/Box, Tablets/Strip &amp; Purchase Unit) &bull; Decimal PKR pricing &bull; Excel Import/Export
+            </p>
           </div>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Multi-Level Packing (Carton, Boxes/Carton, Strips/Box, Tablets/Strip &amp; Purchase Unit) • Decimal PKR pricing • Excel Import/Export
-          </p>
+
+          {/* 2-View Switcher: Item Registration vs Item Master Datasheet */}
+          <div className="inline-flex items-center p-1 rounded-xl bg-slate-200/80 border border-slate-300/80 print:hidden">
+            <button
+              type="button"
+              onClick={() => handleRequestViewMode('registration')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                viewMode === 'registration'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-emerald-700" />
+              <span>Item Registration</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleRequestViewMode('datasheet')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                viewMode === 'datasheet'
+                  ? 'bg-emerald-700 text-white shadow-xs'
+                  : 'text-slate-700 hover:text-slate-900'
+              }`}
+            >
+              <Table2 className="w-3.5 h-3.5" />
+              <span>Item Master Datasheet</span>
+              {datasheetDirtyCount > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 text-[10px] font-extrabold tabular-nums">
+                  {datasheetDirtyCount}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2 print:hidden">
-          <WhatsAppSendButton
-            label="Send to WhatsApp"
-            disabled={items.length === 0}
-            allowWithoutPhone
-            skipDuplicateCheck
-            printElementRef={itemsPrintRef}
-            paperSize="a4"
-            orientation="portrait"
-            payload={{
-              documentType: 'report',
-              documentNumber: 'Medicine Catalog Directory',
-              documentDate: new Date().toISOString().slice(0, 10),
-              customerName: 'Medicine Catalog Directory',
-              totalAmount: 0,
-              paidAmount: 0,
-              remainingBalance: 0,
-            }}
-          />
+          {viewMode === 'registration' && (
+            <>
+              <WhatsAppSendButton
+                label="Send to WhatsApp"
+                disabled={items.length === 0}
+                allowWithoutPhone
+                skipDuplicateCheck
+                printElementRef={itemsPrintRef}
+                paperSize="a4"
+                orientation="portrait"
+                payload={{
+                  documentType: 'report',
+                  documentNumber: 'Medicine Catalog Directory',
+                  documentDate: getPakistanDateISO(),
+                  customerName: 'Medicine Catalog Directory',
+                  totalAmount: 0,
+                  paidAmount: 0,
+                  remainingBalance: 0,
+                }}
+              />
 
-          <button
-            onClick={() => {
-              if (itemsPrintRef.current) {
-                printReportDocument(
-                  itemsPrintRef.current,
-                  'Abrar Medical Store - Medicine Catalog Directory',
-                  { orientation: 'portrait', paperSize: 'legal' }
-                );
-              } else {
-                window.print();
-              }
-            }}
-            disabled={items.length === 0}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-700 text-white hover:bg-slate-800 transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title="Print formatted medicine catalog"
-          >
-            <Printer className="w-3.5 h-3.5 text-slate-300" />
-            <span>Print Catalog</span>
-          </button>
+              <button
+                onClick={() => {
+                  if (itemsPrintRef.current) {
+                    printReportDocument(
+                      itemsPrintRef.current,
+                      'Abrar Medical Store - Medicine Catalog Directory',
+                      { orientation: 'portrait', paperSize: 'legal' }
+                    );
+                  } else {
+                    window.print();
+                  }
+                }}
+                disabled={items.length === 0}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 border border-slate-700 text-white hover:bg-slate-800 transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                title="Print formatted medicine catalog"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-300" />
+                <span>Print Catalog</span>
+              </button>
+            </>
+          )}
 
           <button
             onClick={handleExport}
@@ -290,6 +344,38 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Unsaved Datasheet Guard when switching back to Registration View */}
+      {confirmSwitchToRegistration && (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-semibold">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              You have {datasheetDirtyCount} unsaved item edit(s) in Item Master Datasheet. Save your changes first or discard them to switch to Registration View.
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setConfirmSwitchToRegistration(false)}
+              className="px-3 py-1 rounded-lg bg-white border border-slate-300 text-slate-800 font-bold hover:bg-slate-50 cursor-pointer"
+            >
+              Stay in Datasheet
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmSwitchToRegistration(false);
+                setDatasheetDirtyCount(0);
+                setViewMode('registration');
+              }}
+              className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold cursor-pointer"
+            >
+              Discard Edits &amp; Switch
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Success Banner */}
       {successNotice && (
@@ -326,6 +412,23 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
       {/* Live Database Sync Status */}
       <SimpleSyncStatusBar onSyncCompleted={fetchItems} />
 
+      {viewMode === 'datasheet' ? (
+        <ItemMasterDatasheetView
+          allCompanies={companies}
+          allCategories={categories}
+          onSwitchToRegistration={() => handleRequestViewMode('registration')}
+          onDirtyCountChange={setDatasheetDirtyCount}
+          onOpenVariants={onOpenVariants}
+          onMasterMutated={(notice) => {
+            fetchItems();
+            if (notice) {
+              setSuccessNotice(notice);
+              setTimeout(() => setSuccessNotice(null), 4000);
+            }
+          }}
+        />
+      ) : (
+        <>
       {/* Summary KPI Cards Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs">
@@ -897,6 +1000,8 @@ export const ItemsMasterView: React.FC<ItemsMasterViewProps> = ({
       </div>
     </div>
     </ReportZoomWrapper>
+        </>
+      )}
 
       {/* Item Form Modal (Add / Edit) */}
       <ItemFormModal

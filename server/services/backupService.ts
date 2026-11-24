@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import Database from 'better-sqlite3';
-import { config } from '../config.ts';
+import { config, isTemporaryStoragePath, validatePermanentStorageLocation } from '../config.ts';
+import { getPakistanDateISO, getPakistanFilenameStamp } from '../utils/pakistanTime.ts';
 import {
   getDatabase,
   closeDatabaseConnection,
@@ -10,8 +11,8 @@ import {
 } from '../db/connection.ts';
 import { runMigrations } from '../db/migrations.ts';
 import { bumpDbResetEpoch } from '../db/resetState.ts';
+import { isOfflineOperatingMode } from './operatingModeStore.ts';
 import {
-  uploadBackupToCloudSQL,
   syncDatabaseToCloudSQL,
 } from './cloudPersistenceService.ts';
 
@@ -54,11 +55,20 @@ export interface BackupVerificationResult {
 }
 
 /**
- * Resolves the configured backup directory from company_settings or defaults to data/backups
+ * Resolves the permanent backup directory:
+ * - On Windows: permanently defaults to D:\AbrarMedicalStore\Backups\ (validating D:\ availability).
+ * - On Linux/macOS: uses permanent config.primaryBackupDir (never a temporary folder).
  */
 export function getBackupDirectory(): string {
-  const runtimeBaseDir = path.dirname(config.databasePath);
-  const defaultDir = path.resolve(runtimeBaseDir, 'backups');
+  const storageCheck = validatePermanentStorageLocation();
+  if (!storageCheck.available) {
+    throw new Error(
+      storageCheck.warning ||
+        `Permanent backup drive is unavailable (${config.primaryBackupDir}).`
+    );
+  }
+
+  const defaultDir = config.primaryBackupDir;
 
   try {
     const db = getDatabase();
@@ -66,17 +76,24 @@ export function getBackupDirectory(): string {
       .prepare('SELECT backup_directory FROM company_settings LIMIT 1')
       .get() as { backup_directory?: string } | undefined;
     const customDir = row?.backup_directory ? String(row.backup_directory).trim() : '';
-    if (customDir && customDir !== 'data/backups' && customDir !== './data/backups') {
+    const isGenericLegacy =
+      !customDir ||
+      customDir === 'data/backups' ||
+      customDir === './data/backups' ||
+      customDir === 'D:\\Abrar Medical Store Backups';
+    if (!isGenericLegacy) {
       const candidate = path.isAbsolute(customDir)
         ? customDir
-        : path.resolve(runtimeBaseDir, customDir);
-      if (!fs.existsSync(candidate)) {
-        fs.mkdirSync(candidate, { recursive: true });
+        : path.resolve(path.dirname(config.databasePath), customDir);
+      if (!isTemporaryStoragePath(candidate)) {
+        if (!fs.existsSync(candidate)) {
+          fs.mkdirSync(candidate, { recursive: true });
+        }
+        return candidate;
       }
-      return candidate;
     }
   } catch {
-    // Fallback to default runtime backup directory
+    // Fallback to verified permanent backup directory
   }
 
   if (!fs.existsSync(defaultDir)) {
@@ -89,15 +106,7 @@ export function getBackupDirectory(): string {
  * Formats current timestamp for backup filenames: YYYY-MM-DD_HH-mm-ss
  */
 function formatBackupTimestamp(date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const yyyy = date.getFullYear();
-  const mm = pad(date.getMonth() + 1);
-  const dd = pad(date.getDate());
-  const hh = pad(date.getHours());
-  const min = pad(date.getMinutes());
-  const ss = pad(date.getSeconds());
-  const ms = String(date.getMilliseconds()).padStart(3, '0');
-  return `${yyyy}-${mm}-${dd}_${hh}-${min}-${ss}-${ms}`;
+  return getPakistanFilenameStamp(date);
 }
 
 /**
@@ -149,6 +158,11 @@ export function verifyBackupFile(filePath: string): BackupVerificationResult {
       error: 'Backup file is too small to be a valid SQLite database.',
     };
   }
+
+  const walSidecarPath = `${filePath}-wal`;
+  const shmSidecarPath = `${filePath}-shm`;
+  const hadWalBefore = fs.existsSync(walSidecarPath);
+  const hadShmBefore = fs.existsSync(shmSidecarPath);
 
   let tempDb: Database.Database | null = null;
   try {
@@ -226,6 +240,18 @@ export function verifyBackupFile(filePath: string): BackupVerificationResult {
         tempDb.close();
       } catch {
         // ignore close error
+      }
+    }
+    if (!hadWalBefore && !hadShmBefore) {
+      try {
+        if (fs.existsSync(walSidecarPath) && fs.statSync(walSidecarPath).size === 0) {
+          fs.unlinkSync(walSidecarPath);
+        }
+        if (fs.existsSync(shmSidecarPath) && (!fs.existsSync(walSidecarPath) || fs.statSync(walSidecarPath).size === 0)) {
+          fs.unlinkSync(shmSidecarPath);
+        }
+      } catch {
+        // ignore sidecar cleanup warning
       }
     }
   }
@@ -309,15 +335,7 @@ export function createDatabaseBackup(options: {
     .prepare('SELECT * FROM backup_history WHERE id = ?')
     .get(insertRes.lastInsertRowid) as BackupRecord;
 
-  // Asynchronously mirror backup to permanent Cloud SQL storage
-  uploadBackupToCloudSQL({
-    filename,
-    filePath: targetPath,
-    backupType: options.backupType,
-    notes,
-    counts: verification.coreCounts,
-  }).catch(() => {});
-
+  // Manual Control Only: Never automatically upload local backups to the cloud in the background.
   return {
     ...createdRow,
     file_exists: fs.existsSync(targetPath),
@@ -325,90 +343,19 @@ export function createDatabaseBackup(options: {
 }
 
 /**
- * Triggers an automatic backup before major database changes if enabled in company_settings.
+ * Manual Control Only: Automatic pre-change background backups are disabled so backups
+ * occur strictly via explicit Super Admin action (or explicit pre-restore safety snapshot).
  */
-export function triggerPreChangeBackupIfEnabled(operationReason: string, username = 'System'): BackupRecord | null {
-  try {
-    const db = getDatabase();
-    const settings = db
-      .prepare('SELECT auto_backup_before_changes FROM company_settings LIMIT 1')
-      .get() as { auto_backup_before_changes?: number } | undefined;
-
-    if (settings && Number(settings.auto_backup_before_changes) === 0) {
-      return null;
-    }
-
-    return createDatabaseBackup({
-      backupType: 'pre_change',
-      createdBy: username,
-      notes: `Pre-change safety backup before: ${operationReason}`,
-    });
-  } catch (err) {
-    console.warn('[AMS Backup] Pre-change backup warning:', err);
-    return null;
-  }
+export function triggerPreChangeBackupIfEnabled(_operationReason: string, _username = 'System'): BackupRecord | null {
+  return null;
 }
 
 /**
- * Checks and runs automatic daily backup if enabled and not yet created today.
+ * Manual Control Only: Automatic daily scheduled backups are disabled.
+ * Super Admin initiates backups explicitly via BACKUP & SYNC NOW.
  */
 export function ensureDailyAutomaticBackup(): BackupRecord | null {
-  try {
-    const db = getDatabase();
-    const settings = db
-      .prepare('SELECT auto_daily_backup FROM company_settings LIMIT 1')
-      .get() as { auto_daily_backup?: number } | undefined;
-
-    if (settings && Number(settings.auto_daily_backup) === 0) {
-      return null;
-    }
-
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const existingToday = db
-      .prepare(
-        `
-        SELECT id FROM backup_history
-        WHERE backup_type = 'daily_auto'
-          AND status = 'completed'
-          AND DATE(created_at) = DATE(?)
-        LIMIT 1
-      `
-      )
-      .get(todayStr);
-
-    if (existingToday) {
-      return null;
-    }
-
-    const totalBackupsRow = db
-      .prepare('SELECT COUNT(*) as c FROM backup_history')
-      .get() as { c: number } | undefined;
-    if (Number(totalBackupsRow?.c || 0) === 0) {
-      const txCount = ['sales', 'purchases', 'inventory', 'journal_entries', 'cash_book_vouchers'].reduce(
-        (sum, tbl) => {
-          try {
-            const row = db.prepare(`SELECT COUNT(*) as c FROM "${tbl}"`).get() as { c: number } | undefined;
-            return sum + Number(row?.c || 0);
-          } catch {
-            return sum;
-          }
-        },
-        0
-      );
-      if (txCount === 0) {
-        return null;
-      }
-    }
-
-    return createDatabaseBackup({
-      backupType: 'daily_auto',
-      createdBy: 'System Scheduler',
-      notes: `Automatic Daily Backup for ${todayStr}`,
-    });
-  } catch (err) {
-    console.warn('[AMS Backup] Daily automatic backup check failed:', err);
-    return null;
-  }
+  return null;
 }
 
 /**
@@ -572,15 +519,17 @@ export function restoreDatabaseFromBackup(options: {
       `Restored database from ${targetFilename} (Safety backup created: ${safetyBackup.filename})`
     );
 
-  // Immediately sync restored database to Cloud SQL permanent storage
-  syncDatabaseToCloudSQL(`restore:${targetFilename}`).catch(() => {});
+  // Only sync restored database to Cloud when actively in ONLINE mode; never initiate cloud calls in OFFLINE mode
+  if (!isOfflineOperatingMode()) {
+    syncDatabaseToCloudSQL(`restore:${targetFilename}`).catch(() => {});
+  }
 
   return {
     success: true,
     dbResetEpoch: restoredEpoch,
     safetyBackup,
     restoredVerification: verification,
-    message: `Database successfully restored from "${targetFilename}". A pre-restoration safety backup ("${safetyBackup.filename}") was automatically saved.`,
+    message: `Database successfully restored from "${targetFilename}". A pre-restoration safety backup ("${safetyBackup.filename}") was saved.`,
   };
 }
 
@@ -646,11 +595,7 @@ export function getLocalNetworkAddresses(): Array<{ interfaceName: string; addre
  * Abrar_Backup_YYYY-MM-DD_NNN.db (e.g., Abrar_Backup_2026-04-06_001.db)
  */
 export function getNextNumberedBackupFilename(date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const yyyy = date.getFullYear();
-  const mm = pad(date.getMonth() + 1);
-  const dd = pad(date.getDate());
-  const datePart = `${yyyy}-${mm}-${dd}`;
+  const datePart = getPakistanDateISO(date);
   const prefix = `Abrar_Backup_${datePart}_`;
 
   const backupDir = getBackupDirectory();
@@ -736,7 +681,7 @@ export function createNumberedAbrarBackup(options: {
   const localFolderPath =
     options.localTargetFolder ||
     settingsRow?.local_backup_folder ||
-    'D:\\Abrar Medical Store Backups';
+    config.windowsPrimaryBackupDir;
 
   const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, JEs: ${verification.coreCounts.journalEntries}`;
   const createdBy = options.createdBy || 'Super Admin';
@@ -770,18 +715,10 @@ export function createNumberedAbrarBackup(options: {
     .prepare('SELECT * FROM backup_history WHERE id = ?')
     .get(insertRes.lastInsertRowid) as BackupRecord;
 
-  // Apply retention policy automatically
+  // Apply retention policy
   applyBackupRetentionPolicy();
 
-  // Mirror to Cloud SQL storage
-  uploadBackupToCloudSQL({
-    filename,
-    filePath: targetPath,
-    backupType,
-    notes,
-    counts: verification.coreCounts,
-  }).catch(() => {});
-
+  // Manual Control Only: Never automatically mirror local backups to Cloud in the background.
   return {
     ...createdRow,
     file_exists: fs.existsSync(targetPath),

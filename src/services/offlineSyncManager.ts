@@ -6,12 +6,18 @@
 
 import { offlineStorage } from './offlineStorage';
 import { prepareItemIndex, searchItems } from '../utils/itemSearch';
+import {
+  getPakistanDateISO,
+  getPakistanDateParts,
+  getPakistanYear,
+} from '../utils/formatters';
 
 export type SyncStatusType = 'synced' | 'pending' | 'syncing' | 'failed' | 'offline';
 
 export interface SyncState {
   isOnline: boolean;
   serverConnected: boolean;
+  operatingMode: 'ONLINE' | 'OFFLINE';
   syncStatus: SyncStatusType;
   statusMessage: string;
   pendingCount: number;
@@ -73,6 +79,18 @@ function getStoredAuthHeaders(): Record<string, string> {
 class OfflineSyncManager {
   private isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
   private serverConnected = false;
+  private operatingMode: 'ONLINE' | 'OFFLINE' = (() => {
+    try {
+      if (typeof window !== 'undefined') {
+        return window.localStorage.getItem('ams_system_operating_mode') === 'OFFLINE'
+          ? 'OFFLINE'
+          : 'ONLINE';
+      }
+    } catch {
+      // ignore storage access issues
+    }
+    return 'ONLINE';
+  })();
   private syncStatus: SyncStatusType = 'synced';
   private pendingCount = 0;
   private failedCount = 0;
@@ -93,6 +111,24 @@ class OfflineSyncManager {
     }
   }
 
+  public setOperatingMode(mode: 'ONLINE' | 'OFFLINE'): void {
+    const next: 'ONLINE' | 'OFFLINE' = mode === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+    this.operatingMode = next;
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('ams_system_operating_mode', next);
+      }
+    } catch {
+      // ignore storage error
+    }
+    if (next === 'OFFLINE') {
+      this.syncStatus = 'offline';
+    } else if (this.isOnline && this.pendingCount === 0 && this.failedCount === 0) {
+      this.syncStatus = 'synced';
+    }
+    this.notify();
+  }
+
   private async init() {
     await offlineStorage.getDb().catch(() => {});
 
@@ -104,10 +140,13 @@ class OfflineSyncManager {
     this.lastSyncedAt = await offlineStorage.getMeta('last_synced_at');
     await this.refreshPendingCount();
 
+    // Manual Control Only: track network connectivity status passively — NEVER trigger automatic sync on reconnect or timer!
     window.addEventListener('online', () => {
       this.isOnline = true;
+      if (this.operatingMode === 'ONLINE' && this.syncStatus === 'offline') {
+        this.syncStatus = this.pendingCount > 0 ? 'pending' : 'synced';
+      }
       this.notify();
-      this.syncNow();
     });
 
     window.addEventListener('offline', () => {
@@ -117,20 +156,18 @@ class OfflineSyncManager {
       this.notify();
     });
 
-    this.syncTimer = setInterval(() => {
-      const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
-      if (browserOnline && !this.isSyncing) {
-        this.syncNow();
-      }
-    }, 15000);
+    window.addEventListener('ams-operating-mode-changed', ((e: CustomEvent<{ mode?: string }>) => {
+      const nextMode = e.detail?.mode === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+      this.setOperatingMode(nextMode);
+    }) as EventListener);
 
-    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-      this.syncNow();
-    } else {
-      this.isOnline = false;
+    if (this.operatingMode === 'OFFLINE' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        this.isOnline = false;
+      }
       this.syncStatus = 'offline';
-      this.notify();
     }
+    this.notify();
   }
 
   /**
@@ -230,6 +267,9 @@ class OfflineSyncManager {
   }
 
   private getStatusMessage(): string {
+    if (this.operatingMode === 'OFFLINE') {
+      return 'Offline Mode – Local DB Active.';
+    }
     if (!this.isOnline || this.syncStatus === 'offline') {
       return 'Offline – Working Locally.';
     }
@@ -243,16 +283,17 @@ class OfflineSyncManager {
       return 'Synced – All Changes Saved.';
     }
     if (this.pendingCount > 0) {
-      return 'Failed – Changes Pending.';
+      return 'Pending – Manual Sync Ready.';
     }
-    return this.lastSyncedAt ? 'Synced – All Changes Saved.' : 'Online – Connected.';
+    return this.lastSyncedAt ? 'Synced – All Changes Saved.' : 'Online Mode – Connected.';
   }
 
   public getState(): SyncState {
     return {
       isOnline: this.isOnline,
       serverConnected: this.serverConnected,
-      syncStatus: !this.isOnline ? 'offline' : this.syncStatus,
+      operatingMode: this.operatingMode,
+      syncStatus: this.operatingMode === 'OFFLINE' || !this.isOnline ? 'offline' : this.syncStatus,
       statusMessage: this.getStatusMessage(),
       pendingCount: this.pendingCount,
       failedCount: this.failedCount,
@@ -629,7 +670,14 @@ class OfflineSyncManager {
    * 3. Rehydrates server SQLite from local IndexedDB if a newly republished container started empty
    * 4. Pulls incremental delta updates since lastSyncedAt + last_tombstone_id
    */
-  public async syncNow(): Promise<boolean> {
+  public async syncNow(options?: { manualTrigger?: boolean }): Promise<boolean> {
+    // Manual Control Only: block automatic/background sync calls and never hit cloud during OFFLINE MODE
+    if (!options?.manualTrigger) {
+      return false;
+    }
+    if (this.operatingMode === 'OFFLINE') {
+      return false;
+    }
     if (this.isSyncing) return false;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       this.isOnline = false;
@@ -1081,10 +1129,12 @@ class OfflineSyncManager {
 
     const now = new Date();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-    const targetDate = payload.invoice_date ? new Date(payload.invoice_date) : now;
-    const dd = String(targetDate.getUTCDate()).padStart(2, '0');
-    const mmm = months[targetDate.getUTCMonth()] || 'JAN';
-    const yyyy = targetDate.getUTCFullYear();
+    const resolvedSaleDate = String(payload.invoice_date || getPakistanDateISO(now)).slice(0, 10);
+    const saleDateMatch = resolvedSaleDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const pkNowSale = getPakistanDateParts(now);
+    const dd = saleDateMatch ? saleDateMatch[3] : String(pkNowSale.day).padStart(2, '0');
+    const mmm = months[(saleDateMatch ? Number(saleDateMatch[2]) : pkNowSale.month) - 1] || 'JAN';
+    const yyyy = saleDateMatch ? Number(saleDateMatch[1]) : pkNowSale.year;
     const dateToken = `${dd}-${mmm}-${yyyy}`;
     const allSales = await offlineStorage.getAll<any>('sales');
     const nextSeq = allSales.length + 1;
@@ -1200,9 +1250,7 @@ class OfflineSyncManager {
 
     await this.refreshPendingCount();
 
-    if (this.isOnline) {
-      this.syncNow();
-    }
+    // Manual Control Only: keep queued transaction local until Super Admin manually initiates Backup & Sync.
 
     return {
       success: true,
@@ -1238,10 +1286,12 @@ class OfflineSyncManager {
 
     const now = new Date();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-    const targetDate = payload.bill_date ? new Date(payload.bill_date) : now;
-    const dd = String(targetDate.getUTCDate()).padStart(2, '0');
-    const mmm = months[targetDate.getUTCMonth()] || 'JAN';
-    const yyyy = targetDate.getUTCFullYear();
+    const resolvedBillDate = String(payload.bill_date || getPakistanDateISO(now)).slice(0, 10);
+    const billDateMatch = resolvedBillDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const pkNowPur = getPakistanDateParts(now);
+    const dd = billDateMatch ? billDateMatch[3] : String(pkNowPur.day).padStart(2, '0');
+    const mmm = months[(billDateMatch ? Number(billDateMatch[2]) : pkNowPur.month) - 1] || 'JAN';
+    const yyyy = billDateMatch ? Number(billDateMatch[1]) : pkNowPur.year;
     const dateToken = `${dd}-${mmm}-${yyyy}`;
     const allPurchases = await offlineStorage.getAll<any>('purchases');
     const nextSeq = allPurchases.length + 1;
@@ -1260,7 +1310,7 @@ class OfflineSyncManager {
       client_request_id: clientTxId,
       bill_number: localInvNo,
       invoice_number: localInvNo,
-      bill_date: payload.bill_date || now.toISOString().slice(0, 10),
+      bill_date: resolvedBillDate,
       status: isHeldOrDraft ? 'held' : 'completed',
       sync_status: 'pending',
       created_at: now.toISOString(),
@@ -1372,9 +1422,7 @@ class OfflineSyncManager {
 
     await this.refreshPendingCount();
 
-    if (this.isOnline) {
-      this.syncNow();
-    }
+    // Manual Control Only: keep queued transaction local until Super Admin manually initiates Backup & Sync.
 
     return {
       success: true,
@@ -1408,7 +1456,7 @@ class OfflineSyncManager {
     const recAmt = round2(Math.max(0, Number(payload.receipt_amount || 0)));
     const payAmt = round2(Math.max(0, Number(payload.payment_amount || 0)));
     const netAmt = recAmt > 0 ? recAmt : payAmt;
-    const cleanDate = String(payload.voucher_date || new Date().toISOString().slice(0, 10));
+    const cleanDate = String(payload.voucher_date || getPakistanDateISO());
     const cleanType = String(payload.transaction_type || (recAmt > 0 ? 'Receipt' : 'Payment'));
 
     const record = {
@@ -1506,7 +1554,7 @@ class OfflineSyncManager {
     const now = new Date();
     const allSr = await offlineStorage.getAll<any>('sale_returns');
     const returnNo =
-      payload.return_number || `SR-${now.getFullYear()}-${String(allSr.length + 1).padStart(3, '0')}`;
+      payload.return_number || `SR-${getPakistanYear(now)}-${String(allSr.length + 1).padStart(3, '0')}`;
     const lines = Array.isArray(payload.items) ? payload.items : [];
     const netAmt = round2(payload.net_return_amount || payload.total_amount || 0);
 
@@ -1515,7 +1563,7 @@ class OfflineSyncManager {
       ...payload,
       client_tx_id: clientTxId,
       return_number: returnNo,
-      return_date: payload.return_date || now.toISOString().slice(0, 10),
+      return_date: payload.return_date || getPakistanDateISO(now),
       net_return_amount: netAmt,
       items: lines,
       sync_status: 'pending',
@@ -1580,7 +1628,7 @@ class OfflineSyncManager {
     const now = new Date();
     const allPr = await offlineStorage.getAll<any>('purchase_returns');
     const returnNo =
-      payload.return_number || `PR-${now.getFullYear()}-${String(allPr.length + 1).padStart(3, '0')}`;
+      payload.return_number || `PR-${getPakistanYear(now)}-${String(allPr.length + 1).padStart(3, '0')}`;
     const lines = Array.isArray(payload.items) ? payload.items : [];
     const netAmt = round2(payload.net_return_amount || payload.total_amount || 0);
 
@@ -1589,7 +1637,7 @@ class OfflineSyncManager {
       ...payload,
       client_tx_id: clientTxId,
       return_number: returnNo,
-      return_date: payload.return_date || now.toISOString().slice(0, 10),
+      return_date: payload.return_date || getPakistanDateISO(now),
       net_return_amount: netAmt,
       items: lines,
       sync_status: 'pending',

@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { SalesmanRecord, DeliverymanRecord, DeliveryTrackingRecord } from '../../types/sales';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 import { NumericInput } from '../common/NumericInput';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
@@ -82,7 +82,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   const [smName, setSmName] = useState('');
   const [smMobile, setSmMobile] = useState('');
   const [smAddress, setSmAddress] = useState('');
-  const [smJoiningDate, setSmJoiningDate] = useState(new Date().toISOString().slice(0, 10));
+  const [smJoiningDate, setSmJoiningDate] = useState(getPakistanDateISO());
   const [smCommissionType, setSmCommissionType] = useState<'Percentage' | 'Fixed Amount'>(
     'Percentage'
   );
@@ -92,7 +92,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
 
   // Commission Payment Modal
   const [commissionPayModal, setCommissionPayModal] = useState<SalesmanRecord | null>(null);
-  const [commPayDate, setCommPayDate] = useState(new Date().toISOString().slice(0, 10));
+  const [commPayDate, setCommPayDate] = useState(getPakistanDateISO());
   const [commPayAmount, setCommPayAmount] = useState<number>(0);
   const [commPayMethod, setCommPayMethod] = useState<'Cash' | 'Bank'>('Cash');
   const [commPayRef, setCommPayRef] = useState('');
@@ -103,7 +103,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   const [smReportFilterId, setSmReportFilterId] = useState<string>('');
   const [smReportFromDate, setSmReportFromDate] = useState<string>('2026-01-01');
   const [smReportToDate, setSmReportToDate] = useState<string>(
-    new Date().toISOString().slice(0, 10)
+    getPakistanDateISO()
   );
   const [smReportData, setSmReportData] = useState<any[]>([]);
   const [smReportSummary, setSmReportSummary] = useState<any>(null);
@@ -119,7 +119,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   const [dmName, setDmName] = useState('');
   const [dmMobile, setDmMobile] = useState('');
   const [dmAddress, setDmAddress] = useState('');
-  const [dmJoiningDate, setDmJoiningDate] = useState(new Date().toISOString().slice(0, 10));
+  const [dmJoiningDate, setDmJoiningDate] = useState(getPakistanDateISO());
   const [dmStatus, setDmStatus] = useState<'Active' | 'Inactive'>('Active');
   const [dmNotes, setDmNotes] = useState('');
 
@@ -151,7 +151,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
   const [delReportFilterId, setDelReportFilterId] = useState<string>('');
   const [delReportFromDate, setDelReportFromDate] = useState<string>('2026-01-01');
   const [delReportToDate, setDelReportToDate] = useState<string>(
-    new Date().toISOString().slice(0, 10)
+    getPakistanDateISO()
   );
   const [delReportData, setDelReportData] = useState<any[]>([]);
   const [delReportSummary, setDelReportSummary] = useState<any>(null);
@@ -238,7 +238,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
     setSmName('');
     setSmMobile('');
     setSmAddress('');
-    setSmJoiningDate(new Date().toISOString().slice(0, 10));
+    setSmJoiningDate(getPakistanDateISO());
     setSmCommissionType('Percentage');
     setSmCommissionRate(1.5);
     setSmStatus('Active');
@@ -252,7 +252,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
     setSmName(sm.name || sm.full_name || '');
     setSmMobile(sm.mobile || sm.phone || '');
     setSmAddress(sm.address || '');
-    setSmJoiningDate(sm.joining_date || new Date().toISOString().slice(0, 10));
+    setSmJoiningDate(sm.joining_date || getPakistanDateISO());
     setSmCommissionType(sm.commission_type || 'Percentage');
     setSmCommissionRate(Number(sm.commission_rate || 0));
     setSmStatus(sm.status || 'Active');
@@ -305,7 +305,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
 
   const handleOpenPayCommission = (sm: SalesmanRecord) => {
     setCommissionPayModal(sm);
-    setCommPayDate(new Date().toISOString().slice(0, 10));
+    setCommPayDate(getPakistanDateISO());
     setCommPayAmount(Math.max(0, Number(sm.commission_outstanding || 0)));
     setCommPayMethod('Cash');
     setCommPayRef(`COM-${Date.now().toString().slice(-5)}`);
@@ -341,7 +341,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
     setDmName('');
     setDmMobile('');
     setDmAddress('');
-    setDmJoiningDate(new Date().toISOString().slice(0, 10));
+    setDmJoiningDate(getPakistanDateISO());
     setDmStatus('Active');
     setDmNotes('');
     setDeliverymanModalOpen(true);
@@ -353,7 +353,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
     setDmName(dm.name);
     setDmMobile(dm.mobile || '');
     setDmAddress(dm.address || '');
-    setDmJoiningDate(dm.joining_date || new Date().toISOString().slice(0, 10));
+    setDmJoiningDate(dm.joining_date || getPakistanDateISO());
     setDmStatus(dm.status || 'Active');
     setDmNotes(dm.notes || '');
     setDeliverymanModalOpen(true);
@@ -404,7 +404,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
     setEditingDelivery(del);
     setEditDelDeliverymanId(del.deliveryman_id ? String(del.deliveryman_id) : '');
     setEditDelStatus((del.delivery_status as any) || 'Pending');
-    setEditDelDate(del.delivery_date || new Date().toISOString().slice(0, 10));
+    setEditDelDate(del.delivery_date || getPakistanDateISO());
     setEditDelTime(del.delivery_time || new Date().toTimeString().slice(0, 5));
     setEditDelCharges(Number(del.delivery_charges || 0));
     setEditDelNotes(del.delivery_notes || '');
@@ -721,7 +721,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                     payload={{
                       documentType: 'report',
                       documentNumber: `Salesman Report (${selectedSmReport})`,
-                      documentDate: new Date().toISOString().slice(0, 10),
+                      documentDate: getPakistanDateISO(),
                       customerName: `Salesman Report (${selectedSmReport})`,
                       totalAmount: 0,
                       paidAmount: 0,
@@ -1260,7 +1260,7 @@ export const StaffAndDeliveryWorkspaceView: React.FC<StaffAndDeliveryWorkspaceVi
                     payload={{
                       documentType: 'report',
                       documentNumber: `Delivery Report (${selectedDelReport})`,
-                      documentDate: new Date().toISOString().slice(0, 10),
+                      documentDate: getPakistanDateISO(),
                       customerName: `Delivery Report (${selectedDelReport})`,
                       totalAmount: 0,
                       paidAmount: 0,

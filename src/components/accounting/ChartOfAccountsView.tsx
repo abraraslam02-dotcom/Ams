@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../../utils/formatters';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FolderTree,
@@ -235,7 +236,7 @@ export const ChartOfAccountsView: React.FC<ChartOfAccountsViewProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Abrar_Medical_Chart_of_Accounts_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `Abrar_Medical_Chart_of_Accounts_${getPakistanDateISO()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -388,7 +389,7 @@ export const ChartOfAccountsView: React.FC<ChartOfAccountsViewProps> = ({
             payload={{
               documentType: 'report',
               documentNumber: 'Chart of Accounts',
-              documentDate: new Date().toISOString().slice(0, 10),
+              documentDate: getPakistanDateISO(),
               customerName: 'Chart of Accounts',
               totalAmount: 0,
               paidAmount: 0,

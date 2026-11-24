@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
 import type { AuthenticatedRequest } from '../middleware/authMiddleware.ts';
+import { formatPakistanDateDDMMYYYY } from '../utils/pakistanTime.ts';
 
 export const whatsappRouter = Router();
 
@@ -90,8 +91,7 @@ function formatPKRServer(amount: number): string {
 
 function formatDateDDMMYYYY(rawDate?: string | null): string {
   if (!rawDate) {
-    const now = new Date();
-    return `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+    return formatPakistanDateDDMMYYYY();
   }
   const m = String(rawDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) return `${m[3]}/${m[2]}/${m[1]}`;

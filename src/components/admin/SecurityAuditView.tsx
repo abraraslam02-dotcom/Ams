@@ -35,9 +35,8 @@ export const SecurityAuditView: React.FC<SecurityAuditViewProps> = ({
 
   const safeFormatDate = (val: string) => {
     try {
-      const d = new Date(val);
-      if (isNaN(d.getTime())) return val || '—';
-      return formatPKTDate(d);
+      const formatted = formatPKTDate(val);
+      return formatted && formatted !== '—' ? formatted : val || '—';
     } catch {
       return val || '—';
     }
@@ -45,9 +44,8 @@ export const SecurityAuditView: React.FC<SecurityAuditViewProps> = ({
 
   const safeFormatTime = (val: string) => {
     try {
-      const d = new Date(val);
-      if (isNaN(d.getTime())) return '';
-      return formatPKTTime(d);
+      const formatted = formatPKTTime(val);
+      return formatted && formatted !== '—' ? formatted : '';
     } catch {
       return '';
     }

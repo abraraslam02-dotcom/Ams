@@ -16,7 +16,7 @@ import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
-import { formatAppDate, formatDateRange } from '../../utils/formatters';
+import { formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
 
 interface AdvanceTaxAccountingViewProps {
   onOpenTaxSettings?: () => void;
@@ -98,7 +98,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Abrar_Medical_Advance_Tax_Register_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `Abrar_Medical_Advance_Tax_Register_${getPakistanDateISO()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -159,7 +159,7 @@ export const AdvanceTaxAccountingView: React.FC<AdvanceTaxAccountingViewProps> =
             payload={{
               documentType: 'statement',
               documentNumber: `${subTab.toUpperCase()} Tax Statement`,
-              documentDate: new Date().toISOString().slice(0, 10),
+              documentDate: getPakistanDateISO(),
               customerName: `${subTab.toUpperCase()} Tax Statement`,
               totalAmount: 0,
               paidAmount: 0,

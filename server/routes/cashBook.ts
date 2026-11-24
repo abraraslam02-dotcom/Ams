@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -255,7 +256,7 @@ cashBookRouter.get('/summary', authenticateToken, (req: Request, res: Response) 
   try {
     ensureCashBookSchema();
     const db = getDatabase();
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getPakistanDateISO();
     const startDate = String(req.query.startDate || today).trim();
     const endDate = String(req.query.endDate || today).trim();
 
@@ -640,7 +641,7 @@ cashBookRouter.post('/vouchers', authenticateToken, (req: Request, res: Response
       created_by = (req as any).user?.username || 'Super Admin',
     } = req.body || {};
 
-    const cleanDate = String(voucher_date || new Date().toISOString().slice(0, 10)).trim();
+    const cleanDate = String(voucher_date || getPakistanDateISO()).trim();
     assertPeriodOpen(cleanDate, 'create a cash book voucher');
     const cleanType = String(transaction_type || 'Receipt');
     const recAmt = round2(Math.max(0, Number(receipt_amount || 0)));
@@ -1166,7 +1167,7 @@ cashBookRouter.get('/reports/breakdown', authenticateToken, (req: Request, res: 
   try {
     ensureCashBookSchema();
     const db = getDatabase();
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getPakistanDateISO();
     const startDate = String(req.query.startDate || today).trim();
     const endDate = String(req.query.endDate || today).trim();
 

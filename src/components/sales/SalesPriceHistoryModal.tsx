@@ -3,6 +3,10 @@ import { History, RefreshCw, X } from 'lucide-react';
 import { api } from '../../services/api';
 import { SalesPriceHistoryEntry } from '../../types/sales';
 import { formatPKR, formatAppDate } from '../../utils/formatters';
+import {
+  formatSequentialDiscountLabel,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 
 export interface SalesPriceHistoryModalProps {
   isOpen: boolean;
@@ -242,7 +246,10 @@ export const SalesPriceHistoryModal: React.FC<SalesPriceHistoryModalProps> = ({
                     Sale Price
                   </th>
                   <th className="px-2.5 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
-                    Discount
+                    Disc 1+2
+                  </th>
+                  <th className="px-2.5 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
+                    Net Rate
                   </th>
                   <th className="px-2.5 py-1.5 text-right whitespace-nowrap font-bold">
                     Net Amount
@@ -302,10 +309,30 @@ export const SalesPriceHistoryModal: React.FC<SalesPriceHistoryModalProps> = ({
                           isHighlighted ? 'text-rose-200' : 'text-rose-700'
                         }`}
                       >
-                        {Number(entry.discount_percent || 0)}%
-                        {Number(entry.discount_amount || 0) > 0
-                          ? ` (${formatPKR(entry.discount_amount)})`
-                          : ''}
+                        {(() => {
+                          const seq = resolveLineSequentialDiscounts(
+                            entry,
+                            Number(entry.unit_price || 0)
+                          );
+                          return `${formatSequentialDiscountLabel(
+                            seq.discount_1_percent,
+                            seq.discount_2_percent
+                          )}${
+                            Number(entry.discount_amount || 0) > 0
+                              ? ` (${formatPKR(entry.discount_amount)})`
+                              : ''
+                          }`;
+                        })()}
+                      </td>
+                      <td
+                        className={`px-2.5 py-1.5 border-r border-slate-200 text-right font-mono font-semibold whitespace-nowrap ${
+                          isHighlighted ? 'text-emerald-200' : 'text-teal-800'
+                        }`}
+                      >
+                        {formatPKR(
+                          resolveLineSequentialDiscounts(entry, Number(entry.unit_price || 0))
+                            .net_rate
+                        )}
                       </td>
                       <td
                         className={`px-2.5 py-1.5 text-right font-mono font-bold whitespace-nowrap ${

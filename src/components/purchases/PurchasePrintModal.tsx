@@ -50,6 +50,10 @@ import {
 } from '../../utils/purchaseCompanyGrouping';
 import { formatItemNameWithRemarks } from '../../utils/itemDisplay';
 import { formatAppDate } from '../../utils/formatters';
+import {
+  formatSequentialDiscountLabel,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 import { usePreviewZoom, PreviewZoomToolbar } from '../common/PreviewZoomControls';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 
@@ -427,7 +431,9 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
     | 'batch'
     | 'expiry'
     | 'rate'
-    | 'discPct'
+    | 'disc1'
+    | 'disc2'
+    | 'netRate'
     | 'discAmt'
     | 'salesTax'
     | 'advTax'
@@ -487,8 +493,10 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
     rawA4Columns.push({ key: 'rate', label: 'Trade Price', align: 'right', weight: 8 });
   }
   if (pFields.showDiscount) {
-    rawA4Columns.push({ key: 'discPct', label: 'Discount %', align: 'right', weight: 5.5 });
-    rawA4Columns.push({ key: 'discAmt', label: 'Discount Amount', align: 'right', weight: 7.5 });
+    rawA4Columns.push({ key: 'disc1', label: 'Disc 1 %', align: 'right', weight: 4.5 });
+    rawA4Columns.push({ key: 'disc2', label: 'Disc 2 %', align: 'right', weight: 4.5 });
+    rawA4Columns.push({ key: 'netRate', label: 'Net Rate', align: 'right', weight: 6.5 });
+    rawA4Columns.push({ key: 'discAmt', label: 'Disc Amt', align: 'right', weight: 6.5 });
   }
   if (pFields.showTax) {
     rawA4Columns.push({ key: 'salesTax', label: 'Sales Tax Amount', align: 'right', weight: 7.5 });
@@ -680,13 +688,31 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                 {formatPKR(line.tradePrice)}
               </td>
             );
-          case 'discPct':
+          case 'disc1':
             return (
               <td
                 key={col.key}
                 className={`py-1.5 px-1 text-right font-mono tabular-nums text-slate-700 ${borderClass} align-top whitespace-nowrap`}
               >
-                {line.discountPercent > 0 ? `${line.discountPercent.toFixed(1)}%` : '0.0%'}
+                {line.discount1Percent > 0 ? `${Number(line.discount1Percent.toFixed(2))}%` : '0%'}
+              </td>
+            );
+          case 'disc2':
+            return (
+              <td
+                key={col.key}
+                className={`py-1.5 px-1 text-right font-mono tabular-nums text-slate-700 ${borderClass} align-top whitespace-nowrap`}
+              >
+                {line.discount2Percent > 0 ? `${Number(line.discount2Percent.toFixed(2))}%` : '0%'}
+              </td>
+            );
+          case 'netRate':
+            return (
+              <td
+                key={col.key}
+                className={`py-1.5 px-1 text-right font-mono tabular-nums font-semibold text-slate-900 ${borderClass} align-top whitespace-nowrap`}
+              >
+                {formatPKR(line.netRate)}
               </td>
             );
           case 'discAmt':
@@ -743,7 +769,7 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
     totalValueWithAllTaxes: number;
   }) => {
     const leadingKeys: A4ColumnKey[] = ['sno', 'code', 'company', 'item', 'packing'];
-    const grossSpanKeys: A4ColumnKey[] = ['batch', 'expiry', 'rate', 'discPct'];
+    const grossSpanKeys: A4ColumnKey[] = ['batch', 'expiry', 'rate', 'disc1', 'disc2', 'netRate'];
 
     const cells: React.ReactNode[] = [];
     let i = 0;
@@ -1654,12 +1680,22 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                             </div>
                             {(pFields.showDiscount || pFields.showTax) &&
                               (line.discountAmount > 0 ||
+                                line.discount1Percent > 0 ||
+                                line.discount2Percent > 0 ||
                                 line.salesTaxAmount > 0 ||
                                 line.advanceTaxAmount > 0) && (
                                 <div className="text-[8px] font-mono flex justify-between">
                                   <span>
-                                    {pFields.showDiscount && line.discountAmount > 0
-                                      ? `Disc:${formatPKR(line.discountAmount)}`
+                                    {pFields.showDiscount &&
+                                    (line.discountAmount > 0 ||
+                                      line.discount1Percent > 0 ||
+                                      line.discount2Percent > 0)
+                                      ? `Disc:${formatSequentialDiscountLabel(
+                                          line.discount1Percent,
+                                          line.discount2Percent
+                                        )}(${formatPKR(line.discountAmount)}) Net:${formatPKR(
+                                          line.netRate
+                                        )}`
                                       : ''}
                                   </span>
                                   <span>
@@ -1733,12 +1769,22 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                           </div>
                           {(pFields.showDiscount || pFields.showTax) &&
                             (line.discountAmount > 0 ||
+                              line.discount1Percent > 0 ||
+                              line.discount2Percent > 0 ||
                               line.salesTaxAmount > 0 ||
                               line.advanceTaxAmount > 0) && (
                               <div className="text-[8px] font-mono flex justify-between">
                                 <span>
-                                  {pFields.showDiscount && line.discountAmount > 0
-                                    ? `Disc:${formatPKR(line.discountAmount)}`
+                                  {pFields.showDiscount &&
+                                  (line.discountAmount > 0 ||
+                                    line.discount1Percent > 0 ||
+                                    line.discount2Percent > 0)
+                                    ? `Disc:${formatSequentialDiscountLabel(
+                                        line.discount1Percent,
+                                        line.discount2Percent
+                                      )}(${formatPKR(line.discountAmount)}) Net:${formatPKR(
+                                        line.netRate
+                                      )}`
                                     : ''}
                                 </span>
                                 <span>
@@ -2169,7 +2215,12 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                       <th className="py-2 px-2 font-semibold text-right">Ret. Qty</th>
                       <th className="py-2 px-2 font-semibold text-right">Debit Rate</th>
                       {fields.showDiscount && (
-                        <th className="py-2 px-2 font-semibold text-right">Disc</th>
+                        <>
+                          <th className="py-2 px-1.5 font-semibold text-right">Disc 1 %</th>
+                          <th className="py-2 px-1.5 font-semibold text-right">Disc 2 %</th>
+                          <th className="py-2 px-1.5 font-semibold text-right">Net Rate</th>
+                          <th className="py-2 px-2 font-semibold text-right">Disc Amt</th>
+                        </>
                       )}
                       <th className="py-2 px-2 font-semibold text-right">Taxable</th>
                       {fields.showTax && (
@@ -2215,11 +2266,29 @@ export const PurchasePrintModal: React.FC<PurchasePrintModalProps> = ({
                         <td className="py-1.5 px-2 text-right font-mono">
                           {formatPKR(item.debit_unit_rate)}
                         </td>
-                        {fields.showDiscount && (
-                          <td className="py-1.5 px-2 text-right font-mono text-slate-700">
-                            {formatPKR(item.discount_amount)}
-                          </td>
-                        )}
+                        {fields.showDiscount &&
+                          (() => {
+                            const seq = resolveLineSequentialDiscounts(
+                              item,
+                              Number(item.debit_unit_rate || 0)
+                            );
+                            return (
+                              <>
+                                <td className="py-1.5 px-1.5 text-right font-mono text-slate-700">
+                                  {seq.discount_1_percent}%
+                                </td>
+                                <td className="py-1.5 px-1.5 text-right font-mono text-slate-700">
+                                  {seq.discount_2_percent}%
+                                </td>
+                                <td className="py-1.5 px-1.5 text-right font-mono font-semibold text-slate-900">
+                                  {formatPKR(seq.net_rate)}
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-mono text-slate-700">
+                                  {formatPKR(item.discount_amount)}
+                                </td>
+                              </>
+                            );
+                          })()}
                         <td className="py-1.5 px-2 text-right font-mono font-medium">
                           {formatPKR(item.taxable_amount)}
                         </td>

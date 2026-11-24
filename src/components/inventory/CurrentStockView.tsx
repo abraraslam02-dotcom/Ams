@@ -14,7 +14,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { CurrentStockSummary, ItemStockReportRow } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
@@ -27,7 +27,7 @@ export const CurrentStockView: React.FC = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('item-stock-report');
 
   // Common / Report filters
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = getPakistanDateISO();
   const firstOfMonthIso = `${todayIso.slice(0, 8)}01`;
   const [fromDate, setFromDate] = useState<string>(firstOfMonthIso);
   const [toDate, setToDate] = useState<string>(todayIso);
@@ -377,7 +377,7 @@ export const CurrentStockView: React.FC = () => {
                 documentType: 'report',
                 documentNumber:
                   viewMode === 'item-stock-report' ? 'Item Stock Report' : 'Current Stock Valuation',
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName:
                   viewMode === 'item-stock-report' ? 'Item Stock Report' : 'Current Stock Valuation',
                 totalAmount: 0,

@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -25,7 +26,10 @@ import { getEnrichedVariants, type EnrichedVariantRecord } from '../services/ite
 import { assertPeriodOpen } from '../utils/periodLock.ts';
 import {
   calculateLineTax,
+  calculateSequentialLineDiscount,
+  clampDiscountPercent,
   resolveItemTaxConfig,
+  resolveLineSequentialDiscounts,
   type ItemTaxType,
 } from '../utils/taxCalculation.ts';
 
@@ -177,10 +181,143 @@ function getSystemAccountId(accountCode: string): number {
 
 function computeBatchStatus(packQty: number, expiryDate: string, minStock: number = 0): string {
   if (packQty <= 0) return 'out_of_stock';
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getPakistanDateISO();
   if (expiryDate && expiryDate < today) return 'expired';
   if (minStock > 0 && packQty <= minStock) return 'low_stock';
   return 'in_stock';
+}
+
+interface WeightedAvgCostEntry {
+  totalNetPurchaseAmount: number;
+  totalReceivedPacks: number;
+  weightedAvgPackCost: number | null;
+}
+
+function round6(val: unknown): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n + Number.EPSILON) * 1000000) / 1000000;
+}
+
+/**
+ * Computes Weighted Average Net Purchase Cost per Pack (Sprice) across all completed purchases
+ * for the given item IDs (keyed by `${item_id}:${variant_key}`):
+ *   Final Net Purchase Cost = Total Net Purchase Amount / Total Received Quantity (Purchased + Bonus)
+ * Uses purchase_items.taxable_amount (net after line & prorated invoice discounts),
+ * adjusted proportionally for any returned_quantity.
+ */
+function computeWeightedAvgPurchaseCosts(
+  db: ReturnType<typeof getDatabase>,
+  itemIds: number[]
+): Map<string, WeightedAvgCostEntry> {
+  const result = new Map<string, WeightedAvgCostEntry>();
+  const uniqueIds = Array.from(new Set(itemIds.filter((id) => Number.isFinite(id) && id > 0)));
+  if (uniqueIds.length === 0) return result;
+
+  const accum = new Map<string, { netAmount: number; receivedPacks: number }>();
+
+  const processRows = (rows: Array<Record<string, unknown>>) => {
+    for (const r of rows) {
+      const iId = Number(r.item_id || 0);
+      if (iId <= 0) continue;
+      const vKey = Number(r.variant_id || 0);
+      const unitsPerPack = Math.max(1, Number(r.units_per_pack || 1));
+      const qty = Number(r.quantity || 0);
+      const bonusQty = Number(r.bonus_quantity || 0);
+      const looseQty = Number(r.loose_quantity || 0);
+      const returnedQty = Math.max(0, Number(r.returned_quantity || 0));
+
+      const rawTaxable =
+        r.taxable_amount !== null && r.taxable_amount !== undefined
+          ? Number(r.taxable_amount)
+          : Number(r.gross_amount || 0) - Number(r.discount_amount || 0);
+
+      let lineReceivedPacks = 0;
+      let lineNetAmount = 0;
+
+      if (qty < 0 || looseQty < 0) {
+        lineReceivedPacks = qty + looseQty / unitsPerPack;
+        lineNetAmount = rawTaxable;
+      } else {
+        const billedPacks = qty + looseQty / unitsPerPack;
+        const effectiveReturned = Math.min(billedPacks, returnedQty);
+        const remainingBilled = Math.max(0, billedPacks - effectiveReturned);
+        lineReceivedPacks = remainingBilled + Math.max(0, bonusQty);
+        if (effectiveReturned > 0 && billedPacks > 0) {
+          lineNetAmount = rawTaxable * (remainingBilled / billedPacks);
+        } else {
+          lineNetAmount = rawTaxable;
+        }
+      }
+
+      if (lineReceivedPacks === 0 && lineNetAmount === 0) continue;
+
+      const key = `${iId}:${vKey}`;
+      const cur = accum.get(key) || { netAmount: 0, receivedPacks: 0 };
+      cur.netAmount += lineNetAmount;
+      cur.receivedPacks += lineReceivedPacks;
+      accum.set(key, cur);
+    }
+  };
+
+  const baseSelect = `
+    SELECT
+      pi.item_id,
+      COALESCE(pi.variant_id, 0) as variant_id,
+      COALESCE(pi.units_per_pack, 1) as units_per_pack,
+      COALESCE(pi.quantity, 0) as quantity,
+      COALESCE(pi.bonus_quantity, 0) as bonus_quantity,
+      COALESCE(pi.loose_quantity, 0) as loose_quantity,
+      COALESCE(pi.returned_quantity, 0) as returned_quantity,
+      pi.gross_amount,
+      pi.discount_amount,
+      pi.taxable_amount
+    FROM purchase_items pi
+    INNER JOIN purchases p ON p.id = pi.purchase_id
+    WHERE LOWER(TRIM(COALESCE(p.status, 'completed'))) IN ('completed', 'posted')
+  `;
+
+  if (uniqueIds.length > 400) {
+    const idSet = new Set(uniqueIds);
+    const allRows = db.prepare(baseSelect).all() as Array<Record<string, unknown>>;
+    processRows(allRows.filter((r) => idSet.has(Number(r.item_id || 0))));
+  } else {
+    const placeholders = uniqueIds.map(() => '?').join(',');
+    const rows = db
+      .prepare(`${baseSelect} AND pi.item_id IN (${placeholders})`)
+      .all(...uniqueIds) as Array<Record<string, unknown>>;
+    processRows(rows);
+  }
+
+  for (const [key, val] of accum.entries()) {
+    const valid = val.receivedPacks > 0 && val.netAmount > 0;
+    result.set(key, {
+      totalNetPurchaseAmount: round6(val.netAmount),
+      totalReceivedPacks: round6(val.receivedPacks),
+      weightedAvgPackCost: valid ? round6(val.netAmount / val.receivedPacks) : null,
+    });
+  }
+
+  return result;
+}
+
+function resolveApplicablePackCost(
+  weightedAvgPackCost: number | null | undefined,
+  itemRegistrationPprice: number | null | undefined
+): {
+  packCost: number;
+  hasValidCost: boolean;
+  costSource: 'weighted_avg_purchase' | 'item_pprice' | 'none';
+} {
+  const wac = Number(weightedAvgPackCost || 0);
+  if (Number.isFinite(wac) && wac > 0) {
+    return { packCost: round6(wac), hasValidCost: true, costSource: 'weighted_avg_purchase' };
+  }
+  const pprice = Number(itemRegistrationPprice || 0);
+  if (Number.isFinite(pprice) && pprice > 0) {
+    return { packCost: round6(pprice), hasValidCost: true, costSource: 'item_pprice' };
+  }
+  return { packCost: 0, hasValidCost: false, costSource: 'none' };
 }
 
 function getNextSalesInvoiceNumber(dateStr?: string): string {
@@ -562,6 +699,8 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
       }
     }
 
+    const weightedAvgCostMap = computeWeightedAvgPurchaseCosts(db, itemIds);
+
     const mapBatchRow = (b: Record<string, unknown>, unitsPerPack: number, retailFallback: number, purchaseFallback: number) => ({
       id: Number(b.id),
       variant_id: b.variant_id ? Number(b.variant_id) : null,
@@ -597,7 +736,12 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
       const retailPrice = round2(item.retail_price);
       const wholesalePrice = round2(Number(item.wholesale_price || item.trade_price || item.retail_price));
       const purchasePrice = round2(item.purchase_price);
-      const itemMasterLooseRate = round2(retailPrice / parsed.unitsPerPack);
+      const itemWacEntry = weightedAvgCostMap.get(`${itemId}:0`);
+      const itemResolvedCost = resolveApplicablePackCost(itemWacEntry?.weightedAvgPackCost ?? null, purchasePrice);
+      const itemMasterLooseRate =
+        Number(item.loose_rate || 0) > 0
+          ? round2(item.loose_rate)
+          : round2(retailPrice / parsed.unitsPerPack);
 
       const defaultSourceBatches = hasVariants ? allItemBatches : itemLevelBatches.length > 0 ? itemLevelBatches : allItemBatches;
       const defaultBatch = defaultSourceBatches[0] || null;
@@ -611,6 +755,11 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
         const vTotalUnits = vBatches.reduce((sum, b) => sum + Number(b.total_stock_units || 0), 0);
         const vTotalPacks = round2(vTotalUnits / vParsed.unitsPerPack);
         const vDef = vBatches[0] || null;
+        const vWacEntry = weightedAvgCostMap.get(`${itemId}:${v.id}`) || itemWacEntry;
+        const vResolvedCost = resolveApplicablePackCost(
+          vWacEntry?.weightedAvgPackCost ?? null,
+          Number(v.effective_purchase_price ?? purchasePrice ?? 0)
+        );
 
         return {
           ...v,
@@ -618,8 +767,14 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
           units_per_strip: vParsed.unitsPerStrip,
           tablets_per_strip: vParsed.tabletsPerStrip,
           units_per_pack: vParsed.unitsPerPack,
+          weighted_avg_pack_cost: vWacEntry?.weightedAvgPackCost ?? null,
+          applicable_pack_cost: vResolvedCost.hasValidCost ? vResolvedCost.packCost : null,
+          has_valid_cost: vResolvedCost.hasValidCost,
+          cost_source: vResolvedCost.costSource,
           total_available_units: round2(vTotalUnits),
           total_available_packs: vTotalPacks,
+          batch_number: vDef ? String(vDef.batch_number || '') : '',
+          expiry_date: vDef ? String(vDef.expiry_date || '') : '',
           default_batch: vDef
             ? {
                 inventory_id: Number(vDef.id),
@@ -660,9 +815,17 @@ salesRouter.get('/fast-search', (req: Request, res: Response) => {
         loose_rate: itemMasterLooseRate,
         retail_loose_rate: itemMasterLooseRate,
         wholesale_loose_rate: round2(wholesalePrice / parsed.unitsPerPack),
-        cost_price_per_unit: round2(purchasePrice / parsed.unitsPerPack),
+        weighted_avg_pack_cost: itemWacEntry?.weightedAvgPackCost ?? null,
+        applicable_pack_cost: itemResolvedCost.hasValidCost ? itemResolvedCost.packCost : null,
+        has_valid_cost: itemResolvedCost.hasValidCost,
+        cost_source: itemResolvedCost.costSource,
+        cost_price_per_unit: itemResolvedCost.hasValidCost
+          ? round6(itemResolvedCost.packCost / parsed.unitsPerPack)
+          : 0,
         total_available_units: round2(totalStockUnits),
         total_available_packs: totalStockPacks,
+        batch_number: defaultBatch ? String(defaultBatch.batch_number || '') : '',
+        expiry_date: defaultBatch ? String(defaultBatch.expiry_date || '') : '',
         default_batch: defaultBatch
           ? {
               inventory_id: Number(defaultBatch.id),
@@ -1020,6 +1183,9 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         COALESCE(si.total_units, 0) as total_units,
         COALESCE(si.unit_price, 0) as unit_price,
         COALESCE(si.loose_rate, 0) as loose_rate,
+        COALESCE(si.discount_1_percent, 0) as discount_1_percent,
+        COALESCE(si.discount_2_percent, 0) as discount_2_percent,
+        COALESCE(si.net_rate, 0) as net_rate,
         COALESCE(si.discount_percent, 0) as discount_percent,
         COALESCE(si.discount_amount, 0) as discount_amount,
         COALESCE(si.tax_percent, 0) as tax_percent,
@@ -1063,6 +1229,15 @@ const handleGetItemHistory = (req: Request, res: Response) => {
           LIMIT 25
         `)
         .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, customerId, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
+      customerSalesHistory = customerSalesHistory.map((row) => {
+        const seq = resolveLineSequentialDiscounts(row as any, Number(row.unit_price || 0));
+        return {
+          ...row,
+          discount_1_percent: seq.discount_1_percent,
+          discount_2_percent: seq.discount_2_percent,
+          net_rate: seq.net_rate,
+        };
+      });
     }
 
     const lastCustomerSale = customerSalesHistory.length > 0 ? customerSalesHistory[0] : null;
@@ -1101,11 +1276,20 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         LIMIT 10
       `)
       .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, ...variantFilterSaleParams) as Array<Record<string, unknown>>;
+    const enrichedSalesHistory = salesHistory.map((row) => {
+      const seq = resolveLineSequentialDiscounts(row as any, Number(row.unit_price || 0));
+      return {
+        ...row,
+        discount_1_percent: seq.discount_1_percent,
+        discount_2_percent: seq.discount_2_percent,
+        net_rate: seq.net_rate,
+      };
+    });
 
     // 3. Latest 10 Confirmed Purchase Transactions for this ItemCode (used by Purchase Item History view)
     const variantFilterPurSql = variantIdParam > 0 ? ' AND pi.variant_id = ? ' : '';
     const variantFilterPurParams = variantIdParam > 0 ? [variantIdParam] : [];
-    const purchaseHistory = db
+    const purchaseHistory = (db
       .prepare(`
         SELECT
           pi.id as purchase_item_id,
@@ -1127,6 +1311,9 @@ const handleGetItemHistory = (req: Request, res: Response) => {
           COALESCE(NULLIF(inv.trade_price, 0), it.trade_price, 0) as trade_price,
           COALESCE(NULLIF(inv.wholesale_price, 0), it.wholesale_price, 0) as wholesale_price,
           COALESCE(NULLIF(pi.mrp_rate, 0), inv.retail_price, it.retail_price, 0) as retail_price,
+          COALESCE(pi.discount_1_percent, 0) as discount_1_percent,
+          COALESCE(pi.discount_2_percent, 0) as discount_2_percent,
+          COALESCE(pi.net_rate, 0) as net_rate,
           COALESCE(pi.discount_percent, 0) as discount_percent,
           COALESCE(pi.discount_amount, 0) as discount_amount,
           COALESCE(pi.tax_percent, 0) as tax_percent,
@@ -1162,7 +1349,15 @@ const handleGetItemHistory = (req: Request, res: Response) => {
         ORDER BY DATE(p.bill_date) DESC, p.bill_date DESC, p.id DESC, p.bill_number DESC, pi.id DESC
         LIMIT 10
       `)
-      .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, ...variantFilterPurParams) as Array<Record<string, unknown>>;
+      .all(resolvedItemId, canonicalItemCode, resolvedItemId, ...codeList, ...variantFilterPurParams) as Array<Record<string, unknown>>).map((row) => {
+      const seq = resolveLineSequentialDiscounts(row as any, Number(row.purchase_price || 0));
+      return {
+        ...row,
+        discount_1_percent: seq.discount_1_percent,
+        discount_2_percent: seq.discount_2_percent,
+        net_rate: seq.net_rate,
+      };
+    });
 
     const lastPurchase = purchaseHistory.length > 0 ? purchaseHistory[0] : null;
 
@@ -1175,7 +1370,7 @@ const handleGetItemHistory = (req: Request, res: Response) => {
       lastCustomerSale,
       previousCustomerSaleBeforeLast,
       customerSalesHistory,
-      salesHistory,
+      salesHistory: enrichedSalesHistory,
       lastPurchase,
       purchaseHistory,
     });
@@ -1233,6 +1428,9 @@ salesRouter.get('/price-history/:itemId', (req: Request, res: Response) => {
                 COALESCE(si.quantity, 0) as quantity,
                 COALESCE(si.loose_quantity, 0) as loose_quantity,
                 COALESCE(si.unit_price, 0) as unit_price,
+                COALESCE(si.discount_1_percent, 0) as discount_1_percent,
+                COALESCE(si.discount_2_percent, 0) as discount_2_percent,
+                COALESCE(si.net_rate, 0) as net_rate,
                 COALESCE(si.discount_percent, 0) as discount_percent,
                 COALESCE(si.discount_amount, 0) as discount_amount,
                 COALESCE(si.line_total, 0) as line_total
@@ -1244,7 +1442,15 @@ salesRouter.get('/price-history/:itemId', (req: Request, res: Response) => {
                 AND s.status = 'completed'
               ORDER BY s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
             `)
-            .all(itemId, customerId) as Array<Record<string, unknown>>)
+            .all(itemId, customerId) as Array<Record<string, unknown>>).map((row) => {
+              const seq = resolveLineSequentialDiscounts(row as any, Number(row.unit_price || 0));
+              return {
+                ...row,
+                discount_1_percent: seq.discount_1_percent,
+                discount_2_percent: seq.discount_2_percent,
+                net_rate: seq.net_rate,
+              };
+            })
         : [];
 
     return res.json({
@@ -1337,6 +1543,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
           COALESCE(si.bonus_quantity, 0) as bonus_quantity,
           COALESCE(si.unit_price, 0) as unit_price,
           COALESCE(si.loose_rate, 0) as loose_rate,
+          COALESCE(si.discount_1_percent, 0) as discount_1_percent,
+          COALESCE(si.discount_2_percent, 0) as discount_2_percent,
+          COALESCE(si.net_rate, 0) as net_rate,
           COALESCE(si.discount_percent, 0) as discount_percent,
           COALESCE(si.discount_amount, 0) as discount_amount,
           COALESCE(si.tax_amount, 0) as tax_amount,
@@ -1365,6 +1574,7 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
           ? Number(row.taxable_amount)
           : Number(row.line_total || 0) - Number(row.tax_amount || 0);
       const profit = hasReliableCost ? round2(netRevenue - totalUnits * costPerUnit) : null;
+      const seq = resolveLineSequentialDiscounts(row, Number(row.unit_price || 0));
       return {
         sale_item_id: Number(row.sale_item_id),
         sale_id: Number(row.sale_id),
@@ -1382,6 +1592,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
         bonus_quantity: round2(row.bonus_quantity),
         unit_price: round2(row.unit_price),
         loose_rate: round2(row.loose_rate),
+        discount_1_percent: seq.discount_1_percent,
+        discount_2_percent: seq.discount_2_percent,
+        net_rate: seq.net_rate,
         discount_percent: round2(row.discount_percent),
         discount_amount: round2(row.discount_amount),
         tax_amount: round2(row.tax_amount),
@@ -1394,7 +1607,7 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
       };
     });
 
-    const purchaseHistory = db
+    const purchaseHistory = (db
       .prepare(`
         SELECT
           pi.id as purchase_item_id,
@@ -1414,6 +1627,9 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
           COALESCE(pi.expiry_date, '') as expiry_date,
           COALESCE(pi.purchase_rate, 0) as purchase_price,
           COALESCE(NULLIF(inv.trade_price, 0), i.trade_price, 0) as trade_price,
+          COALESCE(pi.discount_1_percent, 0) as discount_1_percent,
+          COALESCE(pi.discount_2_percent, 0) as discount_2_percent,
+          COALESCE(pi.net_rate, 0) as net_rate,
           COALESCE(pi.discount_percent, 0) as discount_percent,
           COALESCE(pi.discount_amount, 0) as discount_amount,
           COALESCE(pi.tax_percent, 0) as tax_percent,
@@ -1429,7 +1645,15 @@ salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
           AND p.status = 'completed'
         ORDER BY p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
       `)
-      .all(itemId) as Array<Record<string, any>>;
+      .all(itemId) as Array<Record<string, any>>).map((row): Record<string, any> => {
+        const seq = resolveLineSequentialDiscounts(row, Number(row.purchase_price || 0));
+        return {
+          ...row,
+          discount_1_percent: seq.discount_1_percent,
+          discount_2_percent: seq.discount_2_percent,
+          net_rate: seq.net_rate,
+        };
+      });
 
     const totalSoldPacks = round2(salesHistory.reduce((s, r) => s + Number(r.quantity || 0), 0));
     const totalSoldLooseUnits = round2(salesHistory.reduce((s, r) => s + Number(r.loose_quantity || 0), 0));
@@ -1531,7 +1755,17 @@ salesRouter.get('/:id', (req: Request, res: Response, next) => {
         WHERE si.sale_id = ?
         ORDER BY si.id ASC
       `)
-      .all(saleId);
+      .all(saleId) as Array<Record<string, any>>;
+
+    const enrichedItems = items.map((row) => {
+      const seq = resolveLineSequentialDiscounts(row, Number(row.unit_price || 0));
+      return {
+        ...row,
+        discount_1_percent: seq.discount_1_percent,
+        discount_2_percent: seq.discount_2_percent,
+        net_rate: seq.net_rate,
+      };
+    });
 
     const journalIds = [
       Number(invoice.journal_entry_id || 0),
@@ -1564,7 +1798,7 @@ salesRouter.get('/:id', (req: Request, res: Response, next) => {
       success: true,
       data: {
         ...invoice,
-        items,
+        items: enrichedItems,
         journalLines,
       },
     });
@@ -1582,12 +1816,30 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
   const tx = db.transaction(() => {
     let existingSaleRow: { invoice_number: string; status: string } | undefined;
+    // Preserve historical cost_price_per_unit on already-completed invoices when editing
+    const preservedCompletedLineCosts = new Map<string, number>();
     if (saleId) {
       existingSaleRow = db
         .prepare('SELECT invoice_number, status FROM sales WHERE id = ?')
         .get(saleId) as { invoice_number: string; status: string } | undefined;
       if (!existingSaleRow) {
         throw new Error(`Sales invoice #${saleId} not found.`);
+      }
+      if (String(existingSaleRow.status || '').trim().toLowerCase() === 'completed') {
+        const prevLines = db
+          .prepare(
+            'SELECT item_id, COALESCE(variant_id, 0) as variant_key, cost_price_per_unit FROM sale_items WHERE sale_id = ? ORDER BY id ASC'
+          )
+          .all(saleId) as Array<{ item_id: number; variant_key: number; cost_price_per_unit: number }>;
+        for (const pl of prevLines) {
+          const prevCost = Number(pl.cost_price_per_unit || 0);
+          if (Number.isFinite(prevCost) && prevCost > 0) {
+            const k = `${Number(pl.item_id)}:${Number(pl.variant_key || 0)}`;
+            if (!preservedCompletedLineCosts.has(k)) {
+              preservedCompletedLineCosts.set(k, prevCost);
+            }
+          }
+        }
       }
       revertCompletedSaleEffects(saleId);
     }
@@ -1598,7 +1850,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     }
     const status = normalizedSaleStatus as 'draft' | 'held' | 'completed';
 
-    const invoiceDate = String(body.invoice_date || new Date().toISOString().slice(0, 10)).trim();
+    const invoiceDate = String(body.invoice_date || getPakistanDateISO()).trim();
 
     const invoiceType = String(body.invoice_type || 'Retail') === 'Wholesale' ? 'Wholesale' : 'Retail';
     const paymentMode = ['Cash', 'Credit', 'Partial', 'Bank'].includes(String(body.payment_mode))
@@ -1755,6 +2007,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       quantity: number;
       bonusQuantity: number;
       unitPrice: number;
+      discount1Percent: number;
+      discount2Percent: number;
+      netRate: number;
       discountPercent: number;
       discountAmount: number;
       looseQuantity: number;
@@ -1880,24 +2135,39 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
       const grossAmount = round2(quantity * unitPrice + looseQuantity * looseRate);
 
-      let discountPercent =
-        line.discount_percent !== undefined && line.discount_percent !== '' && Number(line.discount_percent) >= 0
-          ? round2(Math.max(0, Math.min(100, Number(line.discount_percent))))
-          : evalOffer.effective_discount_percent;
-      let discountAmount = round2((grossAmount * discountPercent) / 100);
-      if (
-        line.discount_amount !== undefined &&
-        Number(line.discount_amount) !== 0 &&
-        discountPercent === 0
-      ) {
-        const rawDiscAmt = Math.abs(Number(line.discount_amount));
-        const clampedAbsDisc = Math.min(Math.abs(grossAmount), rawDiscAmt);
-        discountAmount = round2(grossAmount >= 0 ? clampedAbsDisc : -clampedAbsDisc);
-        discountPercent =
-          grossAmount !== 0 ? round2((Math.abs(discountAmount) / Math.abs(grossAmount)) * 100) : 0;
-      }
+      const hasExplicitD1 =
+        line.discount_1_percent !== undefined && line.discount_1_percent !== null && line.discount_1_percent !== '';
+      const hasExplicitD2 =
+        line.discount_2_percent !== undefined && line.discount_2_percent !== null && line.discount_2_percent !== '';
+      const hasExplicitLegacyDisc =
+        line.discount_percent !== undefined &&
+        line.discount_percent !== null &&
+        line.discount_percent !== '' &&
+        Number(line.discount_percent) >= 0;
 
-      const taxableAmount = round2(grossAmount - discountAmount);
+      const d1Input =
+        hasExplicitD1 || hasExplicitD2
+          ? clampDiscountPercent(line.discount_1_percent ?? 0)
+          : hasExplicitLegacyDisc
+            ? clampDiscountPercent(line.discount_percent)
+            : clampDiscountPercent(evalOffer.effective_discount_percent);
+      const d2Input =
+        hasExplicitD1 || hasExplicitD2 ? clampDiscountPercent(line.discount_2_percent ?? 0) : 0;
+
+      const seqDisc = calculateSequentialLineDiscount({
+        originalRate: unitPrice,
+        looseRate,
+        grossAmount,
+        discount1Percent: d1Input,
+        discount2Percent: d2Input,
+      });
+
+      const discount1Percent = seqDisc.discount_1_percent;
+      const discount2Percent = seqDisc.discount_2_percent;
+      const netRate = seqDisc.net_rate;
+      const discountPercent = seqDisc.effective_discount_percent;
+      const discountAmount = seqDisc.discount_amount;
+      const taxableAmount = seqDisc.taxable_amount;
       const baseTaxCfg = useVarCustom
         ? resolveItemTaxConfig({
             tax_type: (variantRow?.tax_type ?? itemRow.tax_type) as string | undefined,
@@ -1935,7 +2205,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const lineTotal = round2(grossAmount + taxAmount - discountAmount);
 
       // Resolve batch in inventory with strict variant_key isolation, FIFO & Expiry / Block validation
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = getPakistanDateISO();
       let batchRow: Record<string, unknown> | undefined;
       if (batchWiseSales) {
         if (line.inventory_id) {
@@ -2032,10 +2302,29 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const defaultPurchaseCost = useVarCustom
         ? Number(variantRow?.purchase_price || itemRow.purchase_price || 0)
         : Number(itemRow.purchase_price || 0);
-      const purchasePricePerPack = round2(
-        Number(batchRow?.pack_cost || defaultPurchaseCost)
-      );
-      const costPricePerUnit = round2(purchasePricePerPack / parsed.unitsPerPack);
+
+      // Preserve historical cost for lines on an already-completed invoice; otherwise compute
+      // applicable cost at time of sale: Weighted Average Net Purchase Cost (with bonus & discounts)
+      // for purchased items, or provisional Item Registration Pprice for never-purchased items.
+      const lineCostKey = `${itemId}:${variantKey}`;
+      const isEditingCompletedSale =
+        Boolean(saleId && existingSaleRow && String(existingSaleRow.status || '').trim().toLowerCase() === 'completed');
+      const clientSavedUnitCost = Number(line.saved_cost_price_per_unit || 0);
+      const dbPreservedUnitCost = preservedCompletedLineCosts.get(lineCostKey) || 0;
+
+      let costPricePerUnit = 0;
+      if (isEditingCompletedSale && dbPreservedUnitCost > 0) {
+        costPricePerUnit = round6(dbPreservedUnitCost);
+      } else if (isEditingCompletedSale && Number.isFinite(clientSavedUnitCost) && clientSavedUnitCost > 0) {
+        costPricePerUnit = round6(clientSavedUnitCost);
+      } else {
+        const wacMap = computeWeightedAvgPurchaseCosts(db, [itemId]);
+        const wacEntry = wacMap.get(lineCostKey) || (variantKey !== 0 ? wacMap.get(`${itemId}:0`) : undefined);
+        const resolved = resolveApplicablePackCost(wacEntry?.weightedAvgPackCost ?? null, defaultPurchaseCost);
+        costPricePerUnit = resolved.hasValidCost
+          ? round6(resolved.packCost / Math.max(1, parsed.unitsPerPack))
+          : 0;
+      }
 
       grossTotal = round2(grossTotal + grossAmount);
       itemDiscountTotal = round2(itemDiscountTotal + discountAmount);
@@ -2061,6 +2350,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         quantity,
         bonusQuantity,
         unitPrice,
+        discount1Percent,
+        discount2Percent,
+        netRate,
         discountPercent,
         discountAmount,
         looseQuantity,
@@ -2422,16 +2714,16 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         item_code, company_name, item_name,
         packing, units_per_pack, batch_number, expiry_date,
         available_stock_packs, available_stock_units,
-        quantity, bonus_quantity, unit_price, discount_percent, discount_amount,
+        quantity, bonus_quantity, unit_price, discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount,
         loose_quantity, loose_rate, total_units, cost_price_per_unit,
         gross_amount, taxable_amount, tax_type, tax_value, tax_percent, tax_amount, line_total,
         offer_id, offer_name, offer_discount_percent, offer_discount_amount,
         party_discount_id, party_discount_percent, party_discount_amount,
         manual_override_reason, fifo_batches_json, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = getPakistanDateISO();
 
     for (const pLine of processedLines) {
       let invId = pLine.inventoryId;
@@ -2860,6 +3152,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         pLine.quantity,
         pLine.bonusQuantity,
         pLine.unitPrice,
+        pLine.discount1Percent,
+        pLine.discount2Percent,
+        pLine.netRate,
         pLine.discountPercent,
         pLine.discountAmount,
         pLine.looseQuantity,
@@ -3175,7 +3470,7 @@ salesRouter.post('/', (req: Request, res: Response) => {
       }
     }
 
-    const targetSaleDate = String(body.invoice_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const targetSaleDate = String(body.invoice_date || getPakistanDateISO()).slice(0, 10);
     assertPeriodOpen(targetSaleDate, 'create a sales invoice');
 
     const username = req.user?.username || 'Super Admin';
@@ -3563,7 +3858,7 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
         throw new Error(`Duplicate Sales Return Number "${returnNumber}" is not allowed.`);
       }
 
-      const returnDate = String(body.return_date || new Date().toISOString().slice(0, 10)).trim();
+      const returnDate = String(body.return_date || getPakistanDateISO()).trim();
       assertPeriodOpen(returnDate, 'record a sales return');
       const refundMode = ['Account Adjustment', 'Cash Refund', 'Bank Refund'].includes(String(body.refund_mode))
         ? String(body.refund_mode)
@@ -3605,6 +3900,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
         returnedUnits: number;
         returnRate: number;
         looseReturnRate: number;
+        discount1Percent: number;
+        discount2Percent: number;
+        netRate: number;
         discountPercent: number;
         discountAmount: number;
         taxPercent: number;
@@ -3648,8 +3946,19 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
         const looseReturnRate = round2(Number(rItem.loose_return_rate ?? origLine.loose_rate ?? returnRate / unitsPerPack));
         const lineGross = round2(returnPackQty * returnRate + returnLooseQty * looseReturnRate);
 
-        const discountPercent = round2(Number(origLine.discount_percent || 0));
-        const lineDiscount = round2((lineGross * discountPercent) / 100);
+        const origSeq = resolveLineSequentialDiscounts(origLine as any, returnRate);
+        const retSeq = calculateSequentialLineDiscount({
+          originalRate: returnRate,
+          looseRate: looseReturnRate,
+          grossAmount: lineGross,
+          discount1Percent: origSeq.discount_1_percent,
+          discount2Percent: origSeq.discount_2_percent,
+        });
+        const discount1Percent = retSeq.discount_1_percent;
+        const discount2Percent = retSeq.discount_2_percent;
+        const netRate = retSeq.net_rate;
+        const discountPercent = retSeq.effective_discount_percent;
+        const lineDiscount = retSeq.discount_amount;
         const lineTaxable = round2(Math.max(0, lineGross - lineDiscount));
         const origTaxCfg = resolveItemTaxConfig({
           tax_type: origLine.tax_type as string | undefined,
@@ -3698,6 +4007,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
           returnedUnits,
           returnRate,
           looseReturnRate,
+          discount1Percent,
+          discount2Percent,
+          netRate,
           discountPercent,
           discountAmount: lineDiscount,
           taxPercent,
@@ -3769,9 +4081,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
           item_code, company_name, item_name, packing, units_per_pack,
           batch_number, expiry_date, sold_pack_qty, sold_bonus_qty, sold_loose_qty, sold_total_units,
           return_pack_qty, return_bonus_qty, return_loose_qty, returned_units,
-          return_rate, loose_return_rate, discount_percent, discount_amount,
+          return_rate, loose_return_rate, discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount,
           tax_percent, tax_amount, line_total, return_reason, restock_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'restocked')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'restocked')
       `);
 
       for (const pItem of processedItems) {
@@ -3800,6 +4112,9 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
           pItem.returnedUnits,
           pItem.returnRate,
           pItem.looseReturnRate,
+          pItem.discount1Percent,
+          pItem.discount2Percent,
+          pItem.netRate,
           pItem.discountPercent,
           pItem.discountAmount,
           pItem.taxPercent,
@@ -4142,7 +4457,7 @@ salesRouter.post('/payments', (req: Request, res: Response) => {
       }
 
       const voucherNumber = String(body.voucher_number || '').trim() || getNextVoucherNumber();
-      const voucherDate = String(body.voucher_date || new Date().toISOString().slice(0, 10)).trim();
+      const voucherDate = String(body.voucher_date || getPakistanDateISO()).trim();
       assertPeriodOpen(voucherDate, 'record a payment or receipt voucher');
       const paymentMethod = ['Cash', 'Bank Transfer', 'Cheque', 'Online'].includes(String(body.payment_method))
         ? String(body.payment_method)
@@ -5864,49 +6179,538 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
       return res.json({ success: true, reportType, data: rows });
     }
 
-    if (reportType === 'profit-report') {
+    if (
+      reportType === 'profit-report' ||
+      reportType === 'item-profit-report' ||
+      reportType === 'invoice-profit-report' ||
+      reportType === 'detailed-profit-report' ||
+      reportType === 'account-profit-report'
+    ) {
       const { where, params } = buildSalesHeaderFilter();
       const itemScope = buildItemScopeClause();
-      const rows = db
-        .prepare(`
+      const invoiceSearch = req.query.invoiceNumber ? String(req.query.invoiceNumber).trim() : '';
+      let extraWhere = '';
+      const extraParams: Array<string | number> = [];
+      if (invoiceSearch) {
+        extraWhere += ' AND LOWER(s.invoice_number) LIKE LOWER(?) ';
+        extraParams.push(`%${invoiceSearch}%`);
+      }
+
+      // Unified line-level CTE calculating accurate FIFO/actual purchase unit cost,
+      // full packs + loose units + bonus quantities, line & prorated invoice discounts,
+      // and sales returns (both revenue deduction and COGS reversal).
+      const profitLineCte = `
+        WITH profit_lines AS (
           SELECT
-            si.item_code,
-            si.item_name,
-            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') as company_name,
-            si.packing,
-            ROUND(SUM((si.total_units - si.returned_total_units) / CASE WHEN COALESCE(si.units_per_pack, 1) > 0 THEN si.units_per_pack ELSE 1 END), 2) as net_packs_sold,
-            ROUND(SUM((si.total_units - si.returned_total_units) * si.cost_price_per_unit), 2) as total_cost_amount,
-            ROUND(SUM(
-              CASE
-                WHEN si.total_units > 0
-                THEN si.taxable_amount * ((si.total_units - si.returned_total_units) / si.total_units)
-                ELSE 0
-              END
-            ), 2) as net_revenue_amount
+            si.id AS sale_item_id,
+            si.sale_id,
+            s.invoice_number,
+            s.invoice_date,
+            s.customer_account_id,
+            COALESCE(a.account_code, 'WALK-IN') AS customer_code,
+            COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, 'Walk-in Customer') AS customer_name,
+            COALESCE(s.salesman_id, 0) AS salesman_id,
+            COALESCE(NULLIF(TRIM(sal.full_name), ''), NULLIF(TRIM(sal.name), ''), NULLIF(TRIM(s.salesman), ''), 'Counter') AS salesman_name,
+            COALESCE(NULLIF(TRIM(s.town_name), ''), NULLIF(TRIM(a.town_name), ''), NULLIF(TRIM(a.city), ''), '—') AS town_name,
+            COALESCE(NULLIF(TRIM(s.area_name), ''), NULLIF(TRIM(a.area_name), ''), '—') AS area_name,
+            COALESCE(s.payment_mode, 'Cash') AS payment_mode,
+            COALESCE(s.invoice_type, 'Retail') AS invoice_type,
+            si.item_id,
+            COALESCE(NULLIF(TRIM(i.item_code), ''), si.item_code, '') AS item_code,
+            COALESCE(NULLIF(TRIM(i.item_name), ''), si.item_name, '') AS item_name,
+            COALESCE(NULLIF(TRIM(i.company_name), ''), NULLIF(TRIM(si.company_name), ''), 'General') AS company_name,
+            COALESCE(NULLIF(TRIM(i.category), ''), 'General') AS item_group,
+            COALESCE(NULLIF(TRIM(i.packing), ''), si.packing, '1x1') AS packing,
+            COALESCE(NULLIF(TRIM(si.batch_number), ''), COALESCE(inv.batch_number, '—')) AS batch_number,
+            COALESCE(NULLIF(TRIM(si.expiry_date), ''), COALESCE(inv.expiry_date, '')) AS expiry_date,
+            CASE
+              WHEN COALESCE(si.units_per_pack, i.units_per_pack, 1) > 0
+              THEN COALESCE(si.units_per_pack, i.units_per_pack, 1)
+              ELSE 1
+            END AS upp,
+            COALESCE(si.quantity, 0) AS sold_pack_qty,
+            COALESCE(si.loose_quantity, 0) AS sold_loose_qty,
+            COALESCE(si.bonus_quantity, 0) AS bonus_qty,
+            COALESCE(si.total_units, 0) AS total_units,
+            COALESCE(si.returned_pack_qty, 0) AS returned_pack_qty,
+            COALESCE(si.returned_loose_qty, 0) AS returned_loose_qty,
+            COALESCE(si.returned_total_units, 0) AS returned_total_units,
+            (COALESCE(si.total_units, 0) - COALESCE(si.returned_total_units, 0)) AS net_units_sold,
+            COALESCE(si.unit_price, 0) AS unit_price,
+            COALESCE(si.loose_rate, 0) AS loose_rate,
+            COALESCE(si.discount_percent, 0) AS discount_percent,
+            COALESCE(si.gross_amount, 0) AS gross_amount,
+            COALESCE(si.discount_amount, 0) AS item_discount_amount,
+            CASE
+              WHEN COALESCE(s.invoice_discount_amount, 0) != 0
+                   AND (COALESCE(s.gross_total, 0) - COALESCE(s.item_discount_amount, 0)) > 0
+              THEN COALESCE(s.invoice_discount_amount, 0) * (
+                COALESCE(si.taxable_amount, 0) * 1.0 / (COALESCE(s.gross_total, 0) - COALESCE(s.item_discount_amount, 0))
+              )
+              WHEN (COALESCE(s.discount_amount, 0) - COALESCE(s.item_discount_amount, 0)) > 0.01
+                   AND COALESCE(s.gross_total, 0) > 0
+              THEN (COALESCE(s.discount_amount, 0) - COALESCE(s.item_discount_amount, 0)) * (
+                COALESCE(si.gross_amount, 0) * 1.0 / COALESCE(s.gross_total, 0)
+              )
+              ELSE 0
+            END AS alloc_invoice_discount,
+            COALESCE(si.taxable_amount, 0) AS raw_line_taxable,
+            COALESCE(si.tax_amount, 0) AS line_tax_amount,
+            CASE
+              WHEN COALESCE(si.cost_price_per_unit, 0) > 0 THEN si.cost_price_per_unit
+              WHEN COALESCE(inv.pack_cost, 0) > 0 THEN
+                inv.pack_cost * 1.0 / (CASE WHEN COALESCE(si.units_per_pack, i.units_per_pack, 1) > 0 THEN COALESCE(si.units_per_pack, i.units_per_pack, 1) ELSE 1 END)
+              WHEN COALESCE(inv.cost_price, 0) > 0
+                   AND COALESCE(inv.cost_price, 0) <= COALESCE(NULLIF(i.purchase_price, 0), inv.cost_price) / (CASE WHEN COALESCE(si.units_per_pack, i.units_per_pack, 1) > 1 THEN 2.0 ELSE 1.0 END)
+              THEN inv.cost_price
+              WHEN COALESCE(iv.purchase_price, i.purchase_price, 0) > 0 THEN
+                COALESCE(iv.purchase_price, i.purchase_price, 0) * 1.0 / (CASE WHEN COALESCE(si.units_per_pack, i.units_per_pack, 1) > 0 THEN COALESCE(si.units_per_pack, i.units_per_pack, 1) ELSE 1 END)
+              ELSE 0
+            END AS resolved_unit_cost
           FROM sale_items si
           JOIN sales s ON si.sale_id = s.id
           LEFT JOIN items i ON si.item_id = i.id
+          LEFT JOIN item_variants iv ON si.variant_id = iv.id
+          LEFT JOIN inventory inv ON si.inventory_id = inv.id
           LEFT JOIN accounts a ON s.customer_account_id = a.id
-          ${where} ${itemScope.clause}
-          GROUP BY si.item_id, si.item_code, si.item_name, company_name, si.packing
-          ORDER BY net_revenue_amount DESC
-        `)
-        .all(...params, ...itemScope.params) as Array<Record<string, unknown>>;
+          LEFT JOIN salesmen sal ON s.salesman_id = sal.id
+          ${where} ${itemScope.clause} ${extraWhere}
+        ),
+        enriched_lines AS (
+          SELECT
+            pl.*,
+            ROUND(pl.resolved_unit_cost * pl.upp, 2) AS resolved_pack_cost,
+            ROUND(pl.item_discount_amount + pl.alloc_invoice_discount, 2) AS total_discount_amount,
+            (pl.raw_line_taxable - pl.alloc_invoice_discount) AS net_sale_before_return,
+            CASE
+              WHEN pl.total_units > 0 AND pl.returned_total_units > 0
+              THEN (pl.raw_line_taxable - pl.alloc_invoice_discount) * (pl.returned_total_units * 1.0 / pl.total_units)
+              ELSE 0
+            END AS sales_return_amount,
+            CASE
+              WHEN pl.total_units > 0
+              THEN (pl.raw_line_taxable - pl.alloc_invoice_discount) * (pl.net_units_sold * 1.0 / pl.total_units)
+              ELSE (pl.raw_line_taxable - pl.alloc_invoice_discount)
+            END AS net_revenue_amount,
+            (pl.total_units * pl.resolved_unit_cost) AS gross_cost_amount,
+            (pl.returned_total_units * pl.resolved_unit_cost) AS return_cost_reversed,
+            (pl.net_units_sold * pl.resolved_unit_cost) AS total_cost_amount,
+            (pl.sold_pack_qty + (pl.sold_loose_qty * 1.0 / pl.upp)) AS billable_packs_sold,
+            (pl.returned_total_units * 1.0 / pl.upp) AS return_packs_eq,
+            (pl.net_units_sold * 1.0 / pl.upp) AS net_packs_sold
+          FROM profit_lines pl
+        )
+      `;
 
-      const enriched = rows.map((r) => {
-        const rev = round2(r.net_revenue_amount);
-        const cost = round2(r.total_cost_amount);
-        const profit = round2(rev - cost);
-        const marginPercent = rev > 0 ? round2((profit / rev) * 100) : 0;
-        return {
-          ...r,
-          net_units_sold: round2(r.net_packs_sold),
-          gross_profit: profit,
-          profit_margin_percent: marginPercent,
-        };
-      });
+      const allQueryParams = [...params, ...itemScope.params, ...extraParams];
 
-      return res.json({ success: true, reportType, data: enriched });
+      // ---------------------------------------------------------------------
+      // A. ITEM-WISE PROFIT REPORT (profit-report / item-profit-report)
+      // ---------------------------------------------------------------------
+      if (reportType === 'profit-report' || reportType === 'item-profit-report') {
+        const rows = db
+          .prepare(`
+            ${profitLineCte}
+            SELECT
+              el.item_id,
+              el.item_code,
+              el.item_name,
+              el.company_name,
+              el.item_group,
+              el.packing,
+              MAX(el.upp) AS units_per_pack,
+              COUNT(DISTINCT el.sale_id) AS invoice_count,
+              ROUND(SUM(el.sold_pack_qty), 2) AS sold_pack_qty,
+              ROUND(SUM(el.sold_loose_qty), 2) AS sold_loose_qty,
+              ROUND(SUM(el.bonus_qty), 2) AS bonus_qty,
+              ROUND(SUM(el.returned_pack_qty), 2) AS returned_pack_qty,
+              ROUND(SUM(el.returned_loose_qty), 2) AS returned_loose_qty,
+              ROUND(SUM(el.returned_total_units), 2) AS returned_total_units,
+              ROUND(SUM(el.return_packs_eq), 2) AS return_packs_eq,
+              ROUND(SUM(el.total_units), 2) AS total_units_sold,
+              ROUND(SUM(el.net_units_sold), 2) AS net_total_units,
+              ROUND(SUM(el.net_packs_sold), 2) AS net_packs_sold,
+              ROUND(AVG(el.resolved_pack_cost), 2) AS avg_pack_cost,
+              ROUND(AVG(el.resolved_unit_cost), 4) AS avg_unit_cost,
+              ROUND(SUM(el.gross_amount), 2) AS gross_sales_amount,
+              ROUND(SUM(el.total_discount_amount), 2) AS discount_amount,
+              ROUND(SUM(el.sales_return_amount), 2) AS sales_return_amount,
+              ROUND(SUM(el.net_revenue_amount), 2) AS net_revenue_amount,
+              ROUND(SUM(el.total_cost_amount), 2) AS total_cost_amount
+            FROM enriched_lines el
+            GROUP BY COALESCE(el.item_id, el.item_code), el.item_code, el.item_name, el.company_name, el.packing
+            ORDER BY net_revenue_amount DESC
+          `)
+          .all(...allQueryParams) as Array<Record<string, unknown>>;
+
+        const enriched = rows.map((r) => {
+          const rev = round2(r.net_revenue_amount);
+          const cost = round2(r.total_cost_amount);
+          const profit = round2(rev - cost);
+          const marginPercent = rev > 0 ? round2((profit / rev) * 100) : 0;
+          const markupPercent = cost > 0 ? round2((profit / cost) * 100) : 0;
+          return {
+            ...r,
+            net_units_sold: round2(r.net_packs_sold),
+            gross_profit: profit,
+            profit_margin_percent: marginPercent,
+            markup_percent: markupPercent,
+          };
+        });
+
+        const totals = enriched.reduce(
+          (acc, r: any) => ({
+            invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+            sold_pack_qty: round2(acc.sold_pack_qty + Number(r.sold_pack_qty || 0)),
+            sold_loose_qty: round2(acc.sold_loose_qty + Number(r.sold_loose_qty || 0)),
+            bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+            return_packs_eq: round2(acc.return_packs_eq + Number(r.return_packs_eq || 0)),
+            returned_total_units: round2(acc.returned_total_units + Number(r.returned_total_units || 0)),
+            net_packs_sold: round2(acc.net_packs_sold + Number(r.net_packs_sold || 0)),
+            net_units_sold: round2(acc.net_units_sold + Number(r.net_packs_sold || 0)),
+            net_total_units: round2(acc.net_total_units + Number(r.net_total_units || 0)),
+            gross_sales_amount: round2(acc.gross_sales_amount + Number(r.gross_sales_amount || 0)),
+            discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+            sales_return_amount: round2(acc.sales_return_amount + Number(r.sales_return_amount || 0)),
+            net_revenue_amount: round2(acc.net_revenue_amount + Number(r.net_revenue_amount || 0)),
+            total_cost_amount: round2(acc.total_cost_amount + Number(r.total_cost_amount || 0)),
+            gross_profit: round2(acc.gross_profit + Number(r.gross_profit || 0)),
+          }),
+          {
+            invoice_count: 0,
+            sold_pack_qty: 0,
+            sold_loose_qty: 0,
+            bonus_qty: 0,
+            return_packs_eq: 0,
+            returned_total_units: 0,
+            net_packs_sold: 0,
+            net_units_sold: 0,
+            net_total_units: 0,
+            gross_sales_amount: 0,
+            discount_amount: 0,
+            sales_return_amount: 0,
+            net_revenue_amount: 0,
+            total_cost_amount: 0,
+            gross_profit: 0,
+          }
+        );
+
+        const overallMargin =
+          totals.net_revenue_amount > 0
+            ? round2((totals.gross_profit / totals.net_revenue_amount) * 100)
+            : 0;
+
+        return res.json({
+          success: true,
+          reportType,
+          data: enriched,
+          totals: { ...totals, profit_margin_percent: overallMargin },
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // B. INVOICE-WISE PROFIT REPORT (invoice-profit-report)
+      // ---------------------------------------------------------------------
+      if (reportType === 'invoice-profit-report') {
+        const rows = db
+          .prepare(`
+            ${profitLineCte}
+            SELECT
+              el.sale_id,
+              el.invoice_number,
+              el.invoice_date,
+              el.customer_account_id,
+              el.customer_code,
+              el.customer_name,
+              el.salesman_name,
+              el.town_name,
+              el.area_name,
+              el.payment_mode,
+              el.invoice_type,
+              COUNT(el.sale_item_id) AS item_lines_count,
+              ROUND(SUM(el.sold_pack_qty), 2) AS sold_pack_qty,
+              ROUND(SUM(el.sold_loose_qty), 2) AS sold_loose_qty,
+              ROUND(SUM(el.bonus_qty), 2) AS bonus_qty,
+              ROUND(SUM(el.returned_total_units), 2) AS returned_total_units,
+              ROUND(SUM(el.return_packs_eq), 2) AS return_packs_eq,
+              ROUND(SUM(el.net_packs_sold), 2) AS net_packs_sold,
+              ROUND(SUM(el.net_units_sold), 2) AS net_total_units,
+              ROUND(SUM(el.gross_amount), 2) AS gross_sales_amount,
+              ROUND(SUM(el.item_discount_amount), 2) AS item_discount_amount,
+              ROUND(SUM(el.alloc_invoice_discount), 2) AS invoice_discount_amount,
+              ROUND(SUM(el.total_discount_amount), 2) AS discount_amount,
+              ROUND(SUM(el.sales_return_amount), 2) AS sales_return_amount,
+              ROUND(SUM(el.net_revenue_amount), 2) AS net_revenue_amount,
+              ROUND(SUM(el.total_cost_amount), 2) AS total_cost_amount
+            FROM enriched_lines el
+            GROUP BY el.sale_id
+            ORDER BY el.invoice_date DESC, el.sale_id DESC
+          `)
+          .all(...allQueryParams) as Array<Record<string, unknown>>;
+
+        const enriched = rows.map((r) => {
+          const rev = round2(r.net_revenue_amount);
+          const cost = round2(r.total_cost_amount);
+          const profit = round2(rev - cost);
+          const marginPercent = rev > 0 ? round2((profit / rev) * 100) : 0;
+          return {
+            ...r,
+            gross_profit: profit,
+            profit_margin_percent: marginPercent,
+          };
+        });
+
+        const totals = enriched.reduce(
+          (acc, r: any) => ({
+            invoice_count: acc.invoice_count + 1,
+            item_lines_count: acc.item_lines_count + Number(r.item_lines_count || 0),
+            sold_pack_qty: round2(acc.sold_pack_qty + Number(r.sold_pack_qty || 0)),
+            sold_loose_qty: round2(acc.sold_loose_qty + Number(r.sold_loose_qty || 0)),
+            bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+            return_packs_eq: round2(acc.return_packs_eq + Number(r.return_packs_eq || 0)),
+            net_packs_sold: round2(acc.net_packs_sold + Number(r.net_packs_sold || 0)),
+            net_total_units: round2(acc.net_total_units + Number(r.net_total_units || 0)),
+            gross_sales_amount: round2(acc.gross_sales_amount + Number(r.gross_sales_amount || 0)),
+            item_discount_amount: round2(acc.item_discount_amount + Number(r.item_discount_amount || 0)),
+            invoice_discount_amount: round2(acc.invoice_discount_amount + Number(r.invoice_discount_amount || 0)),
+            discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+            sales_return_amount: round2(acc.sales_return_amount + Number(r.sales_return_amount || 0)),
+            net_revenue_amount: round2(acc.net_revenue_amount + Number(r.net_revenue_amount || 0)),
+            total_cost_amount: round2(acc.total_cost_amount + Number(r.total_cost_amount || 0)),
+            gross_profit: round2(acc.gross_profit + Number(r.gross_profit || 0)),
+          }),
+          {
+            invoice_count: 0,
+            item_lines_count: 0,
+            sold_pack_qty: 0,
+            sold_loose_qty: 0,
+            bonus_qty: 0,
+            return_packs_eq: 0,
+            net_packs_sold: 0,
+            net_total_units: 0,
+            gross_sales_amount: 0,
+            item_discount_amount: 0,
+            invoice_discount_amount: 0,
+            discount_amount: 0,
+            sales_return_amount: 0,
+            net_revenue_amount: 0,
+            total_cost_amount: 0,
+            gross_profit: 0,
+          }
+        );
+
+        const overallMargin =
+          totals.net_revenue_amount > 0
+            ? round2((totals.gross_profit / totals.net_revenue_amount) * 100)
+            : 0;
+
+        return res.json({
+          success: true,
+          reportType,
+          data: enriched,
+          totals: { ...totals, profit_margin_percent: overallMargin },
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // C. DETAILED PROFIT REPORT (detailed-profit-report)
+      // ---------------------------------------------------------------------
+      if (reportType === 'detailed-profit-report') {
+        const rows = db
+          .prepare(`
+            ${profitLineCte}
+            SELECT
+              el.sale_item_id,
+              el.sale_id,
+              el.invoice_number,
+              el.invoice_date,
+              el.customer_account_id,
+              el.customer_code,
+              el.customer_name,
+              el.salesman_name,
+              el.town_name,
+              el.area_name,
+              el.item_id,
+              el.item_code,
+              el.item_name,
+              el.company_name,
+              el.item_group,
+              el.packing,
+              el.batch_number,
+              el.expiry_date,
+              el.upp AS units_per_pack,
+              ROUND(el.sold_pack_qty, 2) AS sold_pack_qty,
+              ROUND(el.sold_loose_qty, 2) AS sold_loose_qty,
+              ROUND(el.bonus_qty, 2) AS bonus_qty,
+              ROUND(el.returned_pack_qty, 2) AS returned_pack_qty,
+              ROUND(el.returned_loose_qty, 2) AS returned_loose_qty,
+              ROUND(el.returned_total_units, 2) AS returned_total_units,
+              ROUND(el.return_packs_eq, 2) AS return_packs_eq,
+              ROUND(el.total_units, 2) AS total_units_sold,
+              ROUND(el.net_units_sold, 2) AS net_total_units,
+              ROUND(el.net_packs_sold, 2) AS net_packs_sold,
+              ROUND(el.unit_price, 2) AS sale_pack_rate,
+              ROUND(el.loose_rate, 2) AS sale_loose_rate,
+              ROUND(el.resolved_pack_cost, 2) AS purchase_pack_cost,
+              ROUND(el.resolved_unit_cost, 4) AS purchase_unit_cost,
+              ROUND(el.gross_amount, 2) AS gross_sales_amount,
+              ROUND(el.item_discount_amount, 2) AS item_discount_amount,
+              ROUND(el.alloc_invoice_discount, 2) AS invoice_discount_amount,
+              ROUND(el.total_discount_amount, 2) AS discount_amount,
+              ROUND(el.sales_return_amount, 2) AS sales_return_amount,
+              ROUND(el.net_revenue_amount, 2) AS net_revenue_amount,
+              ROUND(el.total_cost_amount, 2) AS total_cost_amount
+            FROM enriched_lines el
+            ORDER BY el.invoice_date DESC, el.sale_id DESC, el.sale_item_id ASC
+          `)
+          .all(...allQueryParams) as Array<Record<string, unknown>>;
+
+        const enriched = rows.map((r) => {
+          const rev = round2(r.net_revenue_amount);
+          const cost = round2(r.total_cost_amount);
+          const profit = round2(rev - cost);
+          const marginPercent = rev > 0 ? round2((profit / rev) * 100) : 0;
+          return {
+            ...r,
+            gross_profit: profit,
+            profit_margin_percent: marginPercent,
+          };
+        });
+
+        const totals = enriched.reduce(
+          (acc, r: any) => ({
+            line_count: acc.line_count + 1,
+            sold_pack_qty: round2(acc.sold_pack_qty + Number(r.sold_pack_qty || 0)),
+            sold_loose_qty: round2(acc.sold_loose_qty + Number(r.sold_loose_qty || 0)),
+            bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+            return_packs_eq: round2(acc.return_packs_eq + Number(r.return_packs_eq || 0)),
+            returned_total_units: round2(acc.returned_total_units + Number(r.returned_total_units || 0)),
+            net_packs_sold: round2(acc.net_packs_sold + Number(r.net_packs_sold || 0)),
+            net_total_units: round2(acc.net_total_units + Number(r.net_total_units || 0)),
+            gross_sales_amount: round2(acc.gross_sales_amount + Number(r.gross_sales_amount || 0)),
+            discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+            sales_return_amount: round2(acc.sales_return_amount + Number(r.sales_return_amount || 0)),
+            net_revenue_amount: round2(acc.net_revenue_amount + Number(r.net_revenue_amount || 0)),
+            total_cost_amount: round2(acc.total_cost_amount + Number(r.total_cost_amount || 0)),
+            gross_profit: round2(acc.gross_profit + Number(r.gross_profit || 0)),
+          }),
+          {
+            line_count: 0,
+            sold_pack_qty: 0,
+            sold_loose_qty: 0,
+            bonus_qty: 0,
+            return_packs_eq: 0,
+            returned_total_units: 0,
+            net_packs_sold: 0,
+            net_total_units: 0,
+            gross_sales_amount: 0,
+            discount_amount: 0,
+            sales_return_amount: 0,
+            net_revenue_amount: 0,
+            total_cost_amount: 0,
+            gross_profit: 0,
+          }
+        );
+
+        const overallMargin =
+          totals.net_revenue_amount > 0
+            ? round2((totals.gross_profit / totals.net_revenue_amount) * 100)
+            : 0;
+
+        return res.json({
+          success: true,
+          reportType,
+          data: enriched,
+          totals: { ...totals, profit_margin_percent: overallMargin },
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // D. ACCOUNT / PARTY PROFIT REPORT (account-profit-report)
+      // ---------------------------------------------------------------------
+      if (reportType === 'account-profit-report') {
+        const rows = db
+          .prepare(`
+            ${profitLineCte}
+            SELECT
+              el.customer_account_id,
+              el.customer_code AS party_code,
+              el.customer_name AS party_name,
+              el.town_name,
+              el.area_name,
+              el.salesman_name,
+              COUNT(DISTINCT el.sale_id) AS invoice_count,
+              ROUND(SUM(el.sold_pack_qty), 2) AS sold_pack_qty,
+              ROUND(SUM(el.sold_loose_qty), 2) AS sold_loose_qty,
+              ROUND(SUM(el.bonus_qty), 2) AS bonus_qty,
+              ROUND(SUM(el.return_packs_eq), 2) AS return_packs_eq,
+              ROUND(SUM(el.net_packs_sold), 2) AS net_packs_sold,
+              ROUND(SUM(el.gross_amount), 2) AS gross_sales_amount,
+              ROUND(SUM(el.total_discount_amount), 2) AS discount_amount,
+              ROUND(SUM(el.sales_return_amount), 2) AS sales_return_amount,
+              ROUND(SUM(el.net_revenue_amount), 2) AS net_revenue_amount,
+              ROUND(SUM(el.total_cost_amount), 2) AS total_cost_amount
+            FROM enriched_lines el
+            GROUP BY COALESCE(CAST(el.customer_account_id AS TEXT), el.customer_name)
+            ORDER BY (SUM(el.net_revenue_amount) - SUM(el.total_cost_amount)) DESC
+          `)
+          .all(...allQueryParams) as Array<Record<string, unknown>>;
+
+        const enriched = rows.map((r) => {
+          const rev = round2(r.net_revenue_amount);
+          const cost = round2(r.total_cost_amount);
+          const profit = round2(rev - cost);
+          const marginPercent = rev > 0 ? round2((profit / rev) * 100) : 0;
+          return {
+            ...r,
+            gross_profit: profit,
+            profit_margin_percent: marginPercent,
+          };
+        });
+
+        const totals = enriched.reduce(
+          (acc, r: any) => ({
+            invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+            sold_pack_qty: round2(acc.sold_pack_qty + Number(r.sold_pack_qty || 0)),
+            sold_loose_qty: round2(acc.sold_loose_qty + Number(r.sold_loose_qty || 0)),
+            bonus_qty: round2(acc.bonus_qty + Number(r.bonus_qty || 0)),
+            return_packs_eq: round2(acc.return_packs_eq + Number(r.return_packs_eq || 0)),
+            net_packs_sold: round2(acc.net_packs_sold + Number(r.net_packs_sold || 0)),
+            gross_sales_amount: round2(acc.gross_sales_amount + Number(r.gross_sales_amount || 0)),
+            discount_amount: round2(acc.discount_amount + Number(r.discount_amount || 0)),
+            sales_return_amount: round2(acc.sales_return_amount + Number(r.sales_return_amount || 0)),
+            net_revenue_amount: round2(acc.net_revenue_amount + Number(r.net_revenue_amount || 0)),
+            total_cost_amount: round2(acc.total_cost_amount + Number(r.total_cost_amount || 0)),
+            gross_profit: round2(acc.gross_profit + Number(r.gross_profit || 0)),
+          }),
+          {
+            invoice_count: 0,
+            sold_pack_qty: 0,
+            sold_loose_qty: 0,
+            bonus_qty: 0,
+            return_packs_eq: 0,
+            net_packs_sold: 0,
+            gross_sales_amount: 0,
+            discount_amount: 0,
+            sales_return_amount: 0,
+            net_revenue_amount: 0,
+            total_cost_amount: 0,
+            gross_profit: 0,
+          }
+        );
+
+        const overallMargin =
+          totals.net_revenue_amount > 0
+            ? round2((totals.gross_profit / totals.net_revenue_amount) * 100)
+            : 0;
+
+        return res.json({
+          success: true,
+          reportType,
+          data: enriched,
+          totals: { ...totals, profit_margin_percent: overallMargin },
+        });
+      }
     }
 
     if (reportType === 'discount-report') {

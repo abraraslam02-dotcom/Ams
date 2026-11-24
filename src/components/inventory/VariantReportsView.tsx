@@ -14,7 +14,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { api } from '../../services/api';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, getPakistanDateISO } from '../../utils/formatters';
 import { ProductThumb } from '../common/ProductThumb';
 
 type ReportTab = 'overview' | 'history' | 'ledger' | 'demand';
@@ -165,7 +165,7 @@ export const VariantReportsView: React.FC = () => {
     const ws = XLSX.utils.json_to_sheet(rowsToExport);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
-    XLSX.writeFile(wb, `Abrar_${sheetName}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(wb, `Abrar_${sheetName}_${getPakistanDateISO()}.xlsx`);
   };
 
   return (

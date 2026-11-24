@@ -15,7 +15,7 @@ import {
 import * as XLSX from 'xlsx';
 import { api } from '../../services/api';
 import { LowStockItem } from '../../types/inventory';
-import { formatPKR } from '../../utils/formatters';
+import { formatPKR, getPakistanDateISO } from '../../utils/formatters';
 import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
@@ -82,7 +82,7 @@ export const LowStockView: React.FC = () => {
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Reorder & Low Stock');
-    XLSX.writeFile(workbook, `AMS_Low_Stock_Reorder_${new Date().toISOString().split('T')[0]}.xlsx`);
+    XLSX.writeFile(workbook, `AMS_Low_Stock_Reorder_${getPakistanDateISO()}.xlsx`);
   };
 
   return (
@@ -137,7 +137,7 @@ export const LowStockView: React.FC = () => {
               payload={{
                 documentType: 'report',
                 documentNumber: 'Low Stock & Reorder Sheet',
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName: 'Low Stock & Purchase Requisition Sheet',
                 totalAmount: 0,
                 paidAmount: 0,

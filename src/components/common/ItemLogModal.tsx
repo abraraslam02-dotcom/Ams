@@ -17,6 +17,10 @@ import {
   ItemLogSaleRow,
 } from '../../types/sales';
 import { formatPKR, formatAppDate } from '../../utils/formatters';
+import {
+  formatSequentialDiscountLabel,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 import { SalesPrintModal } from '../sales/SalesPrintModal';
 import { PurchasePrintModal } from '../purchases/PurchasePrintModal';
 
@@ -578,7 +582,10 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                       Sale Price{renderSortIcon('price')}
                     </th>
                     <th className="px-2 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
-                      Discount
+                      Disc 1+2
+                    </th>
+                    <th className="px-2 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
+                      Net Rate
                     </th>
                     <th className="px-2 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
                       Net Amount
@@ -634,10 +641,25 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                         {formatPKR(row.unit_price)}
                       </td>
                       <td className="px-2 py-1 border-r border-slate-200 text-right font-mono text-rose-700 whitespace-nowrap">
-                        {Number(row.discount_percent || 0)}%
-                        {Number(row.discount_amount || 0) > 0
-                          ? ` (${formatPKR(row.discount_amount)})`
-                          : ''}
+                        {(() => {
+                          const seq = resolveLineSequentialDiscounts(
+                            row,
+                            Number(row.unit_price || 0)
+                          );
+                          return `${formatSequentialDiscountLabel(
+                            seq.discount_1_percent,
+                            seq.discount_2_percent
+                          )}${
+                            Number(row.discount_amount || 0) > 0
+                              ? ` (${formatPKR(row.discount_amount)})`
+                              : ''
+                          }`;
+                        })()}
+                      </td>
+                      <td className="px-2 py-1 border-r border-slate-200 text-right font-mono font-semibold text-teal-800 whitespace-nowrap">
+                        {formatPKR(
+                          resolveLineSequentialDiscounts(row, Number(row.unit_price || 0)).net_rate
+                        )}
                       </td>
                       <td className="px-2 py-1 border-r border-slate-200 text-right font-mono font-black text-slate-900">
                         {formatPKR(row.line_total)}
@@ -711,7 +733,10 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                     Trade Price
                   </th>
                   <th className="px-2 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
-                    Discount
+                    Disc 1+2
+                  </th>
+                  <th className="px-2 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
+                    Net Rate
                   </th>
                   <th className="px-2 py-1.5 border-r border-slate-300 text-right whitespace-nowrap font-bold">
                     Tax
@@ -773,10 +798,26 @@ export const ItemLogModal: React.FC<ItemLogModalProps> = ({
                       {formatPKR(row.trade_price)}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 text-right font-mono text-rose-700 whitespace-nowrap">
-                      {Number(row.discount_percent || 0)}%
-                      {Number(row.discount_amount || 0) > 0
-                        ? ` (${formatPKR(row.discount_amount)})`
-                        : ''}
+                      {(() => {
+                        const seq = resolveLineSequentialDiscounts(
+                          row,
+                          Number(row.purchase_price || 0)
+                        );
+                        return `${formatSequentialDiscountLabel(
+                          seq.discount_1_percent,
+                          seq.discount_2_percent
+                        )}${
+                          Number(row.discount_amount || 0) > 0
+                            ? ` (${formatPKR(row.discount_amount)})`
+                            : ''
+                        }`;
+                      })()}
+                    </td>
+                    <td className="px-2 py-1 border-r border-slate-200 text-right font-mono font-semibold text-teal-800 whitespace-nowrap">
+                      {formatPKR(
+                        resolveLineSequentialDiscounts(row, Number(row.purchase_price || 0))
+                          .net_rate
+                      )}
                     </td>
                     <td className="px-2 py-1 border-r border-slate-200 text-right font-mono text-slate-700 whitespace-nowrap">
                       {Number(row.tax_amount || 0) > 0

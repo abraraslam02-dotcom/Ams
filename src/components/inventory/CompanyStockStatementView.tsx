@@ -11,14 +11,14 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { StockStatementResponse } from '../../types/inventory';
-import { formatPKR, formatAppDate, formatDateRange } from '../../utils/formatters';
+import { formatPKR, formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
 import { CompanyItemSelector } from '../common/CompanyItemSelector';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 
 export const CompanyStockStatementView: React.FC = () => {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = getPakistanDateISO();
   const firstOfMonthIso = `${todayIso.slice(0, 8)}01`;
 
   const [fromDate, setFromDate] = useState<string>(firstOfMonthIso);
@@ -223,7 +223,7 @@ export const CompanyStockStatementView: React.FC = () => {
               payload={{
                 documentType: 'statement',
                 documentNumber: 'Company Stock Statement',
-                documentDate: toDate || new Date().toISOString().slice(0, 10),
+                documentDate: toDate || getPakistanDateISO(),
                 customerName: 'Company-wise Stock Statement',
                 totalAmount: 0,
                 paidAmount: 0,

@@ -45,11 +45,10 @@ export const InvoiceSmsModal: React.FC<InvoiceSmsModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    const preNormalized =
-      mode === 'sales' && initialPhone
-        ? normalizePakistaniSmsNumber(initialPhone) || initialPhone.trim()
-        : '';
-    setPhoneInput(mode === 'sales' ? preNormalized : '');
+    const preNormalized = initialPhone
+      ? normalizePakistaniSmsNumber(initialPhone) || initialPhone.trim()
+      : '';
+    setPhoneInput(preNormalized);
     setAllowOverrideRegisteredPhone(false);
     setMessageText(initialMessage);
     setValidationError(null);
@@ -61,8 +60,7 @@ export const InvoiceSmsModal: React.FC<InvoiceSmsModalProps> = ({
   if (!isOpen) return null;
 
   const normalizedPhone = normalizePakistaniSmsNumber(phoneInput);
-  const hasValidRegisteredCustomerPhone =
-    mode === 'sales' &&
+  const hasValidRegisteredPartyPhone =
     isPhoneFromAccounts &&
     Boolean(normalizePakistaniSmsNumber(initialPhone)) &&
     !allowOverrideRegisteredPhone;
@@ -168,7 +166,7 @@ export const InvoiceSmsModal: React.FC<InvoiceSmsModalProps> = ({
               Recipient Mobile Number (Pakistan +92 Format):
             </label>
 
-            {hasValidRegisteredCustomerPhone ? (
+            {hasValidRegisteredPartyPhone ? (
               <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-300 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -191,23 +189,18 @@ export const InvoiceSmsModal: React.FC<InvoiceSmsModalProps> = ({
               </div>
             ) : (
               <div>
-                {mode === 'sales' && !initialPhone && (
+                {!initialPhone && (
                   <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-2 font-medium">
                     No registered mobile number found in Accounts
-                    {customerLabel ? ` for "${customerLabel}"` : ''}. Please enter the customer
-                    mobile number below:
-                  </p>
-                )}
-                {mode === 'purchase' && (
-                  <p className="text-[11px] text-slate-600 mb-1.5">
-                    Manually enter the recipient&apos;s mobile number for this Purchase Order SMS:
+                    {customerLabel ? ` for "${customerLabel}"` : ''}. Please enter the{' '}
+                    {mode === 'purchase' ? 'supplier' : 'customer'} mobile number below:
                   </p>
                 )}
                 <div className="relative">
                   <Phone className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="tel"
-                    autoFocus={!hasValidRegisteredCustomerPhone}
+                    autoFocus={!hasValidRegisteredPartyPhone}
                     required
                     value={phoneInput}
                     onChange={(e) => {

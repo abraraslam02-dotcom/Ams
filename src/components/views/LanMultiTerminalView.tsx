@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { formatPKTTime, formatAppDateTime } from '../../utils/formatters';
 import {
   Network,
   Laptop,
@@ -357,7 +358,7 @@ export const LanMultiTerminalView: React.FC = () => {
             <div className="flex justify-between text-slate-600">
               <span>Last Synced:</span>
               <span className="text-slate-700">
-                {syncState.lastSyncedAt ? new Date(syncState.lastSyncedAt).toLocaleTimeString() : 'Never'}
+                {syncState.lastSyncedAt ? formatPKTTime(syncState.lastSyncedAt) : 'Never'}
               </span>
             </div>
             <div className="flex justify-between text-slate-600">
@@ -441,7 +442,7 @@ export const LanMultiTerminalView: React.FC = () => {
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-slate-600 text-[11px]">
-                        {new Date(t.last_sync_at).toLocaleTimeString()}
+                        {formatPKTTime(t.last_sync_at)}
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono text-[10px] text-slate-400">
                         {t.device_id.slice(0, 16)}...
@@ -517,7 +518,7 @@ export const LanMultiTerminalView: React.FC = () => {
                 auditLogs.map((log) => (
                   <tr key={log.id} className="hover:bg-slate-50/80">
                     <td className="py-2.5 px-4 text-slate-600 text-[11px]">
-                      {new Date(log.created_at || log.synced_at).toLocaleString()}
+                      {formatAppDateTime(log.created_at || log.synced_at)}
                     </td>
                     <td className="py-2.5 px-3 font-medium text-slate-800">
                       {log.counter_name || log.device_name || log.device_id.slice(0, 10)}

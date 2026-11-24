@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
 import { offlineStorage, OfflineSyncItem } from '../../services/offlineStorage';
+import { formatPKTTime } from '../../utils/formatters';
 
 export const SyncStatusBadge: React.FC = () => {
   const [syncState, setSyncState] = useState<SyncState>(offlineSyncManager.getState());
@@ -292,7 +293,7 @@ export const SyncStatusBadge: React.FC = () => {
                       ? 'Automatic background sync is uploading pending local invoices to the central database.'
                       : `Last synchronized: ${
                           syncState.lastSyncedAt
-                            ? new Date(syncState.lastSyncedAt).toLocaleTimeString()
+                            ? formatPKTTime(syncState.lastSyncedAt)
                             : 'Just now'
                         }`}
                   </div>
@@ -350,7 +351,7 @@ export const SyncStatusBadge: React.FC = () => {
                           <div className="font-semibold text-slate-800">{item.action}</div>
                           <div className="text-[10px] text-slate-500 font-mono">
                             UUID: {item.client_tx_id.substring(0, 18)}... |{' '}
-                            {new Date(item.created_at).toLocaleTimeString()}
+                            {formatPKTTime(item.created_at)}
                           </div>
                         </div>
                         <span

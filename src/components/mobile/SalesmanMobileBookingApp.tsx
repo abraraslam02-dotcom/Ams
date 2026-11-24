@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import * as XLSX from 'xlsx';
+import { getPakistanWeekday, getPakistanDateISO } from '../../utils/formatters';
 import {
   Smartphone,
   Wifi,
@@ -197,7 +198,7 @@ function round2(n: number): number {
 }
 
 function generateMobileBookingNumber(salesmanCode: string, existingCount: number): string {
-  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const datePart = getPakistanDateISO().replace(/-/g, '');
   const cleanCode = (salesmanCode || 'SAL').replace(/[^A-Z0-9]/gi, '').slice(-5).toUpperCase();
   const seq = String(existingCount + 1).padStart(3, '0');
   return `MBK-${cleanCode}-${datePart}-${seq}`;
@@ -275,7 +276,7 @@ export const SalesmanMobileBookingApp: React.FC<{
   const [mobileTab, setMobileTab] = useState<'new-booking' | 'saved-bookings' | 'offers-catalog'>('new-booking');
 
   // Booking Header state
-  const [bookingDate, setBookingDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [bookingDate, setBookingDate] = useState<string>(getPakistanDateISO());
   const [bookingNumber, setBookingNumber] = useState<string>('');
   const [editingBookingUuid, setEditingBookingUuid] = useState<string | null>(null);
   const [selectedTown, setSelectedTown] = useState<string>('');
@@ -302,7 +303,7 @@ export const SalesmanMobileBookingApp: React.FC<{
   }, []);
 
   const currentDayName = useMemo(() => {
-    return new Date().toLocaleDateString('en-US', { weekday: 'long' });
+    return getPakistanWeekday();
   }, []);
 
   const isTodayWorkingDay = useMemo(() => {
@@ -480,7 +481,7 @@ export const SalesmanMobileBookingApp: React.FC<{
   // Local client-side Offer & Party Discount evaluation (works 100% offline!)
   const evaluateOfflineLineOfferAndDiscount = useCallback(
     (item: CatalogItem, qty: number, partyId: number, townName: string) => {
-      const today = bookingDate || new Date().toISOString().slice(0, 10);
+      const today = bookingDate || getPakistanDateISO();
       const tradePrice = round2(item.trade_price || 0);
       const gross = round2(qty * tradePrice);
 
@@ -1174,7 +1175,7 @@ export const SalesmanMobileBookingApp: React.FC<{
         return;
       }
 
-      const dateSlug = new Date().toISOString().slice(0, 10);
+      const dateSlug = getPakistanDateISO();
       const timeSlug = Date.now().toString().slice(-4);
       const jsonFileName = `AMS_Booking_${salesman.salesman_code}_${dateSlug}_${timeSlug}.json`;
       const excelFileName = `AMS_Booking_${salesman.salesman_code}_${dateSlug}_${timeSlug}.xlsx`;
@@ -1299,20 +1300,7 @@ export const SalesmanMobileBookingApp: React.FC<{
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      if (salesman?.id) {
-        syncCatalog(salesman.id, false);
-        const pendingUploads = bookings.filter((b) => b.status === 'Pending Upload');
-        if (pendingUploads.length > 0 && !autoSyncTriggeredRef.current) {
-          autoSyncTriggeredRef.current = true;
-          handleSendBookingsToSuperAdmin(pendingUploads, {
-            downloadJson: false,
-            downloadExcel: false,
-            silentAutoSync: true,
-          }).finally(() => {
-            autoSyncTriggeredRef.current = false;
-          });
-        }
-      }
+      // Manual Control Only: do not auto-sync or auto-upload bookings on network reconnect.
     };
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
@@ -1321,7 +1309,7 @@ export const SalesmanMobileBookingApp: React.FC<{
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [salesman?.id, bookings, syncCatalog, handleSendBookingsToSuperAdmin]);
+  }, []);
 
   // ============================================================================
   // PWA INSTALLATION MODAL (Android Chrome & iOS Safari)
@@ -2183,7 +2171,7 @@ export const SalesmanMobileBookingApp: React.FC<{
                   onClick={() => {
                     const target = bookings.filter((b) => b.status !== 'Submitted' && b.status !== 'Imported');
                     const listToExport = target.length > 0 ? target : bookings;
-                    const fn = `AMS_Booking_${salesman.salesman_code}_${new Date().toISOString().slice(0, 10)}.json`;
+                    const fn = `AMS_Booking_${salesman.salesman_code}_${getPakistanDateISO()}.json`;
                     downloadStructuredJsonFile(listToExport, fn);
                     setBanner({ type: 'success', message: `Exported structured JSON file: ${fn}` });
                   }}
@@ -2199,7 +2187,7 @@ export const SalesmanMobileBookingApp: React.FC<{
                   onClick={() => {
                     const target = bookings.filter((b) => b.status !== 'Submitted' && b.status !== 'Imported');
                     const listToExport = target.length > 0 ? target : bookings;
-                    const fn = `AMS_Booking_${salesman.salesman_code}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+                    const fn = `AMS_Booking_${salesman.salesman_code}_${getPakistanDateISO()}.xlsx`;
                     downloadStructuredExcelFile(listToExport, fn);
                     setBanner({ type: 'success', message: `Exported structured Excel file: ${fn}` });
                   }}

@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../../utils/formatters';
 import React, { useState, useMemo, useRef } from 'react';
 import { Printer, X, Columns, FileText, Filter } from 'lucide-react';
 import type { OrderFormPrintLayout } from '../../types/supply';
@@ -310,7 +311,7 @@ export const SupplyPrintModal: React.FC<SupplyPrintModalProps> = ({
               payload={{
                 documentType: 'report',
                 documentNumber: title,
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName: title,
                 totalAmount: 0,
                 paidAmount: 0,

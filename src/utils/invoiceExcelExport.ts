@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import { formatItemNameWithRemarks } from './itemDisplay';
-import { formatAppDate } from './formatters';
+import { formatAppDate, getPakistanDateISO } from './formatters';
+import { resolveLineSequentialDiscounts } from './taxCalculation';
 
 function toNum(val: unknown): number {
   const n = Number(val);
@@ -174,6 +175,9 @@ export function exportSalesInvoicesToExcel(
     'Rate',
     'Loose Rate',
     'Gross Amount',
+    'Discount 1 %',
+    'Discount 2 %',
+    'Net Rate',
     'Discount %',
     'Discount',
     'Tax %',
@@ -221,6 +225,9 @@ export function exportSalesInvoicesToExcel(
         Rate: 0,
         'Loose Rate': 0,
         'Gross Amount': toNum(inv.gross_total ?? 0),
+        'Discount 1 %': 0,
+        'Discount 2 %': 0,
+        'Net Rate': 0,
         'Discount %': 0,
         Discount: toNum(inv.discount_amount ?? 0),
         'Tax %': 0,
@@ -243,16 +250,17 @@ export function exportSalesInvoicesToExcel(
       const grossAmt = toNum(
         item.gross_amount ?? qty * rate + looseQty * looseRate
       );
-      const discPct = toNum(item.discount_percent);
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      const discPct = toNum(item.discount_percent ?? seq.discount_percent);
       const discAmt = toNum(
-        item.discount_amount ?? (grossAmt * discPct) / 100
+        item.discount_amount ?? (grossAmt * seq.discount_percent) / 100
       );
       const taxableAmt = Math.max(0, toNum(grossAmt - discAmt));
       const taxPct = toNum(item.tax_percent);
       const taxAmt = toNum(
-        item.tax_amount ?? (taxableAmt * taxPct) / 100
+        item.tax_amount ?? (grossAmt * taxPct) / 100
       );
-      const lineAmount = toNum(item.line_total ?? taxableAmt + taxAmt);
+      const lineAmount = toNum(item.line_total ?? grossAmt + taxAmt - discAmt);
 
       detQty = toNum(detQty + qty);
       detLooseQty = toNum(detLooseQty + looseQty);
@@ -278,6 +286,9 @@ export function exportSalesInvoicesToExcel(
         Rate: rate,
         'Loose Rate': looseRate,
         'Gross Amount': grossAmt,
+        'Discount 1 %': seq.discount_1_percent,
+        'Discount 2 %': seq.discount_2_percent,
+        'Net Rate': seq.net_rate,
         'Discount %': discPct,
         Discount: discAmt,
         'Tax %': taxPct,
@@ -308,6 +319,9 @@ export function exportSalesInvoicesToExcel(
       Rate: '',
       'Loose Rate': '',
       'Gross Amount': detGross,
+      'Discount 1 %': '',
+      'Discount 2 %': '',
+      'Net Rate': '',
       'Discount %': '',
       Discount: detDisc,
       'Tax %': '',
@@ -333,7 +347,7 @@ export function exportSalesInvoicesToExcel(
   const defaultName =
     invoices.length === 1
       ? `Sales_Invoice_${String(invoices[0].invoice_number || 'Export').replace(/[^a-zA-Z0-9_-]/g, '_')}.xlsx`
-      : `Sales_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      : `Sales_Invoices_${getPakistanDateISO()}.xlsx`;
 
   XLSX.writeFile(wb, customFileName || defaultName);
 }
@@ -478,6 +492,9 @@ export function exportPurchaseInvoicesToExcel(
     'Item Code',
     'Item Name',
     'Qty',
+    'Discount 1 %',
+    'Discount 2 %',
+    'Net Rate',
     'Discount',
     'Bonus',
     'Gross Amount',
@@ -523,6 +540,9 @@ export function exportPurchaseInvoicesToExcel(
         'Item Code': '',
         'Item Name': '(No line items)',
         Qty: 0,
+        'Discount 1 %': 0,
+        'Discount 2 %': 0,
+        'Net Rate': 0,
         Discount: toNum(pur.discount_amount ?? 0),
         Bonus: 0,
         'Gross Amount': toNum(pur.gross_total ?? 0),
@@ -547,12 +567,14 @@ export function exportPurchaseInvoicesToExcel(
       const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
       const mrp = toNum(item.mrp_rate ?? item.mrp);
       const grossAmt = toNum(item.gross_amount ?? qty * rate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (grossAmt * discPct) / 100);
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      const discAmt = toNum(
+        item.discount_amount ?? (grossAmt * seq.discount_percent) / 100
+      );
       const taxableAmt = Math.max(0, toNum(item.taxable_amount ?? (grossAmt - discAmt)));
       const taxPct = toNum(item.tax_percent);
-      const taxAmt = toNum(item.tax_amount ?? (taxableAmt * taxPct) / 100);
-      const lineAmount = toNum(item.line_total ?? taxableAmt + taxAmt);
+      const taxAmt = toNum(item.tax_amount ?? (grossAmt * taxPct) / 100);
+      const lineAmount = toNum(item.line_total ?? grossAmt + taxAmt - discAmt);
       const batchExp = [String(item.batch_number || '').trim(), cleanDate(item.expiry_date)]
         .filter(Boolean)
         .join(' / ');
@@ -572,6 +594,9 @@ export function exportPurchaseInvoicesToExcel(
         'Item Code': String(item.item_code || ''),
         'Item Name': formatItemNameWithRemarks(item.item_name, item.remarks),
         Qty: qty,
+        'Discount 1 %': seq.discount_1_percent,
+        'Discount 2 %': seq.discount_2_percent,
+        'Net Rate': seq.net_rate,
         Discount: discAmt,
         Bonus: bonus,
         'Gross Amount': grossAmt,
@@ -598,6 +623,9 @@ export function exportPurchaseInvoicesToExcel(
       'Item Code': '',
       'Item Name': '',
       Qty: detQty,
+      'Discount 1 %': '',
+      'Discount 2 %': '',
+      'Net Rate': '',
       Discount: detDisc,
       Bonus: detBonus,
       'Gross Amount': detGross,
@@ -630,7 +658,7 @@ export function exportPurchaseInvoicesToExcel(
       ? `Purchase_Invoice_${String(
           purchases[0].bill_number || purchases[0].invoice_number || 'Export'
         ).replace(/[^a-zA-Z0-9_-]/g, '_')}.xlsx`
-      : `Purchase_Invoices_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      : `Purchase_Invoices_${getPakistanDateISO()}.xlsx`;
 
   XLSX.writeFile(wb, customFileName || defaultName);
 }
@@ -833,11 +861,40 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
     },
   },
   {
+    key: 'discount_1_percent',
+    label: 'Discount 1 %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_inv, item) =>
+      resolveLineSequentialDiscounts(item, toNum(item.unit_price ?? item.rate)).discount_1_percent,
+  },
+  {
+    key: 'discount_2_percent',
+    label: 'Discount 2 %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_inv, item) =>
+      resolveLineSequentialDiscounts(item, toNum(item.unit_price ?? item.rate)).discount_2_percent,
+  },
+  {
+    key: 'net_rate',
+    label: 'Net Rate',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_inv, item) =>
+      resolveLineSequentialDiscounts(item, toNum(item.unit_price ?? item.rate)).net_rate,
+  },
+  {
     key: 'discount_percent',
     label: 'Discount %',
     category: 'Financial Information',
     format: 'number',
-    getValue: (_inv, item) => toNum(item.discount_percent),
+    getValue: (_inv, item) =>
+      toNum(
+        item.discount_percent ??
+          resolveLineSequentialDiscounts(item, toNum(item.unit_price ?? item.rate))
+            .discount_percent
+      ),
   },
   {
     key: 'discount_amount',
@@ -850,8 +907,8 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const rate = toNum(item.unit_price ?? item.rate);
       const lRate = toNum(item.loose_rate);
       const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
-      const discPct = toNum(item.discount_percent);
-      return toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      return toNum(item.discount_amount ?? (gross * seq.discount_percent) / 100);
     },
   },
   {
@@ -865,8 +922,8 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const rate = toNum(item.unit_price ?? item.rate);
       const lRate = toNum(item.loose_rate);
       const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      const discAmt = toNum(item.discount_amount ?? (gross * seq.discount_percent) / 100);
       return Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
     },
   },
@@ -888,11 +945,8 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const rate = toNum(item.unit_price ?? item.rate);
       const lRate = toNum(item.loose_rate);
       const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
-      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
       const taxPct = toNum(item.tax_percent);
-      return toNum(item.tax_amount ?? (taxable * taxPct) / 100);
+      return toNum(item.tax_amount ?? (gross * taxPct) / 100);
     },
   },
   {
@@ -906,12 +960,11 @@ export const SALES_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const rate = toNum(item.unit_price ?? item.rate);
       const lRate = toNum(item.loose_rate);
       const gross = toNum(item.gross_amount ?? qty * rate + loose * lRate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
-      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      const discAmt = toNum(item.discount_amount ?? (gross * seq.discount_percent) / 100);
       const taxPct = toNum(item.tax_percent);
-      const taxAmt = toNum(item.tax_amount ?? (taxable * taxPct) / 100);
-      return toNum(item.line_total ?? taxable + taxAmt);
+      const taxAmt = toNum(item.tax_amount ?? (gross * taxPct) / 100);
+      return toNum(item.line_total ?? gross + taxAmt - discAmt);
     },
   },
   {
@@ -1140,11 +1193,51 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
     },
   },
   {
+    key: 'discount_1_percent',
+    label: 'Discount 1 %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_pur, item) =>
+      resolveLineSequentialDiscounts(
+        item,
+        toNum(item.purchase_rate ?? item.purchase_price ?? item.rate)
+      ).discount_1_percent,
+  },
+  {
+    key: 'discount_2_percent',
+    label: 'Discount 2 %',
+    category: 'Financial Information',
+    format: 'number',
+    getValue: (_pur, item) =>
+      resolveLineSequentialDiscounts(
+        item,
+        toNum(item.purchase_rate ?? item.purchase_price ?? item.rate)
+      ).discount_2_percent,
+  },
+  {
+    key: 'net_rate',
+    label: 'Net Rate',
+    category: 'Financial Information',
+    format: 'currency',
+    getValue: (_pur, item) =>
+      resolveLineSequentialDiscounts(
+        item,
+        toNum(item.purchase_rate ?? item.purchase_price ?? item.rate)
+      ).net_rate,
+  },
+  {
     key: 'discount_percent',
     label: 'Discount %',
     category: 'Financial Information',
     format: 'number',
-    getValue: (_pur, item) => toNum(item.discount_percent),
+    getValue: (_pur, item) =>
+      toNum(
+        item.discount_percent ??
+          resolveLineSequentialDiscounts(
+            item,
+            toNum(item.purchase_rate ?? item.purchase_price ?? item.rate)
+          ).discount_percent
+      ),
   },
   {
     key: 'discount_amount',
@@ -1155,8 +1248,8 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const qty = toNum(item.quantity);
       const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
       const gross = toNum(item.gross_amount ?? qty * rate);
-      const discPct = toNum(item.discount_percent);
-      return toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      return toNum(item.discount_amount ?? (gross * seq.discount_percent) / 100);
     },
   },
   {
@@ -1168,8 +1261,8 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const qty = toNum(item.quantity);
       const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
       const gross = toNum(item.gross_amount ?? qty * rate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      const discAmt = toNum(item.discount_amount ?? (gross * seq.discount_percent) / 100);
       return Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
     },
   },
@@ -1189,11 +1282,8 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const qty = toNum(item.quantity);
       const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
       const gross = toNum(item.gross_amount ?? qty * rate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
-      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
       const taxPct = toNum(item.tax_percent);
-      return toNum(item.tax_amount ?? (taxable * taxPct) / 100);
+      return toNum(item.tax_amount ?? (gross * taxPct) / 100);
     },
   },
   {
@@ -1205,12 +1295,11 @@ export const PURCHASE_CUSTOM_EXPORT_FIELDS: CustomExportFieldDef[] = [
       const qty = toNum(item.quantity);
       const rate = toNum(item.purchase_rate ?? item.purchase_price ?? item.rate);
       const gross = toNum(item.gross_amount ?? qty * rate);
-      const discPct = toNum(item.discount_percent);
-      const discAmt = toNum(item.discount_amount ?? (gross * discPct) / 100);
-      const taxable = Math.max(0, toNum(item.taxable_amount ?? gross - discAmt));
+      const seq = resolveLineSequentialDiscounts(item, rate);
+      const discAmt = toNum(item.discount_amount ?? (gross * seq.discount_percent) / 100);
       const taxPct = toNum(item.tax_percent);
-      const taxAmt = toNum(item.tax_amount ?? (taxable * taxPct) / 100);
-      return toNum(item.line_total ?? taxable + taxAmt);
+      const taxAmt = toNum(item.tax_amount ?? (gross * taxPct) / 100);
+      return toNum(item.line_total ?? gross + taxAmt - discAmt);
     },
   },
   {
@@ -1343,7 +1432,7 @@ export function exportCustomInvoicesToExcel(
   const sheetName = moduleType === 'PURCHASE' ? 'Custom Purchase Export' : 'Custom Sales Export';
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
 
-  const datePart = new Date().toISOString().slice(0, 10);
+  const datePart = getPakistanDateISO();
   const defaultName =
     moduleType === 'PURCHASE'
       ? invoices.length === 1

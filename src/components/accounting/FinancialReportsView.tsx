@@ -17,7 +17,7 @@ import { PrintDocumentHeader } from '../common/PrintDocumentHeader';
 import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
-import { formatAppDate, formatDateRange } from '../../utils/formatters';
+import { formatAppDate, formatDateRange, getPakistanDateISO } from '../../utils/formatters';
 
 interface FinancialReportsViewProps {
   initialReport?: FinancialReportKey;
@@ -152,7 +152,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Abrar_Medical_${activeReport}_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `Abrar_Medical_${activeReport}_${getPakistanDateISO()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -196,7 +196,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                 documentType: 'statement',
                 documentNumber:
                   REPORT_TABS.find((t) => t.key === activeReport)?.label || 'Financial Statement',
-                documentDate: new Date().toISOString().slice(0, 10),
+                documentDate: getPakistanDateISO(),
                 customerName:
                   REPORT_TABS.find((t) => t.key === activeReport)?.label || 'Financial Statement',
                 totalAmount: 0,

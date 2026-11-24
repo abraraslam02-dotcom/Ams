@@ -25,11 +25,13 @@ import {
   InvoiceFieldVisibility,
   DEFAULT_FIELD_VISIBILITY,
   parseFieldVisibility,
+  OperatingModeStatus,
 } from '../../types/system';
 import { api } from '../../services/api';
 import { offlineStorage } from '../../services/offlineStorage';
 import { offlineSyncManager } from '../../services/offlineSyncManager';
 import { MasterResetAndLocalBackupPanel } from '../admin/MasterResetAndLocalBackupPanel';
+import { SuperAdminOperatingModePanel } from '../admin/SuperAdminOperatingModePanel';
 import { FirebaseCloudPanel } from '../firebase/FirebaseCloudPanel';
 import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
 import { formatAppDateTime } from '../../utils/formatters';
@@ -39,6 +41,8 @@ export type AdminSubTab = 'store-printing' | 'backup-restore' | 'system-admin';
 interface SystemSettingsViewProps {
   settings: CompanySettings | null;
   initialSubTab?: AdminSubTab;
+  hasUnsavedInvoiceItems?: boolean;
+  onOperatingModeChanged?: (status: OperatingModeStatus) => void;
   onSettingsUpdated?: (updated: CompanySettings) => void;
   onNavigateToAuditLogs?: () => void;
 }
@@ -46,6 +50,8 @@ interface SystemSettingsViewProps {
 export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   settings: propSettings,
   initialSubTab = 'store-printing',
+  hasUnsavedInvoiceItems = false,
+  onOperatingModeChanged,
   onSettingsUpdated,
   onNavigateToAuditLogs,
 }) => {
@@ -951,10 +957,15 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       )}
 
       {/* =====================================================================
-          TAB 2: AUTOMATIC DATABASE BACKUP & DATA RECOVERY
+          TAB 2: MANUAL DATABASE BACKUP, CLOUD SYNC & DATA RECOVERY
       ===================================================================== */}
       {subTab === 'backup-restore' && (
         <div className="space-y-5">
+          <SuperAdminOperatingModePanel
+            hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
+            onModeChanged={onOperatingModeChanged}
+            onDataChanged={fetchAdminData}
+          />
           <MasterResetAndLocalBackupPanel
             initialSection="backup-restore"
             onDataChanged={fetchAdminData}
@@ -967,7 +978,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   <HardDrive className="w-4 h-4 text-emerald-600" />
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">
-                      On-Demand & Automatic Database Backup
+                      On-Demand Local Database Backup (Manual Control Only)
                     </h3>
                     <p className="text-[11px] text-slate-500">
                       Uses SQLite WAL-safe VACUUM INTO snapshot with automatic PRAGMA integrity
@@ -995,7 +1006,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center justify-center gap-2 shadow-xs cursor-pointer disabled:opacity-50 shrink-0"
                 >
                   <Database className="w-4 h-4" />
-                  <span>{creatingBackup ? 'Creating Backup...' : 'Backup Now'}</span>
+                  <span>{creatingBackup ? 'Creating Backup...' : 'Local Backup Only'}</span>
                 </button>
               </div>
 
@@ -1003,38 +1014,13 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-slate-700">Active Backup Directory:</span>
                   <span className="font-mono font-bold text-slate-900">
-                    {backupDir || form.backup_directory || 'data/backups'}
+                    {backupDir || form.backup_directory || 'D:\\AbrarMedicalStore\\Backups'}
                   </span>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                  <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={Number(form.auto_daily_backup ?? 1) === 1}
-                      onChange={async (e) => {
-                        const val = e.target.checked ? 1 : 0;
-                        const next = { ...form, auto_daily_backup: val };
-                        setForm(next);
-                        await api.updateCompanySettings(next);
-                      }}
-                      className="rounded border-slate-300 text-emerald-600"
-                    />
-                    <span>Automatic Daily Backup</span>
-                  </label>
-                  <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={Number(form.auto_backup_before_changes ?? 1) === 1}
-                      onChange={async (e) => {
-                        const val = e.target.checked ? 1 : 0;
-                        const next = { ...form, auto_backup_before_changes: val };
-                        setForm(next);
-                        await api.updateCompanySettings(next);
-                      }}
-                      className="rounded border-slate-300 text-emerald-600"
-                    />
-                    <span>Auto-Backup Before Major Changes</span>
-                  </label>
+                <div className="text-[11px] text-slate-600 bg-white border border-slate-200 rounded-lg p-2.5">
+                  <strong>Manual Control Policy:</strong> Automatic daily backups and background cloud sync
+                  are disabled. Use <strong>BACKUP &amp; SYNC NOW</strong> in the Super Admin Control Panel
+                  above whenever you want to back up locally and synchronize with the Cloud Database.
                 </div>
               </div>
             </div>
@@ -1272,6 +1258,11 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       ===================================================================== */}
       {subTab === 'system-admin' && (
         <div className="space-y-4">
+          <SuperAdminOperatingModePanel
+            hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
+            onModeChanged={onOperatingModeChanged}
+            onDataChanged={fetchAdminData}
+          />
           <FirebaseCloudPanel
             totalLiveRecords={
               sysInfo?.recordCounts
@@ -1480,7 +1471,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 </div>
                 {sysInfo?.appInfo?.builtAt && (
                   <div>
-                    Built At: <strong>{new Date(sysInfo.appInfo.builtAt).toLocaleString()}</strong>
+                    Built At: <strong>{formatAppDateTime(sysInfo.appInfo.builtAt)}</strong>
                   </div>
                 )}
                 <div>

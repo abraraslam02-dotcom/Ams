@@ -1,3 +1,4 @@
+import { getPakistanDateISO } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -1084,27 +1085,39 @@ syncRouter.post('/push', (req: Request, res: Response) => {
         } else if (action === 'UPDATE_ITEM_PRICE_CASCADE') {
           const itemId = Number(payload.id || item.local_id);
           const existingItem = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId) as any;
-          if (existingItem) {
+          if (existingItem && payload.update_purchase_price) {
             const newPurPrice = round2(payload.new_purchase_price);
             const unitsPerPack = parseUnitsPerPack(existingItem.packing);
             const calcRetail = newPurPrice > 0 ? round2(newPurPrice / 0.85) : 0;
-            const finalPur = payload.update_purchase_price
-              ? newPurPrice
-              : round2(existingItem.purchase_price);
-            const finalRetail = payload.update_retail_price
-              ? calcRetail
-              : round2(existingItem.retail_price);
-            const finalLoose = round2(finalRetail / unitsPerPack);
 
-            db.prepare(`
-              UPDATE items
-              SET purchase_price = ?,
-                  trade_price = ?,
-                  retail_price = ?,
-                  loose_rate = ?,
-                  updated_at = CURRENT_TIMESTAMP
-              WHERE id = ?
-            `).run(finalPur, finalPur, finalRetail, finalLoose, itemId);
+            if (payload.update_retail_price) {
+              const finalRetail =
+                payload.new_retail_price !== undefined && Number(payload.new_retail_price) > 0
+                  ? round2(payload.new_retail_price)
+                  : calcRetail;
+              const finalLoose =
+                payload.new_loose_rate !== undefined && Number(payload.new_loose_rate) > 0
+                  ? round2(payload.new_loose_rate)
+                  : round2(finalRetail / unitsPerPack);
+
+              db.prepare(`
+                UPDATE items
+                SET purchase_price = ?,
+                    retail_price = ?,
+                    loose_rate = ?,
+                    wholesale_price = ?,
+                    trade_price = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+              `).run(newPurPrice, finalRetail, finalLoose, finalRetail, finalRetail, itemId);
+            } else {
+              db.prepare(`
+                UPDATE items
+                SET purchase_price = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+              `).run(newPurPrice, itemId);
+            }
           }
 
           db.prepare(`
@@ -1217,7 +1230,7 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           results.push({ client_tx_id, status: 'synced', server_id: accId });
         } else if (action === 'CREATE_CASH_BOOK_VOUCHER') {
           const cleanDate = String(
-            payload.voucher_date || new Date().toISOString().slice(0, 10)
+            payload.voucher_date || getPakistanDateISO()
           ).trim();
           const cleanType = String(payload.transaction_type || 'Receipt');
           const recAmt = round2(Math.max(0, Number(payload.receipt_amount || 0)));
@@ -1407,7 +1420,7 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           results.push({ client_tx_id, status: 'synced', server_id: targetId });
         } else if (action === 'CREATE_SALE_RETURN') {
           const returnNumber = String(payload.return_number || `SR-${Date.now().toString().slice(-6)}`);
-          const returnDate = String(payload.return_date || new Date().toISOString().slice(0, 10));
+          const returnDate = String(payload.return_date || getPakistanDateISO());
           const netReturnAmt = round2(payload.net_return_amount || payload.total_amount || 0);
           const refundPaid = round2(payload.refund_paid || 0);
           const customerAccId = payload.customer_account_id ? Number(payload.customer_account_id) : null;
@@ -1463,8 +1476,8 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 INSERT INTO sale_return_items (
                   sale_return_id, item_id, item_name, batch_id, batch_number,
                   sale_mode, units_per_pack, pack_qty, loose_qty, quantity_returned,
-                  total_units_returned, unit_price, discount_percent, discount_amount, line_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  total_units_returned, unit_price, discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount, line_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).run(
                 newSrId,
                 itemId,
@@ -1478,6 +1491,9 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 unitsReturned,
                 unitsReturned,
                 round2(line.unit_price || 0),
+                round2(line.discount_1_percent ?? line.discount_percent ?? 0),
+                round2(line.discount_2_percent ?? 0),
+                round2(line.net_rate ?? line.unit_price ?? 0),
                 round2(line.discount_percent || 0),
                 round2(line.discount_amount || 0),
                 round2(line.line_total || 0)
@@ -1526,7 +1542,7 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           results.push({ client_tx_id, status: 'synced', server_id: srId, invoice_number: returnNumber });
         } else if (action === 'CREATE_PURCHASE_RETURN') {
           const returnNumber = String(payload.return_number || `PR-${Date.now().toString().slice(-6)}`);
-          const returnDate = String(payload.return_date || new Date().toISOString().slice(0, 10));
+          const returnDate = String(payload.return_date || getPakistanDateISO());
           const netReturnAmt = round2(payload.net_return_amount || payload.total_amount || 0);
           const refundReceived = round2(payload.refund_received || 0);
           const supplierAccId = payload.supplier_account_id ? Number(payload.supplier_account_id) : null;
@@ -1582,8 +1598,8 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 INSERT INTO purchase_return_items (
                   purchase_return_id, item_id, item_name, batch_id, batch_number,
                   units_per_pack, pack_qty, loose_qty, quantity_returned,
-                  total_units_returned, purchase_price, discount_percent, discount_amount, line_total
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  total_units_returned, purchase_price, discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount, line_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).run(
                 newPrId,
                 itemId,
@@ -1596,6 +1612,9 @@ syncRouter.post('/push', (req: Request, res: Response) => {
                 unitsReturned,
                 unitsReturned,
                 round2(line.purchase_price || line.unit_price || 0),
+                round2(line.discount_1_percent ?? line.discount_percent ?? 0),
+                round2(line.discount_2_percent ?? 0),
+                round2(line.net_rate ?? line.purchase_price ?? line.unit_price ?? 0),
                 round2(line.discount_percent || 0),
                 round2(line.discount_amount || 0),
                 round2(line.line_total || 0)

@@ -22,7 +22,7 @@ import type {
 } from '../../types/supply';
 import { exportSupplyTableToExcel } from '../../utils/supplyExcelExport';
 import type { SupplyDocumentPrintType } from './SupplyPrintModal';
-import { formatAppDate } from '../../utils/formatters';
+import { formatAppDate, getPakistanDateISO } from '../../utils/formatters';
 
 interface SupplyReportsAndRecoveryProps {
   activeSection: 'supply-recovery' | 'supply-settlement' | 'supply-reports';
@@ -122,7 +122,7 @@ export const SupplyReportsAndRecoverySection: React.FC<SupplyReportsAndRecoveryP
   onRefreshCore,
   onOpenPrint,
 }) => {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getPakistanDateISO();
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   // ==========================================================================

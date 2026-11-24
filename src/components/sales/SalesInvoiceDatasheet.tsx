@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api } from '../../services/api';
-import { findExactBarcodeOrCodeMatch, prepareItemIndex, searchItems } from '../../utils/itemSearch';
+import {
+  findExactBarcodeOrCodeMatch,
+  prepareItemIndex,
+  resolveItemSelectionFields,
+  searchItems,
+} from '../../utils/itemSearch';
 import { Item, ItemVariant } from '../../types/item';
 import {
   CustomerItemHistoryResponse,
@@ -12,14 +17,23 @@ import {
   SalesmanRecord,
   SalesPaymentMode,
 } from '../../types/sales';
-import { formatPKR, formatAppDate } from '../../utils/formatters';
-import { calculateLineTax, resolveItemTaxConfig } from '../../utils/taxCalculation';
+import { formatPKR, formatAppDate, getPakistanDateISO } from '../../utils/formatters';
+import {
+  calculateLineTax,
+  calculateSequentialLineDiscount,
+  clampDiscountPercent,
+  formatSequentialDiscountLabel,
+  resolveItemTaxConfig,
+  resolveLineSequentialDiscounts,
+} from '../../utils/taxCalculation';
 import {
   formatItemNameWithRemarks,
   matchesSelectedCompany,
   mergeCompanyMasterOptions,
 } from '../../utils/itemDisplay';
+import { useAuth } from '../../context/AuthContext';
 import { useResizableColumns } from '../../hooks/useResizableColumns';
+import { useColumnOrder } from '../../hooks/useColumnOrder';
 import { SalesPrintModal } from './SalesPrintModal';
 import { SalesDsrReportModal } from './SalesDsrReportModal';
 import { NumericInput } from '../common/NumericInput';
@@ -120,6 +134,10 @@ export function createEmptyRow(): DatasheetRow {
     quantity: 0,
     bonus_quantity: 0,
     unit_price: 0,
+    discount_1_percent: 0,
+    discount_2_percent: 0,
+    net_rate: 0,
+    net_loose_rate: 0,
     discount_percent: 0,
     discount_amount: 0,
     loose_quantity: 0,
@@ -141,6 +159,8 @@ export function createEmptyRow(): DatasheetRow {
     rateSuggestionSource: 'standard_retail',
     lastCustomerSaleRate: null,
     lastCustomerDiscountPercent: null,
+    lastCustomerDiscount1Percent: null,
+    lastCustomerDiscount2Percent: null,
     lastCustomerSaleDate: null,
     lastCustomerInvoiceNo: null,
     lastCustomerSoldQty: null,
@@ -148,6 +168,10 @@ export function createEmptyRow(): DatasheetRow {
     lastPurchaseCostRate: null,
     lastPurchaseDate: null,
     lastSupplierName: null,
+    weighted_avg_pack_cost: null,
+    item_pprice: null,
+    saved_cost_price_per_unit: null,
+    saved_fifo_batches_json: null,
   };
 }
 
@@ -257,11 +281,25 @@ function recalcRow(row: DatasheetRow): DatasheetRow {
   const totalUnits = isSyrup
     ? round2((quantity + bonusQuantity) * unitsPerPack)
     : round2((quantity + bonusQuantity) * unitsPerPack + looseQty);
-  // Financial calculation: Item gross amount, discount, tax, net total use signed Normal Qty & Loose Qty
+  // Financial calculation: Item gross amount, sequential discounts, tax, net total use signed Normal Qty & Loose Qty
   const gross = round2(quantity * unitPrice + (isSyrup ? 0 : looseQty * looseRate));
-  const discPct = Math.max(0, Math.min(100, Number(row.discount_percent || 0)));
-  const discAmt = round2((gross * discPct) / 100);
-  const taxable = round2(gross - discAmt);
+  const rawD1 =
+    row.discount_1_percent === undefined &&
+    row.discount_2_percent === undefined &&
+    Number(row.discount_percent || 0) > 0
+      ? clampDiscountPercent(row.discount_percent)
+      : clampDiscountPercent(row.discount_1_percent ?? 0);
+  const rawD2 =
+    row.discount_1_percent === undefined && row.discount_2_percent === undefined
+      ? 0
+      : clampDiscountPercent(row.discount_2_percent ?? 0);
+  const seq = calculateSequentialLineDiscount({
+    originalRate: unitPrice,
+    looseRate: isSyrup ? 0 : looseRate,
+    grossAmount: gross,
+    discount1Percent: rawD1,
+    discount2Percent: rawD2,
+  });
   const resolvedTax = resolveItemTaxConfig({
     tax_type: row.tax_type,
     tax_value: row.tax_value,
@@ -277,7 +315,7 @@ function recalcRow(row: DatasheetRow): DatasheetRow {
     taxValue: resolvedTax.tax_value,
     taxPercent: resolvedTax.tax_percent,
   });
-  const lineTotal = round2(gross + taxAmt - discAmt);
+  const lineTotal = round2(gross + taxAmt - seq.discount_amount);
 
   return {
     ...row,
@@ -288,9 +326,13 @@ function recalcRow(row: DatasheetRow): DatasheetRow {
     loose_rate: looseRate,
     total_units: totalUnits,
     gross_amount: gross,
-    discount_percent: discPct,
-    discount_amount: discAmt,
-    taxable_amount: taxable,
+    discount_1_percent: seq.discount_1_percent,
+    discount_2_percent: seq.discount_2_percent,
+    net_rate: seq.net_rate,
+    net_loose_rate: seq.net_loose_rate,
+    discount_percent: seq.effective_discount_percent,
+    discount_amount: seq.discount_amount,
+    taxable_amount: seq.taxable_amount,
     tax_type: resolvedTax.tax_type,
     tax_value: resolvedTax.tax_value,
     tax_percent: resolvedTax.tax_percent,
@@ -315,10 +357,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   onNavigateToSalesHistory,
   onBackToDashboard,
 }) => {
+  const { user } = useAuth();
   // Header State
   const [editingSaleId, setEditingSaleId] = useState<number | null>(null);
   const [editingSaleStatus, setEditingSaleStatus] = useState<string | null>(null);
-  const [invoiceDate, setInvoiceDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [invoiceDate, setInvoiceDate] = useState<string>(getPakistanDateISO());
   const [invoiceNumber, setInvoiceNumber] = useState<string>(() => {
     const d = new Date();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
@@ -773,7 +816,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 ? parsed.invoiceNumber || nextNumRes.nextInvoiceNumber
                 : nextNumRes.nextInvoiceNumber
             );
-            setInvoiceDate(parsed.invoiceDate || new Date().toISOString().slice(0, 10));
+            setInvoiceDate(parsed.invoiceDate || getPakistanDateISO());
             setCustomerAccountId(Number(parsed.customerAccountId || 0));
             setBuyerName(String(parsed.buyerName || ''));
             setSalesmanId(parsed.salesmanId || (activeSalesmen[0]?.id ?? null));
@@ -905,6 +948,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             ...target,
             lastCustomerSaleRate: null,
             lastCustomerDiscountPercent: null,
+            lastCustomerDiscount1Percent: null,
+            lastCustomerDiscount2Percent: null,
             lastCustomerSaleDate: null,
             lastCustomerInvoiceNo: null,
             lastCustomerSoldQty: null,
@@ -919,7 +964,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             body: JSON.stringify({
               item_id: itemId,
               variant_id: variantId || null,
-              quantity: 0,
+              quantity: invoiceViewMode === 'pos' ? 1 : 0,
               party_account_id: null,
             }),
           }).then((r) => r.json()).catch(() => null);
@@ -940,7 +985,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 }
                 const updated = { ...target };
                 if (calc.effective_discount_percent > 0) {
-                  updated.discount_percent = round2(calc.effective_discount_percent);
+                  updated.discount_1_percent = clampDiscountPercent(calc.effective_discount_percent);
                 }
                 if (calc.bonus_quantity > 0) {
                   updated.bonus_quantity = round2(calc.bonus_quantity);
@@ -999,10 +1044,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             return prev;
           }
 
+          const resolvedLastDisc = lastSale
+            ? resolveLineSequentialDiscounts(lastSale, Number(lastSale.unit_price || 0))
+            : null;
           const updatedRow: DatasheetRow = {
             ...target,
             lastCustomerSaleRate: lastSale ? round2(lastSale.unit_price) : null,
             lastCustomerDiscountPercent: lastSale ? round2(lastSale.discount_percent || 0) : null,
+            lastCustomerDiscount1Percent: resolvedLastDisc ? resolvedLastDisc.discount_1_percent : null,
+            lastCustomerDiscount2Percent: resolvedLastDisc ? resolvedLastDisc.discount_2_percent : null,
             lastCustomerSaleDate: lastSale ? String(lastSale.invoice_date) : null,
             lastCustomerInvoiceNo: lastSale ? String(lastSale.invoice_number) : null,
             lastCustomerSoldQty: lastSale ? Number(lastSale.quantity || 0) : null,
@@ -1023,7 +1073,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             body: JSON.stringify({
               item_id: itemId,
               variant_id: variantId || null,
-              quantity: 0,
+              quantity: invoiceViewMode === 'pos' ? 1 : 0,
               party_account_id: custId || null,
             }),
           }).then((r) => r.json()).catch(() => null);
@@ -1044,7 +1094,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 }
                 const updated = { ...target };
                 if (calc.effective_discount_percent > 0) {
-                  updated.discount_percent = round2(calc.effective_discount_percent);
+                  updated.discount_1_percent = clampDiscountPercent(calc.effective_discount_percent);
                 }
                 if (calc.bonus_quantity > 0) {
                   updated.bonus_quantity = round2(calc.bonus_quantity);
@@ -1100,7 +1150,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               }
               const updated = { ...target };
               if (calc.effective_discount_percent > 0) {
-                updated.discount_percent = round2(calc.effective_discount_percent);
+                updated.discount_1_percent = clampDiscountPercent(calc.effective_discount_percent);
               }
               if (calc.bonus_quantity > 0) {
                 updated.bonus_quantity = round2(calc.bonus_quantity);
@@ -1261,7 +1311,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         const inv = res?.data || res?.invoice || res?.sale || res || {};
         const invId = Number(inv.id || idToResume);
         const loadedStatus = String(inv.status || 'completed').trim().toLowerCase();
-        const loadedDate = String(inv.invoice_date || new Date().toISOString().slice(0, 10));
+        const loadedDate = String(inv.invoice_date || getPakistanDateISO());
         editingSaleIdRef.current = invId;
         localStorage.removeItem(ACTIVE_DRAFT_STORAGE_KEY);
         setEditingSaleId(invId);
@@ -1382,6 +1432,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   catMatch?.retail_price ||
                   0
               ),
+              ...resolveLineSequentialDiscounts(
+                line,
+                Number(
+                  line.unit_price ||
+                    line.trade_price ||
+                    catVariant?.effective_retail_price ||
+                    catMatch?.retail_price ||
+                    0
+                )
+              ),
               discount_percent: Number(line.discount_percent || 0),
               discount_amount: Number(line.discount_amount || 0),
               loose_quantity: Number(line.loose_quantity || 0),
@@ -1402,9 +1462,35 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 catVariant?.effective_wholesale_price ?? catMatch?.wholesale_price ?? line.unit_price ?? 0
               ),
               lastPurchaseCostRate:
-                (catVariant?.effective_purchase_price ?? catMatch?.purchase_price)
-                  ? round2(catVariant?.effective_purchase_price ?? catMatch?.purchase_price)
+                (catVariant?.weighted_avg_pack_cost ??
+                  catMatch?.weighted_avg_pack_cost ??
+                  catVariant?.effective_purchase_price ??
+                  catMatch?.purchase_price)
+                  ? round2(
+                      catVariant?.weighted_avg_pack_cost ??
+                        catMatch?.weighted_avg_pack_cost ??
+                        catVariant?.effective_purchase_price ??
+                        catMatch?.purchase_price
+                    )
                   : null,
+              weighted_avg_pack_cost:
+                (catVariant?.weighted_avg_pack_cost ?? catMatch?.weighted_avg_pack_cost ?? null) !== null &&
+                Number(catVariant?.weighted_avg_pack_cost ?? catMatch?.weighted_avg_pack_cost ?? 0) > 0
+                  ? Number(catVariant?.weighted_avg_pack_cost ?? catMatch?.weighted_avg_pack_cost)
+                  : null,
+              item_pprice:
+                Number(catVariant?.effective_purchase_price ?? catMatch?.purchase_price ?? 0) > 0
+                  ? Number(catVariant?.effective_purchase_price ?? catMatch?.purchase_price)
+                  : null,
+              saved_cost_price_per_unit:
+                line.cost_price_per_unit !== undefined &&
+                line.cost_price_per_unit !== null &&
+                Number(line.cost_price_per_unit) > 0
+                  ? Number(line.cost_price_per_unit)
+                  : null,
+              saved_fifo_batches_json: line.fifo_batches_json
+                ? String(line.fifo_batches_json)
+                : null,
               batches: variantBatches,
               isRateManuallyEdited: true,
               isLooseRateManuallyEdited: true,
@@ -1480,9 +1566,26 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               0
           ),
           lastPurchaseCostRate:
-            (catVariant?.effective_purchase_price ?? catMatch.purchase_price)
-              ? round2(catVariant?.effective_purchase_price ?? catMatch.purchase_price)
+            (catVariant?.weighted_avg_pack_cost ??
+              catMatch.weighted_avg_pack_cost ??
+              catVariant?.effective_purchase_price ??
+              catMatch.purchase_price)
+              ? round2(
+                  catVariant?.weighted_avg_pack_cost ??
+                    catMatch.weighted_avg_pack_cost ??
+                    catVariant?.effective_purchase_price ??
+                    catMatch.purchase_price
+                )
               : r.lastPurchaseCostRate,
+          weighted_avg_pack_cost:
+            (catVariant?.weighted_avg_pack_cost ?? catMatch.weighted_avg_pack_cost ?? null) !== null &&
+            Number(catVariant?.weighted_avg_pack_cost ?? catMatch.weighted_avg_pack_cost ?? 0) > 0
+              ? Number(catVariant?.weighted_avg_pack_cost ?? catMatch.weighted_avg_pack_cost)
+              : r.weighted_avg_pack_cost ?? null,
+          item_pprice:
+            Number(catVariant?.effective_purchase_price ?? catMatch.purchase_price ?? 0) > 0
+              ? Number(catVariant?.effective_purchase_price ?? catMatch.purchase_price)
+              : r.item_pprice ?? null,
           batches: variantBatches,
         };
       });
@@ -1824,17 +1927,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         ? targetRow.loose_rate
         : round2(effectivePrice / effUnitsPerPack);
 
+      const defaultNewQty = invoiceViewMode === 'pos' ? 1 : 0;
       const preservedQty = hasExistingItem
         ? parseSignedNumeric(targetRow.quantity)
         : parseSignedNumeric(targetRow.quantity) !== 0
         ? parseSignedNumeric(targetRow.quantity)
-        : 0;
+        : defaultNewQty;
 
-      const preservedDiscount = hasExistingItem
-        ? Math.max(0, Math.min(100, Number(targetRow.discount_percent || 0)))
-        : Number(targetRow.discount_percent || 0) > 0
-        ? Math.max(0, Math.min(100, Number(targetRow.discount_percent || 0)))
-        : effDefaultDisc;
+      const preservedDiscount1 = hasExistingItem
+        ? clampDiscountPercent(targetRow.discount_1_percent ?? targetRow.discount_percent ?? 0)
+        : Number(targetRow.discount_1_percent ?? targetRow.discount_percent ?? 0) > 0
+        ? clampDiscountPercent(targetRow.discount_1_percent ?? targetRow.discount_percent ?? 0)
+        : clampDiscountPercent(effDefaultDisc);
+      const preservedDiscount2 = hasExistingItem
+        ? clampDiscountPercent(targetRow.discount_2_percent ?? 0)
+        : clampDiscountPercent(targetRow.discount_2_percent ?? 0);
 
       updated[rowIdx] = recalcRow({
         ...targetRow,
@@ -1859,7 +1966,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         quantity: preservedQty,
         bonus_quantity: isSameItem && Number(targetRow.bonus_quantity || 0) > 0 ? targetRow.bonus_quantity : 0,
         unit_price: effectivePrice,
-        discount_percent: preservedDiscount,
+        discount_1_percent: preservedDiscount1,
+        discount_2_percent: preservedDiscount2,
         loose_quantity: isSameItem ? targetRow.loose_quantity || 0 : 0,
         loose_rate: effectiveLoose,
         tax_type: effTaxCfg.tax_type,
@@ -1877,9 +1985,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           : invoiceType === 'Wholesale'
           ? 'standard_wholesale'
           : 'standard_retail',
-        lastPurchaseCostRate: effPurchasePrice > 0 ? round2(effPurchasePrice) : null,
+        lastPurchaseCostRate:
+          Number(
+            chosenVariant?.weighted_avg_pack_cost ??
+              item.weighted_avg_pack_cost ??
+              effPurchasePrice ??
+              0
+          ) > 0
+            ? round2(
+                Number(
+                  chosenVariant?.weighted_avg_pack_cost ??
+                    item.weighted_avg_pack_cost ??
+                    effPurchasePrice ??
+                    0
+                )
+              )
+            : null,
+        weighted_avg_pack_cost:
+          Number(chosenVariant?.weighted_avg_pack_cost ?? item.weighted_avg_pack_cost ?? 0) > 0
+            ? Number(chosenVariant?.weighted_avg_pack_cost ?? item.weighted_avg_pack_cost)
+            : null,
+        item_pprice: effPurchasePrice > 0 ? effPurchasePrice : null,
+        saved_cost_price_per_unit: isSameItem ? targetRow.saved_cost_price_per_unit ?? null : null,
+        saved_fifo_batches_json: isSameItem ? targetRow.saved_fifo_batches_json ?? null : null,
         lastCustomerSaleRate: isSameItem ? targetRow.lastCustomerSaleRate : null,
         lastCustomerDiscountPercent: isSameItem ? targetRow.lastCustomerDiscountPercent : null,
+        lastCustomerDiscount1Percent: isSameItem ? targetRow.lastCustomerDiscount1Percent ?? null : null,
+        lastCustomerDiscount2Percent: isSameItem ? targetRow.lastCustomerDiscount2Percent ?? null : null,
         lastCustomerSaleDate: isSameItem ? targetRow.lastCustomerSaleDate : null,
         lastCustomerInvoiceNo: isSameItem ? targetRow.lastCustomerInvoiceNo : null,
         lastCustomerSoldQty: isSameItem ? targetRow.lastCustomerSoldQty : null,
@@ -1908,16 +2040,27 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       effVariantId
     );
 
-    if (focusQuantityAfter) {
-      const targetId =
-        invoiceViewMode === 'pos'
-          ? `pos_row_${rowIdx}_quantity`
-          : `cell_${rowIdx}_quantity`;
-      pendingFocusTargetRef.current = targetId;
+    if (invoiceViewMode === 'pos') {
+      // In POS mode, always keep cursor on the Barcode / Search input after adding an item for rapid scanning
+      pendingFocusTargetRef.current = 'pos_item_search_input';
       window.requestAnimationFrame(() => {
         setTimeout(() => {
           const rowQtyEl = document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null;
           rowQtyEl?.closest('tr')?.scrollIntoView({ block: 'nearest' });
+          const barcodeEl =
+            posSearchInputRef.current ||
+            (document.getElementById('pos_item_search_input') as HTMLInputElement | null);
+          if (barcodeEl) {
+            barcodeEl.focus();
+            barcodeEl.select?.();
+          }
+        }, 35);
+      });
+    } else if (focusQuantityAfter) {
+      const targetId = `cell_${rowIdx}_quantity`;
+      pendingFocusTargetRef.current = targetId;
+      window.requestAnimationFrame(() => {
+        setTimeout(() => {
           const qtyEl = document.getElementById(targetId) as HTMLInputElement | null;
           if (qtyEl) {
             qtyEl.focus();
@@ -2003,8 +2146,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
     if (trimmed === existingCode && !currentRow?.variant_id) {
       if (moveFocusToQty && currentRow?.item_id) {
-        const prefix = invoiceViewMode === 'pos' ? 'pos_row' : 'cell';
-        focusCell(rowIdx, 'quantity', prefix);
+        if (invoiceViewMode === 'pos') {
+          focusSalesItemSearch();
+        } else {
+          focusCell(rowIdx, 'quantity', 'cell');
+        }
       }
       return false;
     }
@@ -2077,8 +2223,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       Number(currentRow?.variant_id || 0) === Number(matchedVariant?.id || 0)
     ) {
       if (moveFocusToQty) {
-        const prefix = invoiceViewMode === 'pos' ? 'pos_row' : 'cell';
-        focusCell(rowIdx, 'quantity', prefix);
+        if (invoiceViewMode === 'pos') {
+          focusSalesItemSearch();
+        } else {
+          focusCell(rowIdx, 'quantity', 'cell');
+        }
       }
       return true;
     }
@@ -2191,7 +2340,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     populateRowWithItem(rowIdxToFill, item, true, chosenVariant || null);
   };
 
-  // Reusable Excel-Style Item Search Combobox Table (Item Name | Company Name | Purchase Price | Sale Price)
+  // Reusable Excel-Style Item Search Combobox Table (11 Required Fields in Exact Order)
   const renderSalesExcelItemCombobox = (context: 'top' | 'row', rowIdx?: number) => {
     if (!showSearchDropdown) return null;
     if (context === 'top' && activeSearchRowIdx !== null) return null;
@@ -2201,8 +2350,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       <div
         className={
           context === 'top'
-            ? 'absolute right-0 top-full mt-1 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl w-[660px] max-w-[92vw] overflow-hidden'
-            : 'absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl min-w-[560px] max-w-[720px] overflow-hidden'
+            ? 'absolute right-0 top-full mt-1 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl w-[980px] max-w-[95vw] overflow-hidden'
+            : 'absolute left-0 top-full mt-0.5 z-[100] bg-white text-slate-900 rounded-lg border border-slate-400 shadow-2xl w-[960px] max-w-[94vw] overflow-hidden'
         }
       >
         <div
@@ -2215,33 +2364,40 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           </span>
           <span className="font-mono text-emerald-700 shrink-0">↑/↓ Navigate • Enter Select • Esc Close</span>
         </div>
-        <div ref={salesSearchListRef} className="max-h-[340px] overflow-y-auto">
+        <div ref={salesSearchListRef} className="max-h-[340px] overflow-auto">
           {searchResults.length === 0 ? (
             <div className="p-4 text-center text-base font-bold text-slate-600">
               No Item Found
             </div>
           ) : (
-            <table className="w-full text-left text-[11px] border-collapse">
+            <table className="w-full text-left text-[11px] border-collapse whitespace-nowrap">
               <thead className="bg-slate-200 text-slate-800 sticky top-0 z-10 border-b border-slate-300 text-[10px] font-bold uppercase">
                 <tr>
-                  <th className="px-2.5 py-1 border-r border-slate-300">Item Name</th>
-                  <th className="px-2.5 py-1 border-r border-slate-300">Company Name</th>
-                  <th className="px-2.5 py-1 border-r border-slate-300 text-right">Purchase Price</th>
-                  <th className="px-2.5 py-1 text-right">Sale Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Item Code</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Item Name</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">SPrice</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Purchase Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Loose Price</th>
+                  <th className="px-2 py-1 border-r border-slate-300 text-right">Stock</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Company</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Packing</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Batch Number</th>
+                  <th className="px-2 py-1 border-r border-slate-300">Expiry Date</th>
+                  <th className="px-2 py-1">Generic / Rack</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {searchResults.map((it, idx) => {
                   const isHighlighted = idx === searchHighlightIdx;
-                  const purchasePrice = round2(
-                    Number((it as any).purchase_price || it.default_batch?.available_packs ? (it as any).purchase_price : 0) ||
-                      Number((it as any).purchase_price || 0)
-                  );
                   const salePrice =
                     invoiceType === 'Wholesale'
                       ? round2(it.wholesale_price || it.trade_price || it.retail_price)
                       : round2(it.retail_price);
-                  const stockQty = it.total_available_packs ?? it.consolidated_stock_packs ?? it.default_batch?.available_packs ?? 0;
+                  const resolved = resolveItemSelectionFields(it, { salePrice });
+                  const formattedExpiry =
+                    resolved.expiryDate !== '—'
+                      ? formatAppDate(resolved.expiryDate) || resolved.expiryDate
+                      : '—';
                   const variantCount = Number(it.has_variants || 0) === 1 ? getActiveVariants(it).length : 0;
                   const activeRowForMatch =
                     context === 'row' && typeof rowIdx === 'number'
@@ -2276,83 +2432,110 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           : 'hover:bg-sky-100 text-slate-900'
                       }`}
                     >
-                      <td className="px-2.5 py-1 border-r border-slate-200">
-                        <div className="flex items-center justify-between gap-1.5">
-                          <div className="flex items-center gap-1.5 min-w-0 truncate">
-                            <ProductThumb
-                              src={it.thumbnail_url || it.image_url}
-                              alt={it.item_name}
-                              size="xs"
-                              className="!w-5 !h-5 shrink-0"
-                            />
-                            <span
-                              className={`font-mono text-[10px] font-bold shrink-0 ${
-                                isHighlighted ? 'text-amber-200' : 'text-emerald-700'
-                              }`}
-                            >
-                              [{it.item_code}]
-                            </span>
-                            <span
-                              className={`font-bold truncate ${
-                                isHighlighted ? 'text-white' : 'text-slate-900'
-                              }`}
-                            >
-                              {it.item_name}
-                            </span>
-                            <span
-                              className={`text-[10px] shrink-0 ${
-                                isHighlighted ? 'text-sky-100' : 'text-slate-500'
-                              }`}
-                            >
-                              ({it.packing})
-                            </span>
-                            {variantCount > 0 && (
-                              <span
-                                className={`text-[9px] font-bold px-1 rounded border shrink-0 ${
-                                  isHighlighted
-                                    ? 'bg-sky-900 text-amber-200 border-sky-400'
-                                    : 'bg-amber-100 text-amber-800 border-amber-200'
-                                }`}
-                              >
-                                {variantCount} Var
-                              </span>
-                            )}
-                          </div>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono text-[10px] font-bold ${
+                          isHighlighted ? 'text-amber-200' : 'text-emerald-700'
+                        }`}
+                      >
+                        {resolved.itemCode}
+                      </td>
+                      <td className="px-2 py-1 border-r border-slate-200">
+                        <div className="flex items-center gap-1.5 min-w-0 max-w-[230px]">
+                          <ProductThumb
+                            src={it.thumbnail_url || it.image_url}
+                            alt={it.item_name}
+                            size="xs"
+                            className="!w-5 !h-5 shrink-0"
+                          />
                           <span
-                            className={`text-[9.5px] font-mono px-1 rounded shrink-0 ${
-                              isHighlighted
-                                ? stockQty > 0
-                                  ? 'bg-sky-900 text-emerald-200 border border-sky-400'
-                                  : 'bg-rose-900 text-rose-100 border border-rose-400'
-                                : stockQty > 0
-                                ? 'bg-emerald-50 text-emerald-700'
-                                : 'bg-rose-50 text-rose-600'
+                            className={`font-bold truncate ${
+                              isHighlighted ? 'text-white' : 'text-slate-900'
                             }`}
                           >
-                            Stk: {stockQty}P
+                            {resolved.itemName}
                           </span>
+                          {variantCount > 0 && (
+                            <span
+                              className={`text-[9px] font-bold px-1 rounded border shrink-0 ${
+                                isHighlighted
+                                  ? 'bg-sky-900 text-amber-200 border-sky-400'
+                                  : 'bg-amber-100 text-amber-800 border-amber-200'
+                              }`}
+                            >
+                              {variantCount} Var
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td
-                        className={`px-2.5 py-1 border-r border-slate-200 truncate max-w-[160px] ${
-                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
-                        }`}
-                      >
-                        {it.company_name || '—'}
-                      </td>
-                      <td
-                        className={`px-2.5 py-1 border-r border-slate-200 text-right font-mono font-semibold ${
-                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
-                        }`}
-                      >
-                        Rs. {purchasePrice.toFixed(2)}
-                      </td>
-                      <td
-                        className={`px-2.5 py-1 text-right font-mono font-black ${
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-black ${
                           isHighlighted ? 'text-amber-200' : 'text-emerald-800'
                         }`}
                       >
-                        Rs. {salePrice.toFixed(2)}
+                        Rs. {resolved.sPrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-semibold ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        Rs. {resolved.purchasePrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-teal-700'
+                        }`}
+                      >
+                        Rs. {resolved.loosePrice.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 text-right font-mono font-bold ${
+                          isHighlighted
+                            ? resolved.stockPacks > 0
+                              ? 'text-emerald-200'
+                              : 'text-rose-200'
+                            : resolved.stockPacks > 0
+                            ? 'text-emerald-700'
+                            : 'text-rose-600'
+                        }`}
+                      >
+                        {resolved.stockPacks}P
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 truncate max-w-[140px] ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        {resolved.company}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {resolved.packing}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-700'
+                        }`}
+                      >
+                        {resolved.batchNumber}
+                      </td>
+                      <td
+                        className={`px-2 py-1 border-r border-slate-200 font-mono ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {formattedExpiry}
+                      </td>
+                      <td
+                        className={`px-2 py-1 truncate max-w-[160px] ${
+                          isHighlighted ? 'text-sky-100' : 'text-slate-500'
+                        }`}
+                        title={resolved.otherInfo !== '—' ? resolved.otherInfo : undefined}
+                      >
+                        {resolved.otherInfo}
                       </td>
                     </tr>
                   );
@@ -2379,7 +2562,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         ...r,
         unit_price: newPrice,
         loose_rate: newLoose,
-        discount_percent: round2(r.lastCustomerDiscountPercent ?? r.discount_percent),
+        discount_1_percent: clampDiscountPercent(
+          r.lastCustomerDiscount1Percent ?? r.lastCustomerDiscountPercent ?? r.discount_1_percent
+        ),
+        discount_2_percent: clampDiscountPercent(r.lastCustomerDiscount2Percent ?? 0),
         isRateManuallyEdited: false,
         rateSuggestionSource: 'customer_last_sale',
       });
@@ -2395,6 +2581,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       if (field === 'batch_number') {
         const matchedBatch = current.batches.find((b) => b.batch_number === value);
+        current.saved_cost_price_per_unit = null;
+        current.saved_fifo_batches_json = null;
         if (matchedBatch) {
           current.inventory_id = matchedBatch.id;
           current.batch_number = matchedBatch.batch_number;
@@ -2420,14 +2608,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         current.rateSuggestionSource = 'manual';
       } else if (field === 'loose_quantity') {
         current.loose_quantity = isSyrupItem(current) ? 0 : parseSignedNumeric(value);
-      } else if (field === 'discount_amount') {
-        const discAmt = parseSignedNumeric(value);
-        const gross = round2(
-          current.quantity * current.unit_price + current.loose_quantity * current.loose_rate
-        );
-        current.discount_amount = discAmt;
-        current.discount_percent =
-          gross !== 0 ? Math.max(0, Math.min(100, round2(Math.abs(discAmt / gross) * 100))) : 0;
       } else if (field === 'quantity') {
         const nextQty = parseSignedNumeric(value);
         current.quantity = nextQty;
@@ -2451,8 +2631,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }
       } else if (field === 'bonus_quantity') {
         current.bonus_quantity = Math.max(0, Number(value || 0));
+      } else if (field === 'discount_1_percent') {
+        current.discount_1_percent = clampDiscountPercent(value);
+      } else if (field === 'discount_2_percent') {
+        current.discount_2_percent = clampDiscountPercent(value);
       } else if (field === 'discount_percent') {
-        current.discount_percent = Math.max(0, Math.min(100, Number(value || 0)));
+        current.discount_1_percent = clampDiscountPercent(value);
       } else {
         (current as any)[field] = value;
       }
@@ -2534,11 +2718,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     'loose_quantity',
     'unit_price',
     'loose_rate',
-    'discount',
+    'discount_1',
+    'discount_2',
+    'net_rate',
     'bonus_quantity',
     'gross_amount',
     'tax',
     'amount',
+    'roi',
     'remarks',
   ];
 
@@ -2546,12 +2733,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     'item_code',
     'item_name',
     'quantity',
-    'discount',
+    'discount_1',
+    'discount_2',
     'unit_price',
+    'net_rate',
     'loose_quantity',
     'loose_rate',
     'bonus_quantity',
     'amount',
+    'roi',
     'last_purchase_price',
     'company',
     'gross_amount',
@@ -2563,7 +2753,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     company: 'Company',
     item_name: 'Item Name',
     quantity: 'Full Qty',
-    discount: 'Discount',
+    discount_1: 'Disc 1 (%)',
+    discount_2: 'Disc 2 (%)',
+    net_rate: 'Net Rate',
     loose_quantity: 'Loose Qty',
     unit_price: 'Rate',
     bonus_quantity: 'Bonus',
@@ -2571,9 +2763,51 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     gross_amount: 'Gross Amount',
     tax: 'Tax',
     amount: 'Net Amount',
+    roi: 'ROI',
     last_purchase_price: 'Last Purchase Price',
     remarks: 'Remarks',
   };
+
+  const SALES_ACCESS_COL_META: Record<string, { label: string; cls: string }> = {
+    item_code: { label: 'Item Code', cls: 'border-r border-slate-300 text-left' },
+    item_name: { label: 'Item Name', cls: 'border-r border-slate-300 text-left' },
+    quantity: { label: 'Qty', cls: 'border-r border-slate-300 text-right bg-emerald-100/60 text-emerald-950' },
+    discount_1: { label: 'Disc 1 %', cls: 'border-r border-slate-300 text-right' },
+    discount_2: { label: 'Disc 2 %', cls: 'border-r border-slate-300 text-right' },
+    unit_price: { label: 'Price', cls: 'border-r border-slate-300 text-right' },
+    net_rate: { label: 'Net Rate', cls: 'border-r border-slate-300 text-right bg-indigo-50/70 text-indigo-950 font-bold' },
+    loose_quantity: { label: 'Loose Qty', cls: 'border-r border-slate-300 text-right bg-teal-100/60 text-teal-950' },
+    loose_rate: { label: 'Loose Rate', cls: 'border-r border-slate-300 text-right bg-blue-100/60 text-blue-950' },
+    bonus_quantity: { label: 'Bonus', cls: 'border-r border-slate-300 text-right bg-emerald-100/70 text-emerald-950' },
+    amount: { label: 'Net Amount', cls: 'border-r border-slate-300 text-right bg-slate-300/60 font-black' },
+    roi: { label: 'ROI', cls: 'border-r border-slate-300 text-right bg-emerald-100/80 text-emerald-950 font-black' },
+    last_purchase_price: { label: 'Last Purchase Price', cls: 'border-r border-slate-300 text-right bg-amber-50/70 text-amber-950' },
+    company: { label: 'Company', cls: 'border-r border-slate-300 text-left' },
+    gross_amount: { label: 'Gross Amount', cls: 'border-r border-slate-300 text-right bg-slate-200/70' },
+    remarks: { label: 'Remarks', cls: 'border-r border-slate-300 text-left' },
+  };
+
+  const {
+    columnOrder: orderedSalesAccessColKeys,
+    isCustomized: isSalesAccessColsCustomized,
+    moveColumnsLeft: moveSalesAccessColsLeft,
+    moveColumnsRight: moveSalesAccessColsRight,
+    canMoveLeft: canMoveSalesAccessLeft,
+    canMoveRight: canMoveSalesAccessRight,
+    resetColumnOrder: resetSalesAccessColOrder,
+    draggedColKey: draggedSalesAccessCol,
+    dragOverColKey: dragOverSalesAccessCol,
+    dragDropSide: salesAccessDropSide,
+    handleColDragStart: handleSalesAccessColDragStart,
+    handleColDragOver: handleSalesAccessColDragOver,
+    handleColDrop: handleSalesAccessColDrop,
+    handleColDragEnd: handleSalesAccessColDragEnd,
+  } = useColumnOrder({
+    storageKey: 'ams_sales_access_col_order_v1',
+    defaultOrder: SALES_ACCESS_COL_KEYS,
+    userKey: user?.id ?? user?.username ?? null,
+    legacyExpand: { discount: ['discount_1', 'discount_2', 'net_rate'] },
+  });
 
   const isRowInSelectionRange = (rIdx: number): boolean => {
     if (!selectedRowRange) return false;
@@ -2651,7 +2885,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         'item_code',
         'item_name',
         'quantity',
-        'discount',
+        'discount_1',
+        'discount_2',
         'unit_price',
         'loose_quantity',
         'loose_rate',
@@ -2722,9 +2957,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         if (colSet.has('item_code')) updated.item_code = '';
         if (colSet.has('item_name')) updated.item_name = '';
         if (colSet.has('quantity')) updated.quantity = 0;
-        if (colSet.has('discount')) {
-          updated.discount_percent = 0;
-          updated.discount_amount = 0;
+        if (colSet.has('discount_1')) {
+          updated.discount_1_percent = 0;
+        }
+        if (colSet.has('discount_2')) {
+          updated.discount_2_percent = 0;
         }
         if (colSet.has('unit_price')) updated.unit_price = 0;
         if (colSet.has('loose_quantity')) updated.loose_quantity = 0;
@@ -2746,12 +2983,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       quantity: r.quantity,
       bonus_quantity: r.bonus_quantity || 0,
       unit_price: r.unit_price,
+      discount_1_percent: r.discount_1_percent,
+      discount_2_percent: r.discount_2_percent,
       discount_percent: r.discount_percent,
       loose_quantity: r.loose_quantity,
       loose_rate: r.loose_rate,
       remarks: r.remarks || '',
     });
-    setSuccessMsg(`Copied values (Qty, Bonus Qty, Price, Discount %, Loose Qty) from Row #${index + 1}.`);
+    setSuccessMsg(`Copied values (Qty, Bonus Qty, Price, Disc 1 %, Disc 2 %, Loose Qty) from Row #${index + 1}.`);
   };
 
   const handlePasteRow = (index: number) => {
@@ -2793,6 +3032,141 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   const totalTax = round2(gstAmount + advanceTaxAmount);
   const netInvoiceAmount = round2(taxableAmount + totalTax);
+
+  // Fast O(1) catalog lookup for live ROI & applicable cost calculation
+  const catalogByIdMap = useMemo(() => {
+    const map = new Map<number, FastSearchItem>();
+    for (const c of catalogItems) {
+      map.set(Number(c.id), c);
+    }
+    return map;
+  }, [catalogItems]);
+
+  // Unified Item-wise ROI (profit AMOUNT) calculation:
+  // - Purchased items: Weighted Average Net Purchase Cost = Total Net Purchase Amount / Total Received Qty (incl. purchase bonus & discounts)
+  // - Never-purchased items: Provisional Item Registration Pprice (purchase_price)
+  // - No valid cost (both WAC and Pprice <= 0): ROI is blank (null), excluded from Invoice Total Profit
+  // - Saved historical invoice lines: preserves cost_price_per_unit recorded at time of sale
+  // - Sales Bonus Quantity: does NOT deduct additional purchase cost (stock deduction remains unchanged)
+  const rowRoiMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        hasValidCost: boolean;
+        packCost: number;
+        unitCost: number;
+        lineCost: number;
+        netSellingAmount: number;
+        roiAmount: number | null;
+        costSource: 'saved' | 'weighted_avg_purchase' | 'item_pprice' | 'none';
+      }
+    >();
+
+    const invDiscRatio =
+      subtotalAfterItemDisc !== 0 && computedInvoiceDiscAmt !== 0
+        ? computedInvoiceDiscAmt / subtotalAfterItemDisc
+        : 0;
+
+    for (const r of validRows) {
+      const unitsPerPack = Math.max(1, Number(r.units_per_pack || 1));
+      const packQty = Number(r.quantity || 0);
+      const looseQty = Number(r.loose_quantity || 0);
+      const bonusQty = Number(r.bonus_quantity || 0);
+
+      let hasValidCost = false;
+      let packCost = 0;
+      let unitCost = 0;
+      let costSource: 'saved' | 'weighted_avg_purchase' | 'item_pprice' | 'none' = 'none';
+
+      const savedUnitCost = Number(r.saved_cost_price_per_unit || 0);
+      if (Number.isFinite(savedUnitCost) && savedUnitCost > 0) {
+        unitCost = savedUnitCost;
+        packCost = savedUnitCost * unitsPerPack;
+        hasValidCost = true;
+        costSource = 'saved';
+      } else {
+        const catMatch = r.item_id ? catalogByIdMap.get(Number(r.item_id)) : undefined;
+        const catVariant =
+          r.variant_id && catMatch?.variants
+            ? catMatch.variants.find((v) => Number(v.id) === Number(r.variant_id))
+            : null;
+
+        const wacPack = Number(
+          catVariant?.weighted_avg_pack_cost ??
+            catMatch?.weighted_avg_pack_cost ??
+            r.weighted_avg_pack_cost ??
+            0
+        );
+        const regPprice = Number(
+          catVariant?.effective_purchase_price ??
+            catMatch?.purchase_price ??
+            r.item_pprice ??
+            0
+        );
+
+        if (Number.isFinite(wacPack) && wacPack > 0) {
+          packCost = wacPack;
+          unitCost = wacPack / unitsPerPack;
+          hasValidCost = true;
+          costSource = 'weighted_avg_purchase';
+        } else if (Number.isFinite(regPprice) && regPprice > 0) {
+          packCost = regPprice;
+          unitCost = regPprice / unitsPerPack;
+          hasValidCost = true;
+          costSource = 'item_pprice';
+        }
+      }
+
+      const rawTaxable = Number(r.taxable_amount || 0);
+      const netSellingAmount = rawTaxable - rawTaxable * invDiscRatio;
+
+      if (!hasValidCost || (packQty === 0 && looseQty === 0 && bonusQty === 0)) {
+        map.set(r.row_id, {
+          hasValidCost,
+          packCost,
+          unitCost,
+          lineCost: 0,
+          netSellingAmount: round2(netSellingAmount),
+          roiAmount: null,
+          costSource,
+        });
+        continue;
+      }
+
+      // Cost is computed strictly on billed full & loose quantities (sales bonus quantity adds 0 extra cost)
+      const lineCost = packQty * packCost + looseQty * unitCost;
+      const roiAmount = round2(netSellingAmount - lineCost);
+
+      map.set(r.row_id, {
+        hasValidCost: true,
+        packCost,
+        unitCost,
+        lineCost,
+        netSellingAmount: round2(netSellingAmount),
+        roiAmount,
+        costSource,
+      });
+    }
+
+    return map;
+  }, [validRows, catalogByIdMap, subtotalAfterItemDisc, computedInvoiceDiscAmt]);
+
+  // Invoice Total Profit = exact sum of all valid item-wise ROI amounts (100% reconciled with ROI column)
+  const invoiceTotalProfit = useMemo(() => {
+    let total = 0;
+    for (const r of validRows) {
+      const info = rowRoiMap.get(r.row_id);
+      if (info && info.roiAmount !== null) {
+        total += info.roiAmount;
+      }
+    }
+    return round2(total);
+  }, [validRows, rowRoiMap]);
+
+  const formattedInvoiceProfit = invoiceTotalProfit.toLocaleString('en-PK', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
   // Previous Customer Balance from actual account ledger (before posting current invoice)
   const prevCustomerBalance =
@@ -2860,6 +3234,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       await loadReferenceData();
     } catch {
       // ignore
+    }
+    if (invoiceViewMode === 'pos') {
+      focusSalesItemSearch();
     }
   };
 
@@ -2992,6 +3369,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           quantity: r.quantity,
           bonus_quantity: Number(r.bonus_quantity || 0),
           unit_price: r.unit_price,
+          discount_1_percent: r.discount_1_percent,
+          discount_2_percent: r.discount_2_percent,
+          net_rate: r.net_rate,
           discount_percent: r.discount_percent,
           discount_amount: r.discount_amount,
           loose_quantity: r.loose_quantity,
@@ -2999,6 +3379,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           tax_type: r.tax_type || 'percentage',
           tax_value: Number(r.tax_value ?? r.tax_percent ?? 0),
           tax_percent: r.tax_percent,
+          saved_cost_price_per_unit: r.saved_cost_price_per_unit ?? null,
           remarks: String(r.remarks || '').trim(),
         })),
       };
@@ -3228,6 +3609,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         quantity: r.quantity,
         bonus_quantity: Number(r.bonus_quantity || 0),
         unit_price: r.unit_price,
+        discount_1_percent: r.discount_1_percent,
+        discount_2_percent: r.discount_2_percent,
+        net_rate: r.net_rate,
         discount_percent: r.discount_percent,
         discount_amount: r.discount_amount,
         loose_quantity: r.loose_quantity,
@@ -3300,6 +3684,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         total_units: r.total_units,
         unit_price: r.unit_price,
         loose_rate: r.loose_rate,
+        discount_1_percent: r.discount_1_percent,
+        discount_2_percent: r.discount_2_percent,
+        net_rate: r.net_rate,
         discount_percent: r.discount_percent,
         discount_amount: r.discount_amount,
         taxable_amount: r.taxable_amount,
@@ -3525,12 +3912,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       item_code: 86,
       item_name: 330,
       quantity: 58,
-      discount: 76,
+      discount_1: 66,
+      discount_2: 66,
       unit_price: 76,
+      net_rate: 76,
       loose_quantity: 84,
       loose_rate: 90,
       bonus_quantity: 64,
       amount: 96,
+      roi: 84,
       last_purchase_price: 154,
       company: 125,
       gross_amount: 106,
@@ -3557,29 +3947,38 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       loose_quantity: 96,
       unit_price: 84,
       loose_rate: 84,
-      discount: 74,
+      discount_1: 64,
+      discount_2: 64,
+      net_rate: 76,
       bonus_quantity: 68,
       gross_amount: 96,
       tax: 86,
       amount: 108,
+      roi: 88,
       remarks: 126,
       actions: 62,
     },
     minWidth: 36,
   });
 
-  // Keyboard Navigation in Access Datasheet Grid (matches exact visual column order)
-  const colOrder = [
-    'item_code',
-    'item_name',
-    'quantity',
-    'discount_percent',
-    'unit_price',
-    'loose_quantity',
-    'loose_rate',
-    'bonus_quantity',
-    'remarks',
-  ];
+  // Keyboard Navigation in Access Datasheet Grid (dynamically follows customized column order)
+  const accessEditableColOrder = useMemo(() => {
+    const colToFocusKey: Record<string, string> = {
+      item_code: 'item_code',
+      item_name: 'item_name',
+      quantity: 'quantity',
+      discount_1: 'discount_1_percent',
+      discount_2: 'discount_2_percent',
+      unit_price: 'unit_price',
+      loose_quantity: 'loose_quantity',
+      loose_rate: 'loose_rate',
+      bonus_quantity: 'bonus_quantity',
+      remarks: 'remarks',
+    };
+    return orderedSalesAccessColKeys
+      .map((k) => colToFocusKey[k])
+      .filter((k): k is string => Boolean(k));
+  }, [orderedSalesAccessColKeys]);
 
   // MS Access-style: only ONE blank "new record" row is active at a time.
   // Blank rows below it are shown as greyed placeholders and cannot be edited.
@@ -3592,36 +3991,29 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const getEditableColsForRow = (row?: DatasheetRow, mode: 'pos' | 'access' = 'access') => {
     if (mode === 'pos') {
       if (isSyrupItem(row)) {
-        return ['quantity', 'discount_percent', 'unit_price', 'bonus_quantity', 'remarks'] as Array<
-          'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate' | 'remarks'
+        return ['quantity', 'unit_price', 'discount_1_percent', 'discount_2_percent', 'bonus_quantity', 'remarks'] as Array<
+          'quantity' | 'bonus_quantity' | 'discount_1_percent' | 'discount_2_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate' | 'remarks'
         >;
       }
       return [
         'quantity',
-        'discount_percent',
         'loose_quantity',
         'unit_price',
-        'bonus_quantity',
         'loose_rate',
+        'discount_1_percent',
+        'discount_2_percent',
+        'bonus_quantity',
         'remarks',
       ] as Array<
-        'quantity' | 'bonus_quantity' | 'discount_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate' | 'remarks'
+        'quantity' | 'bonus_quantity' | 'discount_1_percent' | 'discount_2_percent' | 'unit_price' | 'loose_quantity' | 'loose_rate' | 'remarks'
       >;
     }
     if (isSyrupItem(row)) {
-      return ['item_code', 'item_name', 'quantity', 'discount_percent', 'unit_price', 'bonus_quantity', 'remarks'];
+      return accessEditableColOrder.filter(
+        (c) => c !== 'loose_quantity' && c !== 'loose_rate'
+      );
     }
-    return [
-      'item_code',
-      'item_name',
-      'quantity',
-      'discount_percent',
-      'unit_price',
-      'loose_quantity',
-      'loose_rate',
-      'bonus_quantity',
-      'remarks',
-    ];
+    return accessEditableColOrder;
   };
 
   const focusCell = (rIdx: number, cName: string, prefix: 'cell' | 'pos_row' = 'cell') => {
@@ -3662,12 +4054,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setShowSearchDropdown(false);
     setActiveSearchRowIdx(null);
 
-    const prefix = invoiceViewMode === 'pos' ? 'pos_row' : 'cell';
-    window.requestAnimationFrame(() => {
-      setTimeout(() => {
-        focusCell(targetRowIdx, 'item_name', prefix);
-      }, 25);
-    });
+    if (invoiceViewMode === 'pos') {
+      focusSalesItemSearch();
+    } else {
+      window.requestAnimationFrame(() => {
+        setTimeout(() => {
+          focusCell(targetRowIdx, 'item_name', 'cell');
+        }, 25);
+      });
+    }
   };
 
   const handleSelectCustomerAccount = (id: number) => {
@@ -3826,14 +4221,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     });
   };
 
-  // POS View Keyboard Navigation: 1. Quantity -> 2. Discount -> 3. Price -> 4. Loose Quantity -> 5. Loose Rate -> Enter -> New Row & Item Search
+  // POS View Keyboard Navigation: Quantity -> Loose Qty -> Rate -> Loose Rate -> Disc 1 % -> Disc 2 % -> Bonus -> Remarks -> New Row
   const handlePosFieldKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
     rowIdx: number,
     fieldName:
       | 'quantity'
       | 'bonus_quantity'
-      | 'discount_percent'
+      | 'discount_1_percent'
+      | 'discount_2_percent'
       | 'unit_price'
       | 'loose_quantity'
       | 'loose_rate'
@@ -3846,7 +4242,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     const posOrder = getEditableColsForRow(row, 'pos') as Array<
       | 'quantity'
       | 'bonus_quantity'
-      | 'discount_percent'
+      | 'discount_1_percent'
+      | 'discount_2_percent'
       | 'unit_price'
       | 'loose_quantity'
       | 'loose_rate'
@@ -4235,14 +4632,52 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         advanceToNextRowItemCode(rowIndex, 'access');
         return;
       }
+      const amountVisualIdx = orderedSalesAccessColKeys.indexOf('amount');
+      const colToFocusKey: Record<string, string> = {
+        item_code: 'item_code',
+        item_name: 'item_name',
+        quantity: 'quantity',
+        discount_1: 'discount_1_percent',
+        discount_2: 'discount_2_percent',
+        unit_price: 'unit_price',
+        loose_quantity: 'loose_quantity',
+        loose_rate: 'loose_rate',
+        bonus_quantity: 'bonus_quantity',
+        remarks: 'remarks',
+      };
+      const editableSet = new Set(rowEditableCols);
       if (e.key === 'Tab' && !e.shiftKey) {
         e.preventDefault();
-        focusCell(rowIndex, 'remarks', 'cell');
+        let nextEditable: string | null = null;
+        for (let i = amountVisualIdx + 1; i < orderedSalesAccessColKeys.length; i++) {
+          const fk = colToFocusKey[orderedSalesAccessColKeys[i]];
+          if (fk && editableSet.has(fk)) {
+            nextEditable = fk;
+            break;
+          }
+        }
+        if (nextEditable) {
+          focusCell(rowIndex, nextEditable, 'cell');
+        } else {
+          advanceToNewRowItemSearch(rowIndex, 'access');
+        }
         return;
       }
       if (e.key === 'Tab' && e.shiftKey) {
         e.preventDefault();
-        focusCell(rowIndex, 'bonus_quantity', 'cell');
+        let prevEditable: string | null = null;
+        for (let i = amountVisualIdx - 1; i >= 0; i--) {
+          const fk = colToFocusKey[orderedSalesAccessColKeys[i]];
+          if (fk && editableSet.has(fk)) {
+            prevEditable = fk;
+            break;
+          }
+        }
+        if (prevEditable) {
+          focusCell(rowIndex, prevEditable, 'cell');
+        } else if (rowEditableCols.length > 0) {
+          focusCell(rowIndex, rowEditableCols[0], 'cell');
+        }
         return;
       }
     }
@@ -5235,7 +5670,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
               {/* Synchronized Active Line Quick-Entry Inspector */}
               <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-12 gap-2 pt-2 border-t border-slate-100 items-end">
-                <div className="col-span-2 sm:col-span-2 xl:col-span-3 min-w-0">
+                <div className="col-span-2 sm:col-span-2 xl:col-span-2 min-w-0">
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
                     Active Item #{selectedRowIndex + 1}
                   </div>
@@ -5245,7 +5680,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                         <span className="text-xs font-bold text-slate-900 truncate">
                           {activeRow.item_name}
                         </span>
-                        <span className="text-[11px] font-medium text-slate-500 shrink-0 truncate max-w-[90px]">
+                        <span className="text-[11px] font-medium text-slate-500 shrink-0 truncate max-w-[70px]">
                           {activeRow.company_name || '—'}
                         </span>
                       </div>
@@ -5309,7 +5744,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   />
                 </div>
 
-                <div className="xl:col-span-2">
+                <div className="xl:col-span-1">
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
                     Sale Rate
                   </label>
@@ -5325,16 +5760,46 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
                 <div className="xl:col-span-1">
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
-                    Disc %
+                    Disc 1 %
                   </label>
                   <NumericInput
-                    id="pos_active_discount_percent"
+                    id="pos_active_discount_1_percent"
                     disabled={!activeHasItem}
-                    value={activeHasItem ? activeRow.discount_percent : 0}
-                    onChange={(e) => updateRowField(selectedRowIndex, 'discount_percent', e.target.value)}
-                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'discount_percent', false)}
+                    value={activeHasItem ? activeRow.discount_1_percent : 0}
+                    onChange={(e) => updateRowField(selectedRowIndex, 'discount_1_percent', e.target.value)}
+                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'discount_1_percent', false)}
                     className="w-full px-2 py-1 text-right font-mono font-semibold text-xs text-slate-800 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
                   />
+                </div>
+
+                <div className="xl:col-span-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
+                    Disc 2 %
+                  </label>
+                  <NumericInput
+                    id="pos_active_discount_2_percent"
+                    disabled={!activeHasItem}
+                    value={activeHasItem ? activeRow.discount_2_percent : 0}
+                    onChange={(e) => updateRowField(selectedRowIndex, 'discount_2_percent', e.target.value)}
+                    onKeyDown={(e) => handlePosFieldKeyDown(e, selectedRowIndex, 'discount_2_percent', false)}
+                    className="w-full px-2 py-1 text-right font-mono font-semibold text-xs text-slate-800 rounded-lg border border-slate-300 bg-white focus:border-emerald-600 outline-none disabled:opacity-40"
+                  />
+                </div>
+
+                <div className="xl:col-span-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-indigo-700 mb-0.5">
+                    Net Rate
+                  </label>
+                  <div
+                    className="px-2 py-1 rounded-lg border border-indigo-200 bg-indigo-50/70 text-right font-mono font-bold text-xs text-indigo-950 tabular-nums truncate"
+                    title={
+                      activeHasItem
+                        ? `Net Rate after sequential discounts: Rs. ${Number(activeRow.net_rate || 0).toFixed(2)}`
+                        : 'Net Rate (read-only)'
+                    }
+                  >
+                    {activeHasItem ? Number(activeRow.net_rate || 0).toFixed(2) : '0.00'}
+                  </div>
                 </div>
 
                 <div className="xl:col-span-1">
@@ -5451,11 +5916,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     <col style={{ width: `${posColWidths.loose_quantity}px` }} />
                     <col style={{ width: `${posColWidths.unit_price}px` }} />
                     <col style={{ width: `${posColWidths.loose_rate}px` }} />
-                    <col style={{ width: `${posColWidths.discount}px` }} />
+                    <col style={{ width: `${posColWidths.discount_1}px` }} />
+                    <col style={{ width: `${posColWidths.discount_2}px` }} />
+                    <col style={{ width: `${posColWidths.net_rate}px` }} />
                     <col style={{ width: `${posColWidths.bonus_quantity}px` }} />
                     <col style={{ width: `${posColWidths.gross_amount}px` }} />
                     <col style={{ width: `${posColWidths.tax}px` }} />
                     <col style={{ width: `${posColWidths.amount}px` }} />
+                    <col style={{ width: `${posColWidths.roi}px` }} />
                     <col style={{ width: `${posColWidths.remarks}px` }} />
                     <col style={{ width: `${posColWidths.actions}px` }} />
                   </colgroup>
@@ -5471,11 +5939,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           { key: 'loose_quantity', label: 'Loose Qty', cls: 'py-2 px-2 text-right bg-teal-50/70 text-teal-900 border-r border-slate-200' },
                           { key: 'unit_price', label: 'Rate', cls: 'py-2 px-2 text-right border-r border-slate-200' },
                           { key: 'loose_rate', label: 'Loose Rate', cls: 'py-2 px-2 text-right border-r border-slate-200' },
-                          { key: 'discount', label: 'Disc %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                          { key: 'discount_1', label: 'Disc 1 %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                          { key: 'discount_2', label: 'Disc 2 %', cls: 'py-2 px-2 text-right border-r border-slate-200' },
+                          { key: 'net_rate', label: 'Net Rate', cls: 'py-2 px-2 text-right bg-indigo-50/70 text-indigo-900 border-r border-slate-200' },
                           { key: 'bonus_quantity', label: 'Bonus', cls: 'py-2 px-2 text-right border-r border-slate-200' },
                           { key: 'gross_amount', label: 'Gross', cls: 'py-2 px-2 text-right border-r border-slate-200' },
                           { key: 'tax', label: 'Tax', cls: 'py-2 px-2 text-right border-r border-slate-200' },
                           { key: 'amount', label: 'Amount', cls: 'py-2 px-2 text-right bg-slate-100 text-slate-900 font-extrabold border-r border-slate-200' },
+                          { key: 'roi', label: 'ROI', cls: 'py-2 px-2 text-right bg-emerald-50/80 text-emerald-900 font-extrabold border-r border-slate-200' },
                           { key: 'remarks', label: 'Remarks', cls: 'py-2 px-2 border-r border-slate-200' },
                           { key: 'actions', label: '', cls: 'py-2 px-1.5 text-center' },
                         ] as const
@@ -5523,7 +5994,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             <td className="py-1 px-1.5 text-center font-mono text-[11px] text-slate-300 border-r border-slate-100">
                               {rIdx + 1}
                             </td>
-                            <td colSpan={14} />
+                            <td colSpan={17} />
                           </tr>
                         );
                       }
@@ -6012,16 +6483,42 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             />
                           </td>
 
-                          {/* Discount % */}
-                          <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount')}`}>
+                          {/* Discount 1 % */}
+                          <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount_1')}`}>
                             <NumericInput
-                              id={`pos_row_${rIdx}_discount_percent`}
-                              value={row.discount_percent}
+                              id={`pos_row_${rIdx}_discount_1_percent`}
+                              value={row.discount_1_percent}
                               onFocus={() => setSelectedRowIndex(rIdx)}
-                              onChange={(e) => updateRowField(rIdx, 'discount_percent', e.target.value)}
-                              onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'discount_percent', true)}
+                              onChange={(e) => updateRowField(rIdx, 'discount_1_percent', e.target.value)}
+                              onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'discount_1_percent', true)}
                               className="w-full px-1.5 py-1 text-right font-mono text-xs text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                              title="Discount 1 (%) applied first to Original Rate"
                             />
+                          </td>
+
+                          {/* Discount 2 % */}
+                          <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('discount_2')}`}>
+                            <NumericInput
+                              id={`pos_row_${rIdx}_discount_2_percent`}
+                              value={row.discount_2_percent}
+                              onFocus={() => setSelectedRowIndex(rIdx)}
+                              onChange={(e) => updateRowField(rIdx, 'discount_2_percent', e.target.value)}
+                              onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'discount_2_percent', true)}
+                              className="w-full px-1.5 py-1 text-right font-mono text-xs text-slate-800 rounded border border-transparent focus:border-emerald-500 bg-transparent focus:bg-white outline-none tabular-nums"
+                              title="Discount 2 (%) applied sequentially after Discount 1"
+                            />
+                          </td>
+
+                          {/* Net Rate (Read-only) */}
+                          <td
+                            className={`px-2 py-1 text-right font-mono font-bold text-xs text-indigo-900 bg-indigo-50/40 border-r border-slate-100 align-middle tabular-nums whitespace-nowrap ${colHighlight('net_rate')}`}
+                            title={
+                              hasItem
+                                ? `Original Rate ${Number(row.unit_price || 0).toFixed(2)} → Disc 1 (${row.discount_1_percent}%) → Disc 2 (${row.discount_2_percent}%) = Net Rate ${Number(row.net_rate || 0).toFixed(2)}`
+                                : ''
+                            }
+                          >
+                            {hasItem ? Number(row.net_rate || 0).toFixed(2) : ''}
                           </td>
 
                           {/* Bonus */}
@@ -6104,6 +6601,32 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               }`}
                             />
                           </td>
+
+                          {/* ROI (Profit Amount) */}
+                          {(() => {
+                            const posRoi = hasItem ? rowRoiMap.get(row.row_id) : undefined;
+                            const roiVal = posRoi && posRoi.roiAmount !== null ? posRoi.roiAmount : null;
+                            return (
+                              <td
+                                className={`px-2 py-1 text-right font-mono font-bold text-xs border-r border-slate-100 align-middle tabular-nums whitespace-nowrap bg-emerald-50/30 ${
+                                  roiVal === null
+                                    ? 'text-slate-400'
+                                    : roiVal < 0
+                                    ? 'text-rose-700'
+                                    : 'text-emerald-800'
+                                } ${colHighlight('roi')}`}
+                                title={
+                                  hasItem && posRoi?.hasValidCost
+                                    ? `ROI = Net Selling (${posRoi.netSellingAmount.toFixed(2)}) − Cost (${posRoi.lineCost.toFixed(2)}) [Pack Cost: ${posRoi.packCost.toFixed(4)}]`
+                                    : hasItem
+                                    ? 'No valid purchase cost or Pprice available'
+                                    : ''
+                                }
+                              >
+                                {roiVal !== null ? roiVal.toFixed(2) : ''}
+                              </td>
+                            );
+                          })()}
 
                           {/* Remarks */}
                           <td className={`p-1 border-r border-slate-100 align-middle ${colHighlight('remarks')}`}>
@@ -6270,6 +6793,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <span>
                     Loose <strong className="text-teal-700">{posLooseQtySum}</strong>
                   </span>
+                  <input
+                    type="text"
+                    readOnly
+                    tabIndex={-1}
+                    value={formattedInvoiceProfit}
+                    className="w-24 px-2 py-0.5 rounded bg-white border border-slate-300 font-mono font-bold text-[11px] text-right text-slate-900 tabular-nums outline-none select-all"
+                  />
                 </div>
               </div>
             </div>
@@ -6289,9 +6819,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 historyData={activeItemHistory}
                 loading={historyLoading}
                 onClose={() => setShowCompactHistoryPopup(false)}
-                onApplySaleRate={(rate, discPct) => {
+                onApplySaleRate={(rate, disc1Pct, disc2Pct = 0) => {
                   updateRowField(selectedRowIndex, 'unit_price', round2(rate));
-                  updateRowField(selectedRowIndex, 'discount_percent', round2(discPct));
+                  updateRowField(selectedRowIndex, 'discount_1_percent', clampDiscountPercent(disc1Pct));
+                  updateRowField(selectedRowIndex, 'discount_2_percent', clampDiscountPercent(disc2Pct));
                 }}
               />
             )}
@@ -6691,7 +7222,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   className="w-full px-1 py-0 rounded border border-slate-300 font-mono text-slate-900 bg-white"
                 />
               </div>
-              <div className="col-span-4 flex items-center gap-1">
+              <div className="col-span-3 flex items-center gap-1">
                 <label className="font-bold text-slate-600 whitespace-nowrap">Customer:</label>
                 <input
                   type="text"
@@ -6712,7 +7243,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       focusNewRowItemSearch();
                     }
                   }}
-                  className="w-16 px-1 py-0 rounded border border-slate-300 bg-white"
+                  className="w-14 px-1 py-0 rounded border border-slate-300 bg-white"
                 />
                 <select
                   value={customerAccountId}
@@ -6743,31 +7274,46 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </select>
               </div>
               <div className="col-span-2 flex items-center gap-1">
-                <label className="font-bold text-slate-600 whitespace-nowrap">Type:</label>
-                <select
-                  value={invoiceType}
-                  onChange={(e) => handleInvoiceTypeChange(e.target.value as SalesInvoiceType)}
-                  className="w-full px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
-                >
-                  <option value="Retail">Retail</option>
-                  <option value="Wholesale">Wholesale</option>
-                </select>
+                <label htmlFor="access_buyer_name_input" className="font-bold text-slate-600 whitespace-nowrap">
+                  Buyer:
+                </label>
+                <input
+                  id="access_buyer_name_input"
+                  type="text"
+                  value={buyerName}
+                  onChange={(e) => setBuyerName(e.target.value)}
+                  placeholder="Buyer / Patient name..."
+                  className="w-full min-w-0 px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white focus:border-emerald-600 outline-none"
+                />
               </div>
-              <div className="col-span-2 flex items-center gap-1">
-                <label className="font-bold text-slate-600 whitespace-nowrap">Mode:</label>
-                <select
-                  value={paymentMode}
-                  onChange={(e) => {
-                    setPaidAmountManuallyEdited(false);
-                    setPaymentMode(e.target.value as SalesPaymentMode);
-                  }}
-                  className="w-full px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
-                >
-                  <option value="Cash">Cash</option>
-                  <option value="Credit">Credit</option>
-                  <option value="Partial">Partial</option>
-                  <option value="Bank">Bank</option>
-                </select>
+              <div className="col-span-3 flex items-center gap-1.5">
+                <div className="flex-1 flex items-center gap-1 min-w-0">
+                  <label className="font-bold text-slate-600 whitespace-nowrap">Type:</label>
+                  <select
+                    value={invoiceType}
+                    onChange={(e) => handleInvoiceTypeChange(e.target.value as SalesInvoiceType)}
+                    className="w-full px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
+                  >
+                    <option value="Retail">Retail</option>
+                    <option value="Wholesale">Wholesale</option>
+                  </select>
+                </div>
+                <div className="flex-1 flex items-center gap-1 min-w-0">
+                  <label className="font-bold text-slate-600 whitespace-nowrap">Mode:</label>
+                  <select
+                    value={paymentMode}
+                    onChange={(e) => {
+                      setPaidAmountManuallyEdited(false);
+                      setPaymentMode(e.target.value as SalesPaymentMode);
+                    }}
+                    className="w-full px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"
+                  >
+                    <option value="Cash">Cash</option>
+                    <option value="Credit">Credit</option>
+                    <option value="Partial">Partial</option>
+                    <option value="Bank">Bank</option>
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -7090,75 +7636,113 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               >
                 <colgroup>
                   <col style={{ width: `${colWidths.selector}px` }} />
-                  <col style={{ width: `${colWidths.item_code}px` }} />
-                  <col style={{ width: `${colWidths.item_name}px` }} />
-                  <col style={{ width: `${colWidths.quantity}px` }} />
-                  <col style={{ width: `${colWidths.discount}px` }} />
-                  <col style={{ width: `${colWidths.unit_price}px` }} />
-                  <col style={{ width: `${colWidths.loose_quantity}px` }} />
-                  <col style={{ width: `${colWidths.loose_rate}px` }} />
-                  <col style={{ width: `${colWidths.bonus_quantity}px` }} />
-                  <col style={{ width: `${colWidths.amount}px` }} />
-                  <col style={{ width: `${colWidths.last_purchase_price}px` }} />
-                  <col style={{ width: `${colWidths.company}px` }} />
-                  <col style={{ width: `${colWidths.gross_amount}px` }} />
-                  <col style={{ width: `${colWidths.remarks}px` }} />
+                  {orderedSalesAccessColKeys.map((colKey) => (
+                    <col key={colKey} style={{ width: `${colWidths[colKey]}px` }} />
+                  ))}
                   <col style={{ width: `${colWidths.actions}px` }} />
                 </colgroup>
                 <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                   <tr className="h-6">
-                    {(
-                      [
-                        { key: 'selector', label: '#', cls: 'bg-slate-300/80 border-r border-slate-400 text-center font-mono' },
-                        { key: 'item_code', label: 'Item Code', cls: 'border-r border-slate-300 text-left' },
-                        { key: 'item_name', label: 'Item Name', cls: 'border-r border-slate-300 text-left' },
-                        { key: 'quantity', label: 'Qty', cls: 'border-r border-slate-300 text-right bg-emerald-100/60 text-emerald-950' },
-                        { key: 'discount', label: 'Discount', cls: 'border-r border-slate-300 text-right' },
-                        { key: 'unit_price', label: 'Price', cls: 'border-r border-slate-300 text-right' },
-                        { key: 'loose_quantity', label: 'Loose Qty', cls: 'border-r border-slate-300 text-right bg-teal-100/60 text-teal-950' },
-                        { key: 'loose_rate', label: 'Loose Rate', cls: 'border-r border-slate-300 text-right bg-blue-100/60 text-blue-950' },
-                        { key: 'bonus_quantity', label: 'Bonus', cls: 'border-r border-slate-300 text-right bg-emerald-100/70 text-emerald-950' },
-                        { key: 'amount', label: 'Net Amount', cls: 'border-r border-slate-300 text-right bg-slate-300/60 font-black' },
-                        { key: 'last_purchase_price', label: 'Last Purchase Price', cls: 'border-r border-slate-300 text-right bg-amber-50/70 text-amber-950' },
-                        { key: 'company', label: 'Company', cls: 'border-r border-slate-300 text-left' },
-                        { key: 'gross_amount', label: 'Gross Amount', cls: 'border-r border-slate-300 text-right bg-slate-200/70' },
-                        { key: 'remarks', label: 'Remarks', cls: 'border-r border-slate-300 text-left' },
-                        { key: 'actions', label: 'Batch / Del', cls: 'text-center' },
-                      ] as const
-                    ).map((col) => {
-                      const isColSelected = selectedColKeys.includes(col.key);
-                      const isSelectableCol = col.key !== 'selector' && col.key !== 'actions';
+                    <th
+                      key="selector"
+                      style={{ width: `${colWidths.selector}px` }}
+                      className="bg-slate-300/80 border-r border-slate-400 text-center font-mono px-1 py-0 relative h-6 whitespace-nowrap overflow-hidden text-ellipsis"
+                    >
+                      <span className="truncate block">#</span>
+                      <div
+                        data-col-resize-handle="true"
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          handleColResizeMouseDown('selector', e);
+                        }}
+                        onDoubleClick={(e) => handleResetAccessColWidth('selector', e)}
+                        title="Drag border to resize column (double-click to reset)"
+                        className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                          accessResizingCol === 'selector' ? 'bg-emerald-600' : 'hover:bg-emerald-500/80'
+                        }`}
+                      />
+                    </th>
+
+                    {orderedSalesAccessColKeys.map((colKey) => {
+                      const meta = SALES_ACCESS_COL_META[colKey] || {
+                        label: SALES_COL_LABELS[colKey] || colKey,
+                        cls: 'border-r border-slate-300 text-left',
+                      };
+                      const isColSelected = selectedColKeys.includes(colKey);
+                      const isDraggingThis = draggedSalesAccessCol === colKey;
+                      const isDragOverThis = dragOverSalesAccessCol === colKey;
+                      const dropIndicatorCls = isDragOverThis
+                        ? salesAccessDropSide === 'left'
+                          ? '!border-l-[3px] !border-l-indigo-600 !bg-indigo-100/80'
+                          : '!border-r-[3px] !border-r-indigo-600 !bg-indigo-100/80'
+                        : '';
                       return (
                         <th
-                          key={col.key}
-                          onMouseDown={(e) => handleColHeaderMouseDown(col.key, SALES_ACCESS_COL_KEYS, e)}
-                          onMouseEnter={() => handleColHeaderMouseEnter(col.key, SALES_ACCESS_COL_KEYS)}
-                          style={{ width: `${colWidths[col.key]}px` }}
-                          title={
-                            isSelectableCol
-                              ? 'Click or drag to select column(s) · Press Shift+Delete to clear column values'
-                              : undefined
+                          key={colKey}
+                          draggable={accessResizingCol === null}
+                          onDragStart={(e) => {
+                            isDraggingColsRef.current = false;
+                            handleSalesAccessColDragStart(colKey, e, accessResizingCol !== null);
+                          }}
+                          onDragOver={(e) => handleSalesAccessColDragOver(colKey, e)}
+                          onDrop={(e) =>
+                            handleSalesAccessColDrop(colKey, e, (movedKey) => {
+                              setSelectedColKeys([movedKey]);
+                              colSelectionAnchorRef.current = movedKey;
+                            })
                           }
-                          className={`${col.cls} ${
-                            isSelectableCol ? 'cursor-pointer hover:bg-sky-100/70' : ''
-                          } ${
+                          onDragEnd={handleSalesAccessColDragEnd}
+                          onMouseDown={(e) =>
+                            handleColHeaderMouseDown(colKey, orderedSalesAccessColKeys, e)
+                          }
+                          onMouseEnter={() =>
+                            handleColHeaderMouseEnter(colKey, orderedSalesAccessColKeys)
+                          }
+                          style={{ width: `${colWidths[colKey]}px` }}
+                          title="Click to select column (Move Left/Right or Shift+Del) · Drag header to reorder"
+                          className={`${meta.cls} cursor-grab active:cursor-grabbing hover:bg-sky-100/70 ${
                             isColSelected
                               ? '!bg-sky-200 !text-sky-950 ring-1 ring-inset ring-sky-500'
                               : ''
-                          } px-1 py-0 relative h-6 whitespace-nowrap overflow-hidden text-ellipsis`}
+                          } ${isDraggingThis ? 'opacity-50' : ''} ${dropIndicatorCls} px-1 py-0 relative h-6 whitespace-nowrap overflow-hidden text-ellipsis`}
                         >
-                          <span className="truncate block">{col.label}</span>
+                          <span className="truncate block pr-1">{meta.label}</span>
                           <div
-                            onMouseDown={(e) => handleColResizeMouseDown(col.key, e)}
-                            onDoubleClick={(e) => handleResetAccessColWidth(col.key, e)}
+                            data-col-resize-handle="true"
+                            draggable={false}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              handleColResizeMouseDown(colKey, e);
+                            }}
+                            onDoubleClick={(e) => handleResetAccessColWidth(colKey, e)}
                             title="Drag border to resize column (double-click to reset)"
                             className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
-                              accessResizingCol === col.key ? 'bg-emerald-600' : 'hover:bg-emerald-500/80'
+                              accessResizingCol === colKey ? 'bg-emerald-600' : 'hover:bg-emerald-500/80'
                             }`}
                           />
                         </th>
                       );
                     })}
+
+                    <th
+                      key="actions"
+                      style={{ width: `${colWidths.actions}px` }}
+                      className="text-center px-1 py-0 relative h-6 whitespace-nowrap overflow-hidden text-ellipsis"
+                    >
+                      <span className="truncate block">Batch / Del</span>
+                      <div
+                        data-col-resize-handle="true"
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          handleColResizeMouseDown('actions', e);
+                        }}
+                        onDoubleClick={(e) => handleResetAccessColWidth('actions', e)}
+                        title="Drag border to resize column (double-click to reset)"
+                        className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize transition-colors ${
+                          accessResizingCol === 'actions' ? 'bg-emerald-600' : 'hover:bg-emerald-500/80'
+                        }`}
+                      />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -7169,7 +7753,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                             {rIdx + 1}
                           </td>
-                          <td colSpan={14} />
+                          <td colSpan={orderedSalesAccessColKeys.length + 1} />
                         </tr>
                       );
                     }
@@ -7196,6 +7780,419 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       selectedColKeys.includes(colKey)
                         ? '!bg-sky-100/80 ring-1 ring-inset ring-sky-400'
                         : '';
+
+                    const renderSalesAccessCell = (colKey: string): React.ReactNode => {
+                      switch (colKey) {
+                        case 'item_code':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_code')}`}>
+                              <input
+                                id={`cell_${rIdx}_item_code`}
+                                type="text"
+                                value={
+                                  editingItemCode?.rowIdx === rIdx
+                                    ? editingItemCode.value
+                                    : row.item_code
+                                }
+                                onFocus={() => {
+                                  setSelectedRowIndex(rIdx);
+                                  setShowSearchDropdown(false);
+                                  cancelledCodeEditRef.current = false;
+                                  committedCodeEditRef.current = false;
+                                }}
+                                onBlur={() => {
+                                  setTimeout(() => {
+                                    setShowSearchDropdown(false);
+                                    setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
+                                    if (cancelledCodeEditRef.current || committedCodeEditRef.current) {
+                                      cancelledCodeEditRef.current = false;
+                                      committedCodeEditRef.current = false;
+                                      setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                      return;
+                                    }
+                                    if (editingItemCode && editingItemCode.rowIdx === rIdx) {
+                                      commitItemCodeChange(rIdx, editingItemCode.value, false);
+                                    }
+                                  }, 160);
+                                }}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setSelectedRowIndex(rIdx);
+                                  committedCodeEditRef.current = false;
+                                  setEditingItemCode({ rowIdx: rIdx, value: val });
+                                  if (val.trim().length > 0) {
+                                    setActiveSearchRowIdx(rIdx);
+                                    setShowSearchDropdown(true);
+                                    runFastSearch(val);
+                                  } else {
+                                    setShowSearchDropdown(false);
+                                    setSearchResults([]);
+                                    setActiveSearchRowIdx(null);
+                                  }
+                                }}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_code')}
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                              />
+                            </td>
+                          );
+                        case 'item_name':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_name')}`}>
+                              <div className="flex items-center gap-1 h-[15px] px-0.5">
+                                {row.item_id !== null && row.variant_thumbnail_url && (
+                                  <ProductThumb
+                                    src={row.variant_thumbnail_url}
+                                    alt={row.item_name}
+                                    size="xs"
+                                    className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
+                                  />
+                                )}
+                                <input
+                                  id={`cell_${rIdx}_item_name`}
+                                  type="text"
+                                  value={
+                                    editingItemName?.rowIdx === rIdx
+                                      ? editingItemName.value
+                                      : formatItemNameWithRemarks(row.item_name, row.remarks)
+                                  }
+                                  onFocus={() => {
+                                    setSelectedRowIndex(rIdx);
+                                    if (!row.item_id && selectedCompanyFilter) {
+                                      setActiveSearchRowIdx(rIdx);
+                                      setShowSearchDropdown(true);
+                                      runFastSearch('');
+                                    } else {
+                                      setShowSearchDropdown(false);
+                                    }
+                                    if (row.item_code || row.item_id) {
+                                      fetchAndApplyItemHistory(
+                                        rIdx,
+                                        Number(row.item_id || 0),
+                                        customerAccountId,
+                                        invoiceType,
+                                        false,
+                                        row.item_code,
+                                        row.variant_id || null
+                                      );
+                                    }
+                                  }}
+                                  onDoubleClick={(e) => {
+                                    if (!row.item_id) return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setShowSearchDropdown(false);
+                                    setEditingItemName(null);
+                                    setItemLogModalState({
+                                      isOpen: true,
+                                      itemId: row.item_id,
+                                      itemCode: row.item_code,
+                                      itemName: row.item_name,
+                                      returnFocusId: `cell_${rIdx}_item_name`,
+                                    });
+                                  }}
+                                  onBlur={() => {
+                                    setTimeout(() => {
+                                      setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
+                                      setShowSearchDropdown(false);
+                                      setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
+                                    }, 160);
+                                  }}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setSelectedRowIndex(rIdx);
+                                    setEditingItemName({ rowIdx: rIdx, value: val });
+                                    if (val.trim().length > 0 || selectedCompanyFilter) {
+                                      setActiveSearchRowIdx(rIdx);
+                                      setShowSearchDropdown(true);
+                                      runFastSearch(val);
+                                    } else {
+                                      setShowSearchDropdown(false);
+                                      setSearchResults([]);
+                                      setActiveSearchRowIdx(null);
+                                    }
+                                  }}
+                                  onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_name')}
+                                  placeholder={
+                                    selectedCompanyFilter
+                                      ? `Type Item Name in ${selectedCompanyFilter} (or F2)...`
+                                      : 'Type Item Name / Code (or F2)...'
+                                  }
+                                  title={
+                                    row.item_id
+                                      ? `${formatItemNameWithRemarks(row.item_name, row.remarks)}${row.variant_name ? ` — ${row.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
+                                      : selectedCompanyFilter
+                                      ? `Type Item Name / Code in ${selectedCompanyFilter} (or F2)`
+                                      : 'Type Item Name / Code (or F2)'
+                                  }
+                                  className="w-full min-w-0 flex-1 px-0.5 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none truncate"
+                                />
+                                {row.variant_name && (
+                                  <span
+                                    className="px-1 rounded bg-amber-100 text-amber-800 border border-amber-200 text-[8.5px] font-bold shrink-0 max-w-[85px] truncate leading-tight"
+                                    title={row.variant_name}
+                                  >
+                                    {row.variant_name}
+                                  </span>
+                                )}
+                              </div>
+                              {renderSalesExcelItemCombobox('row', rIdx)}
+                            </td>
+                          );
+                        case 'quantity':
+                          return (
+                            <td
+                              key={colKey}
+                              className={`border-r border-slate-300 p-0 h-[16px] align-middle ${
+                                isZeroQty
+                                  ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
+                                  : 'bg-emerald-50/20'
+                              } ${colHighlight('quantity')}`}
+                            >
+                              <NumericInput
+                                id={`cell_${rIdx}_quantity`}
+                                value={row.quantity}
+                                allowNegative={true}
+                                displayZero={hasItem}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'quantity', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'quantity')}
+                                className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
+                                  isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
+                                }`}
+                              />
+                            </td>
+                          );
+                        case 'discount_1':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('discount_1')}`}>
+                              <NumericInput
+                                id={`cell_${rIdx}_discount_1_percent`}
+                                value={row.discount_1_percent}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'discount_1_percent', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'discount_1_percent')}
+                                title="Discount 1 (%) applied first to Original Rate"
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                              />
+                            </td>
+                          );
+                        case 'discount_2':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('discount_2')}`}>
+                              <NumericInput
+                                id={`cell_${rIdx}_discount_2_percent`}
+                                value={row.discount_2_percent}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'discount_2_percent', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'discount_2_percent')}
+                                title="Discount 2 (%) applied sequentially after Discount 1"
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                              />
+                            </td>
+                          );
+                        case 'unit_price':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('unit_price')}`}>
+                              <NumericInput
+                                id={`cell_${rIdx}_unit_price`}
+                                value={row.unit_price}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'unit_price')}
+                                title={
+                                  row.item_id
+                                    ? 'Sale Price — Press Ctrl to view Customer Item History, or Space / H / F4 for Sales Price History'
+                                    : 'Sale Price'
+                                }
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                              />
+                            </td>
+                          );
+                        case 'net_rate':
+                          return (
+                            <td
+                              key={colKey}
+                              className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-bold text-indigo-900 bg-indigo-50/40 text-[11px] h-[16px] align-middle select-none ${colHighlight('net_rate')}`}
+                              title={
+                                hasItem
+                                  ? `Net Rate: ${Number(row.unit_price || 0).toFixed(2)} × (1 − ${row.discount_1_percent}%) × (1 − ${row.discount_2_percent}%) = ${Number(row.net_rate || 0).toFixed(2)}`
+                                  : 'Calculated Net Rate (read-only)'
+                              }
+                            >
+                              {hasItem ? Number(row.net_rate || 0).toFixed(2) : ''}
+                            </td>
+                          );
+                        case 'loose_quantity':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 bg-teal-50/20 h-[16px] align-middle ${colHighlight('loose_quantity')}`}>
+                              {isSyrupItem(row) ? (
+                                <div className="flex items-center justify-center h-[15px] select-none">
+                                  <span className="text-[8.5px] text-amber-800 bg-amber-100 border border-amber-300 px-1 py-0 rounded-lg font-bold whitespace-nowrap">
+                                    Bottle
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="flex items-center h-[15px]">
+                                  <NumericInput
+                                    id={`cell_${rIdx}_loose_quantity`}
+                                    value={row.loose_quantity}
+                                    allowNegative={true}
+                                    onFocus={() => setSelectedRowIndex(rIdx)}
+                                    onChange={(e) => updateRowField(rIdx, 'loose_quantity', e.target.value)}
+                                    onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_quantity')}
+                                    className="w-full px-1 py-0 border border-transparent focus:border-teal-600 focus:bg-white text-right font-mono font-bold text-teal-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                  />
+                                  {row.item_id && row.units_per_strip > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAddStripToRow(rIdx, 1)}
+                                      title={`Add 1 Strip (+${row.units_per_strip} Loose Units)`}
+                                      className="px-0.5 py-0 rounded-lg bg-teal-100 hover:bg-teal-200 text-teal-800 font-mono text-[8px] font-bold shrink-0 cursor-pointer mr-0.5 leading-tight"
+                                    >
+                                      +1S
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          );
+                        case 'loose_rate':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 bg-blue-50/20 h-[16px] align-middle ${colHighlight('loose_rate')}`}>
+                              <NumericInput
+                                id={`cell_${rIdx}_loose_rate`}
+                                disabled={isSyrupItem(row)}
+                                value={row.loose_rate}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'loose_rate', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_rate')}
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-blue-950 bg-transparent text-[11px] h-[15px] leading-none outline-none disabled:opacity-40"
+                                title="Loose Rate per unit"
+                              />
+                            </td>
+                          );
+                        case 'bonus_quantity':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 bg-emerald-50/40 h-[16px] align-middle ${colHighlight('bonus_quantity')}`}>
+                              <NumericInput
+                                id={`cell_${rIdx}_bonus_quantity`}
+                                value={row.bonus_quantity ?? 0}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'bonus_quantity', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'bonus_quantity')}
+                                className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                                title="Bonus Quantity (Press Enter to add next item row)"
+                              />
+                            </td>
+                          );
+                        case 'amount':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('amount')}`}>
+                              <input
+                                id={`cell_${rIdx}_line_total`}
+                                type="text"
+                                readOnly
+                                tabIndex={0}
+                                value={hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
+                                onFocus={(e) => {
+                                  setSelectedRowIndex(rIdx);
+                                  e.currentTarget.select();
+                                }}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'line_total')}
+                                title="Net Amount (Press Enter to move to next row Item Code)"
+                                className={`w-full px-1 py-0 border border-transparent focus:border-blue-600 text-right font-mono font-black text-[11px] h-[15px] leading-none outline-none ${
+                                  isZeroNet
+                                    ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300 focus:bg-orange-50'
+                                    : 'text-slate-900 bg-slate-50/60 focus:bg-white'
+                                }`}
+                              />
+                            </td>
+                          );
+                        case 'roi': {
+                          const accessRoi = hasItem ? rowRoiMap.get(row.row_id) : undefined;
+                          const roiVal = accessRoi && accessRoi.roiAmount !== null ? accessRoi.roiAmount : null;
+                          return (
+                            <td
+                              key={colKey}
+                              className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-bold bg-emerald-50/40 text-[11px] h-[16px] align-middle tabular-nums ${
+                                roiVal === null
+                                  ? 'text-slate-400'
+                                  : roiVal < 0
+                                  ? 'text-rose-700'
+                                  : 'text-emerald-900'
+                              } ${colHighlight('roi')}`}
+                              title={
+                                hasItem && accessRoi?.hasValidCost
+                                  ? `ROI = Net Selling (${accessRoi.netSellingAmount.toFixed(2)}) − Cost (${accessRoi.lineCost.toFixed(2)}) [Pack Cost: ${accessRoi.packCost.toFixed(4)}]`
+                                  : hasItem
+                                  ? 'No valid purchase cost or Pprice available'
+                                  : ''
+                              }
+                            >
+                              {roiVal !== null ? roiVal.toFixed(2) : ''}
+                            </td>
+                          );
+                        }
+                        case 'last_purchase_price':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-amber-900 bg-amber-50/30 text-[11px] h-[16px] align-middle ${colHighlight('last_purchase_price')}`}>
+                              {catPurchaseFallback > 0 ? catPurchaseFallback.toFixed(2) : ''}
+                            </td>
+                          );
+                        case 'company':
+                          return (
+                            <td
+                              key={colKey}
+                              className={`border-r border-slate-300 p-0 text-slate-700 text-[10px] h-[16px] align-middle overflow-hidden ${colHighlight('company')}`}
+                              title={hasItem ? row.company_name : selectedCompanyFilter || 'All Companies'}
+                            >
+                              {hasItem ? (
+                                <div className="px-1 truncate">{row.company_name || ''}</div>
+                              ) : (
+                                <select
+                                  aria-label={`Row ${rIdx + 1} Company Filter`}
+                                  value={selectedCompanyFilter}
+                                  onFocus={() => setSelectedRowIndex(rIdx)}
+                                  onChange={(e) => setSelectedCompanyFilter(e.target.value)}
+                                  className={`w-full h-[15px] px-0.5 py-0 text-[10px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-blue-600 outline-none truncate ${
+                                    selectedCompanyFilter ? 'text-emerald-900 bg-emerald-50/60' : 'text-slate-600'
+                                  }`}
+                                >
+                                  <option value="">All Companies</option>
+                                  {companyOptions.map((c) => (
+                                    <option key={c} value={c}>
+                                      {c}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </td>
+                          );
+                        case 'gross_amount':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-700 bg-slate-50/30 text-[11px] h-[16px] align-middle ${colHighlight('gross_amount')}`}>
+                              {hasItem && row.gross_amount !== 0 ? row.gross_amount.toFixed(2) : ''}
+                            </td>
+                          );
+                        case 'remarks':
+                          return (
+                            <td key={colKey} className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('remarks')}`}>
+                              <input
+                                id={`cell_${rIdx}_remarks`}
+                                type="text"
+                                value={row.remarks || ''}
+                                onFocus={() => setSelectedRowIndex(rIdx)}
+                                onChange={(e) => updateRowField(rIdx, 'remarks', e.target.value)}
+                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'remarks')}
+                                placeholder={hasItem ? 'Remarks...' : ''}
+                                className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-left text-slate-800 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                              />
+                            </td>
+                          );
+                        default:
+                          return null;
+                      }
+                    };
 
                     return (
                       <tr
@@ -7256,344 +8253,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           )}
                         </td>
 
-                        {/* 1. Item Code (Searchable with live dropdown + explicit validation; never deletes item on click) */}
-                        <td className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_code')}`}>
-                          <input
-                            id={`cell_${rIdx}_item_code`}
-                            type="text"
-                            value={
-                              editingItemCode?.rowIdx === rIdx
-                                ? editingItemCode.value
-                                : row.item_code
-                            }
-                            onFocus={() => {
-                              setSelectedRowIndex(rIdx);
-                              setShowSearchDropdown(false);
-                              cancelledCodeEditRef.current = false;
-                              committedCodeEditRef.current = false;
-                            }}
-                            onBlur={() => {
-                              setTimeout(() => {
-                                setShowSearchDropdown(false);
-                                setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
-                                if (cancelledCodeEditRef.current || committedCodeEditRef.current) {
-                                  cancelledCodeEditRef.current = false;
-                                  committedCodeEditRef.current = false;
-                                  setEditingItemCode((prev) => (prev?.rowIdx === rIdx ? null : prev));
-                                  return;
-                                }
-                                if (editingItemCode && editingItemCode.rowIdx === rIdx) {
-                                  commitItemCodeChange(rIdx, editingItemCode.value, false);
-                                }
-                              }, 160);
-                            }}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSelectedRowIndex(rIdx);
-                              committedCodeEditRef.current = false;
-                              setEditingItemCode({ rowIdx: rIdx, value: val });
-                              if (val.trim().length > 0) {
-                                setActiveSearchRowIdx(rIdx);
-                                setShowSearchDropdown(true);
-                                runFastSearch(val);
-                              } else {
-                                setShowSearchDropdown(false);
-                                setSearchResults([]);
-                                setActiveSearchRowIdx(null);
-                              }
-                            }}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_code')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                          />
-                        </td>
+                        {orderedSalesAccessColKeys.map((colKey) => renderSalesAccessCell(colKey))}
 
-                        {/* 2. Item Name (Fixed 330px column; live searchable while typing) */}
-                        <td className={`border-r border-slate-300 p-0 h-[16px] align-middle relative ${colHighlight('item_name')}`}>
-                          <div className="flex items-center gap-1 h-[15px] px-0.5">
-                            {row.item_id !== null && row.variant_thumbnail_url && (
-                              <ProductThumb
-                                src={row.variant_thumbnail_url}
-                                alt={row.item_name}
-                                size="xs"
-                                className="!w-3.5 !h-3.5 !rounded-xs border-0 shrink-0"
-                              />
-                            )}
-                            <input
-                              id={`cell_${rIdx}_item_name`}
-                              type="text"
-                              value={
-                                editingItemName?.rowIdx === rIdx
-                                  ? editingItemName.value
-                                  : formatItemNameWithRemarks(row.item_name, row.remarks)
-                              }
-                              onFocus={() => {
-                                setSelectedRowIndex(rIdx);
-                                if (!row.item_id && selectedCompanyFilter) {
-                                  setActiveSearchRowIdx(rIdx);
-                                  setShowSearchDropdown(true);
-                                  runFastSearch('');
-                                } else {
-                                  setShowSearchDropdown(false);
-                                }
-                                if (row.item_code || row.item_id) {
-                                  fetchAndApplyItemHistory(
-                                    rIdx,
-                                    Number(row.item_id || 0),
-                                    customerAccountId,
-                                    invoiceType,
-                                    false,
-                                    row.item_code,
-                                    row.variant_id || null
-                                  );
-                                }
-                              }}
-                              onDoubleClick={(e) => {
-                                if (!row.item_id) return;
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setShowSearchDropdown(false);
-                                setEditingItemName(null);
-                                setItemLogModalState({
-                                  isOpen: true,
-                                  itemId: row.item_id,
-                                  itemCode: row.item_code,
-                                  itemName: row.item_name,
-                                  returnFocusId: `cell_${rIdx}_item_name`,
-                                });
-                              }}
-                              onBlur={() => {
-                                setTimeout(() => {
-                                  setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
-                                  setShowSearchDropdown(false);
-                                  setActiveSearchRowIdx((prev) => (prev === rIdx ? null : prev));
-                                }, 160);
-                              }}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setSelectedRowIndex(rIdx);
-                                setEditingItemName({ rowIdx: rIdx, value: val });
-                                if (val.trim().length > 0 || selectedCompanyFilter) {
-                                  setActiveSearchRowIdx(rIdx);
-                                  setShowSearchDropdown(true);
-                                  runFastSearch(val);
-                                } else {
-                                  setShowSearchDropdown(false);
-                                  setSearchResults([]);
-                                  setActiveSearchRowIdx(null);
-                                }
-                              }}
-                              onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_name')}
-                              placeholder={
-                                selectedCompanyFilter
-                                  ? `Type Item Name in ${selectedCompanyFilter} (or F2)...`
-                                  : 'Type Item Name / Code (or F2)...'
-                              }
-                              title={
-                                row.item_id
-                                  ? `${formatItemNameWithRemarks(row.item_name, row.remarks)}${row.variant_name ? ` — ${row.variant_name}` : ''} — Double-click to open Complete ITEM LOG`
-                                  : selectedCompanyFilter
-                                  ? `Type Item Name / Code in ${selectedCompanyFilter} (or F2)`
-                                  : 'Type Item Name / Code (or F2)'
-                              }
-                              className="w-full min-w-0 flex-1 px-0.5 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none truncate"
-                            />
-                            {row.variant_name && (
-                              <span
-                                className="px-1 rounded bg-amber-100 text-amber-800 border border-amber-200 text-[8.5px] font-bold shrink-0 max-w-[85px] truncate leading-tight"
-                                title={row.variant_name}
-                              >
-                                {row.variant_name}
-                              </span>
-                            )}
-                          </div>
-                          {renderSalesExcelItemCombobox('row', rIdx)}
-                        </td>
-
-                        {/* 3. Qty */}
-                        <td
-                          className={`border-r border-slate-300 p-0 h-[16px] align-middle ${
-                            isZeroQty
-                              ? 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300'
-                              : 'bg-emerald-50/20'
-                          } ${colHighlight('quantity')}`}
-                        >
-                          <NumericInput
-                            id={`cell_${rIdx}_quantity`}
-                            value={row.quantity}
-                            allowNegative={true}
-                            displayZero={hasItem}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'quantity', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'quantity')}
-                            className={`w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold bg-transparent text-[11px] h-[15px] leading-none outline-none ${
-                              isZeroQty ? 'text-rose-950 placeholder:text-rose-700' : 'text-slate-900'
-                            }`}
-                          />
-                        </td>
-
-                        {/* 4. Discount */}
-                        <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('discount')}`}>
-                          <NumericInput
-                            id={`cell_${rIdx}_discount_percent`}
-                            value={row.discount_percent}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'discount_percent', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'discount_percent')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                          />
-                        </td>
-
-                        {/* 5. Price */}
-                        <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('unit_price')}`}>
-                          <NumericInput
-                            id={`cell_${rIdx}_unit_price`}
-                            value={row.unit_price}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'unit_price')}
-                            title={
-                              row.item_id
-                                ? 'Sale Price — Press Ctrl to view Customer Item History, or Space / H / F4 for Sales Price History'
-                                : 'Sale Price'
-                            }
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                          />
-                        </td>
-
-                        {/* 6. Loose Qty */}
-                        <td className={`border-r border-slate-300 p-0 bg-teal-50/20 h-[16px] align-middle ${colHighlight('loose_quantity')}`}>
-                          {isSyrupItem(row) ? (
-                            <div className="flex items-center justify-center h-[15px] select-none">
-                              <span className="text-[8.5px] text-amber-800 bg-amber-100 border border-amber-300 px-1 py-0 rounded-lg font-bold whitespace-nowrap">
-                                Bottle
-                              </span>
-                            </div>
-                          ) : (
-                            <div className="flex items-center h-[15px]">
-                              <NumericInput
-                                id={`cell_${rIdx}_loose_quantity`}
-                                value={row.loose_quantity}
-                                allowNegative={true}
-                                onFocus={() => setSelectedRowIndex(rIdx)}
-                                onChange={(e) => updateRowField(rIdx, 'loose_quantity', e.target.value)}
-                                onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_quantity')}
-                                className="w-full px-1 py-0 border border-transparent focus:border-teal-600 focus:bg-white text-right font-mono font-bold text-teal-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                              />
-                              {row.item_id && row.units_per_strip > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleAddStripToRow(rIdx, 1)}
-                                  title={`Add 1 Strip (+${row.units_per_strip} Loose Units)`}
-                                  className="px-0.5 py-0 rounded-lg bg-teal-100 hover:bg-teal-200 text-teal-800 font-mono text-[8px] font-bold shrink-0 cursor-pointer mr-0.5 leading-tight"
-                                >
-                                  +1S
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </td>
-
-                        {/* 7. Loose Rate */}
-                        <td className={`border-r border-slate-300 p-0 bg-blue-50/20 h-[16px] align-middle ${colHighlight('loose_rate')}`}>
-                          <NumericInput
-                            id={`cell_${rIdx}_loose_rate`}
-                            disabled={isSyrupItem(row)}
-                            value={row.loose_rate}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'loose_rate', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_rate')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-blue-950 bg-transparent text-[11px] h-[15px] leading-none outline-none disabled:opacity-40"
-                            title="Loose Rate per unit"
-                          />
-                        </td>
-
-                        {/* 8. Bonus */}
-                        <td className={`border-r border-slate-300 p-0 bg-emerald-50/40 h-[16px] align-middle ${colHighlight('bonus_quantity')}`}>
-                          <NumericInput
-                            id={`cell_${rIdx}_bonus_quantity`}
-                            value={row.bonus_quantity ?? 0}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'bonus_quantity', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'bonus_quantity')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                            title="Bonus Quantity (Press Enter to add next item row)"
-                          />
-                        </td>
-
-                        {/* 9. Net Amount */}
-                        <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('amount')}`}>
-                          <input
-                            id={`cell_${rIdx}_line_total`}
-                            type="text"
-                            readOnly
-                            tabIndex={0}
-                            value={hasItem ? Number(row.line_total || 0).toFixed(2) : ''}
-                            onFocus={(e) => {
-                              setSelectedRowIndex(rIdx);
-                              e.currentTarget.select();
-                            }}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'line_total')}
-                            title="Net Amount (Press Enter to move to next row Item Code)"
-                            className={`w-full px-1 py-0 border border-transparent focus:border-blue-600 text-right font-mono font-black text-[11px] h-[15px] leading-none outline-none ${
-                              isZeroNet
-                                ? 'bg-orange-100 text-rose-950 ring-1 ring-inset ring-orange-300 focus:bg-orange-50'
-                                : 'text-slate-900 bg-slate-50/60 focus:bg-white'
-                            }`}
-                          />
-                        </td>
-
-                        {/* 10. Last Purchase Price */}
-                        <td className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-amber-900 bg-amber-50/30 text-[11px] h-[16px] align-middle ${colHighlight('last_purchase_price')}`}>
-                          {catPurchaseFallback > 0 ? catPurchaseFallback.toFixed(2) : ''}
-                        </td>
-
-                        {/* 11. Company */}
-                        <td
-                          className={`border-r border-slate-300 p-0 text-slate-700 text-[10px] h-[16px] align-middle overflow-hidden ${colHighlight('company')}`}
-                          title={hasItem ? row.company_name : selectedCompanyFilter || 'All Companies'}
-                        >
-                          {hasItem ? (
-                            <div className="px-1 truncate">{row.company_name || ''}</div>
-                          ) : (
-                            <select
-                              aria-label={`Row ${rIdx + 1} Company Filter`}
-                              value={selectedCompanyFilter}
-                              onFocus={() => setSelectedRowIndex(rIdx)}
-                              onChange={(e) => setSelectedCompanyFilter(e.target.value)}
-                              className={`w-full h-[15px] px-0.5 py-0 text-[10px] font-semibold bg-transparent focus:bg-white border border-transparent focus:border-blue-600 outline-none truncate ${
-                                selectedCompanyFilter ? 'text-emerald-900 bg-emerald-50/60' : 'text-slate-600'
-                              }`}
-                            >
-                              <option value="">All Companies</option>
-                              {companyOptions.map((c) => (
-                                <option key={c} value={c}>
-                                  {c}
-                                </option>
-                              ))}
-                            </select>
-                          )}
-                        </td>
-
-                        {/* 12. Gross Amount */}
-                        <td className={`border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-700 bg-slate-50/30 text-[11px] h-[16px] align-middle ${colHighlight('gross_amount')}`}>
-                          {hasItem && row.gross_amount !== 0 ? row.gross_amount.toFixed(2) : ''}
-                        </td>
-
-                        {/* 13. Remarks */}
-                        <td className={`border-r border-slate-300 p-0 h-[16px] align-middle ${colHighlight('remarks')}`}>
-                          <input
-                            id={`cell_${rIdx}_remarks`}
-                            type="text"
-                            value={row.remarks || ''}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'remarks', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'remarks')}
-                            placeholder={hasItem ? 'Remarks...' : ''}
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-left text-slate-800 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                          />
-                        </td>
-
-                        {/* 14. Batch / Del */}
+                        {/* Batch / Del */}
                         <td className="px-1 py-0 text-center h-[16px] align-middle">
                           <div className="flex items-center justify-center gap-0.5 h-[15px]">
                             {row.batches && row.batches.length > 0 ? (
@@ -7655,40 +8317,109 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </table>
             </div>
 
-            {/* Combined Microsoft Access Record Navigator, Invoice Search & Customer History Strip */}
+            {/* Combined Microsoft Access Record Navigator, Invoice Search & Column Arrangement Strip */}
             <div className="ams-access-record-bar bg-slate-200 border-t border-slate-400 px-2 py-0.5 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-700 shrink-0">
-              {(selectedRowRange || selectedColKeys.length > 0) && (
-                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-sky-100 border border-sky-300 text-sky-900 font-bold">
-                  <span>
-                    {selectedColKeys.length > 0
-                      ? `Selected ${selectedColKeys.length} col(s): ${selectedColKeys
-                          .map((k) => SALES_COL_LABELS[k] || k)
-                          .join(', ')}`
-                      : `Selected ${
-                          Math.abs((selectedRowRange?.end ?? 0) - (selectedRowRange?.start ?? 0)) + 1
-                        } row(s)`}
-                  </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(selectedRowRange || selectedColKeys.length > 0) && (
+                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-sky-100 border border-sky-300 text-sky-900 font-bold">
+                    <span>
+                      {selectedColKeys.length > 0
+                        ? `Selected ${selectedColKeys.length} col(s): ${selectedColKeys
+                            .map((k) => SALES_COL_LABELS[k] || k)
+                            .join(', ')}`
+                        : `Selected ${
+                            Math.abs((selectedRowRange?.end ?? 0) - (selectedRowRange?.start ?? 0)) + 1
+                          } row(s)`}
+                    </span>
+                    {selectedColKeys.length > 0 && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={!canMoveSalesAccessLeft(selectedColKeys)}
+                          onClick={() => moveSalesAccessColsLeft(selectedColKeys)}
+                          title="Move selected column(s) left"
+                          className="px-1.5 py-0 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white cursor-pointer inline-flex items-center gap-0.5"
+                        >
+                          <ChevronLeft className="w-3 h-3" />
+                          <span>Move Left</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!canMoveSalesAccessRight(selectedColKeys)}
+                          onClick={() => moveSalesAccessColsRight(selectedColKeys)}
+                          title="Move selected column(s) right"
+                          className="px-1.5 py-0 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white cursor-pointer inline-flex items-center gap-0.5"
+                        >
+                          <span>Move Right</span>
+                          <ChevronRight className="w-3 h-3" />
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => requestDatasheetDeleteConfirm(selectedRowIndex)}
+                      className="px-1.5 py-0 rounded bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                    >
+                      Shift+Del
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedRowRange(null);
+                        rowSelectionAnchorRef.current = null;
+                        setSelectedColKeys([]);
+                        colSelectionAnchorRef.current = null;
+                      }}
+                      className="px-1 py-0 rounded bg-white border border-sky-300 text-sky-800 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-1 px-1.5 py-0 rounded bg-slate-100 border border-slate-300">
+                  <span className="font-bold text-slate-600">Cols:</span>
                   <button
                     type="button"
-                    onClick={() => requestDatasheetDeleteConfirm(selectedRowIndex)}
-                    className="px-1.5 py-0 rounded bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                    disabled={!canMoveSalesAccessLeft(selectedColKeys)}
+                    onClick={() => moveSalesAccessColsLeft(selectedColKeys)}
+                    title={
+                      selectedColKeys.length > 0
+                        ? 'Move selected column left'
+                        : 'Click a column header first, or drag any column header'
+                    }
+                    className="px-1 py-0 rounded bg-white hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-400 text-slate-800 font-bold cursor-pointer inline-flex items-center gap-0.5"
                   >
-                    Shift+Del
+                    <ChevronLeft className="w-2.5 h-2.5" />
+                    <span>Left</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedRowRange(null);
-                      rowSelectionAnchorRef.current = null;
-                      setSelectedColKeys([]);
-                      colSelectionAnchorRef.current = null;
-                    }}
-                    className="px-1 py-0 rounded bg-white border border-sky-300 text-sky-800 cursor-pointer"
+                    disabled={!canMoveSalesAccessRight(selectedColKeys)}
+                    onClick={() => moveSalesAccessColsRight(selectedColKeys)}
+                    title={
+                      selectedColKeys.length > 0
+                        ? 'Move selected column right'
+                        : 'Click a column header first, or drag any column header'
+                    }
+                    className="px-1 py-0 rounded bg-white hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-400 text-slate-800 font-bold cursor-pointer inline-flex items-center gap-0.5"
                   >
-                    Clear
+                    <span>Right</span>
+                    <ChevronRight className="w-2.5 h-2.5" />
                   </button>
+                  {isSalesAccessColsCustomized && (
+                    <button
+                      type="button"
+                      onClick={resetSalesAccessColOrder}
+                      title="Restore default Sales column arrangement"
+                      className="px-1 py-0 rounded bg-white hover:bg-amber-50 border border-slate-400 text-amber-800 font-bold cursor-pointer inline-flex items-center gap-0.5"
+                    >
+                      <RotateCcw className="w-2.5 h-2.5" />
+                      <span>Reset</span>
+                    </button>
+                  )}
                 </div>
-              )}
+              </div>
               <div className="flex flex-wrap items-center gap-1.5">
                 <div className="flex items-center gap-1">
                   <span className="font-bold text-[10px] text-slate-700 mr-0.5">Record:</span>
@@ -7774,7 +8505,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       {formatPKR(activeItemHistory.lastCustomerSale.unit_price)}
                     </span>
                     <span className="text-rose-700">
-                      ({Number(activeItemHistory.lastCustomerSale.discount_percent || 0)}% Disc)
+                      ({formatSequentialDiscountLabel(
+                        activeItemHistory.lastCustomerSale.discount_1_percent,
+                        activeItemHistory.lastCustomerSale.discount_2_percent,
+                        activeItemHistory.lastCustomerSale.discount_percent
+                      )} Disc)
                     </span>
                     <span className="text-slate-600">{formatAppDate(activeItemHistory.lastCustomerSale.invoice_date)}</span>
                     <button
@@ -7842,9 +8577,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               historyData={activeItemHistory}
               loading={historyLoading}
               onClose={() => setShowCompactHistoryPopup(false)}
-              onApplySaleRate={(rate, discPct) => {
+              onApplySaleRate={(rate, disc1Pct, disc2Pct = 0) => {
                 updateRowField(selectedRowIndex, 'unit_price', round2(rate));
-                updateRowField(selectedRowIndex, 'discount_percent', round2(discPct));
+                updateRowField(selectedRowIndex, 'discount_1_percent', clampDiscountPercent(disc1Pct));
+                updateRowField(selectedRowIndex, 'discount_2_percent', clampDiscountPercent(disc2Pct));
               }}
             />
           )}
@@ -8051,7 +8787,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   Reprint
                 </button>
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  readOnly
+                  tabIndex={-1}
+                  value={formattedInvoiceProfit}
+                  className="w-24 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-600 font-mono font-bold text-[11px] text-right text-white tabular-nums outline-none select-all"
+                />
                 <button
                   type="button"
                   onClick={() => setShowDiscardConfirm(true)}
@@ -8940,6 +9683,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             ? round2(it.wholesale_price || it.trade_price || it.retail_price)
             : round2(it.retail_price)
         }
+        getItemSalePrice={(it) =>
+          invoiceType === 'Wholesale'
+            ? round2(it.wholesale_price || it.trade_price || it.retail_price)
+            : round2(it.retail_price)
+        }
         getItemStock={(it) =>
           it.total_available_packs ??
           it.consolidated_stock_packs ??
@@ -9239,6 +9987,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   Number(updatedItem.purchase_price || 0) > 0
                     ? round2(updatedItem.purchase_price)
                     : r.lastPurchaseCostRate,
+                saved_cost_price_per_unit: null,
+                saved_fifo_batches_json: null,
               });
             })
           );

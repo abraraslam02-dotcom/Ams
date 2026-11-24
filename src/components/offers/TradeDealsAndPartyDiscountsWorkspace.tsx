@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
-import { formatAppDate, formatAppDateTime, replaceIsoDatesInText } from '../../utils/formatters';
+import { formatAppDate, formatAppDateTime, replaceIsoDatesInText, getPakistanDateISO } from '../../utils/formatters';
 
 export type OfferWorkspaceSubTab =
   | 'trade-offers'
@@ -96,7 +96,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
     discount_percent: 5,
     fixed_discount_amount: 0,
     bonus_quantity: 1,
-    start_date: new Date().toISOString().slice(0, 10),
+    start_date: getPakistanDateISO(),
     end_date: '2027-12-31',
     status: 'Active',
     remarks: '',
@@ -119,7 +119,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
     company_name: '',
     discount_percent: 2,
     fixed_discount_amount: 0,
-    start_date: new Date().toISOString().slice(0, 10),
+    start_date: getPakistanDateISO(),
     end_date: '2027-12-31',
     status: 'Active',
     remarks: '',
@@ -1862,7 +1862,7 @@ export const TradeDealsAndPartyDiscountsWorkspace: React.FC<{
                     documentNumber:
                       OFFER_REPORTS_LIST.find((r) => r.key === activeReportKey)?.label ||
                       'Offer & Discount Report',
-                    documentDate: new Date().toISOString().slice(0, 10),
+                    documentDate: getPakistanDateISO(),
                     customerName:
                       OFFER_REPORTS_LIST.find((r) => r.key === activeReportKey)?.label ||
                       'Offer & Discount Report',

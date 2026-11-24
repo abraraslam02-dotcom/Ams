@@ -35,7 +35,7 @@ import { printReportDocument } from '../../utils/printEngine';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { NavTabId } from '../layout/Sidebar';
 import { ReportZoomWrapper } from '../common/PreviewZoomControls';
-import { formatAppDate, formatAppDateTime } from '../../utils/formatters';
+import { formatAppDate, formatAppDateTime, getPakistanDateISO } from '../../utils/formatters';
 
 export type ClosingTabId =
   | 'closing-daily'
@@ -77,7 +77,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
   const [overview, setOverview] = useState<any>(null);
 
   // 1. Daily Closing state
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getPakistanDateISO();
   const [dailyDate, setDailyDate] = useState<string>(todayStr);
   const [dailyData, setDailyData] = useState<any>(null);
   const [actualPhysicalCash, setActualPhysicalCash] = useState<string>('');
@@ -2433,7 +2433,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                 payload={{
                   documentType: 'report',
                   documentNumber: 'Financial Closing History Register',
-                  documentDate: new Date().toISOString().slice(0, 10),
+                  documentDate: getPakistanDateISO(),
                   customerName: 'Financial Closing History Register',
                   totalAmount: 0,
                   paidAmount: 0,
@@ -2771,7 +2771,7 @@ export const ClosingManagementWorkspace: React.FC<ClosingManagementWorkspaceProp
                   payload={{
                     documentType: 'report',
                     documentNumber: `${selectedClosingDetail.closing_code} - ${selectedClosingDetail.closing_type} Closing Report`,
-                    documentDate: new Date().toISOString().slice(0, 10),
+                    documentDate: getPakistanDateISO(),
                     customerName: `${selectedClosingDetail.closing_code} Closing Report`,
                     totalAmount: 0,
                     paidAmount: 0,
