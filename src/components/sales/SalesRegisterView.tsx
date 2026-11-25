@@ -61,7 +61,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
   const fetchRegister = useCallback(async () => {
     try {
       setLoading(true);
-      const statusParam = mode === 'held_or_draft' ? 'held_or_draft' : 'completed';
+      const statusParam = mode === 'held_or_draft' ? 'held' : 'completed';
       const [salesRes, accRes] = await Promise.all([
         api.getSales({
           q,
@@ -152,7 +152,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
   const handleExportExcel = async () => {
     try {
       setExporting(true);
-      const statusParam = mode === 'held_or_draft' ? 'held_or_draft' : 'completed';
+      const statusParam = mode === 'held_or_draft' ? 'held' : 'completed';
       const res = await api.getSales({
         q,
         customerId,
@@ -193,7 +193,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
         setCustomExportOpen(true);
         return;
       }
-      const statusParam = mode === 'held_or_draft' ? 'held_or_draft' : 'completed';
+      const statusParam = mode === 'held_or_draft' ? 'held' : 'completed';
       const res = await api.getSales({
         q,
         customerId,

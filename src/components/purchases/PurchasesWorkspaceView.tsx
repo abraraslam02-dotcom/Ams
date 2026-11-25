@@ -7440,6 +7440,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </button>
                   <button
                     type="button"
+                    onClick={() => {
+                      const activeEl = document.activeElement as HTMLElement | null;
+                      setF9ItemMasterState({
+                        isOpen: true,
+                        editingItem: null,
+                        rowIndex: selectedPurchaseLineIndex,
+                        returnFocusId: activeEl?.id || '',
+                      });
+                    }}
+                    className="px-1.5 py-0 rounded bg-emerald-700 hover:bg-emerald-600 border border-emerald-500/60 text-white font-bold flex items-center gap-0.5 cursor-pointer"
+                    title="Open Item Registration to add a new item"
+                  >
+                    <Plus className="w-3 h-3 text-emerald-200" />
+                    <span>Item Registration</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={handlePreviewInvoice}
                     className="px-1.5 py-0 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                     title="Preview A4 Invoice (F4)"
@@ -8958,17 +8975,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               })()}
 
               {/* SECTION C (BOTTOM): COMPACT MS ACCESS CALCULATION & ACTION FOOTER */}
-              <div className="ams-pos-compact-chrome px-2.5 py-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1 shrink-0">
-                {/* Row 1: Essential Totals & Payment Settlement */}
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-1 tabular-nums">
+              <div className="ams-pos-compact-chrome px-3 py-2 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1.5 shrink-0">
+                {/* Row 1: Larger & Clearer Totals & Payment Settlement */}
+                <div className="ams-access-payment-totals flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-800 pb-1.5 tabular-nums">
                   <div className="flex flex-wrap items-center gap-2.5">
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Grand Total ({validLines.length}):</span>
-                      <span className="font-mono font-bold text-white">{formatPKR(grossTotal)}</span>
+                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 border border-slate-700">
+                      <span className="text-slate-300 font-bold">Grand Total ({validLines.length}):</span>
+                      <span className="font-mono font-black text-white ams-payment-amount-lg">
+                        {formatPKR(grossTotal)}
+                      </span>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-rose-400">Discount:</span>
-                      <span className="font-mono font-bold text-rose-300">-{formatPKR(totalDiscount)}</span>
+                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-950/35 border border-rose-500/40">
+                      <span className="text-rose-300 font-bold">Discount:</span>
+                      <span className="font-mono font-black text-rose-300 ams-payment-amount-lg">
+                        -{formatPKR(totalDiscount)}
+                      </span>
                       <NumericInput
                         step="0.01"
                         min="0"
@@ -8981,38 +9002,38 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         }}
                         placeholder="%"
                         title="Invoice Discount %"
-                        className="w-12 px-1 py-0 text-right rounded bg-slate-800 border border-slate-700 text-white font-mono"
+                        className="w-14 px-1.5 py-0.5 text-right rounded bg-slate-900 border border-slate-600 text-white font-mono font-bold"
                       />
                     </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Tax ({appliedAdvanceTaxRate}%):</span>
-                      <span className="font-mono font-bold text-amber-300">
+                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 border border-slate-700">
+                      <span className="text-slate-300 font-bold">Tax ({appliedAdvanceTaxRate}%):</span>
+                      <span className="font-mono font-black text-amber-300 ams-payment-amount-lg">
                         +{formatPKR(gstTotal + advanceTaxAmount)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-slate-400">Prev Bal ({previousBalanceType}):</span>
-                      <span className="font-mono font-semibold text-amber-300">
+                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 border border-amber-500/40">
+                      <span className="text-slate-300 font-bold">Prev Bal ({previousBalanceType}):</span>
+                      <span className="font-mono font-black text-amber-300 ams-payment-amount-lg">
                         {formatPKR(previousSupplierBalance)}
                       </span>
                     </div>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1">
-                      <span className="uppercase font-bold text-emerald-300">Net Amount:</span>
+                    <div className="px-3 py-1 rounded-md bg-emerald-500/20 border-2 border-emerald-400/60 flex items-center gap-1.5 shadow-xs">
+                      <span className="uppercase font-extrabold text-emerald-200">Net Amount:</span>
                       <span className="font-mono font-black text-emerald-300 ams-total-highlight">
                         {formatPKR(netInvoiceAmount)}
                       </span>
                     </div>
-                    <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1">
-                      <span className="uppercase font-bold text-sky-300">Payable:</span>
+                    <div className="px-3 py-1 rounded-md bg-sky-500/20 border-2 border-sky-400/60 flex items-center gap-1.5 shadow-xs">
+                      <span className="uppercase font-extrabold text-sky-200">Payable:</span>
                       <span className="font-mono font-black text-sky-300 ams-total-highlight">
                         {formatPKR(totalPayable)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1 bg-slate-800 px-1.5 py-0.5 rounded border border-emerald-500">
-                      <span className="uppercase font-bold text-emerald-300">Cash Paid:</span>
+                    <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-md border-2 border-emerald-500 shadow-xs">
+                      <span className="uppercase font-extrabold text-emerald-300">Cash Paid:</span>
                       <NumericInput
                         step="0.01"
                         min="0"
@@ -9022,18 +9043,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           setPaidAmountManuallyEdited(true);
                           setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
                         }}
-                        className="w-24 px-1 py-0 rounded bg-slate-900 border border-slate-700 text-right font-mono font-bold text-emerald-300 outline-none"
+                        className="ams-cash-received-input w-32 px-2 py-0.5 rounded bg-slate-950 border border-emerald-500/60 text-right font-mono font-black text-emerald-300 outline-none focus:border-emerald-400"
                       />
                       <button
                         type="button"
                         onClick={handleExactPurchasePayment}
-                        className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
+                        className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
                       >
                         Exact
                       </button>
                     </div>
-                    <div className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1">
-                      <span className="uppercase font-bold text-amber-300">Remaining:</span>
+                    <div className="px-3 py-1 rounded-md bg-amber-500/20 border-2 border-amber-400/60 flex items-center gap-1.5 shadow-xs">
+                      <span className="uppercase font-extrabold text-amber-200">Remaining:</span>
                       <span className="font-mono font-black text-amber-300 ams-total-highlight">
                         {formatPKR(remainingBalance)}
                       </span>
@@ -9078,26 +9099,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </button>
                     <button
                       type="button"
-                      disabled={exportingExcel}
-                      onClick={handleExportCurrentPurchaseToExcel}
-                      className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Export Purchase Invoice to Excel (.xlsx)"
-                    >
-                      <Download className="w-3 h-3" />
-                      <span>Excel</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={exportingExcel}
-                      onClick={() => handleOpenCustomPurchaseExcelExport(false)}
-                      className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Purchase Invoice → Custom Excel Export (Field Selection & Templates)"
-                    >
-                      <FileSpreadsheet className="w-3 h-3" />
-                      <span>Custom Excel Export</span>
-                    </button>
-                    <button
-                      type="button"
                       onClick={handlePreviewInvoice}
                       className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
                     >
@@ -9112,24 +9113,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     >
                       <PauseCircle className="w-3 h-3 text-amber-400" />
                       <span>Hold (F3)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSendPurchaseOrderSms}
-                      className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Send Order via SMS for Current Purchase Invoice"
-                    >
-                      <MessageSquare className="w-3 h-3 text-indigo-100" />
-                      <span>Send Order via SMS</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSendPurchaseOrderWhatsApp}
-                      className="px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white font-bold flex items-center gap-1 cursor-pointer"
-                      title="Send Order via WhatsApp for Current Purchase Invoice"
-                    >
-                      <MessageCircle className="w-3 h-3 text-green-100" />
-                      <span>Send Order via WhatsApp</span>
                     </button>
                   </div>
                   <div className="flex items-center gap-1">
@@ -10261,10 +10244,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         }}
       />
 
-      {f9ItemMasterState.isOpen && f9ItemMasterState.editingItem && (
+      {f9ItemMasterState.isOpen && (
         <ItemFormModal
           isOpen={f9ItemMasterState.isOpen}
           editingItem={f9ItemMasterState.editingItem}
+          onCompanyCreated={(companies) => {
+            if (Array.isArray(companies)) {
+              setCompanyMasterList(companies);
+            }
+          }}
           onClose={() => {
             const focusId = f9ItemMasterState.returnFocusId;
             setF9ItemMasterState((prev) => ({ ...prev, isOpen: false, editingItem: null }));
@@ -10277,10 +10265,48 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             }
           }}
           onSaved={(updatedItem: Item) => {
+            if (!updatedItem || !updatedItem.id) return;
+            const wasEditing = Boolean(f9ItemMasterState.editingItem);
             const focusId = f9ItemMasterState.returnFocusId;
-            setItems((prev) =>
-              prev.map((it) => (Number(it.id) === Number(updatedItem.id) ? updatedItem : it))
-            );
+
+            if (updatedItem.company_name && String(updatedItem.company_name).trim()) {
+              const trimmedCompany = String(updatedItem.company_name).trim();
+              setCompanyMasterList((prev) =>
+                prev.some((c) => c.toLowerCase() === trimmedCompany.toLowerCase())
+                  ? prev
+                  : [...prev, trimmedCompany].sort((a, b) => a.localeCompare(b))
+              );
+            }
+
+            setItems((prev) => {
+              const exists = prev.some((it) => Number(it.id) === Number(updatedItem.id));
+              if (exists) {
+                return prev.map((it) =>
+                  Number(it.id) === Number(updatedItem.id) ? ({ ...it, ...updatedItem } as Item) : it
+                );
+              }
+              return [updatedItem, ...prev];
+            });
+
+            // Hydrate server-side batch/stock fields for the newly registered or updated item
+            api
+              .fastSearchPurchaseItems(
+                String(updatedItem.item_code || updatedItem.item_name || ''),
+                20
+              )
+              .then((res) => {
+                const fetched: Item[] = res?.items || res?.data || [];
+                const hydrated = fetched.find((f) => Number(f.id) === Number(updatedItem.id));
+                if (hydrated) {
+                  setItems((prev) =>
+                    prev.map((it) =>
+                      Number(it.id) === Number(hydrated.id) ? ({ ...it, ...hydrated } as Item) : it
+                    )
+                  );
+                }
+              })
+              .catch(() => {});
+
             setLines((prevLines) =>
               prevLines.map((l) => {
                 if (Number(l.item_id) !== Number(updatedItem.id)) return l;
@@ -10376,7 +10402,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               })
             );
             setF9ItemMasterState((prev) => ({ ...prev, isOpen: false, editingItem: null }));
-            setFormSuccess(`Item "${updatedItem.item_name}" updated in Item Master.`);
+            setFormSuccess(
+              wasEditing
+                ? `Item "${updatedItem.item_name}" updated in Item Master.`
+                : `Item "${updatedItem.item_name}" [${updatedItem.item_code}] registered and ready for selection.`
+            );
             if (focusId) {
               window.setTimeout(() => {
                 const el = document.getElementById(focusId) as HTMLInputElement | null;

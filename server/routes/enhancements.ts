@@ -3439,9 +3439,12 @@ enhancementsRouter.post('/local-backup/upload-verify', authenticateToken, (req, 
     }
 
     const buf = Buffer.from(String(base64_data), 'base64');
+    const walBase64 = body.wal_base64 ? String(body.wal_base64) : '';
+    const walBuf = walBase64 ? Buffer.from(walBase64, 'base64') : undefined;
     const staged = stageAndVerifyUploadedBackup({
       originalFilename: String(filename),
       fileBuffer: buf,
+      walBuffer: walBuf,
       uploadedBy: user.username,
     });
 
@@ -3463,6 +3466,7 @@ enhancementsRouter.post('/local-backup/upload-verify', authenticateToken, (req, 
       salvage_warnings: staged.salvageWarnings || [],
       verification: {
         ...staged.verification,
+        backup_id: staged.backupId,
         staged_file_name: staged.stagedFilename,
         table_count: staged.verification.tablesCount,
         row_counts: staged.verification.coreCounts,

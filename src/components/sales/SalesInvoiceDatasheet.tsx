@@ -485,6 +485,24 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     } catch {}
   };
 
+  // Compact grouped controls state for MS Access Sales Form (Printer Group & Excel Group)
+  const [selectedPrintFormat, setSelectedPrintFormat] = useState<'a4' | '80mm' | '58mm'>('a4');
+  const [selectedExcelAction, setSelectedExcelAction] = useState<
+    'current' | 'custom' | 'import' | 'all'
+  >('current');
+
+  const handleRunGroupedExcelAction = () => {
+    if (selectedExcelAction === 'current') {
+      handleExportCurrentSaleToExcel();
+    } else if (selectedExcelAction === 'custom') {
+      handleOpenCustomExcelExport();
+    } else if (selectedExcelAction === 'import') {
+      setExcelImportOpen(true);
+    } else if (selectedExcelAction === 'all') {
+      handleExportAllSalesToExcel();
+    }
+  };
+
   // Bill Level Discounts & Advance Tax
   const [invoiceDiscountPercent, setInvoiceDiscountPercent] = useState<number>(0);
   const [invoiceDiscountAmount, setInvoiceDiscountAmount] = useState<number>(0);
@@ -508,6 +526,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [companyMasterList, setCompanyMasterList] = useState<string[]>([]);
   const [selectedCompanyFilter, setSelectedCompanyFilter] = useState<string>('');
   const [heldInvoices, setHeldInvoices] = useState<SalesInvoiceRecord[]>([]);
+  const [pendingInvoices, setPendingInvoices] = useState<SalesInvoiceRecord[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -620,6 +639,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [showCustomerLedgerChoicePopup, setShowCustomerLedgerChoicePopup] = useState<boolean>(false);
   const customerLedgerReqIdRef = useRef<number>(0);
   const [showHeldDrawer, setShowHeldDrawer] = useState<boolean>(false);
+  const [showPendingDrawer, setShowPendingDrawer] = useState<boolean>(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState<boolean>(false);
 
   // Find & Edit Existing Invoice Modal State
@@ -667,12 +687,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     editingSaleIdRef.current = editingSaleId;
   }, [editingSaleId]);
 
-  const isHeldStatus = (statusVal: unknown): boolean => {
+  const isOnlyHeldStatus = (statusVal: unknown): boolean => {
     const norm = String(statusVal || '').trim().toLowerCase();
-    return ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(norm);
+    return ['held', 'on_hold', 'on hold', 'hold'].includes(norm);
   };
 
-  // Fetch held/draft invoices directly from active database so a failure here cannot block the datasheet.
+  const isPendingStatus = (statusVal: unknown): boolean => {
+    const norm = String(statusVal || '').trim().toLowerCase();
+    return ['draft', 'pending'].includes(norm);
+  };
+
+  const isHeldStatus = (statusVal: unknown): boolean => {
+    return isOnlyHeldStatus(statusVal) || isPendingStatus(statusVal);
+  };
+
+  // Fetch held and pending invoices directly from active database into strictly separate lists.
   const refreshHeldInvoices = useCallback(async () => {
     try {
       const res: any = await api.getSales({ status: 'held_or_draft', exportAll: true });
@@ -685,9 +714,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         res?.data?.sales,
         res?.data?.invoices,
       ];
-      const list = (candidates.find(Array.isArray) || []).filter((inv: any) =>
-        isHeldStatus(inv?.status)
-      );
+      const allUnposted = candidates.find(Array.isArray) || [];
+      const list = allUnposted.filter((inv: any) => isOnlyHeldStatus(inv?.status));
+      const pendingList = allUnposted.filter((inv: any) => isPendingStatus(inv?.status));
       setHeldInvoices((prev) => {
         if (
           prev.length === list.length &&
@@ -702,13 +731,32 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }
         return list;
       });
+      setPendingInvoices((prev) => {
+        if (
+          prev.length === pendingList.length &&
+          prev.every(
+            (item: any, idx: number) =>
+              Number(item?.id) === Number(pendingList[idx]?.id) &&
+              String(item?.updated_at || '') === String(pendingList[idx]?.updated_at || '') &&
+              Number(item?.net_amount || 0) === Number(pendingList[idx]?.net_amount || 0)
+          )
+        ) {
+          return prev;
+        }
+        return pendingList;
+      });
     } catch (err) {
-      console.error('Unable to load held/draft sales invoices:', err);
+      console.error('Unable to load held/pending sales invoices:', err);
     }
   }, []);
 
   const openHeldDrawer = useCallback(async () => {
     setShowHeldDrawer(true);
+    await refreshHeldInvoices();
+  }, [refreshHeldInvoices]);
+
+  const openPendingDrawer = useCallback(async () => {
+    setShowPendingDrawer(true);
     await refreshHeldInvoices();
   }, [refreshHeldInvoices]);
 
@@ -775,7 +823,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       const heldCandidates = [heldRes?.data, heldRes?.sales, heldRes?.invoices, heldRes?.records, heldRes?.data?.data, heldRes?.data?.sales, heldRes?.data?.invoices];
       const heldList = heldCandidates.find(Array.isArray) || [];
-      setHeldInvoices(heldList.filter((inv: any) => isHeldStatus(inv?.status)));
+      setHeldInvoices(heldList.filter((inv: any) => isOnlyHeldStatus(inv?.status)));
+      setPendingInvoices(heldList.filter((inv: any) => isPendingStatus(inv?.status)));
 
       const activeSalesmen: SalesmanRecord[] = (smRes.data || []).map((sm: SalesmanRecord) => ({
         ...sm,
@@ -1504,6 +1553,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           setRows(ensureMinimumRows([]));
         }
         setShowHeldDrawer(false);
+        setShowPendingDrawer(false);
         setSuccessMsg(`Loaded Invoice ${inv.invoice_number || invId} into datasheet.`);
         if (onClearResume) onClearResume();
       } catch (err: unknown) {
@@ -3395,6 +3445,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       if (prevEditingId && targetStatus === 'completed') {
         localStorage.removeItem(ACTIVE_DRAFT_STORAGE_KEY);
         setHeldInvoices((prev) => prev.filter((h) => Number(h.id) !== Number(prevEditingId)));
+        setPendingInvoices((prev) => prev.filter((p) => Number(p.id) !== Number(prevEditingId)));
       }
 
       // Automatically dismiss any related WhatsApp/activity notification when invoice is saved or posted
@@ -3422,6 +3473,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           ? (wasEditing
               ? `Sales Invoice ${savedInvoice.invoice_number} successfully updated! Stock & Accounts reconciled.`
               : `Sales Invoice ${savedInvoice.invoice_number} confirmed! Stock & Customer Ledger Balance updated.`)
+          : targetStatus === 'draft'
+          ? `Invoice ${savedInvoice.invoice_number} saved as PENDING.`
           : `Invoice ${savedInvoice.invoice_number} saved as ${targetStatus.toUpperCase()}.`
       );
 
@@ -5189,45 +5242,39 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-300">
-          <button
-            type="button"
-            disabled={exportingExcel}
-            onClick={handleExportCurrentSaleToExcel}
-            className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-            title="Export Current Invoice (.xlsx)"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>{exportingExcel ? 'Exporting...' : 'Excel'}</span>
-          </button>
-          <button
-            type="button"
-            disabled={exportingExcel}
-            onClick={handleExportAllSalesToExcel}
-            className="px-2.5 py-1 rounded-lg bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-            title="Export All Saved Sales (.xlsx)"
-          >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>All Excel</span>
-          </button>
-          <button
-            type="button"
-            disabled={exportingExcel}
-            onClick={handleOpenCustomExcelExport}
-            className="px-2.5 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-            title="Sales Invoice → Custom Excel Export (Choose Fields & Saved Templates)"
-          >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Custom Excel</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setExcelImportOpen(true)}
-            className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-            title="Import Sales Invoices from Excel (.xlsx)"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>Import Excel</span>
-          </button>
+          {/* Compact Excel Group (Excel Export, Custom Excel Export, Excel Import, All Excel) */}
+          <div className="inline-flex items-center rounded-lg bg-slate-800 border border-slate-700 p-0.5 gap-1 shrink-0">
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400 ml-1.5 shrink-0" />
+            <select
+              value={selectedExcelAction}
+              onChange={(e) =>
+                setSelectedExcelAction(
+                  e.target.value as 'current' | 'custom' | 'import' | 'all'
+                )
+              }
+              aria-label="Excel Action Group"
+              className="bg-slate-900 text-white font-bold text-xs px-2 py-0.5 rounded border border-slate-700 focus:outline-none cursor-pointer"
+            >
+              <option value="current">Excel Export</option>
+              <option value="custom">Custom Excel Export</option>
+              <option value="import">Excel Import</option>
+              <option value="all">All Sales Excel</option>
+            </select>
+            <button
+              type="button"
+              disabled={exportingExcel && selectedExcelAction !== 'import'}
+              onClick={handleRunGroupedExcelAction}
+              className="px-2.5 py-0.5 rounded-md bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+              title="Execute selected Excel action"
+            >
+              {selectedExcelAction === 'import' ? (
+                <Upload className="w-3.5 h-3.5" />
+              ) : (
+                <Download className="w-3.5 h-3.5" />
+              )}
+              <span>{exportingExcel && selectedExcelAction !== 'import' ? 'Working...' : 'Go'}</span>
+            </button>
+          </div>
           <label
             className={`flex items-center gap-1 px-2 py-1 rounded-lg border font-bold cursor-pointer transition-colors ${
               allowNegativeStock
@@ -7174,6 +7221,23 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => {
+                  const activeEl = document.activeElement as HTMLElement | null;
+                  setF9ItemMasterState({
+                    isOpen: true,
+                    editingItem: null,
+                    rowIndex: selectedRowIndex,
+                    returnFocusId: activeEl?.id || '',
+                  });
+                }}
+                className="px-1.5 py-0 rounded bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-500/60 font-bold flex items-center gap-0.5 cursor-pointer"
+                title="Open Item Registration to add a new item"
+              >
+                <Plus className="w-3 h-3 text-emerald-200" />
+                Item Registration
+              </button>
+              <button
+                type="button"
                 onClick={() => setShowEditSearchModal(true)}
                 className="px-1.5 py-0 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                 title="Find & Edit Existing Invoice (Ctrl+E)"
@@ -8598,16 +8662,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           )}
 
           {/* ================= SECTION C (BOTTOM): COMPACT MS ACCESS CALCULATION & ACTION FOOTER ================= */}
-          <div className="ams-pos-compact-chrome px-2.5 py-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1 shrink-0">
-            {/* Row 1: Essential Totals & Payment Settlement */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-1 tabular-nums">
+          <div className="ams-pos-compact-chrome px-3 py-2 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1.5 shrink-0">
+            {/* Row 1: Slightly Larger & Clearer Payment & Total Settlement Section */}
+            <div className="ams-access-payment-totals flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-800 pb-1.5 tabular-nums">
               <div className="flex flex-wrap items-center gap-2.5">
                 <div className="flex items-center gap-1">
-                  <span className="text-slate-400">A/C:</span>
+                  <span className="text-slate-300 font-semibold">A/C:</span>
                   <select
                     value={paymentAccountId || ''}
                     onChange={(e) => setPaymentAccountId(Number(e.target.value))}
-                    className="px-1.5 py-0 rounded bg-slate-800 border border-slate-700 text-white font-semibold"
+                    className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-white font-semibold"
                   >
                     {financialAccounts.map((fa) => (
                       <option key={fa.id} value={fa.id}>
@@ -8616,13 +8680,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     ))}
                   </select>
                 </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Grand Total ({validRows.length}):</span>
-                  <span className="font-mono font-bold text-white">{formatPKR(grossAmount)}</span>
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 border border-slate-700">
+                  <span className="text-slate-300 font-bold">Grand Total ({validRows.length}):</span>
+                  <span className="font-mono font-black text-white ams-payment-amount-lg">
+                    {formatPKR(grossAmount)}
+                  </span>
                 </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-rose-400">Discount:</span>
-                  <span className="font-mono font-bold text-rose-300">-{formatPKR(totalDiscount)}</span>
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-950/35 border border-rose-500/40">
+                  <span className="text-rose-300 font-bold">Discount:</span>
+                  <span className="font-mono font-black text-rose-300 ams-payment-amount-lg">
+                    -{formatPKR(totalDiscount)}
+                  </span>
                   <NumericInput
                     value={invoiceDiscountPercent}
                     onChange={(e) => {
@@ -8630,7 +8698,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setInvoiceDiscountPercent(pct);
                       setInvoiceDiscountAmount(round2((subtotalAfterItemDisc * pct) / 100));
                     }}
-                    className="w-12 px-1 py-0 rounded bg-slate-800 border border-slate-700 font-mono text-right text-white"
+                    className="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-600 font-mono font-bold text-right text-white"
                     placeholder="%"
                     title="Invoice Discount %"
                   />
@@ -8640,41 +8708,43 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setInvoiceDiscountPercent(0);
                       setInvoiceDiscountAmount(Math.max(0, Number(e.target.value || 0)));
                     }}
-                    className="w-16 px-1 py-0 rounded bg-slate-800 border border-slate-700 font-mono text-right text-white"
+                    className="w-20 px-1.5 py-0.5 rounded bg-slate-900 border border-slate-600 font-mono font-bold text-right text-white"
                     placeholder="PKR"
                     title="Invoice Discount Amount"
                   />
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Cash Load:</span>
+                  <span className="text-slate-300 font-semibold">Cash Load:</span>
                   <NumericInput
                     value={deliveryCharges}
                     onChange={(e) => setDeliveryCharges(Math.max(0, Number(e.target.value || 0)))}
-                    className="w-16 px-1 py-0 rounded bg-slate-800 border border-slate-700 font-mono text-amber-300 text-right"
+                    className="w-18 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-600 font-mono font-bold text-amber-300 text-right"
                     title="Delivery / Cash Load Charges"
                   />
                 </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-slate-400">Prev Bal:</span>
-                  <span className="font-mono font-semibold text-amber-300">{formatPKR(prevCustomerBalance)}</span>
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 border border-amber-500/40">
+                  <span className="text-slate-300 font-bold">Prev Bal:</span>
+                  <span className="font-mono font-black text-amber-300 ams-payment-amount-lg">
+                    {formatPKR(prevCustomerBalance)}
+                  </span>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <div className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/40 flex items-center gap-1">
-                  <span className="uppercase font-bold text-emerald-300">Net Amount:</span>
+                <div className="px-3 py-1 rounded-md bg-emerald-500/20 border-2 border-emerald-400/60 flex items-center gap-1.5 shadow-xs">
+                  <span className="uppercase font-extrabold text-emerald-200">Net Amount:</span>
                   <span className="font-mono font-black text-emerald-300 ams-total-highlight">
                     {formatPKR(netInvoiceAmount)}
                   </span>
                 </div>
-                <div className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/40 flex items-center gap-1">
-                  <span className="uppercase font-bold text-sky-300">Receivable:</span>
+                <div className="px-3 py-1 rounded-md bg-sky-500/20 border-2 border-sky-400/60 flex items-center gap-1.5 shadow-xs">
+                  <span className="uppercase font-extrabold text-sky-200">Receivable:</span>
                   <span className="font-mono font-black text-sky-300 ams-total-highlight">
                     {formatPKR(totalReceivable)}
                   </span>
                 </div>
-                <div className="flex items-center gap-1 bg-slate-800 px-1.5 py-0.5 rounded border border-emerald-500">
-                  <span className="uppercase font-bold text-emerald-300">Cash Rec:</span>
+                <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1 rounded-md border-2 border-emerald-500 shadow-xs">
+                  <span className="uppercase font-extrabold text-emerald-300">Cash Rec:</span>
                   <NumericInput
                     value={paidAmountInput}
                     displayZero={Boolean(editingSaleId) || paidAmountInput.trim() === '0'}
@@ -8682,18 +8752,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
                     }}
-                    className="w-24 px-1 py-0 rounded bg-slate-900 border border-slate-700 text-right font-mono font-bold text-emerald-300 outline-none"
+                    className="ams-cash-received-input w-32 px-2 py-0.5 rounded bg-slate-950 border border-emerald-500/60 text-right font-mono font-black text-emerald-300 outline-none focus:border-emerald-400"
                   />
                   <button
                     type="button"
                     onClick={handleExactCash}
-                    className="px-1.5 py-0 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
+                    className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold cursor-pointer"
                   >
                     Exact
                   </button>
                 </div>
-                <div className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 flex items-center gap-1">
-                  <span className="uppercase font-bold text-amber-300">
+                <div className="px-3 py-1 rounded-md bg-amber-500/20 border-2 border-amber-400/60 flex items-center gap-1.5 shadow-xs">
+                  <span className="uppercase font-extrabold text-amber-200">
                     {paidAmount >= totalReceivable ? 'Change:' : 'Remaining:'}
                   </span>
                   <span className="font-mono font-black text-amber-300 ams-total-highlight">
@@ -8703,112 +8773,111 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            {/* Row 2: Compact Action Buttons Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-1">
-              <div className="flex flex-wrap items-center gap-1">
+            {/* Row 2: Compact Action Buttons Bar (Primary Save/Hold on Left, Grouped Printer & Document Controls on Right) */}
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => handleSaveInvoice('completed')}
-                  className={`px-2.5 py-0.5 rounded ${
+                  className={`px-3 py-0.5 rounded ${
                     editingSaleId ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'
                   } text-white font-black flex items-center gap-1 cursor-pointer`}
                 >
-                  <Save className="w-3 h-3" />
+                  <Save className="w-3.5 h-3.5" />
                   {editingSaleId ? 'Update (Ctrl+S)' : 'Save (Ctrl+S)'}
                 </button>
                 <button
                   type="button"
                   disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed', 'a4')}
-                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <Printer className="w-3 h-3 text-emerald-400" />
-                  Save &amp; A4
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed', '80mm')}
-                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <Printer className="w-3 h-3 text-teal-400" />
-                  80mm
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportCurrentInvoicePdf}
-                  className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                  title="Export this invoice in 80mm thermal PDF format"
-                >
-                  <Download className="w-3 h-3" />
-                  <span>Export PDF</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleSaveInvoice('completed', '58mm')}
-                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <Printer className="w-3 h-3 text-amber-400" />
-                  58mm
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
                   onClick={() => handleSaveInvoice('held')}
-                  className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  className="px-2.5 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <PauseCircle className="w-3 h-3" />
+                  <PauseCircle className="w-3.5 h-3.5" />
                   Hold (F9)
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleOpenCurrentInvoicePreview('a4')}
-                  className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  disabled={submitting}
+                  onClick={() => {
+                    const hasActiveItems = rows.some((r) => r.item_id !== null);
+                    if (hasActiveItems) {
+                      handleSaveInvoice('draft');
+                    } else {
+                      openPendingDrawer();
+                    }
+                  }}
+                  title="Save current invoice to Pending, or click when empty (or click count) to open Pending Invoices list"
+                  className="px-2.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 cursor-pointer"
                 >
-                  <Eye className="w-3 h-3" />
-                  Print Preview
-                </button>
-                <button
-                  type="button"
-                  disabled={exportingExcel}
-                  onClick={handleExportCurrentSaleToExcel}
-                  className="px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                  title="Export Sales Invoice to Excel (.xlsx)"
-                >
-                  <Download className="w-3 h-3" />
-                  Excel
-                </button>
-                <button
-                  type="button"
-                  disabled={exportingExcel}
-                  onClick={handleOpenCustomExcelExport}
-                  className="px-2 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-1 cursor-pointer"
-                  title="Sales Invoice → Custom Excel Export (Field Selection & Templates)"
-                >
-                  <FileSpreadsheet className="w-3 h-3" />
-                  Custom Excel Export
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setExcelImportOpen(true)}
-                  className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer"
-                  title="Import Sales Invoices from Excel (.xlsx)"
-                >
-                  <Upload className="w-3 h-3" />
-                  Import Excel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleReprintLastInvoice}
-                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <Printer className="w-3 h-3" />
-                  Reprint
+                  <PauseCircle className="w-3.5 h-3.5" />
+                  <span>Pending</span>
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openPendingDrawer();
+                    }}
+                    title="Open Pending Invoices List"
+                    className="ml-0.5 px-1 py-0 rounded bg-indigo-800/90 hover:bg-indigo-950 text-indigo-100 text-[10px] font-mono"
+                  >
+                    ({pendingInvoices.length})
+                  </span>
                 </button>
               </div>
-              <div className="flex items-center gap-1.5">
+
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                {/* Printer Group: Format Combo Box (A4 / Thermal 80mm / Thermal 58mm) + Print / Preview / PDF / Reprint */}
+                <div className="inline-flex items-center gap-1 bg-slate-800/90 border border-slate-700 rounded px-1.5 py-0.5">
+                  <Printer className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <select
+                    value={selectedPrintFormat}
+                    onChange={(e) => setSelectedPrintFormat(e.target.value as 'a4' | '80mm' | '58mm')}
+                    aria-label="Printer Format"
+                    className="px-1.5 py-0 rounded bg-slate-900 border border-slate-600 text-white font-bold cursor-pointer"
+                  >
+                    <option value="a4">A4</option>
+                    <option value="80mm">Thermal 80mm</option>
+                    <option value="58mm">Thermal 58mm</option>
+                  </select>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => handleSaveInvoice('completed', selectedPrintFormat)}
+                    className="px-2.5 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                    title="Save and Print in selected format"
+                  >
+                    <Printer className="w-3 h-3" />
+                    Print
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenCurrentInvoicePreview(selectedPrintFormat)}
+                    className="px-2 py-0.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold flex items-center gap-1 cursor-pointer"
+                    title="Print Preview in selected format"
+                  >
+                    <Eye className="w-3 h-3" />
+                    Preview
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportCurrentInvoicePdf}
+                    className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-sky-200 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
+                    title="Export this invoice in 80mm thermal PDF format"
+                  >
+                    <Download className="w-3 h-3" />
+                    PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleReprintLastInvoice}
+                    className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-blue-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
+                    title="Reprint last saved invoice"
+                  >
+                    <Printer className="w-3 h-3" />
+                    Reprint
+                  </button>
+                </div>
+
                 <input
                   type="text"
                   readOnly
@@ -9338,13 +9407,13 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         </div>
       )}
 
-      {/* ================= MODAL 3: HELD / DRAFT INVOICES DRAWER ================= */}
+      {/* ================= MODAL 3: HELD INVOICES DRAWER ================= */}
       {showHeldDrawer && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl border border-slate-200 shadow-2xl w-full max-w-2xl p-5 text-xs space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <h3 className="text-sm font-bold text-slate-900">
-                Held & Draft Sales Invoices ({heldInvoices.length})
+                Held Sales Invoices ({heldInvoices.length})
               </h3>
               <button
                 type="button"
@@ -9371,7 +9440,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   {heldInvoices.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="p-5 text-center text-slate-400">
-                        No held or draft invoices currently saved.
+                        No held invoices currently saved.
                       </td>
                     </tr>
                   ) : (
@@ -9402,6 +9471,99 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               handleResumeInvoice(h.id);
                             }}
                             className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                          >
+                            Resume
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL 3B: PENDING INVOICES DRAWER (SEPARATE FROM HOLD LIST) ================= */}
+      {showPendingDrawer && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-2xl w-full max-w-2xl p-5 text-xs space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-sm font-bold text-slate-900">
+                Pending Sales Invoices ({pendingInvoices.length})
+              </h3>
+              <div className="flex items-center gap-2">
+                {rows.some((r) => r.item_id !== null) && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={async () => {
+                      setShowPendingDrawer(false);
+                      await handleSaveInvoice('draft');
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+                  >
+                    + Save Current Invoice to Pending
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowPendingDrawer(false)}
+                  className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-80 overflow-y-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-left border-collapse text-[11px]">
+                <thead className="bg-slate-900 text-white">
+                  <tr>
+                    <th className="px-3 py-2">Invoice #</th>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Customer</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2 text-right">Net Amount</th>
+                    <th className="px-3 py-2 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingInvoices.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-5 text-center text-slate-400">
+                        No pending invoices currently saved.
+                      </td>
+                    </tr>
+                  ) : (
+                    pendingInvoices.map((p) => (
+                      <tr
+                        key={p.id}
+                        onClick={() => handleResumeInvoice(p.id)}
+                        onDoubleClick={() => handleResumeInvoice(p.id)}
+                        title="Click or double-click to reopen this pending invoice in datasheet"
+                        className="border-b border-slate-100 cursor-pointer hover:bg-indigo-50/70 transition-colors"
+                      >
+                        <td className="px-3 py-2 font-mono font-bold text-slate-900">{p.invoice_number}</td>
+                        <td className="px-3 py-2 font-mono text-slate-700">{formatAppDate(p.invoice_date)}</td>
+                        <td className="px-3 py-2 font-semibold text-slate-900">
+                          {p.customer_name || 'Walk-in Cash Customer'}
+                        </td>
+                        <td className="px-3 py-2 uppercase font-bold text-indigo-700">
+                          PENDING
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
+                          {formatPKR(p.net_total)}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleResumeInvoice(p.id);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
                           >
                             Resume
                           </button>
@@ -9927,10 +10089,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }}
       />
 
-      {/* ================= MODAL 12: F9 EDIT SELECTED ITEM IN ITEM MASTER ================= */}
+      {/* ================= MODAL 12: F9 EDIT SELECTED ITEM OR ADD NEW ITEM IN ITEM MASTER ================= */}
       <ItemFormModal
         isOpen={f9ItemMasterState.isOpen}
         editingItem={f9ItemMasterState.editingItem}
+        onCompanyCreated={(companies) => {
+          if (Array.isArray(companies)) {
+            setCompanyMasterList(companies);
+          }
+        }}
         onClose={() => {
           const focusId = f9ItemMasterState.returnFocusId;
           setF9ItemMasterState((prev) => ({ ...prev, isOpen: false, editingItem: null }));
@@ -9944,46 +10111,147 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }}
         onSaved={(updatedItem) => {
           if (!updatedItem || !updatedItem.id) return;
+          const wasEditing = Boolean(f9ItemMasterState.editingItem);
           const uAny = updatedItem as any;
-          setCatalogItems((prev) =>
-            prev.map((c) =>
-              Number(c.id) === Number(updatedItem.id)
-                ? {
-                    ...c,
-                    item_code: String(updatedItem.item_code || c.item_code),
-                    company_name: String(updatedItem.company_name || c.company_name),
-                    item_name: String(updatedItem.item_name || c.item_name),
-                    generic_name: String(updatedItem.generic_name || c.generic_name || ''),
-                    category: String(updatedItem.category || c.category || 'Tablet'),
-                    packing: String(updatedItem.packing || c.packing || '1x1'),
-                    barcode: String(updatedItem.barcode || c.barcode || ''),
-                    purchase_price: Number(updatedItem.purchase_price || 0),
-                    trade_price: Number(updatedItem.trade_price || 0),
-                    wholesale_price: Number(updatedItem.wholesale_price || 0),
-                    retail_price: Number(updatedItem.retail_price || 0),
-                    loose_rate: Number(updatedItem.loose_rate || 0),
-                    discount_percent: Number(updatedItem.discount_percent || 0),
-                    tax_type: updatedItem.tax_type || 'percentage',
-                    tax_value: Number(updatedItem.tax_value ?? updatedItem.tax_percent ?? 0),
-                    tax_percent: Number(updatedItem.tax_percent || 0),
-                    minimum_stock: Number(updatedItem.minimum_stock || 0),
-                    rack_number: String(updatedItem.rack_number || ''),
-                    strips_per_box: Number(uAny.strips_per_box || c.strips_per_box || 1),
-                    tablets_per_strip: Number(
-                      uAny.tablets_per_strip || uAny.units_per_strip || c.tablets_per_strip || c.units_per_strip || 1
-                    ),
-                    units_per_strip: Number(
-                      uAny.tablets_per_strip || uAny.units_per_strip || c.units_per_strip || 1
-                    ),
-                    units_per_pack: Number(uAny.units_per_pack || c.units_per_pack || 1),
-                    purchase_unit: uAny.purchase_unit || c.purchase_unit || 'Box',
-                    has_variants: Number(updatedItem.has_variants || 0),
-                    image_url: updatedItem.image_url ?? c.image_url,
-                    thumbnail_url: updatedItem.thumbnail_url ?? c.thumbnail_url,
-                  }
-                : c
-            )
-          );
+
+          if (updatedItem.company_name && String(updatedItem.company_name).trim()) {
+            const trimmedCompany = String(updatedItem.company_name).trim();
+            setCompanyMasterList((prev) =>
+              prev.some((c) => c.toLowerCase() === trimmedCompany.toLowerCase())
+                ? prev
+                : [...prev, trimmedCompany].sort((a, b) => a.localeCompare(b))
+            );
+          }
+
+          setCatalogItems((prev) => {
+            const exists = prev.some((c) => Number(c.id) === Number(updatedItem.id));
+            if (exists) {
+              return prev.map((c) =>
+                Number(c.id) === Number(updatedItem.id)
+                  ? {
+                      ...c,
+                      item_code: String(updatedItem.item_code || c.item_code),
+                      company_name: String(updatedItem.company_name || c.company_name),
+                      item_name: String(updatedItem.item_name || c.item_name),
+                      generic_name: String(updatedItem.generic_name || c.generic_name || ''),
+                      category: String(updatedItem.category || c.category || 'Tablet'),
+                      packing: String(updatedItem.packing || c.packing || '1x1'),
+                      barcode: String(updatedItem.barcode || c.barcode || ''),
+                      purchase_price: Number(updatedItem.purchase_price || 0),
+                      trade_price: Number(updatedItem.trade_price || 0),
+                      wholesale_price: Number(updatedItem.wholesale_price || 0),
+                      retail_price: Number(updatedItem.retail_price || 0),
+                      loose_rate: Number(updatedItem.loose_rate || 0),
+                      discount_percent: Number(updatedItem.discount_percent || 0),
+                      tax_type: updatedItem.tax_type || 'percentage',
+                      tax_value: Number(updatedItem.tax_value ?? updatedItem.tax_percent ?? 0),
+                      tax_percent: Number(updatedItem.tax_percent || 0),
+                      minimum_stock: Number(updatedItem.minimum_stock || 0),
+                      rack_number: String(updatedItem.rack_number || ''),
+                      strips_per_box: Number(uAny.strips_per_box || c.strips_per_box || 1),
+                      tablets_per_strip: Number(
+                        uAny.tablets_per_strip || uAny.units_per_strip || c.tablets_per_strip || c.units_per_strip || 1
+                      ),
+                      units_per_strip: Number(
+                        uAny.tablets_per_strip || uAny.units_per_strip || c.units_per_strip || 1
+                      ),
+                      units_per_pack: Number(uAny.units_per_pack || c.units_per_pack || 1),
+                      purchase_unit: uAny.purchase_unit || c.purchase_unit || 'Box',
+                      has_variants: Number(updatedItem.has_variants || 0),
+                      image_url: updatedItem.image_url ?? c.image_url,
+                      thumbnail_url: updatedItem.thumbnail_url ?? c.thumbnail_url,
+                    }
+                  : c
+              );
+            }
+
+            const unitsPerPack = Math.max(1, Number(uAny.units_per_pack || 1));
+            const retailPrice = Number(updatedItem.retail_price || 0);
+            const wholesalePrice = Number(
+              updatedItem.wholesale_price || updatedItem.trade_price || retailPrice || 0
+            );
+            const purchasePrice = Number(updatedItem.purchase_price || 0);
+            const looseRate =
+              Number(updatedItem.loose_rate || 0) > 0
+                ? Number(updatedItem.loose_rate)
+                : round2(retailPrice / unitsPerPack);
+            const openingStockPacks = Number(updatedItem.opening_stock || 0);
+            const openingStockUnits = openingStockPacks * unitsPerPack;
+
+            const newCatalogEntry: FastSearchItem = {
+              id: Number(updatedItem.id),
+              item_code: String(updatedItem.item_code || ''),
+              company_name: String(updatedItem.company_name || ''),
+              item_name: String(updatedItem.item_name || ''),
+              generic_name: String(updatedItem.generic_name || ''),
+              category: String(updatedItem.category || 'Tablet'),
+              packing: String(updatedItem.packing || '1x1'),
+              barcode: String(updatedItem.barcode || ''),
+              purchase_price: purchasePrice,
+              trade_price: Number(updatedItem.trade_price || 0),
+              wholesale_price: wholesalePrice,
+              retail_price: retailPrice,
+              discount_percent: Number(updatedItem.discount_percent || 0),
+              tax_type: updatedItem.tax_type || 'percentage',
+              tax_value: Number(updatedItem.tax_value ?? updatedItem.tax_percent ?? 0),
+              tax_percent: Number(updatedItem.tax_percent || 0),
+              opening_stock: openingStockPacks,
+              minimum_stock: Number(updatedItem.minimum_stock || 0),
+              rack_number: String(updatedItem.rack_number || ''),
+              status: String(updatedItem.status || 'Active'),
+              carton: uAny.carton ?? null,
+              boxes_per_carton: uAny.boxes_per_carton ?? null,
+              strips_per_box: Number(uAny.strips_per_box || 1),
+              tablets_per_strip: Number(uAny.tablets_per_strip || uAny.units_per_strip || 1),
+              units_per_strip: Number(uAny.tablets_per_strip || uAny.units_per_strip || 1),
+              units_per_pack: unitsPerPack,
+              purchase_unit: uAny.purchase_unit || 'Box',
+              loose_rate: looseRate,
+              retail_loose_rate: looseRate,
+              wholesale_loose_rate: round2(wholesalePrice / unitsPerPack),
+              weighted_avg_pack_cost: purchasePrice > 0 ? purchasePrice : null,
+              applicable_pack_cost: purchasePrice > 0 ? purchasePrice : null,
+              has_valid_cost: purchasePrice > 0,
+              cost_source: purchasePrice > 0 ? 'item_pprice' : 'none',
+              cost_price_per_unit: purchasePrice > 0 ? purchasePrice / unitsPerPack : 0,
+              total_available_units: openingStockUnits,
+              total_available_packs: openingStockPacks,
+              batch_number: 'OPENING',
+              expiry_date: '2028-12-31',
+              default_batch: {
+                inventory_id: null,
+                batch_number: 'OPENING',
+                expiry_date: '2028-12-31',
+                available_packs: openingStockPacks,
+                available_units: openingStockUnits,
+              },
+              batches: [],
+              has_variants: Number(updatedItem.has_variants || 0),
+              active_variant_count: Array.isArray(updatedItem.variants)
+                ? updatedItem.variants.length
+                : 0,
+              consolidated_stock_packs: openingStockPacks,
+              variants: Array.isArray(updatedItem.variants) ? updatedItem.variants : [],
+              image_url: updatedItem.image_url ?? null,
+              thumbnail_url: updatedItem.thumbnail_url ?? null,
+            };
+
+            return [newCatalogEntry, ...prev];
+          });
+
+          // Hydrate server-side batch/stock fields for the newly registered or updated item
+          api
+            .fastSearchSalesItems(String(updatedItem.item_code || updatedItem.item_name || ''), 20)
+            .then((res) => {
+              const fetched: FastSearchItem[] = res?.data || res?.items || [];
+              const hydrated = fetched.find((f) => Number(f.id) === Number(updatedItem.id));
+              if (hydrated) {
+                setCatalogItems((prev) =>
+                  prev.map((c) => (Number(c.id) === Number(hydrated.id) ? { ...c, ...hydrated } : c))
+                );
+              }
+            })
+            .catch(() => {});
 
           setRows((prev) =>
             prev.map((r) => {
@@ -10047,7 +10315,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           );
 
           setSuccessMsg(
-            `Item "${updatedItem.item_name}" [${updatedItem.item_code}] updated in Item Master.`
+            wasEditing
+              ? `Item "${updatedItem.item_name}" [${updatedItem.item_code}] updated in Item Master.`
+              : `Item "${updatedItem.item_name}" [${updatedItem.item_code}] registered and ready for selection.`
           );
         }}
       />

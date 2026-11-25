@@ -14,6 +14,7 @@ import {
   ArrowRightLeft,
   WifiOff,
   FolderOpen,
+  Upload,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { api, getStoredAuthToken } from '../../services/api';
@@ -918,6 +919,24 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
                 >
                   <RefreshCw className={`w-4 h-4 ${runningBackupSync ? 'animate-spin' : ''}`} />
                   <span>{runningBackupSync ? 'Running Backup & Sync...' : 'Backup & Sync Now'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const panel = document.getElementById('restore-from-db-panel');
+                    if (panel) {
+                      panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    const fileInput = document.getElementById('local-backup-file-input') as HTMLInputElement | null;
+                    if (fileInput) {
+                      fileInput.click();
+                    }
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs flex items-center gap-2 shadow-xs cursor-pointer"
+                >
+                  <Upload className="w-4 h-4 text-sky-400" />
+                  <span>Restore from .db File</span>
                 </button>
               </div>
             </div>

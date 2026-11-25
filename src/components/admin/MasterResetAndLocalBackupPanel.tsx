@@ -44,6 +44,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
 
   // Restore from Local Hard Drive state (No email OTP required — Super Admin direct verified restore)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedWalFile, setSelectedWalFile] = useState<File | null>(null);
   const [verifyingUpload, setVerifyingUpload] = useState(false);
   const [stagedBackup, setStagedBackup] = useState<Record<string, any> | null>(null);
   const [restoreConfirmationText, setRestoreConfirmationText] = useState('');
@@ -274,15 +275,27 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     }
   };
 
-  // Part 15: Upload & Verify Local .db or .ams.json Backup File (Supports Offline Restoration)
-  const handleVerifyLocalBackupFile = async (file: File) => {
+  const fileToBase64 = async (file: File): Promise<string> => {
+    const arrayBuf = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuf);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
+  // Part 15: Upload & Verify Local .db or .ams.json Backup File (Supports Corrupted .db Auto-Repair & Optional -wal)
+  const handleVerifyLocalBackupFile = async (file: File, walFileOverride?: File | null) => {
+    const activeWal = walFileOverride !== undefined ? walFileOverride : selectedWalFile;
     setSelectedFile(file);
     setVerifyingUpload(true);
     setStagedBackup(null);
     setBanner(null);
     try {
       // Check if it's an offline .ams.json snapshot or JSON backup
-      if (file.name.endsWith('.json')) {
+      if (file.name.toLowerCase().endsWith('.json')) {
         const text = await file.text();
         const parsed = JSON.parse(text);
         if (!parsed || parsed.format !== 'AMS_LOCAL_SNAPSHOT_V1' || typeof parsed.stores !== 'object') {
@@ -307,14 +320,8 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
         return;
       }
 
-      const arrayBuf = await file.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuf);
-      let binary = '';
-      const chunkSize = 0x8000;
-      for (let i = 0; i < bytes.length; i += chunkSize) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-      }
-      const base64Data = btoa(binary);
+      const base64Data = await fileToBase64(file);
+      const walBase64 = activeWal ? await fileToBase64(activeWal) : undefined;
 
       const res = await fetch('/api/enhancements/local-backup/upload-verify', {
         method: 'POST',
@@ -322,19 +329,31 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
         body: JSON.stringify({
           file_name: file.name,
           file_base64: base64Data,
+          ...(walBase64 ? { wal_base64: walBase64 } : {}),
         }),
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data: Record<string, any> = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        throw new Error(
+          `Server returned unexpected response (HTTP ${res.status}). Ensure the .db file is under 100 MB and try again.`
+        );
+      }
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Backup file failed SQLite integrity verification');
       }
-      setStagedBackup(data.verification);
+      setStagedBackup({
+        ...data.verification,
+        backup_id: data.backup_id ?? data.verification?.backup_id,
+      });
       setRestoreConfirmationText('');
       setBanner({
         type: 'success',
         message: data.repaired_from_corruption
-          ? `Corrupted backup "${file.name}" was automatically repaired & verified (${data.repair_method || 'SQLite Salvage'})! Recovered ${data.verification.row_counts?.items ?? 0} Items, ${data.verification.row_counts?.sales ?? 0} Sales, ${data.verification.row_counts?.purchases ?? 0} Purchases, ${data.verification.row_counts?.accounts ?? 0} Accounts. Review counts below and type "RESTORE DATA" to restore.`
-          : `Backup file "${file.name}" verified! SQLite Integrity: OK (${data.verification.table_count} tables). Type "RESTORE DATA" below to restore directly without OTP.`,
+          ? `Backup "${file.name}" was automatically repaired & verified (${data.repair_method || 'SQLite Salvage'})! Recovered ${data.verification.row_counts?.items ?? 0} Items, ${data.verification.row_counts?.sales ?? 0} Sales, ${data.verification.row_counts?.purchases ?? 0} Purchases, ${data.verification.row_counts?.accounts ?? 0} Accounts. Review counts below and type "RESTORE DATA" to restore.`
+          : `Backup file "${file.name}" verified! SQLite Integrity: OK (${data.verification.table_count} tables). Type "RESTORE DATA" below to restore directly.`,
       });
     } catch (err: unknown) {
       setBanner({
@@ -660,27 +679,31 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
             </div>
           </div>
 
-          {/* Right: RESTORE FROM LOCAL BACKUP */}
-          <div className="lg:col-span-6 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
+          {/* Right: RESTORE FROM .DB BACKUP FILE */}
+          <div
+            id="restore-from-db-panel"
+            className="lg:col-span-6 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4"
+          >
             <div className="border-b border-slate-100 pb-3">
               <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
                 <Upload className="w-4 h-4 text-sky-600" />
-                RESTORE FROM LOCAL BACKUP
+                RESTORE DATABASE FROM .DB FILE
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Browse a <code className="font-mono">.db</code> or <code className="font-mono">.ams.json</code> backup file from your computer hard drive—or pick a verified snapshot on the left—to restore directly as Super Admin without email verification codes.
+                Browse any <code className="font-mono">.db</code>, <code className="font-mono">.sqlite</code>, <code className="font-mono">.db.gz</code>, or <code className="font-mono">.ams.json</code> backup file from your computer—corrupted SQLite files are automatically repaired &amp; verified before restoring.
               </p>
             </div>
 
-            <div className="border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center space-y-2 bg-slate-50/60">
+            <div className="border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center space-y-2.5 bg-slate-50/60">
               <input
                 type="file"
-                accept=".db,.sqlite,.json"
+                accept=".db,.sqlite,.sqlite3,.gz,.bak,.json"
                 id="local-backup-file-input"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) handleVerifyLocalBackupFile(f);
+                  e.target.value = '';
+                  if (f) void handleVerifyLocalBackupFile(f);
                 }}
               />
               <label
@@ -689,13 +712,49 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
               >
                 <FolderOpen className="w-4 h-4 text-sky-400" />
                 {verifyingUpload
-                  ? 'Verifying Backup Integrity...'
-                  : 'RESTORE FROM LOCAL BACKUP (Browse .db or .ams.json File)'}
+                  ? 'Verifying & Repairing .db File...'
+                  : 'RESTORE FROM .DB FILE (Browse .db / .sqlite / .ams.json)'}
               </label>
               <div className="text-[11px] text-slate-500">
                 {selectedFile
                   ? `Selected: ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`
-                  : 'Select an Abrar_Backup (.db) or Offline Snapshot (.ams.json) file from your laptop'}
+                  : 'Select your Abrar_Backup (.db) or ams_medical.db file from your computer'}
+              </div>
+
+              {/* Optional companion -wal file attachment for WAL-mode SQLite backups */}
+              <div className="pt-2 border-t border-slate-200/80 flex flex-wrap items-center justify-center gap-2 text-[11px]">
+                <input
+                  type="file"
+                  accept=".db-wal,.wal"
+                  id="local-backup-wal-input"
+                  className="hidden"
+                  onChange={(e) => {
+                    const wf = e.target.files?.[0] || null;
+                    e.target.value = '';
+                    setSelectedWalFile(wf);
+                    if (wf && selectedFile) {
+                      void handleVerifyLocalBackupFile(selectedFile, wf);
+                    }
+                  }}
+                />
+                <label
+                  htmlFor="local-backup-wal-input"
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 font-semibold cursor-pointer"
+                >
+                  {selectedWalFile ? `Attached WAL: ${selectedWalFile.name}` : 'Optional: Attach Companion -wal File'}
+                </label>
+                {selectedWalFile && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedWalFile(null);
+                      if (selectedFile) void handleVerifyLocalBackupFile(selectedFile, null);
+                    }}
+                    className="text-rose-600 font-bold hover:underline cursor-pointer"
+                  >
+                    Remove WAL
+                  </button>
+                )}
               </div>
             </div>
 

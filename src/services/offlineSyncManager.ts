@@ -1142,15 +1142,18 @@ class OfflineSyncManager {
       (crypto.randomUUID
         ? crypto.randomUUID()
         : `TX-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
+    const rawStatusLower = String(payload.status || '').trim().toLowerCase();
+    const isDraftStatus = ['draft', 'pending'].includes(rawStatusLower);
     const isHeldOrDraft = [
       'held',
       'hold',
       'on_hold',
       'on hold',
       'draft',
+      'pending',
       'temp',
       'temporary',
-    ].includes(String(payload.status || '').trim().toLowerCase());
+    ].includes(rawStatusLower);
 
     const now = new Date();
     const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
@@ -1163,7 +1166,9 @@ class OfflineSyncManager {
     const dateToken = `${dd}-${mmm}-${yyyy}`;
     const allSales = await offlineStorage.getAll<any>('sales');
     const nextSeq = allSales.length + 1;
-    const localInvNo = isHeldOrDraft
+    const localInvNo = isDraftStatus
+      ? `DRF-SI-${dateToken}-${String(nextSeq).padStart(3, '0')}`
+      : isHeldOrDraft
       ? `HLD-SI-${dateToken}-${String(nextSeq).padStart(3, '0')}`
       : payload.invoice_number && !String(payload.invoice_number).includes('OFF')
       ? payload.invoice_number
@@ -1186,7 +1191,7 @@ class OfflineSyncManager {
       client_request_id: clientTxId,
       invoice_number: localInvNo,
       invoice_date: payload.invoice_date || nowIso.slice(0, 10),
-      status: isHeldOrDraft ? 'held' : 'completed',
+      status: isDraftStatus ? 'draft' : isHeldOrDraft ? 'held' : 'completed',
       sync_status: 'pending',
       local_modified: true,
       created_at: payload.created_at || nowIso,

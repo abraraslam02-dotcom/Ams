@@ -8322,7 +8322,7 @@ function validateAndBuildSalesImportPreview(rawInvoices: Array<Record<string, un
   // Preload accounts (customers + walk-in) for fast code-first, name-second matching
   const accountRows = db
     .prepare(`
-      SELECT id, account_code, account_name, main_group, sub_group, is_active, filer_status
+      SELECT id, account_code, account_name, main_group, account_group, account_type, status, filer_status
       FROM accounts
       ORDER BY id ASC
     `)
@@ -8331,8 +8331,9 @@ function validateAndBuildSalesImportPreview(rawInvoices: Array<Record<string, un
       account_code: string;
       account_name: string;
       main_group: string;
-      sub_group: string;
-      is_active: number;
+      account_group: string;
+      account_type?: string;
+      status?: string;
       filer_status?: string;
     }>;
 
@@ -8347,8 +8348,12 @@ function validateAndBuildSalesImportPreview(rawInvoices: Array<Record<string, un
     if (codeKey && !allAccountsByCode.has(codeKey)) allAccountsByCode.set(codeKey, acc);
     if (nameKey && !allAccountsByName.has(nameKey)) allAccountsByName.set(nameKey, acc);
 
+    const accGroupLower = String(acc.account_group || '').trim().toLowerCase();
+    const accTypeLower = String(acc.account_type || '').trim().toLowerCase();
     const isCustomerOrParty =
-      String(acc.sub_group || '').toLowerCase() === 'customer' ||
+      accGroupLower === 'customer' ||
+      accGroupLower === 'customer & supplier' ||
+      accTypeLower === 'customer' ||
       String(acc.main_group || '').toUpperCase() === 'PARTY ACCOUNTS' ||
       codeKey === 'cus-1001';
     if (isCustomerOrParty) {
@@ -8370,7 +8375,7 @@ function validateAndBuildSalesImportPreview(rawInvoices: Array<Record<string, un
   // Preload items and variants for code-first, name-second matching
   const itemRows = db.prepare('SELECT * FROM items ORDER BY id ASC').all() as Array<Record<string, unknown>>;
   const variantRows = db
-    .prepare('SELECT * FROM item_variants WHERE COALESCE(is_active, 1) = 1 ORDER BY id ASC')
+    .prepare("SELECT * FROM item_variants WHERE LOWER(COALESCE(status, 'active')) != 'inactive' ORDER BY id ASC")
     .all() as Array<Record<string, unknown>>;
 
   const itemsById = new Map<number, Record<string, unknown>>();

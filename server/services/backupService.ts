@@ -1085,12 +1085,15 @@ export function applyBackupRetentionPolicy(): { prunedCount: number } {
 
 /**
  * Attempts multi-stage non-destructive repair & salvage of a corrupted uploaded SQLite backup:
+ * - Optional WAL Replay: If a companion -wal file buffer is provided, replays & checkpoints it on a disposable copy.
+ * - WAL Header Normalization: If bytes 18-19 are 0x02 (WAL mode) without a -wal file, resets them to 0x01 on the disposable copy so SQLite can open it cleanly.
  * - Stage 1: REINDEX + VACUUM INTO on a disposable copy (fixes B-tree index / freelist page errors with 0% row loss).
  * - Stage 2: Table-by-table & rowid-chunk binary fallback extraction into a clean verified SQLite database.
  */
 function salvageCorruptedSqliteBackup(
   rawFilePath: string,
-  repairedTargetPath: string
+  repairedTargetPath: string,
+  walBuffer?: Buffer
 ): {
   recovered: boolean;
   method: string;
@@ -1110,13 +1113,49 @@ function salvageCorruptedSqliteBackup(
     }
   };
 
-  // Stage 1: REINDEX + VACUUM INTO on a disposable working copy
-  try {
+  const prepareWorkingCopy = () => {
     cleanupTempWork();
-    if (fs.existsSync(repairedTargetPath)) fs.unlinkSync(repairedTargetPath);
     fs.copyFileSync(rawFilePath, tempWorkCopy);
+    if (walBuffer && walBuffer.length > 0) {
+      fs.writeFileSync(`${tempWorkCopy}-wal`, walBuffer);
+    } else {
+      // If the standalone .db file has WAL format bytes (0x02, 0x02 at header offset 18..19) without a -wal sidecar,
+      // normalize to rollback journal format (0x01, 0x01) on the disposable copy so SQLite opens it cleanly.
+      try {
+        const fd = fs.openSync(tempWorkCopy, 'r+');
+        try {
+          const hdr = Buffer.alloc(20);
+          const bytesRead = fs.readSync(fd, hdr, 0, 20, 0);
+          if (bytesRead === 20 && (hdr[18] === 2 || hdr[19] === 2)) {
+            hdr[18] = 1;
+            hdr[19] = 1;
+            fs.writeSync(fd, hdr.subarray(18, 20), 0, 2, 18);
+            warnings.push('Normalized standalone WAL-mode SQLite header to standard journal format for recovery.');
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        // ignore header normalization error
+      }
+    }
+  };
+
+  // Stage 1: Checkpoint (if WAL) + REINDEX + VACUUM INTO on a disposable working copy
+  try {
+    if (fs.existsSync(repairedTargetPath)) fs.unlinkSync(repairedTargetPath);
+    prepareWorkingCopy();
     const workDb = new Database(tempWorkCopy);
     try {
+      if (walBuffer && walBuffer.length > 0) {
+        try {
+          workDb.pragma('wal_checkpoint(TRUNCATE)');
+        } catch (walErr) {
+          warnings.push(
+            `WAL checkpoint note: ${walErr instanceof Error ? walErr.message : String(walErr)}`
+          );
+        }
+      }
       try {
         workDb.pragma('journal_mode = DELETE');
       } catch {}
@@ -1140,7 +1179,10 @@ function salvageCorruptedSqliteBackup(
       cleanupTempWork();
       return {
         recovered: true,
-        method: 'REINDEX + VACUUM INTO (Full Index & Page Repair)',
+        method:
+          walBuffer && walBuffer.length > 0
+            ? 'WAL Replay + REINDEX + VACUUM INTO'
+            : 'REINDEX + VACUUM INTO (Full Index & Page Repair)',
         warnings,
         verification: stage1Ver,
       };
@@ -1164,11 +1206,10 @@ function salvageCorruptedSqliteBackup(
   let destDb: Database.Database | null = null;
 
   try {
+    prepareWorkingCopy();
     try {
-      sourceDb = new Database(rawFilePath, { readonly: true, fileMustExist: true });
+      sourceDb = new Database(tempWorkCopy, { readonly: true, fileMustExist: true });
     } catch {
-      // Fallback: copy to tempWorkCopy and open normal readwrite/recovery
-      fs.copyFileSync(rawFilePath, tempWorkCopy);
       sourceDb = new Database(tempWorkCopy, { fileMustExist: true });
     }
 
@@ -1394,6 +1435,7 @@ function salvageCorruptedSqliteBackup(
 export function stageAndVerifyUploadedBackup(params: {
   originalFilename: string;
   fileBuffer: Buffer;
+  walBuffer?: Buffer;
   uploadedBy: string;
 }): {
   valid: boolean;
@@ -1433,8 +1475,9 @@ export function stageAndVerifyUploadedBackup(params: {
   let repairedFromCorruption = false;
   let repairMethod: string | undefined;
   let salvageWarnings: string[] = [];
+  const hasWalAttachment = Boolean(params.walBuffer && params.walBuffer.length > 0);
 
-  if (!verification.valid) {
+  if (!verification.valid || hasWalAttachment) {
     const headerStr = decodedBuffer.subarray(0, 15).toString('utf8');
     if (headerStr !== 'SQLite format 3') {
       try {
@@ -1452,7 +1495,7 @@ export function stageAndVerifyUploadedBackup(params: {
 
     const repairedName = `Salvaged_${finalName}`;
     const repairedPath = path.join(backupDir, repairedName);
-    const salvage = salvageCorruptedSqliteBackup(stagedPath, repairedPath);
+    const salvage = salvageCorruptedSqliteBackup(stagedPath, repairedPath, params.walBuffer);
 
     try {
       if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
@@ -1479,12 +1522,12 @@ export function stageAndVerifyUploadedBackup(params: {
 
     activeStagedName = repairedName;
     activeStagedPath = repairedPath;
-    repairedFromCorruption = true;
+    repairedFromCorruption = !verification.valid || hasWalAttachment;
     repairMethod = salvage.method;
     salvageWarnings = salvage.warnings;
     verification = {
       ...salvage.verification,
-      repairedFromCorruption: true,
+      repairedFromCorruption,
       repairMethod: salvage.method,
       salvageWarnings: salvage.warnings,
     };

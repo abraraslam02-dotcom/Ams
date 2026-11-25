@@ -214,7 +214,10 @@ export function getDatabase(): Database.Database {
       fs.mkdirSync(dbDir, { recursive: true });
     }
 
-    const pendingRestorePath = `${config.databasePath}.pending_restore`;
+    const dropInRestorePath = path.join(dbDir, 'restore.db');
+    const pendingRestorePath = fs.existsSync(dropInRestorePath)
+      ? dropInRestorePath
+      : `${config.databasePath}.pending_restore`;
     if (fs.existsSync(pendingRestorePath)) {
       let probe: Database.Database | null = null;
       try {
@@ -223,6 +226,14 @@ export function getDatabase(): Database.Database {
         probe.close();
         probe = null;
         if (check === 'ok') {
+          if (fs.existsSync(config.databasePath)) {
+            const safetyDir = config.primaryBackupDir || path.join(dbDir, 'backups');
+            if (!fs.existsSync(safetyDir)) fs.mkdirSync(safetyDir, { recursive: true });
+            const safetyCopy = path.join(safetyDir, `Pre_DropIn_Restore_${Date.now()}.db`);
+            try {
+              fs.copyFileSync(config.databasePath, safetyCopy);
+            } catch {}
+          }
           for (const suffix of ['-wal', '-shm']) {
             const sidecar = `${config.databasePath}${suffix}`;
             if (fs.existsSync(sidecar)) {
@@ -234,7 +245,9 @@ export function getDatabase(): Database.Database {
           fs.renameSync(pendingRestorePath, config.databasePath);
           wasDatabaseCreatedOnBoot = false;
           wasDatabaseQuarantinedOnBoot = false;
-          console.log(`[AMS DB] Applied verified pending database restore onto ${config.databasePath}`);
+          console.log(
+            `[AMS DB] Applied verified database restore from ${path.basename(pendingRestorePath)} onto ${config.databasePath}`
+          );
         }
       } catch (restoreErr) {
         try {

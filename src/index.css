@@ -386,6 +386,37 @@
     line-height: 1.15 !important;
   }
 
+  /* Slightly larger, clearer Payment & Total section in MS Access Sales Form */
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals label:not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals span:not(.ams-total-highlight):not(.ams-payment-amount-lg):not(.print-modal-container *) {
+    font-size: 13px !important;
+    line-height: 1.25 !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals .ams-payment-amount-lg:not(.print-modal-container *) {
+    font-size: 14.5px !important;
+    line-height: 1.2 !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals .ams-total-highlight:not(.print-modal-container *) {
+    font-size: 16.5px !important;
+    line-height: 1.2 !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals input:not([type="checkbox"]):not([type="radio"]):not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals select:not(.print-modal-container *),
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals button:not(.print-modal-container *) {
+    font-size: 13.5px !important;
+    min-height: 28px !important;
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+  }
+
+  .ams-readable-invoice-scope .ams-pos-compact-chrome .ams-access-payment-totals input.ams-cash-received-input:not(.print-modal-container *) {
+    font-size: 15.5px !important;
+    min-height: 30px !important;
+  }
+
   /* 10+ visible row density & clean internal scrolling for Sales & Purchase Invoice Grids */
   .ams-readable-invoice-scope table.ams-compact-10-grid:not(.print-modal-container *) thead th {
     font-size: 12.5px !important;
