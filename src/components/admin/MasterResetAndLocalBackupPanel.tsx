@@ -332,7 +332,9 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
       setRestoreConfirmationText('');
       setBanner({
         type: 'success',
-        message: `Backup file "${file.name}" verified! SQLite Integrity: OK (${data.verification.table_count} tables). Type "RESTORE DATA" below to restore directly without OTP.`,
+        message: data.repaired_from_corruption
+          ? `Corrupted backup "${file.name}" was automatically repaired & verified (${data.repair_method || 'SQLite Salvage'})! Recovered ${data.verification.row_counts?.items ?? 0} Items, ${data.verification.row_counts?.sales ?? 0} Sales, ${data.verification.row_counts?.purchases ?? 0} Purchases, ${data.verification.row_counts?.accounts ?? 0} Accounts. Review counts below and type "RESTORE DATA" to restore.`
+          : `Backup file "${file.name}" verified! SQLite Integrity: OK (${data.verification.table_count} tables). Type "RESTORE DATA" below to restore directly without OTP.`,
       });
     } catch (err: unknown) {
       setBanner({
@@ -702,17 +704,46 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
                 onSubmit={handleExecuteLocalRestore}
                 className="bg-sky-50/70 border border-sky-200 rounded-2xl p-4 space-y-3"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-extrabold text-sky-950 flex items-center gap-1.5">
-                    <FileCheck2 className="w-4 h-4 text-emerald-600" />
-                    Backup Ready: {stagedBackup.staged_file_name} ({stagedBackup.table_count} Tables/Stores)
-                  </span>
-                  {stagedBackup.row_counts && Object.keys(stagedBackup.row_counts).length > 0 && (
-                    <span className="text-[11px] font-mono text-sky-800">
-                      Items: {stagedBackup.row_counts?.items ?? 0} | Accounts:{' '}
-                      {stagedBackup.row_counts?.accounts ?? 0} | Sales:{' '}
-                      {stagedBackup.row_counts?.sales ?? 0}
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold text-sky-950 flex items-center gap-1.5">
+                      <FileCheck2 className="w-4 h-4 text-emerald-600" />
+                      Backup Ready: {stagedBackup.staged_file_name} ({stagedBackup.table_count} Tables/Stores)
                     </span>
+                    {stagedBackup.repaired_from_corruption && (
+                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-extrabold uppercase">
+                        Auto-Repaired from Corrupted File
+                      </span>
+                    )}
+                  </div>
+                  {stagedBackup.row_counts && Object.keys(stagedBackup.row_counts).length > 0 && (
+                    <div className="text-[11px] font-mono text-sky-900 bg-white/80 rounded-lg px-2.5 py-1.5 border border-sky-200 flex flex-wrap gap-x-3 gap-y-1">
+                      <span>Items: <strong>{stagedBackup.row_counts?.items ?? 0}</strong></span>
+                      <span>Accounts: <strong>{stagedBackup.row_counts?.accounts ?? 0}</strong></span>
+                      <span>Sales: <strong>{stagedBackup.row_counts?.sales ?? 0}</strong></span>
+                      <span>Purchases: <strong>{stagedBackup.row_counts?.purchases ?? 0}</strong></span>
+                      <span>Batches: <strong>{stagedBackup.row_counts?.inventoryBatches ?? 0}</strong></span>
+                      <span>Cashbook: <strong>{stagedBackup.row_counts?.cashBookVouchers ?? 0}</strong></span>
+                      <span>JEs: <strong>{stagedBackup.row_counts?.journalEntries ?? 0}</strong></span>
+                    </div>
+                  )}
+                  {stagedBackup.latestTimestamps && (
+                    <div className="text-[10px] font-mono text-slate-600 flex flex-wrap gap-x-3 gap-y-1">
+                      {stagedBackup.latestTimestamps.latestSaleAt && (
+                        <span>Latest Sale: {stagedBackup.latestTimestamps.latestSaleAt}</span>
+                      )}
+                      {stagedBackup.latestTimestamps.latestPurchaseAt && (
+                        <span>Latest Purchase: {stagedBackup.latestTimestamps.latestPurchaseAt}</span>
+                      )}
+                      {stagedBackup.latestTimestamps.latestVoucherAt && (
+                        <span>Latest Voucher: {stagedBackup.latestTimestamps.latestVoucherAt}</span>
+                      )}
+                    </div>
+                  )}
+                  {Array.isArray(stagedBackup.salvage_warnings) && stagedBackup.salvage_warnings.length > 0 && (
+                    <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                      {stagedBackup.salvage_warnings.join(' | ')}
+                    </div>
                   )}
                 </div>
 

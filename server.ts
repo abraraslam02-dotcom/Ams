@@ -45,7 +45,7 @@ import { getBuildMetadata } from './server/utils/buildInfo.ts';
 async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '50mb' }));
+  app.use(express.json({ limit: '100mb' }));
 
   const distPath = path.resolve(process.cwd(), 'dist');
   const distIndexHtml = path.resolve(distPath, 'index.html');

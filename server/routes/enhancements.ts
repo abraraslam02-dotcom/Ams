@@ -3458,13 +3458,21 @@ enhancementsRouter.post('/local-backup/upload-verify', authenticateToken, (req, 
       backup_id: staged.backupId,
       staged_filename: staged.stagedFilename,
       staged_file_name: staged.stagedFilename,
+      repaired_from_corruption: Boolean(staged.repairedFromCorruption),
+      repair_method: staged.repairMethod || null,
+      salvage_warnings: staged.salvageWarnings || [],
       verification: {
         ...staged.verification,
         staged_file_name: staged.stagedFilename,
         table_count: staged.verification.tablesCount,
         row_counts: staged.verification.coreCounts,
+        repaired_from_corruption: Boolean(staged.repairedFromCorruption),
+        repair_method: staged.repairMethod || null,
+        salvage_warnings: staged.salvageWarnings || [],
       },
-      message: `Backup file "${staged.stagedFilename}" verified successfully (${staged.verification.tablesCount} tables, integrity: ${staged.verification.integrityCheck}).`,
+      message: staged.repairedFromCorruption
+        ? `Corrupted backup "${filename}" was automatically repaired & salvaged (${staged.repairMethod}) into verified file "${staged.stagedFilename}" (Integrity: ${staged.verification.integrityCheck}).`
+        : `Backup file "${staged.stagedFilename}" verified successfully (${staged.verification.tablesCount} tables, integrity: ${staged.verification.integrityCheck}).`,
     });
   } catch (err: unknown) {
     return res.status(500).json({

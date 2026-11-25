@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import Database from 'better-sqlite3';
 import { config, isTemporaryStoragePath, validatePermanentStorageLocation } from '../config.ts';
 import { getPakistanDateISO, getPakistanFilenameStamp } from '../utils/pakistanTime.ts';
@@ -55,8 +56,18 @@ export interface BackupVerificationResult {
     sales: number;
     inventoryBatches: number;
     journalEntries: number;
+    cashBookVouchers?: number;
     users: number;
   };
+  latestTimestamps?: {
+    latestSaleAt?: string | null;
+    latestPurchaseAt?: string | null;
+    latestVoucherAt?: string | null;
+    latestItemAt?: string | null;
+  };
+  repairedFromCorruption?: boolean;
+  repairMethod?: string;
+  salvageWarnings?: string[];
   error?: string;
 }
 
@@ -372,7 +383,37 @@ export function verifyBackupFile(filePath: string): BackupVerificationResult {
       sales: safeCount('sales'),
       inventoryBatches: safeCount('inventory'),
       journalEntries: safeCount('journal_entries'),
+      cashBookVouchers: safeCount('cash_book_vouchers'),
       users: safeCount('users'),
+    };
+
+    const safeLatestTs = (sql: string, tableName: string): string | null => {
+      if (!tableSet.has(tableName)) return null;
+      try {
+        const r = tempDb!.prepare(sql).get() as { ts?: string | null } | undefined;
+        return r?.ts ? String(r.ts) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const latestTimestamps = {
+      latestSaleAt: safeLatestTs(
+        'SELECT MAX(COALESCE(updated_at, created_at, invoice_date)) as ts FROM sales',
+        'sales'
+      ),
+      latestPurchaseAt: safeLatestTs(
+        'SELECT MAX(COALESCE(updated_at, created_at, bill_date)) as ts FROM purchases',
+        'purchases'
+      ),
+      latestVoucherAt: safeLatestTs(
+        'SELECT MAX(COALESCE(updated_at, created_at, voucher_date)) as ts FROM cash_book_vouchers',
+        'cash_book_vouchers'
+      ),
+      latestItemAt: safeLatestTs(
+        'SELECT MAX(COALESCE(updated_at, created_at)) as ts FROM items',
+        'items'
+      ),
     };
 
     const isValid = integrity.toLowerCase() === 'ok' && missingRequired.length === 0;
@@ -386,6 +427,7 @@ export function verifyBackupFile(filePath: string): BackupVerificationResult {
       integrityCheck: integrity,
       tablesCount: tables.length,
       coreCounts,
+      latestTimestamps,
       error: isValid
         ? undefined
         : missingRequired.length > 0
@@ -1042,7 +1084,312 @@ export function applyBackupRetentionPolicy(): { prunedCount: number } {
 }
 
 /**
+ * Attempts multi-stage non-destructive repair & salvage of a corrupted uploaded SQLite backup:
+ * - Stage 1: REINDEX + VACUUM INTO on a disposable copy (fixes B-tree index / freelist page errors with 0% row loss).
+ * - Stage 2: Table-by-table & rowid-chunk binary fallback extraction into a clean verified SQLite database.
+ */
+function salvageCorruptedSqliteBackup(
+  rawFilePath: string,
+  repairedTargetPath: string
+): {
+  recovered: boolean;
+  method: string;
+  warnings: string[];
+  verification: BackupVerificationResult;
+} {
+  const warnings: string[] = [];
+  const tempWorkCopy = `${rawFilePath}.repair_work.db`;
+
+  const cleanupTempWork = () => {
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        if (fs.existsSync(`${tempWorkCopy}${suffix}`)) {
+          fs.unlinkSync(`${tempWorkCopy}${suffix}`);
+        }
+      } catch {}
+    }
+  };
+
+  // Stage 1: REINDEX + VACUUM INTO on a disposable working copy
+  try {
+    cleanupTempWork();
+    if (fs.existsSync(repairedTargetPath)) fs.unlinkSync(repairedTargetPath);
+    fs.copyFileSync(rawFilePath, tempWorkCopy);
+    const workDb = new Database(tempWorkCopy);
+    try {
+      try {
+        workDb.pragma('journal_mode = DELETE');
+      } catch {}
+      try {
+        workDb.exec('REINDEX;');
+      } catch (reindexErr) {
+        warnings.push(
+          `REINDEX warning: ${reindexErr instanceof Error ? reindexErr.message : String(reindexErr)}`
+        );
+      }
+      const escapedTarget = repairedTargetPath.replace(/'/g, "''");
+      workDb.exec(`VACUUM INTO '${escapedTarget}';`);
+    } finally {
+      try {
+        workDb.close();
+      } catch {}
+    }
+
+    const stage1Ver = verifyBackupFile(repairedTargetPath);
+    if (stage1Ver.valid) {
+      cleanupTempWork();
+      return {
+        recovered: true,
+        method: 'REINDEX + VACUUM INTO (Full Index & Page Repair)',
+        warnings,
+        verification: stage1Ver,
+      };
+    }
+  } catch (stage1Err) {
+    warnings.push(
+      `Stage 1 (REINDEX/VACUUM) could not complete: ${
+        stage1Err instanceof Error ? stage1Err.message : String(stage1Err)
+      }`
+    );
+  } finally {
+    cleanupTempWork();
+  }
+
+  // Stage 2: Table-by-table & rowid-chunk salvage into fresh clean SQLite file
+  try {
+    if (fs.existsSync(repairedTargetPath)) fs.unlinkSync(repairedTargetPath);
+  } catch {}
+
+  let sourceDb: Database.Database | null = null;
+  let destDb: Database.Database | null = null;
+
+  try {
+    try {
+      sourceDb = new Database(rawFilePath, { readonly: true, fileMustExist: true });
+    } catch {
+      // Fallback: copy to tempWorkCopy and open normal readwrite/recovery
+      fs.copyFileSync(rawFilePath, tempWorkCopy);
+      sourceDb = new Database(tempWorkCopy, { fileMustExist: true });
+    }
+
+    destDb = new Database(repairedTargetPath);
+    destDb.pragma('journal_mode = DELETE');
+    destDb.pragma('synchronous = OFF');
+    destDb.pragma('foreign_keys = OFF');
+
+    let tableDefs: Array<{ name: string; sql: string }> = [];
+    let indexDefs: Array<{ name: string; sql: string }> = [];
+
+    try {
+      tableDefs = sourceDb
+        .prepare(
+          "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+        )
+        .all() as Array<{ name: string; sql: string }>;
+      indexDefs = sourceDb
+        .prepare(
+          "SELECT name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+        )
+        .all() as Array<{ name: string; sql: string }>;
+    } catch (masterErr) {
+      warnings.push(
+        `Uploaded sqlite_master was partially unreadable (${
+          masterErr instanceof Error ? masterErr.message : String(masterErr)
+        }); using active application schema template.`
+      );
+      const liveDb = getDatabase();
+      tableDefs = liveDb
+        .prepare(
+          "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+        )
+        .all() as Array<{ name: string; sql: string }>;
+      indexDefs = liveDb
+        .prepare(
+          "SELECT name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+        )
+        .all() as Array<{ name: string; sql: string }>;
+    }
+
+    // Create tables inside fresh clean destination DB
+    for (const td of tableDefs) {
+      try {
+        destDb.exec(td.sql);
+      } catch {
+        // ignore duplicate/constraint DDL edge cases
+      }
+    }
+
+    let totalRowsSalvaged = 0;
+    for (const td of tableDefs) {
+      const tbl = td.name;
+      const destCols = (destDb.prepare(`PRAGMA table_info("${tbl}")`).all() as Array<{ name: string }>).map(
+        (c) => c.name
+      );
+      if (destCols.length === 0) continue;
+
+      let sourceCols: string[] = destCols;
+      try {
+        const sCols = (sourceDb.prepare(`PRAGMA table_info("${tbl}")`).all() as Array<{ name: string }>).map(
+          (c) => c.name
+        );
+        if (sCols.length > 0) sourceCols = sCols;
+      } catch {}
+
+      const destSet = new Set(destCols);
+      const sharedCols = sourceCols.filter((c) => destSet.has(c));
+      if (sharedCols.length === 0) continue;
+
+      const selectExpr = sharedCols.map((c) => `"${c}"`).join(', ');
+      const placeholders = sharedCols.map(() => '?').join(', ');
+      const insertStmt = destDb.prepare(
+        `INSERT OR IGNORE INTO "${tbl}" (${selectExpr}) VALUES (${placeholders})`
+      );
+
+      const insertBatch = destDb.transaction((rows: Array<Record<string, unknown>>) => {
+        for (const row of rows) {
+          insertStmt.run(...sharedCols.map((c) => row[c]));
+        }
+      });
+
+      try {
+        const allRows = sourceDb
+          .prepare(`SELECT ${selectExpr} FROM "${tbl}"`)
+          .all() as Array<Record<string, unknown>>;
+        insertBatch(allRows);
+        totalRowsSalvaged += allRows.length;
+      } catch {
+        // Table has corrupt internal page(s): salvage intact rowid chunks around damaged pages!
+        let minRowId = 1;
+        let maxRowId = 0;
+        let hasRowId = true;
+        try {
+          const bounds = sourceDb
+            .prepare(`SELECT MIN(rowid) as minId, MAX(rowid) as maxId FROM "${tbl}"`)
+            .get() as { minId?: number; maxId?: number } | undefined;
+          minRowId = Number(bounds?.minId || 1);
+          maxRowId = Number(bounds?.maxId || 0);
+        } catch {
+          hasRowId = false;
+        }
+
+        if (!hasRowId || maxRowId <= 0) {
+          warnings.push(`Table "${tbl}" had unreadable pages and could not be scanned.`);
+          continue;
+        }
+
+        let rescuedForTable = 0;
+        let skippedRowIds = 0;
+        const CHUNK = 50;
+        const chunkStmt = sourceDb.prepare(
+          `SELECT ${selectExpr} FROM "${tbl}" WHERE rowid >= ? AND rowid <= ?`
+        );
+        const singleStmt = sourceDb.prepare(`SELECT ${selectExpr} FROM "${tbl}" WHERE rowid = ?`);
+
+        for (let start = minRowId; start <= maxRowId; start += CHUNK) {
+          const end = Math.min(maxRowId, start + CHUNK - 1);
+          try {
+            const chunkRows = chunkStmt.all(start, end) as Array<Record<string, unknown>>;
+            if (chunkRows.length > 0) {
+              insertBatch(chunkRows);
+              rescuedForTable += chunkRows.length;
+              totalRowsSalvaged += chunkRows.length;
+            }
+          } catch {
+            // Scan single rowids in damaged chunk so only corrupted individual records are skipped
+            for (let rid = start; rid <= end; rid++) {
+              try {
+                const row = singleStmt.get(rid) as Record<string, unknown> | undefined;
+                if (row) {
+                  insertBatch([row]);
+                  rescuedForTable++;
+                  totalRowsSalvaged++;
+                }
+              } catch {
+                skippedRowIds++;
+              }
+            }
+          }
+        }
+
+        warnings.push(
+          `Table "${tbl}": salvaged ${rescuedForTable} intact row(s)${
+            skippedRowIds > 0 ? ` (${skippedRowIds} rowid slot(s) on physically damaged page unreadable)` : ''
+          }.`
+        );
+      }
+    }
+
+    // Salvage sqlite_sequence if available
+    try {
+      const seqRows = sourceDb.prepare('SELECT name, seq FROM sqlite_sequence').all() as Array<{
+        name: string;
+        seq: number;
+      }>;
+      const destSeqExists = destDb
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'")
+        .get();
+      if (destSeqExists && seqRows.length > 0) {
+        const upSeq = destDb.prepare('INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES (?, ?)');
+        for (const s of seqRows) {
+          upSeq.run(s.name, s.seq);
+        }
+      }
+    } catch {}
+
+    // Rebuild clean indexes
+    for (const idx of indexDefs) {
+      try {
+        destDb.exec(idx.sql);
+      } catch {}
+    }
+
+    destDb.pragma('foreign_keys = ON');
+    destDb.exec('REINDEX;');
+    destDb.close();
+    destDb = null;
+    sourceDb.close();
+    sourceDb = null;
+    cleanupTempWork();
+
+    const stage2Ver = verifyBackupFile(repairedTargetPath);
+    if (stage2Ver.valid && totalRowsSalvaged > 0) {
+      return {
+        recovered: true,
+        method: 'Row-by-Row SQLite Salvage Recovery',
+        warnings,
+        verification: stage2Ver,
+      };
+    }
+
+    return {
+      recovered: false,
+      method: 'failed',
+      warnings,
+      verification: stage2Ver,
+    };
+  } catch (err) {
+    try {
+      destDb?.close();
+    } catch {}
+    try {
+      sourceDb?.close();
+    } catch {}
+    cleanupTempWork();
+    const errMsg = err instanceof Error ? err.message : String(err);
+    warnings.push(errMsg);
+    return {
+      recovered: false,
+      method: 'failed',
+      warnings,
+      verification: verifyBackupFile(repairedTargetPath),
+    };
+  }
+}
+
+/**
  * Stages an uploaded .db file from the user's hard drive into the backup directory and verifies its SQLite integrity.
+ * If the uploaded .db file has index, freelist, WAL-sidecar, or page corruption, automatically runs multi-stage
+ * SQLite salvage recovery so real business data is preserved and verified cleanly before restoration.
  */
 export function stageAndVerifyUploadedBackup(params: {
   originalFilename: string;
@@ -1053,36 +1400,102 @@ export function stageAndVerifyUploadedBackup(params: {
   stagedFilename: string;
   stagedPath: string;
   backupId?: number;
+  repairedFromCorruption?: boolean;
+  repairMethod?: string;
+  salvageWarnings?: string[];
   verification: BackupVerificationResult;
 } {
   const backupDir = getBackupDirectory();
-  const safeBase = path.basename(params.originalFilename || 'Uploaded_Backup.db').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const safeBase = path
+    .basename(params.originalFilename || 'Uploaded_Backup.db')
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
   const finalName = safeBase.endsWith('.db') ? safeBase : `${safeBase}.db`;
   const stagedPath = path.join(backupDir, finalName);
 
-  fs.writeFileSync(stagedPath, params.fileBuffer);
-  const verification = verifyBackupFile(stagedPath);
+  // Support gzip-compressed SQLite backups transparently if compressed on disk/download
+  let decodedBuffer = params.fileBuffer;
+  if (
+    decodedBuffer.length >= 2 &&
+    decodedBuffer[0] === 0x1f &&
+    decodedBuffer[1] === 0x8b
+  ) {
+    try {
+      decodedBuffer = zlib.gunzipSync(decodedBuffer);
+    } catch {
+      // Keep original buffer if not valid gzip
+    }
+  }
+
+  fs.writeFileSync(stagedPath, decodedBuffer);
+  let verification = verifyBackupFile(stagedPath);
+  let activeStagedName = finalName;
+  let activeStagedPath = stagedPath;
+  let repairedFromCorruption = false;
+  let repairMethod: string | undefined;
+  let salvageWarnings: string[] = [];
 
   if (!verification.valid) {
+    const headerStr = decodedBuffer.subarray(0, 15).toString('utf8');
+    if (headerStr !== 'SQLite format 3') {
+      try {
+        if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
+      } catch {}
+      const hexPreview = decodedBuffer.subarray(0, 16).toString('hex');
+      verification.error = `The selected file (${decodedBuffer.length} bytes) does not contain a valid SQLite database header (found bytes: ${hexPreview || 'empty'}). Please verify it is a real .db backup file and not an HTML error page or empty file.`;
+      return {
+        valid: false,
+        stagedFilename: finalName,
+        stagedPath,
+        verification,
+      };
+    }
+
+    const repairedName = `Salvaged_${finalName}`;
+    const repairedPath = path.join(backupDir, repairedName);
+    const salvage = salvageCorruptedSqliteBackup(stagedPath, repairedPath);
+
     try {
       if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
-    } catch {
-      // ignore
+    } catch {}
+
+    if (!salvage.recovered || !salvage.verification.valid) {
+      try {
+        if (fs.existsSync(repairedPath)) fs.unlinkSync(repairedPath);
+      } catch {}
+      return {
+        valid: false,
+        stagedFilename: finalName,
+        stagedPath,
+        repairedFromCorruption: false,
+        salvageWarnings: salvage.warnings,
+        verification: {
+          ...salvage.verification,
+          error:
+            salvage.verification.error ||
+            `Automatic SQLite salvage could not recover intact business tables (${salvage.warnings.join('; ') || 'unreadable file'}).`,
+        },
+      };
     }
-    return {
-      valid: false,
-      stagedFilename: finalName,
-      stagedPath,
-      verification,
+
+    activeStagedName = repairedName;
+    activeStagedPath = repairedPath;
+    repairedFromCorruption = true;
+    repairMethod = salvage.method;
+    salvageWarnings = salvage.warnings;
+    verification = {
+      ...salvage.verification,
+      repairedFromCorruption: true,
+      repairMethod: salvage.method,
+      salvageWarnings: salvage.warnings,
     };
   }
 
   const db = getDatabase();
-  const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, JEs: ${verification.coreCounts.journalEntries}`;
+  const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, Cashbook: ${verification.coreCounts.cashBookVouchers ?? 0}, JEs: ${verification.coreCounts.journalEntries}`;
 
   const existing = db
     .prepare('SELECT id FROM backup_history WHERE filename = ?')
-    .get(finalName) as { id: number } | undefined;
+    .get(activeStagedName) as { id: number } | undefined;
 
   let backupId: number;
   if (existing) {
@@ -1091,7 +1504,7 @@ export function stageAndVerifyUploadedBackup(params: {
        SET file_path = ?, file_size_bytes = ?, integrity_status = ?, tables_count = ?, records_summary = ?, status = 'completed'
        WHERE id = ?`
     ).run(
-      stagedPath,
+      activeStagedPath,
       verification.fileSizeBytes,
       verification.integrityCheck,
       verification.tablesCount,
@@ -1106,25 +1519,31 @@ export function stageAndVerifyUploadedBackup(params: {
           filename, file_path, backup_type, file_size_bytes,
           integrity_status, tables_count, records_summary,
           status, created_by, notes
-        ) VALUES (?, ?, 'manual', ?, ?, ?, ?, 'completed', ?, 'Uploaded from local hard drive for restoration')`
+        ) VALUES (?, ?, 'manual', ?, ?, ?, ?, 'completed', ?, ?)`
       )
       .run(
-        finalName,
-        stagedPath,
+        activeStagedName,
+        activeStagedPath,
         verification.fileSizeBytes,
         verification.integrityCheck,
         verification.tablesCount,
         summaryText,
-        params.uploadedBy
+        params.uploadedBy,
+        repairedFromCorruption
+          ? `Uploaded & automatically salvaged from corrupted backup (${repairMethod})`
+          : 'Uploaded from local hard drive for restoration'
       );
     backupId = Number(ins.lastInsertRowid);
   }
 
   return {
     valid: true,
-    stagedFilename: finalName,
-    stagedPath,
+    stagedFilename: activeStagedName,
+    stagedPath: activeStagedPath,
     backupId,
+    repairedFromCorruption,
+    repairMethod,
+    salvageWarnings,
     verification,
   };
 }
