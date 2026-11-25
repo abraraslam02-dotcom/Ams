@@ -256,7 +256,7 @@ export function getClientDeviceName(): string {
   }
 }
 
-function getStoredAuthToken(): string | null {
+export function getStoredAuthToken(): string | null {
   if (typeof window === 'undefined') return null;
   try {
     const rawSession =
@@ -8740,11 +8740,99 @@ export const api = {
     return data;
   },
 
-  async runBackupAndSyncNow(notes?: string): Promise<import('../types/system').BackupAndSyncNowResponse> {
+  async runBackupAndSyncNow(
+    notes?: string,
+    customDDriveFolder?: string
+  ): Promise<import('../types/system').BackupAndSyncNowResponse> {
     const res = await authFetch('/api/system/backup-and-sync-now', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ notes }),
+      body: JSON.stringify({ notes, customDDriveFolder }),
+    });
+    const data = await parseJsonSafe(res);
+    if (data?.status?.mode && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-operating-mode-changed', {
+          detail: { mode: data.status.mode, status: data.status },
+        })
+      );
+    }
+    return data;
+  },
+
+  async runDDriveBackupNow(payload?: {
+    customDDriveFolder?: string;
+    notes?: string;
+  }): Promise<{
+    success: boolean;
+    backup: {
+      id: number;
+      filename: string;
+      file_path: string;
+      file_size_bytes: number;
+      integrity_status: string;
+      writtenDirectlyToDDrive: boolean;
+      requiresBrowserDDriveSave: boolean;
+      dDriveTargetFolder: string;
+      dDriveExactFilePath: string;
+      dDriveError: string | null;
+      sha256: string;
+    } | null;
+    message: string;
+    error: string | null;
+    status: import('../types/system').OperatingModeStatus;
+  }> {
+    const res = await authFetch('/api/system/d-drive-backup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+    });
+    const data = await parseJsonSafe(res);
+    if (data?.status?.mode && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-operating-mode-changed', {
+          detail: { mode: data.status.mode, status: data.status },
+        })
+      );
+    }
+    return data;
+  },
+
+  async confirmDDriveBackupSave(payload: {
+    success: boolean;
+    savedFilePath: string | null;
+    configuredFolder?: string;
+    error?: string | null;
+  }): Promise<{
+    success: boolean;
+    status: import('../types/system').OperatingModeStatus;
+  }> {
+    const res = await authFetch('/api/system/d-drive-backup/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await parseJsonSafe(res);
+    if (data?.status?.mode && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('ams-operating-mode-changed', {
+          detail: { mode: data.status.mode, status: data.status },
+        })
+      );
+    }
+    return data;
+  },
+
+  async runIndependentCloudSyncNow(): Promise<{
+    success: boolean;
+    cloudSync: import('../types/system').BackupAndSyncNowResponse['step2CloudSync'];
+    conflicts: import('../types/system').SyncConflictRecord[];
+    status: import('../types/system').OperatingModeStatus;
+  }> {
+    const res = await authFetch('/api/system/independent-cloud-sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
     });
     const data = await parseJsonSafe(res);
     if (data?.status?.mode && typeof window !== 'undefined') {
@@ -8821,6 +8909,77 @@ export const api = {
           detail: { mode: data.status.mode, status: data.status },
         })
       );
+    }
+    return data;
+  },
+
+  async previewSalesExcelImport(invoices: any[]): Promise<{
+    success: boolean;
+    invoices: any[];
+    summary: {
+      totalInvoices: number;
+      validInvoices: number;
+      duplicateInvoices: number;
+      invalidInvoices: number;
+      missingCustomersCount: number;
+      missingItemsCount: number;
+      invalidQuantitiesCount: number;
+      invalidValuesCount: number;
+      totalMismatchesCount: number;
+    };
+  }> {
+    const res = await authFetch('/api/sales/import-excel/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invoices }),
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to validate Excel invoices for import preview.');
+    }
+    return data;
+  },
+
+  async commitSalesExcelImport(invoices: any[]): Promise<{
+    success: boolean;
+    summary: {
+      totalSubmitted: number;
+      successfulCount: number;
+      skippedDuplicatesCount: number;
+      failedCount: number;
+    };
+    importedInvoices: Array<{
+      id: number;
+      invoiceNumber: string;
+      invoiceDate: string;
+      customerName: string;
+      customerCode: string;
+      itemsCount: number;
+      netTotal: number;
+      paidAmount: number;
+      paymentMode: string;
+    }>;
+    skippedDuplicates: Array<{
+      invoiceNumber: string;
+      invoiceDate: string;
+      customerName: string;
+      reason: string;
+    }>;
+    failedInvoices: Array<{
+      invoiceNumber: string;
+      invoiceDate: string;
+      customerName: string;
+      errors: string[];
+    }>;
+  }> {
+    const res = await authFetch('/api/sales/import-excel/commit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invoices }),
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to import sales invoices from Excel.');
     }
     return data;
   },

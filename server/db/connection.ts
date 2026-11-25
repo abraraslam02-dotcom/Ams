@@ -214,6 +214,36 @@ export function getDatabase(): Database.Database {
       fs.mkdirSync(dbDir, { recursive: true });
     }
 
+    const pendingRestorePath = `${config.databasePath}.pending_restore`;
+    if (fs.existsSync(pendingRestorePath)) {
+      let probe: Database.Database | null = null;
+      try {
+        probe = new Database(pendingRestorePath, { readonly: true });
+        const check = String(probe.pragma('integrity_check', { simple: true }) || '').toLowerCase();
+        probe.close();
+        probe = null;
+        if (check === 'ok') {
+          for (const suffix of ['-wal', '-shm']) {
+            const sidecar = `${config.databasePath}${suffix}`;
+            if (fs.existsSync(sidecar)) {
+              try {
+                fs.unlinkSync(sidecar);
+              } catch {}
+            }
+          }
+          fs.renameSync(pendingRestorePath, config.databasePath);
+          wasDatabaseCreatedOnBoot = false;
+          wasDatabaseQuarantinedOnBoot = false;
+          console.log(`[AMS DB] Applied verified pending database restore onto ${config.databasePath}`);
+        }
+      } catch (restoreErr) {
+        try {
+          probe?.close();
+        } catch {}
+        console.warn('[AMS DB] Pending restore file could not be applied:', restoreErr);
+      }
+    }
+
     const dbMissingBeforeOpen = !fs.existsSync(config.databasePath);
     if (dbMissingBeforeOpen) {
       wasDatabaseCreatedOnBoot = true;
@@ -265,15 +295,76 @@ export function getDatabase(): Database.Database {
       }
 
       // Step 2 Recovery: If the main .db file itself is genuinely malformed, safely quarantine it (never delete!)
-      // and open a clean staging file so Cloud Firestore recovery can hydrate authoritative data cleanly.
+      // and attempt immediate recovery from the newest verified local backup before falling back to Cloud Firestore hydration.
       if (!verifiedHandle) {
         const quarantineDir = quarantineCorruptDatabaseFiles('boot_integrity_check_failed');
-        wasDatabaseQuarantinedOnBoot = true;
-        wasDatabaseCreatedOnBoot = true;
-        console.warn(
-          `[AMS DB] Local database at ${config.databasePath} failed SQLite integrity verification and was safely quarantined to ${quarantineDir || 'data/quarantine'}. Awaiting authoritative recovery.`
-        );
-        verifiedHandle = openAndConfigureSqlite(config.databasePath, false);
+        let restoredBackupPath: string | null = null;
+        try {
+          const backupDirs = Array.from(
+            new Set([config.primaryBackupDir, path.join(path.dirname(config.databasePath), 'backups')])
+          );
+          const candidates: Array<{ filePath: string; mtimeMs: number }> = [];
+          for (const dir of backupDirs) {
+            if (!dir || !fs.existsSync(dir)) continue;
+            for (const entry of fs.readdirSync(dir)) {
+              if (!entry.endsWith('.db')) continue;
+              const full = path.join(dir, entry);
+              try {
+                const st = fs.statSync(full);
+                if (st.isFile() && st.size > 4096) {
+                  candidates.push({ filePath: full, mtimeMs: st.mtimeMs });
+                }
+              } catch {
+                // ignore unreadable entry
+              }
+            }
+          }
+          candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+          for (const cand of candidates) {
+            let probe: Database.Database | null = null;
+            try {
+              probe = new Database(cand.filePath, { readonly: true });
+              const check = String(probe.pragma('integrity_check', { simple: true }) || '').toLowerCase();
+              const hasCompanySettings = probe
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_settings'")
+                .get();
+              const hasItems = probe
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'")
+                .get();
+              probe.close();
+              probe = null;
+              if (check === 'ok' && hasCompanySettings && hasItems) {
+                const recoverTmp = `${config.databasePath}.recover.tmp`;
+                fs.copyFileSync(cand.filePath, recoverTmp);
+                fs.renameSync(recoverTmp, config.databasePath);
+                restoredBackupPath = cand.filePath;
+                break;
+              }
+            } catch {
+              try {
+                probe?.close();
+              } catch {}
+            }
+          }
+        } catch {
+          // ignore recovery scan errors
+        }
+
+        if (restoredBackupPath) {
+          wasDatabaseQuarantinedOnBoot = false;
+          wasDatabaseCreatedOnBoot = false;
+          console.warn(
+            `[AMS DB] Local database at ${config.databasePath} failed SQLite integrity verification (quarantined to ${quarantineDir || 'data/quarantine'}) and was automatically restored from verified local backup: ${restoredBackupPath}`
+          );
+          verifiedHandle = openAndConfigureSqlite(config.databasePath, true);
+        } else {
+          wasDatabaseQuarantinedOnBoot = true;
+          wasDatabaseCreatedOnBoot = true;
+          console.warn(
+            `[AMS DB] Local database at ${config.databasePath} failed SQLite integrity verification and was safely quarantined to ${quarantineDir || 'data/quarantine'}. Awaiting authoritative recovery.`
+          );
+          verifiedHandle = openAndConfigureSqlite(config.databasePath, false);
+        }
       }
     }
 

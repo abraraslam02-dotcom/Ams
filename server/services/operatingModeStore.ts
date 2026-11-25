@@ -5,6 +5,7 @@ import { config } from '../config.ts';
 export type SystemOperatingMode = 'ONLINE' | 'OFFLINE';
 export type LocalBackupStatus = 'Successful' | 'Failed' | 'Not Run';
 export type CloudSyncStatus = 'Successful' | 'Pending' | 'Failed' | 'Not Run';
+export type DDriveBackupStatus = 'Successful' | 'Failed' | 'Pending Save' | 'Not Run';
 
 export interface PersistedOperatingModeState {
   mode: SystemOperatingMode;
@@ -17,11 +18,19 @@ export interface PersistedOperatingModeState {
   lastBackupSizeBytes: number;
   lastBackupSha256: string | null;
   lastBackupError: string | null;
+  dDriveBackupStatus: DDriveBackupStatus;
+  dDriveBackupPath: string | null;
+  dDriveBackupError: string | null;
+  dDriveConfiguredFolder: string;
   cloudSyncStatus: CloudSyncStatus;
   lastSuccessfulCloudSyncAt: string | null;
   lastCloudSyncError: string | null;
   pendingLocalChangesCount: number;
   manualControlOnly: boolean;
+  quotaExhausted: boolean;
+  quotaCooldownUntilMs: number;
+  lastSyncedCloudSha256: string | null;
+  lastSyncedCloudVersionSeq: number;
 }
 
 const DEFAULT_STATE: PersistedOperatingModeState = {
@@ -35,11 +44,19 @@ const DEFAULT_STATE: PersistedOperatingModeState = {
   lastBackupSizeBytes: 0,
   lastBackupSha256: null,
   lastBackupError: null,
+  dDriveBackupStatus: 'Not Run',
+  dDriveBackupPath: null,
+  dDriveBackupError: null,
+  dDriveConfiguredFolder: 'D:\\AbrarMedicalStore\\Backups',
   cloudSyncStatus: 'Not Run',
   lastSuccessfulCloudSyncAt: null,
   lastCloudSyncError: null,
   pendingLocalChangesCount: 0,
-  manualControlOnly: true,
+  manualControlOnly: false,
+  quotaExhausted: false,
+  quotaCooldownUntilMs: 0,
+  lastSyncedCloudSha256: null,
+  lastSyncedCloudVersionSeq: 0,
 };
 
 let cachedState: PersistedOperatingModeState | null = null;
@@ -51,12 +68,18 @@ function readStateFromDisk(): PersistedOperatingModeState {
       const raw = fs.readFileSync(cfgPath, 'utf8');
       const parsed = JSON.parse(raw) as Partial<PersistedOperatingModeState>;
       const mode: SystemOperatingMode = parsed.mode === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+      const quotaCooldownUntilMs = Math.max(0, Number(parsed.quotaCooldownUntilMs || 0));
+      const quotaExhausted = Boolean(parsed.quotaExhausted) && quotaCooldownUntilMs > Date.now();
       return {
         ...DEFAULT_STATE,
         ...parsed,
         mode,
+        dDriveConfiguredFolder:
+          String(parsed.dDriveConfiguredFolder || '').trim() || 'D:\\AbrarMedicalStore\\Backups',
         pendingLocalChangesCount: Math.max(0, Number(parsed.pendingLocalChangesCount || 0)),
-        manualControlOnly: true,
+        quotaExhausted,
+        quotaCooldownUntilMs: quotaExhausted ? quotaCooldownUntilMs : 0,
+        lastSyncedCloudVersionSeq: Math.max(0, Number(parsed.lastSyncedCloudVersionSeq || 0)),
       };
     }
   } catch {

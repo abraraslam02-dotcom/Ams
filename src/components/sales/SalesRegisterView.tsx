@@ -6,11 +6,13 @@ import { resolveLineSequentialDiscounts } from '../../utils/taxCalculation';
 import { exportSalesInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { SalesPrintModal } from './SalesPrintModal';
 import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
+import { SalesInvoiceExcelImportModal } from './SalesInvoiceExcelImportModal';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 import {
   Search,
   Download,
+  Upload,
   FileSpreadsheet,
   Printer,
   Eye,
@@ -51,6 +53,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
   const [exporting, setExporting] = useState<boolean>(false);
   const [customExportOpen, setCustomExportOpen] = useState<boolean>(false);
   const [customExportRecords, setCustomExportRecords] = useState<SalesInvoiceRecord[]>([]);
+  const [excelImportOpen, setExcelImportOpen] = useState<boolean>(false);
   const [viewInvoice, setViewInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printInvoice, setPrintInvoice] = useState<SalesInvoiceRecord | null>(null);
   const [printFormat, setPrintFormat] = useState<'a4' | '80mm' | '58mm'>('a4');
@@ -361,6 +364,16 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
         >
           <FileSpreadsheet className="w-3.5 h-3.5" />
           <span>Custom Excel Export</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setExcelImportOpen(true)}
+          className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+          title="Import Sales Invoices from Excel (.xlsx)"
+        >
+          <Upload className="w-3.5 h-3.5" />
+          <span>Import Excel (.xlsx)</span>
         </button>
       </div>
 
@@ -764,6 +777,19 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
         onClose={() => setCustomExportOpen(false)}
         moduleType="SALES"
         records={customExportRecords}
+      />
+
+      <SalesInvoiceExcelImportModal
+        isOpen={excelImportOpen}
+        onClose={() => setExcelImportOpen(false)}
+        sampleCustomer={
+          customers[0]
+            ? { account_code: customers[0].account_code, account_name: customers[0].account_name }
+            : undefined
+        }
+        onImportSuccess={() => {
+          fetchRegister();
+        }}
       />
     </div>
   );

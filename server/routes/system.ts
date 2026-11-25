@@ -30,6 +30,9 @@ import {
   getOperatingModeFullStatus,
   switchOperatingMode,
   executeManualBackupAndSync,
+  executeIndependentDDriveBackup,
+  confirmBrowserDDriveBackupSave,
+  executeIndependentCloudSync,
   listSyncConflicts,
   resolveSyncConflict,
   resolveAllSyncConflicts,
@@ -2879,12 +2882,109 @@ systemRouter.post(
 );
 
 /**
+ * POST /api/system/d-drive-backup
+ * Independent D-Drive Local Backup (creates verified .db backup, checks D:\AbrarMedicalStore\Backups writability,
+ * and returns exact path + status or browser File System Access save metadata).
+ */
+systemRouter.post(
+  '/d-drive-backup',
+  authenticateToken,
+  (req: AuthenticatedRequest, res: Response) => {
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only authorized administrators can run D Drive Backups.',
+      });
+    }
+    try {
+      const customDDriveFolder = req.body?.customDDriveFolder
+        ? String(req.body.customDDriveFolder).trim().slice(0, 260)
+        : undefined;
+      const notes = req.body?.notes ? String(req.body.notes).trim().slice(0, 200) : undefined;
+      const result = executeIndependentDDriveBackup({
+        username: req.user?.username || 'Super Admin',
+        userId: req.user?.id || null,
+        ipAddress: req.ip || '',
+        customDDriveFolder,
+        notes,
+      });
+      return res.status(result.backup ? 200 : 500).json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
+ * POST /api/system/d-drive-backup/confirm
+ * Confirms the result of the browser File System Access save to the user's Windows D:\AbrarMedicalStore\Backups folder.
+ */
+systemRouter.post(
+  '/d-drive-backup/confirm',
+  authenticateToken,
+  (req: AuthenticatedRequest, res: Response) => {
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only authorized administrators can confirm D Drive Backups.',
+      });
+    }
+    try {
+      const success = Boolean(req.body?.success);
+      const savedFilePath = req.body?.savedFilePath
+        ? String(req.body.savedFilePath).trim().slice(0, 300)
+        : null;
+      const configuredFolder = req.body?.configuredFolder
+        ? String(req.body.configuredFolder).trim().slice(0, 260)
+        : undefined;
+      const error = req.body?.error ? String(req.body.error).trim().slice(0, 400) : null;
+
+      const status = confirmBrowserDDriveBackupSave({
+        success,
+        savedFilePath,
+        configuredFolder,
+        error,
+        username: req.user?.username || 'Super Admin',
+      });
+      return res.json({
+        success: true,
+        status,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
+ * POST /api/system/independent-cloud-sync
+ * Independent incremental Cloud Synchronization (does NOT require a Local Backup first).
+ */
+systemRouter.post(
+  '/independent-cloud-sync',
+  authenticateToken,
+  requireRole(['Super Admin']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const result = await executeIndependentCloudSync({
+        username: req.user?.username || 'Super Admin',
+        userId: req.user?.id || null,
+        ipAddress: req.ip || '',
+      });
+      return res.json(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  }
+);
+
+/**
  * POST /api/system/backup-and-sync-now
  * Strictly restricted to Super Admin.
- * Manual Control Only:
- *   Step 1: Complete verified Local Backup in permanent Backups folder
- *   Step 2: Conflict-aware Cloud Database synchronization (only after Step 1 succeeds)
- *   Step 3: Separate status report for Local Backup and Cloud Sync
+ * Decoupled Step 1 (D-Drive Local Backup) & Step 2 (Incremental Cloud Sync).
  */
 systemRouter.post(
   '/backup-and-sync-now',
@@ -2893,11 +2993,15 @@ systemRouter.post(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const notes = req.body?.notes ? String(req.body.notes).trim().slice(0, 200) : undefined;
+      const customDDriveFolder = req.body?.customDDriveFolder
+        ? String(req.body.customDDriveFolder).trim().slice(0, 260)
+        : undefined;
       const result = await executeManualBackupAndSync({
         username: req.user?.username || 'Super Admin',
         userId: req.user?.id || null,
         ipAddress: req.ip || '',
         notes,
+        customDDriveFolder,
       });
 
       return res.status(result.step1LocalBackup.status === 'Successful' ? 200 : 500).json(result);

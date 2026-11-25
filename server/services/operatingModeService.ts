@@ -11,18 +11,25 @@ import {
   updatePersistedOperatingModeState,
   type SystemOperatingMode,
   type LocalBackupStatus,
+  type DDriveBackupStatus,
   type CloudSyncStatus,
 } from './operatingModeStore.ts';
 import {
   createDatabaseBackup,
+  createNumberedAbrarBackup,
+  checkDDriveBackupFolderStatus,
   verifyBackupFile,
   getBackupDirectory,
   logSystemError,
+  type CreatedNumberedBackupResult,
+  type DDriveFolderCheckResult,
 } from './backupService.ts';
 import {
   ALLOWED_CONFLICT_TABLES,
   checkCloudDatabaseReachability,
   getCloudPersistenceStatus,
+  getDurablePendingCloudSyncCount,
+  isFirestoreQuotaCooldownActive,
   runConflictAwareBidirectionalCloudSync,
 } from './cloudPersistenceService.ts';
 import { reconcileHeldAndDuplicateLedgerEntries } from './ledgerIntegrityService.ts';
@@ -57,9 +64,16 @@ export interface OperatingModeFullStatus {
   lastBackupSizeBytes: number;
   lastBackupSha256: string | null;
   lastBackupError: string | null;
+  dDriveBackupStatus: DDriveBackupStatus;
+  dDriveBackupPath: string | null;
+  dDriveBackupError: string | null;
+  dDriveConfiguredFolder: string;
+  dDriveFolderCheck: DDriveFolderCheckResult;
   cloudSyncStatus: CloudSyncStatus;
   lastSuccessfulCloudSyncAt: string | null;
   lastCloudSyncError: string | null;
+  quotaExhausted: boolean;
+  quotaCooldownUntilMs: number;
   pendingLocalChangesCount: number;
   unresolvedConflictsCount: number;
   storage: {
@@ -82,6 +96,7 @@ export interface OperatingModeFullStatus {
     databaseIdentity: string;
     lastVersionSeq: number;
     lastError: string | null;
+    quotaExhausted: boolean;
   };
 }
 
@@ -102,6 +117,7 @@ export interface BackupAndSyncResult {
   success: boolean;
   step1LocalBackup: {
     status: 'Successful' | 'Failed';
+    backupId?: number;
     filename: string | null;
     filePath: string | null;
     fileSizeBytes: number;
@@ -109,6 +125,11 @@ export interface BackupAndSyncResult {
     sha256: string | null;
     completedAt: string | null;
     error: string | null;
+    writtenDirectlyToDDrive?: boolean;
+    requiresBrowserDDriveSave?: boolean;
+    dDriveTargetFolder?: string;
+    dDriveExactFilePath?: string;
+    dDriveError?: string | null;
   };
   step2CloudSync: {
     status: 'Successful' | 'Pending' | 'Failed';
@@ -121,6 +142,7 @@ export interface BackupAndSyncResult {
     completedAt: string | null;
     message: string;
     error: string | null;
+    quotaExhausted?: boolean;
   };
   lastSuccessfulBackupAt: string | null;
   lastSuccessfulCloudSyncAt: string | null;
@@ -165,6 +187,11 @@ export function syncModeMetadataToDb(): void {
     );
     if (!cols.has('system_operating_mode')) return;
 
+    const durablePendingCount = Math.max(
+      state.pendingLocalChangesCount || 0,
+      getDurablePendingCloudSyncCount()
+    );
+
     db.prepare(
       `UPDATE company_settings
        SET system_operating_mode = ?,
@@ -181,7 +208,7 @@ export function syncModeMetadataToDb(): void {
       state.lastSuccessfulCloudSyncAt,
       state.localBackupStatus,
       state.cloudSyncStatus,
-      state.pendingLocalChangesCount
+      durablePendingCount
     );
   } catch {
     // non-fatal if table not yet migrated
@@ -230,7 +257,7 @@ function writeOperatingModeAuditLog(params: {
 }
 
 /**
- * Returns complete Operating Mode, Storage, Local Backup, Cloud Sync & Conflict status.
+ * Returns complete Operating Mode, Storage, Local Backup, D-Drive Backup, Cloud Sync & Conflict status.
  * Makes ZERO Cloud network requests (safe in OFFLINE MODE).
  */
 export function getOperatingModeFullStatus(): OperatingModeFullStatus {
@@ -239,6 +266,12 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
   const dbHealth = checkDatabaseConnection();
   const cloudStatus = getCloudPersistenceStatus();
   const unresolvedConflictsCount = getUnresolvedConflictsCountSafe();
+  const dDriveCheck = checkDDriveBackupFolderStatus(state.dDriveConfiguredFolder);
+  const durablePendingCount = Math.max(
+    state.pendingLocalChangesCount || 0,
+    getDurablePendingCloudSyncCount()
+  );
+  const quotaActive = isFirestoreQuotaCooldownActive();
 
   let activeBackupDir = config.primaryBackupDir;
   try {
@@ -251,8 +284,8 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
     mode: state.mode,
     activeDatabaseLabel:
       state.mode === 'OFFLINE'
-        ? 'Permanent Local Database (SQLite)'
-        : 'Cloud Database (Primary Online)',
+        ? 'Local SQLite Database (Offline Mode — Zero Cloud Requests)'
+        : 'Local-First SQLite + Automatic Cloud Sync (Online Mode)',
     switchedAt: state.switchedAt,
     switchedBy: state.switchedBy,
     manualControlOnly: true,
@@ -263,10 +296,17 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
     lastBackupSizeBytes: state.lastBackupSizeBytes,
     lastBackupSha256: state.lastBackupSha256,
     lastBackupError: state.lastBackupError,
-    cloudSyncStatus: state.cloudSyncStatus,
+    dDriveBackupStatus: state.dDriveBackupStatus || 'Not Run',
+    dDriveBackupPath: state.dDriveBackupPath || null,
+    dDriveBackupError: state.dDriveBackupError || null,
+    dDriveConfiguredFolder: state.dDriveConfiguredFolder || 'D:\\AbrarMedicalStore\\Backups',
+    dDriveFolderCheck: dDriveCheck,
+    cloudSyncStatus: quotaActive ? 'Pending' : state.cloudSyncStatus,
     lastSuccessfulCloudSyncAt: state.lastSuccessfulCloudSyncAt,
     lastCloudSyncError: state.lastCloudSyncError,
-    pendingLocalChangesCount: state.pendingLocalChangesCount,
+    quotaExhausted: quotaActive,
+    quotaCooldownUntilMs: state.quotaCooldownUntilMs || 0,
+    pendingLocalChangesCount: durablePendingCount,
     unresolvedConflictsCount,
     storage: {
       platform: process.platform,
@@ -288,6 +328,7 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
       databaseIdentity: cloudStatus.databaseIdentity || cloudStatus.externalLocation,
       lastVersionSeq: cloudStatus.lastVersionSeq,
       lastError: state.mode === 'OFFLINE' ? null : cloudStatus.lastError,
+      quotaExhausted: quotaActive,
     },
   };
 }
@@ -295,8 +336,8 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
 /**
  * Safely switches between ONLINE MODE and OFFLINE MODE (Super Admin ONLY).
  * 1. Flushes/checkpoints pending WAL writes to disk.
- * 2. Verifies target database accessibility BEFORE activating the selected mode.
- * 3. Protects pending offline records when switching back to ONLINE MODE.
+ * 2. In Local-First mode, allows switching to ONLINE MODE even if Firestore quota is temporarily exhausted
+ *    (so automatic sync will resume as soon as quota resets) or after verifying cloud reachability.
  */
 export async function switchOperatingMode(params: {
   targetMode: SystemOperatingMode;
@@ -309,6 +350,10 @@ export async function switchOperatingMode(params: {
   const previousMode = currentState.mode;
   const targetMode: SystemOperatingMode = params.targetMode === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
   const unresolvedConflictsCount = getUnresolvedConflictsCountSafe();
+  const pendingCount = Math.max(
+    currentState.pendingLocalChangesCount || 0,
+    getDurablePendingCloudSyncCount()
+  );
 
   // Always flush pending SQLite WAL frames cleanly before switching
   checkpointDatabaseWal();
@@ -320,14 +365,13 @@ export async function switchOperatingMode(params: {
       mode: targetMode,
       previousMode,
       message: `System is already operating in ${targetMode} MODE.`,
-      pendingLocalChangesCount: currentState.pendingLocalChangesCount,
+      pendingLocalChangesCount: pendingCount,
       unresolvedConflictsCount,
       status: getOperatingModeFullStatus(),
     };
   }
 
   if (targetMode === 'OFFLINE') {
-    // Verify permanent local storage & SQLite integrity BEFORE switching to OFFLINE MODE
     const storageCheck = validatePermanentStorageLocation();
     if (!storageCheck.available) {
       return {
@@ -339,7 +383,7 @@ export async function switchOperatingMode(params: {
           storageCheck.warning ||
           `Cannot switch to OFFLINE MODE because the permanent local database directory (${config.primaryDatabaseDir}) is not accessible.`,
         warning: storageCheck.warning,
-        pendingLocalChangesCount: currentState.pendingLocalChangesCount,
+        pendingLocalChangesCount: pendingCount,
         unresolvedConflictsCount,
         status: getOperatingModeFullStatus(),
       };
@@ -353,7 +397,7 @@ export async function switchOperatingMode(params: {
         mode: previousMode,
         previousMode,
         message: `Cannot switch to OFFLINE MODE: Local database verification failed (${dbHealth.error || dbHealth.integrityCheck}). Current ONLINE MODE preserved.`,
-        pendingLocalChangesCount: currentState.pendingLocalChangesCount,
+        pendingLocalChangesCount: pendingCount,
         unresolvedConflictsCount,
         status: getOperatingModeFullStatus(),
       };
@@ -390,17 +434,16 @@ export async function switchOperatingMode(params: {
       mode: 'OFFLINE',
       previousMode,
       message:
-        'Switched to OFFLINE MODE successfully. The application now runs exclusively on the permanent local database with zero Cloud Database requests.',
-      pendingLocalChangesCount: getPersistedOperatingModeState().pendingLocalChangesCount,
+        'Switched to OFFLINE MODE. All modules now operate 100% locally with zero internet or Cloud Database requests.',
+      pendingLocalChangesCount: getOperatingModeFullStatus().pendingLocalChangesCount,
       unresolvedConflictsCount,
       status: getOperatingModeFullStatus(),
     };
   }
 
   // Target mode is ONLINE:
-  // 1. Verify Cloud Database reachability BEFORE switching
   const cloudCheck = await checkCloudDatabaseReachability();
-  if (!cloudCheck.reachable) {
+  if (!cloudCheck.reachable && !cloudCheck.quotaExhausted) {
     return {
       success: false,
       switched: false,
@@ -408,32 +451,7 @@ export async function switchOperatingMode(params: {
       previousMode,
       message: `Cannot switch to ONLINE MODE because the Cloud Database is unreachable (${cloudCheck.error || 'no internet connection'}). System remains safely in OFFLINE MODE with all local records preserved.`,
       warning: cloudCheck.error,
-      pendingLocalChangesCount: currentState.pendingLocalChangesCount,
-      unresolvedConflictsCount,
-      status: getOperatingModeFullStatus(),
-    };
-  }
-
-  // 2. Warn if there are unsynced offline changes or unresolved conflicts unless explicitly confirmed
-  if (
-    (currentState.pendingLocalChangesCount > 0 || unresolvedConflictsCount > 0) &&
-    !params.allowWithPendingOfflineChanges
-  ) {
-    const parts: string[] = [];
-    if (currentState.pendingLocalChangesCount > 0) {
-      parts.push(`${currentState.pendingLocalChangesCount} offline change(s) pending Cloud Sync`);
-    }
-    if (unresolvedConflictsCount > 0) {
-      parts.push(`${unresolvedConflictsCount} unresolved sync conflict(s)`);
-    }
-    return {
-      success: false,
-      switched: false,
-      requiresConfirmation: true,
-      mode: previousMode,
-      previousMode,
-      message: `You have ${parts.join(' and ')}. Recommended: click "BACKUP & SYNC NOW" first so offline records are backed up and synchronized with Cloud Database before switching to ONLINE MODE. Or confirm to switch now while preserving all local records.`,
-      pendingLocalChangesCount: currentState.pendingLocalChangesCount,
+      pendingLocalChangesCount: pendingCount,
       unresolvedConflictsCount,
       status: getOperatingModeFullStatus(),
     };
@@ -448,23 +466,51 @@ export async function switchOperatingMode(params: {
   syncModeMetadataToDb();
   checkpointDatabaseWal();
 
+  // If online and not in quota cooldown, trigger incremental sync in background for any pending local changes
+  let syncSummaryMsg = '';
+  if (cloudCheck.reachable && !cloudCheck.quotaExhausted && pendingCount > 0 && unresolvedConflictsCount === 0) {
+    try {
+      const autoSync = await runConflictAwareBidirectionalCloudSync({
+        lastSyncedAt: currentState.lastSuccessfulCloudSyncAt,
+        switchedAt: nowIso,
+        hasLocalPendingChanges: true,
+        initiatedBy: `${params.username}_switch_online`,
+      });
+      if (autoSync.status === 'Successful') {
+        updatePersistedOperatingModeState({
+          cloudSyncStatus: 'Successful',
+          lastSuccessfulCloudSyncAt: new Date().toISOString(),
+          lastCloudSyncError: null,
+          pendingLocalChangesCount: 0,
+        });
+        syncModeMetadataToDb();
+        syncSummaryMsg = ` Synchronized pending offline changes automatically (Cloud Version #${autoSync.cloudVersionSeq}).`;
+      }
+    } catch {
+      // background sync will retry safely
+    }
+  }
+
   writeOperatingModeAuditLog({
     action: 'OPERATING_MODE_SWITCHED_ONLINE',
     username: params.username,
     userId: params.userId,
     ipAddress: params.ipAddress,
-    details: `Super Admin switched System Operating Mode from OFFLINE MODE to ONLINE MODE (Cloud DB verified at v${cloudCheck.versionSeq})`,
+    details: `Super Admin switched System Operating Mode from OFFLINE MODE to ONLINE MODE (Cloud DB v${cloudCheck.versionSeq})`,
   });
 
+  const finalStatus = getOperatingModeFullStatus();
   return {
     success: true,
     switched: true,
     mode: 'ONLINE',
     previousMode,
-    message: `Switched to ONLINE MODE successfully. Cloud Database (${cloudCheck.location}) verified and active.`,
-    pendingLocalChangesCount: getPersistedOperatingModeState().pendingLocalChangesCount,
-    unresolvedConflictsCount,
-    status: getOperatingModeFullStatus(),
+    message: cloudCheck.quotaExhausted
+      ? 'Switched to ONLINE MODE. Local operations continue normally; Cloud Sync is Pending because Firestore daily read quota is exhausted and will resume automatically after quota reset.'
+      : `Switched to ONLINE MODE. Automatic Cloud Synchronization is active.${syncSummaryMsg}`,
+    pendingLocalChangesCount: finalStatus.pendingLocalChangesCount,
+    unresolvedConflictsCount: finalStatus.unresolvedConflictsCount,
+    status: finalStatus,
   };
 }
 
@@ -476,7 +522,7 @@ export function listSyncConflicts(statusFilter: 'unresolved' | 'resolved' | 'all
     const db = getDatabase();
     const sql =
       statusFilter === 'all'
-        ? 'SELECT * FROM sync_conflicts ORDER BY CASE WHEN status = \'unresolved\' THEN 0 ELSE 1 END, id DESC LIMIT 200'
+        ? "SELECT * FROM sync_conflicts ORDER BY CASE WHEN status = 'unresolved' THEN 0 ELSE 1 END, id DESC LIMIT 200"
         : 'SELECT * FROM sync_conflicts WHERE status = ? ORDER BY id DESC LIMIT 200';
     const rows = (
       statusFilter === 'all' ? db.prepare(sql).all() : db.prepare(sql).all(statusFilter)
@@ -508,7 +554,6 @@ export function listSyncConflicts(statusFilter: 'unresolved' | 'resolved' | 'all
 
 /**
  * Resolves a detected record conflict by explicitly applying either the Local version or the Cloud version.
- * Uses a static table allowlist and PRAGMA column validation to prevent SQL injection.
  */
 export function resolveSyncConflict(params: {
   conflictId: number;
@@ -580,7 +625,6 @@ export function resolveSyncConflict(params: {
       ).run(resolution, params.username, nowIso, nowIso, params.conflictId);
     } else {
       if (tableColSet.has('updated_at')) {
-        // Keep local values intact and bump updated_at so local cleanly supersedes the older cloud version on next sync
         db.prepare(`UPDATE "${allowedRule.table}" SET "updated_at" = ? WHERE id = ?`).run(
           nowIso,
           recordId
@@ -623,7 +667,7 @@ export function resolveSyncConflict(params: {
     success: true,
     message: `Conflict on ${allowedRule.table} (${conflict.record_label || `#${recordId}`}) resolved using "${resolution === 'keep_cloud' ? 'Cloud Version' : 'Local Version'}". ${
       unresolvedConflictsCount === 0
-        ? 'All conflicts resolved — click BACKUP & SYNC NOW to complete Cloud Synchronization.'
+        ? 'All conflicts resolved — click Sync Cloud Now to complete Cloud Synchronization.'
         : `${unresolvedConflictsCount} conflict(s) remaining.`
     }`,
     unresolvedConflictsCount,
@@ -667,7 +711,7 @@ export function resolveAllSyncConflicts(params: {
       resolvedCount > 0
         ? `Resolved ${resolvedCount} conflict(s) using "${
             params.resolution === 'keep_cloud' ? 'Cloud Version' : 'Local Version'
-          }". Click BACKUP & SYNC NOW to complete Cloud Synchronization.`
+          }". Click Sync Cloud Now to complete Cloud Synchronization.`
         : 'No unresolved conflicts remaining.',
     unresolvedConflictsCount: remaining,
     status: getOperatingModeFullStatus(),
@@ -675,21 +719,197 @@ export function resolveAllSyncConflicts(params: {
 }
 
 /**
- * Executes the Super Admin single-button manual operation: BACKUP & SYNC NOW.
- * Step 1: Creates and verifies complete local backup in D:\AbrarMedicalStore\Backups\ (Windows) / permanent backup dir.
- * Step 2: Only after Step 1 succeeds, runs conflict-aware synchronization with the Cloud Database.
- * Step 3: Returns clear separate statuses for Local Backup & Cloud Sync + Last Successful timestamps.
+ * Independent Manual Local Backup to D Drive (does NOT trigger or depend on Cloud Sync).
+ */
+export function executeIndependentDDriveBackup(params: {
+  username: string;
+  userId?: number | null;
+  ipAddress?: string;
+  customDDriveFolder?: string;
+  notes?: string;
+}): {
+  success: boolean;
+  backup: CreatedNumberedBackupResult | null;
+  message: string;
+  error: string | null;
+  status: OperatingModeFullStatus;
+} {
+  checkpointDatabaseWal();
+  try {
+    const backup = createNumberedAbrarBackup({
+      createdBy: params.username || 'Super Admin',
+      localTargetFolder: params.customDDriveFolder,
+      notes: params.notes,
+    });
+
+    syncModeMetadataToDb();
+    writeOperatingModeAuditLog({
+      action: 'MANUAL_D_DRIVE_LOCAL_BACKUP',
+      username: params.username,
+      userId: params.userId,
+      ipAddress: params.ipAddress,
+      status: backup.writtenDirectlyToDDrive ? 'SUCCESS' : 'WARNING',
+      details: backup.writtenDirectlyToDDrive
+        ? `Verified D Drive backup created at ${backup.dDriveExactFilePath} (${backup.file_size_bytes} bytes, SHA-256: ${backup.sha256})`
+        : `Verified backup ${backup.filename} created (${backup.file_size_bytes} bytes). Direct D Drive status: ${backup.dDriveError || 'Pending browser save to D:\\AbrarMedicalStore\\Backups'}`,
+    });
+
+    const message = backup.writtenDirectlyToDDrive
+      ? `D Drive Backup created and verified at ${backup.dDriveExactFilePath} (${(backup.file_size_bytes / 1024).toFixed(1)} KB).`
+      : backup.requiresBrowserDDriveSave
+      ? `Verified backup ${backup.filename} prepared on server. Saving directly to your computer's ${backup.dDriveTargetFolder}...`
+      : `Local backup ${backup.filename} created, but D Drive was unavailable: ${backup.dDriveError}`;
+
+    return {
+      success: backup.writtenDirectlyToDDrive || backup.requiresBrowserDDriveSave,
+      backup,
+      message,
+      error: backup.writtenDirectlyToDDrive ? null : backup.dDriveError,
+      status: getOperatingModeFullStatus(),
+    };
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    updatePersistedOperatingModeState({
+      localBackupStatus: 'Failed',
+      lastBackupError: errMsg,
+      dDriveBackupStatus: 'Failed',
+      dDriveBackupError: errMsg,
+    });
+    syncModeMetadataToDb();
+    return {
+      success: false,
+      backup: null,
+      message: `D Drive Backup failed: ${errMsg}`,
+      error: errMsg,
+      status: getOperatingModeFullStatus(),
+    };
+  }
+}
+
+/**
+ * Confirms the result of the browser File System Access save to the user's Windows D:\AbrarMedicalStore\Backups folder.
+ */
+export function confirmBrowserDDriveBackupSave(params: {
+  success: boolean;
+  savedFilePath: string | null;
+  configuredFolder?: string;
+  error?: string | null;
+  username: string;
+}): OperatingModeFullStatus {
+  const nowIso = new Date().toISOString();
+  if (params.success && params.savedFilePath) {
+    updatePersistedOperatingModeState({
+      dDriveBackupStatus: 'Successful',
+      dDriveBackupPath: params.savedFilePath,
+      dDriveBackupError: null,
+      lastSuccessfulBackupAt: nowIso,
+      ...(params.configuredFolder ? { dDriveConfiguredFolder: params.configuredFolder } : {}),
+    });
+  } else {
+    updatePersistedOperatingModeState({
+      dDriveBackupStatus: 'Failed',
+      dDriveBackupError:
+        params.error ||
+        'D Drive folder permission was not granted or D Drive is unavailable on this computer.',
+    });
+  }
+  syncModeMetadataToDb();
+  return getOperatingModeFullStatus();
+}
+
+/**
+ * Independent Manual Cloud Synchronization (does NOT depend on Local Backup).
+ */
+export async function executeIndependentCloudSync(params: {
+  username: string;
+  userId?: number | null;
+  ipAddress?: string;
+}): Promise<{
+  success: boolean;
+  cloudSync: BackupAndSyncResult['step2CloudSync'];
+  conflicts: SyncConflictItem[];
+  status: OperatingModeFullStatus;
+}> {
+  const beforeState = getPersistedOperatingModeState();
+  checkpointDatabaseWal();
+
+  const syncRes = await runConflictAwareBidirectionalCloudSync({
+    lastSyncedAt: beforeState.lastSuccessfulCloudSyncAt,
+    switchedAt: beforeState.switchedAt,
+    hasLocalPendingChanges:
+      beforeState.pendingLocalChangesCount > 0 || getDurablePendingCloudSyncCount() > 0,
+    initiatedBy: params.username || 'Super Admin',
+  });
+
+  const syncDoneAt = syncRes.status === 'Successful' ? new Date().toISOString() : null;
+
+  if (syncRes.status === 'Successful') {
+    updatePersistedOperatingModeState({
+      cloudSyncStatus: 'Successful',
+      lastSuccessfulCloudSyncAt: syncDoneAt,
+      lastCloudSyncError: null,
+      pendingLocalChangesCount: 0,
+    });
+  } else if (syncRes.status === 'Pending') {
+    updatePersistedOperatingModeState({
+      cloudSyncStatus: 'Pending',
+      lastCloudSyncError: syncRes.error || syncRes.message,
+    });
+  } else {
+    updatePersistedOperatingModeState({
+      cloudSyncStatus: 'Failed',
+      lastCloudSyncError: syncRes.error || syncRes.message,
+    });
+  }
+
+  syncModeMetadataToDb();
+  checkpointDatabaseWal();
+
+  writeOperatingModeAuditLog({
+    action: 'MANUAL_CLOUD_SYNC_ONLY',
+    username: params.username,
+    userId: params.userId,
+    ipAddress: params.ipAddress,
+    status: syncRes.status === 'Successful' ? 'SUCCESS' : 'WARNING',
+    details: `Cloud Sync: ${syncRes.status} (${syncRes.message})`,
+  });
+
+  const finalStatus = getOperatingModeFullStatus();
+  return {
+    success: syncRes.status === 'Successful',
+    cloudSync: {
+      status: syncRes.status,
+      reachable: syncRes.reachable,
+      mergedFromCloud: syncRes.mergedFromCloud,
+      updatedFromCloud: syncRes.updatedFromCloud,
+      conflictsDetected: syncRes.conflictsDetected,
+      unresolvedConflictsCount: syncRes.unresolvedConflictsCount,
+      cloudVersionSeq: syncRes.cloudVersionSeq,
+      completedAt: syncDoneAt,
+      message: syncRes.message,
+      error: syncRes.error,
+      quotaExhausted: syncRes.quotaExhausted,
+    },
+    conflicts: listSyncConflicts('unresolved'),
+    status: finalStatus,
+  };
+}
+
+/**
+ * Executes combined BACKUP & SYNC NOW while keeping Step 1 (Local Backup) and Step 2 (Cloud Sync) decoupled
+ * so a failure or quota pending state in one never blocks or corrupts the other.
  */
 export async function executeManualBackupAndSync(params: {
   username: string;
   userId?: number | null;
   ipAddress?: string;
   notes?: string;
+  customDDriveFolder?: string;
 }): Promise<BackupAndSyncResult> {
   const beforeState = getPersistedOperatingModeState();
   checkpointDatabaseWal();
 
-  // ================= STEP 1: LOCAL BACKUP =================
+  // ================= STEP 1: LOCAL BACKUP (INDEPENDENT) =================
   let step1LocalBackup: BackupAndSyncResult['step1LocalBackup'] = {
     status: 'Failed',
     filename: null,
@@ -702,43 +922,29 @@ export async function executeManualBackupAndSync(params: {
   };
 
   try {
-    const backup = createDatabaseBackup({
-      backupType: 'manual',
+    const numbered = createNumberedAbrarBackup({
       createdBy: params.username || 'Super Admin',
+      localTargetFolder: params.customDDriveFolder,
       notes: params.notes || 'Super Admin Manual BACKUP & SYNC NOW',
     });
 
-    const verify = verifyBackupFile(backup.file_path);
-    if (!verify.valid) {
-      throw new Error(
-        `Created backup "${backup.filename}" failed post-backup integrity verification (${verify.error || verify.integrityCheck}).`
-      );
-    }
-
-    const fileBuf = fs.readFileSync(backup.file_path);
-    const sha256 = crypto.createHash('sha256').update(fileBuf).digest('hex');
     const backupDoneAt = new Date().toISOString();
-
     step1LocalBackup = {
       status: 'Successful',
-      filename: backup.filename,
-      filePath: backup.file_path,
-      fileSizeBytes: backup.file_size_bytes,
-      integrityStatus: verify.integrityCheck,
-      sha256,
+      backupId: numbered.id,
+      filename: numbered.filename,
+      filePath: numbered.writtenDirectlyToDDrive ? numbered.dDriveExactFilePath : numbered.file_path,
+      fileSizeBytes: numbered.file_size_bytes,
+      integrityStatus: numbered.integrity_status || 'ok',
+      sha256: numbered.sha256,
       completedAt: backupDoneAt,
-      error: null,
+      error: numbered.dDriveError,
+      writtenDirectlyToDDrive: numbered.writtenDirectlyToDDrive,
+      requiresBrowserDDriveSave: numbered.requiresBrowserDDriveSave,
+      dDriveTargetFolder: numbered.dDriveTargetFolder,
+      dDriveExactFilePath: numbered.dDriveExactFilePath || undefined,
+      dDriveError: numbered.dDriveError,
     };
-
-    updatePersistedOperatingModeState({
-      localBackupStatus: 'Successful',
-      lastSuccessfulBackupAt: backupDoneAt,
-      lastBackupFilename: backup.filename,
-      lastBackupPath: backup.file_path,
-      lastBackupSizeBytes: backup.file_size_bytes,
-      lastBackupSha256: sha256,
-      lastBackupError: null,
-    });
     syncModeMetadataToDb();
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -747,6 +953,8 @@ export async function executeManualBackupAndSync(params: {
     updatePersistedOperatingModeState({
       localBackupStatus: 'Failed',
       lastBackupError: errMsg,
+      dDriveBackupStatus: 'Failed',
+      dDriveBackupError: errMsg,
     });
     syncModeMetadataToDb();
 
@@ -754,39 +962,18 @@ export async function executeManualBackupAndSync(params: {
       severity: 'CRITICAL',
       module: 'operating_mode_backup_sync',
       operation: 'BACKUP & SYNC NOW — Step 1 Local Backup',
-      userMessage: 'Manual Local Backup failed; Cloud Sync was not started.',
+      userMessage: 'Manual Local Backup failed; proceeding with independent Cloud Sync check.',
       technicalDetails: errMsg,
       username: params.username,
     });
-
-    const finalStatus = getOperatingModeFullStatus();
-    return {
-      success: false,
-      step1LocalBackup,
-      step2CloudSync: {
-        status: 'Pending',
-        reachable: false,
-        mergedFromCloud: 0,
-        updatedFromCloud: 0,
-        conflictsDetected: 0,
-        unresolvedConflictsCount: finalStatus.unresolvedConflictsCount,
-        cloudVersionSeq: finalStatus.cloud.lastVersionSeq,
-        completedAt: null,
-        message: 'Cloud Sync did not run because Step 1 (Local Backup) failed.',
-        error: errMsg,
-      },
-      lastSuccessfulBackupAt: finalStatus.lastSuccessfulBackupAt,
-      lastSuccessfulCloudSyncAt: finalStatus.lastSuccessfulCloudSyncAt,
-      conflicts: listSyncConflicts('unresolved'),
-      status: finalStatus,
-    };
   }
 
-  // ================= STEP 2: CLOUD SYNCHRONIZATION =================
+  // ================= STEP 2: CLOUD SYNCHRONIZATION (INDEPENDENT) =================
   const syncRes = await runConflictAwareBidirectionalCloudSync({
     lastSyncedAt: beforeState.lastSuccessfulCloudSyncAt,
     switchedAt: beforeState.switchedAt,
-    hasLocalPendingChanges: beforeState.pendingLocalChangesCount > 0,
+    hasLocalPendingChanges:
+      beforeState.pendingLocalChangesCount > 0 || getDurablePendingCloudSyncCount() > 0,
     initiatedBy: params.username || 'Super Admin',
   });
 
@@ -819,15 +1006,18 @@ export async function executeManualBackupAndSync(params: {
     username: params.username,
     userId: params.userId,
     ipAddress: params.ipAddress,
-    status: syncRes.status === 'Successful' ? 'SUCCESS' : 'WARNING',
-    details: `Local Backup: Successful (${step1LocalBackup.filename}, ${step1LocalBackup.fileSizeBytes} bytes); Cloud Sync: ${syncRes.status} (${syncRes.message})`,
+    status:
+      step1LocalBackup.status === 'Successful' && syncRes.status === 'Successful'
+        ? 'SUCCESS'
+        : 'WARNING',
+    details: `Local Backup: ${step1LocalBackup.status} (${step1LocalBackup.filename || 'none'}); Cloud Sync: ${syncRes.status} (${syncRes.message})`,
   });
 
   const finalStatus = getOperatingModeFullStatus();
   const unresolvedConflicts = listSyncConflicts('unresolved');
 
   return {
-    success: step1LocalBackup.status === 'Successful' && syncRes.status === 'Successful',
+    success: step1LocalBackup.status === 'Successful',
     step1LocalBackup,
     step2CloudSync: {
       status: syncRes.status,
@@ -840,6 +1030,7 @@ export async function executeManualBackupAndSync(params: {
       completedAt: syncDoneAt,
       message: syncRes.message,
       error: syncRes.error,
+      quotaExhausted: syncRes.quotaExhausted,
     },
     lastSuccessfulBackupAt: finalStatus.lastSuccessfulBackupAt,
     lastSuccessfulCloudSyncAt: finalStatus.lastSuccessfulCloudSyncAt,

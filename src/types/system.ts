@@ -197,7 +197,19 @@ export function parseFieldVisibility(jsonStr?: string | null): InvoiceFieldVisib
 
 export type SystemOperatingMode = 'ONLINE' | 'OFFLINE';
 export type LocalBackupStatus = 'Successful' | 'Failed' | 'Not Run';
+export type DDriveBackupStatus = 'Successful' | 'Failed' | 'Pending Save' | 'Not Run';
 export type CloudSyncStatus = 'Successful' | 'Pending' | 'Failed' | 'Not Run';
+
+export interface DDriveFolderCheckResult {
+  configuredFolder: string;
+  resolvedLocalPath: string | null;
+  isWindowsHost: boolean;
+  driveExists: boolean;
+  folderExists: boolean;
+  writable: boolean;
+  requiresBrowserDDriveHelper: boolean;
+  error: string | null;
+}
 
 export interface SyncConflictRecord {
   id: number;
@@ -229,9 +241,16 @@ export interface OperatingModeStatus {
   lastBackupSizeBytes: number;
   lastBackupSha256: string | null;
   lastBackupError: string | null;
+  dDriveBackupStatus?: DDriveBackupStatus;
+  dDriveBackupPath?: string | null;
+  dDriveBackupError?: string | null;
+  dDriveConfiguredFolder?: string;
+  dDriveFolderCheck?: DDriveFolderCheckResult;
   cloudSyncStatus: CloudSyncStatus;
   lastSuccessfulCloudSyncAt: string | null;
   lastCloudSyncError: string | null;
+  quotaExhausted?: boolean;
+  quotaCooldownUntilMs?: number;
   pendingLocalChangesCount: number;
   unresolvedConflictsCount: number;
   storage: {
@@ -254,6 +273,7 @@ export interface OperatingModeStatus {
     databaseIdentity: string;
     lastVersionSeq: number;
     lastError: string | null;
+    quotaExhausted?: boolean;
   };
 }
 
@@ -275,6 +295,7 @@ export interface BackupAndSyncNowResponse {
   success: boolean;
   step1LocalBackup: {
     status: 'Successful' | 'Failed';
+    backupId?: number;
     filename: string | null;
     filePath: string | null;
     fileSizeBytes: number;
@@ -282,6 +303,11 @@ export interface BackupAndSyncNowResponse {
     sha256: string | null;
     completedAt: string | null;
     error: string | null;
+    writtenDirectlyToDDrive?: boolean;
+    requiresBrowserDDriveSave?: boolean;
+    dDriveTargetFolder?: string;
+    dDriveExactFilePath?: string;
+    dDriveError?: string | null;
   };
   step2CloudSync: {
     status: 'Successful' | 'Pending' | 'Failed';
@@ -294,6 +320,7 @@ export interface BackupAndSyncNowResponse {
     completedAt: string | null;
     message: string;
     error: string | null;
+    quotaExhausted?: boolean;
   };
   lastSuccessfulBackupAt: string | null;
   lastSuccessfulCloudSyncAt: string | null;
@@ -301,4 +328,5 @@ export interface BackupAndSyncNowResponse {
   status: OperatingModeStatus;
   error?: string;
 }
+
 

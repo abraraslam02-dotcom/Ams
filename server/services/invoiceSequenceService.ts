@@ -416,3 +416,50 @@ export function bindInvoiceNumberRecordId(
     WHERE invoice_number = ? AND module_type = ?
   `).run(recordId, invoiceNumber, moduleType);
 }
+
+/**
+ * Permanently registers an imported invoice number in invoice_number_registry
+ * and advances daily_invoice_sequences / invoice_sequences if the imported invoice number
+ * matches the canonical 'SI-NNN-DD-MMM-YYYY' / 'PI-NNN-DD-MMM-YYYY' pattern for that date.
+ */
+export function registerImportedInvoiceNumber(
+  moduleType: InvoiceModuleType,
+  invoiceNumber: string,
+  dateStr?: string | null,
+  recordId?: number | null
+): void {
+  ensureInvoiceSequenceTables();
+  const db = getDatabase();
+  const cleanNo = String(invoiceNumber || '').trim();
+  if (!cleanNo) return;
+
+  const dateKey = normalizeInvoiceDateKey(dateStr);
+  const periodKey = `${moduleType}:${dateKey}`;
+  const parsedSeq = parseInvoiceSeqForDate(cleanNo, moduleType, dateKey);
+
+  if (parsedSeq > 0) {
+    db.prepare(`
+      INSERT INTO daily_invoice_sequences (invoice_type, invoice_date, last_seq, updated_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(invoice_type, invoice_date) DO UPDATE SET
+        last_seq = MAX(daily_invoice_sequences.last_seq, excluded.last_seq),
+        updated_at = CURRENT_TIMESTAMP
+    `).run(moduleType, dateKey, parsedSeq);
+
+    db.prepare(`
+      INSERT INTO invoice_sequences (period_key, last_seq, updated_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(period_key) DO UPDATE SET
+        last_seq = MAX(invoice_sequences.last_seq, excluded.last_seq),
+        updated_at = CURRENT_TIMESTAMP
+    `).run(periodKey, parsedSeq);
+  }
+
+  db.prepare(`
+    INSERT INTO invoice_number_registry (invoice_number, period_key, seq_number, module_type, record_id, allocated_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(invoice_number) DO UPDATE SET
+      record_id = COALESCE(excluded.record_id, invoice_number_registry.record_id)
+  `).run(cleanNo, periodKey, parsedSeq, moduleType, recordId ?? null);
+}
+

@@ -52,6 +52,7 @@ import {
   InvoiceSearchableItem,
 } from '../common/InvoiceRecordSearchInput';
 import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
+import { SalesInvoiceExcelImportModal } from './SalesInvoiceExcelImportModal';
 import { WhatsAppDocumentPayload } from '../../utils/whatsapp';
 import {
   Search,
@@ -65,6 +66,7 @@ import {
   PlayCircle,
   Printer,
   Download,
+  Upload,
   Percent,
   Users2,
   BookOpen,
@@ -3635,6 +3637,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [exportingExcel, setExportingExcel] = useState<boolean>(false);
   const [customExportOpen, setCustomExportOpen] = useState<boolean>(false);
   const [customExportRecords, setCustomExportRecords] = useState<Array<Record<string, any>>>([]);
+  const [excelImportOpen, setExcelImportOpen] = useState<boolean>(false);
 
   const buildCurrentSaleExportRecord = () => {
     const activeLines = rows.filter((r) => r.item_id !== null);
@@ -5215,6 +5218,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
             <span>Custom Excel</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setExcelImportOpen(true)}
+            className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+            title="Import Sales Invoices from Excel (.xlsx)"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>Import Excel</span>
           </button>
           <label
             className={`flex items-center gap-1 px-2 py-1 rounded-lg border font-bold cursor-pointer transition-colors ${
@@ -8780,6 +8792,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => setExcelImportOpen(true)}
+                  className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold flex items-center gap-1 cursor-pointer"
+                  title="Import Sales Invoices from Excel (.xlsx)"
+                >
+                  <Upload className="w-3 h-3" />
+                  Import Excel
+                </button>
+                <button
+                  type="button"
                   onClick={handleReprintLastInvoice}
                   className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-600 font-bold flex items-center gap-1 cursor-pointer"
                 >
@@ -9629,6 +9650,38 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         moduleType="SALES"
         records={customExportRecords}
         defaultFilename={`Sales_Custom_Export_${invoiceDate}.xlsx`}
+      />
+
+      {/* ================= SALES INVOICE EXCEL IMPORT MODAL ================= */}
+      <SalesInvoiceExcelImportModal
+        isOpen={excelImportOpen}
+        onClose={() => setExcelImportOpen(false)}
+        sampleCustomer={
+          selectedCustomer
+            ? { account_code: selectedCustomer.account_code, account_name: selectedCustomer.account_name }
+            : undefined
+        }
+        sampleItems={catalogItems.slice(0, 2).map((it) => ({
+          item_code: it.item_code,
+          item_name: it.item_name,
+          company_name: it.company_name,
+          packing: it.packing,
+          retail_price: it.retail_price,
+        }))}
+        onImportSuccess={async () => {
+          await loadReferenceData();
+          if (!editingSaleId) {
+            try {
+              const nextNumRes = await api.getNextSalesNumbers(invoiceDate);
+              if (nextNumRes?.nextInvoiceNumber) {
+                setInvoiceNumber(nextNumRes.nextInvoiceNumber);
+              }
+            } catch {
+              // ignore
+            }
+          }
+          setSuccessMsg('Sales Invoice(s) imported from Excel and stock/accounts updated.');
+        }}
       />
 
       {/* ================= MODAL 6: DSR (DAILY STOCK REQUISITION) REPORT ================= */}

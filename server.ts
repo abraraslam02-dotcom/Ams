@@ -545,6 +545,13 @@ self.addEventListener('fetch', (event) => {
           const safetyReport = await runPreDeploymentSafetyChecks();
           console.log(`[AMS Deployment Safety] ${safetyReport.message}`);
           if (safetyReport.localIntegrityOk) {
+            const activeDbAfterSafety = getDatabase();
+            const hasCompanySettings = activeDbAfterSafety
+              .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_settings'")
+              .get();
+            if (!hasCompanySettings) {
+              runMigrations();
+            }
             ensureAuthTables(getDatabase());
             syncModeMetadataToDb();
             if (deferredBootVerificationForCloudRecovery) {

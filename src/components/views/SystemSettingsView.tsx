@@ -957,7 +957,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       )}
 
       {/* =====================================================================
-          TAB 2: MANUAL DATABASE BACKUP, CLOUD SYNC & DATA RECOVERY
+          TAB 2: D DRIVE BACKUP, CLOUD SYNC & DATA RECOVERY
       ===================================================================== */}
       {subTab === 'backup-restore' && (
         <div className="space-y-5">
@@ -970,103 +970,6 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             initialSection="backup-restore"
             onDataChanged={fetchAdminData}
           />
-          {/* Backup Controls & Configuration Card */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-            <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <div className="flex items-center gap-2">
-                  <HardDrive className="w-4 h-4 text-emerald-600" />
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">
-                      On-Demand Local Database Backup (Manual Control Only)
-                    </h3>
-                    <p className="text-[11px] text-slate-500">
-                      Uses SQLite WAL-safe VACUUM INTO snapshot with automatic PRAGMA integrity
-                      verification
-                    </p>
-                  </div>
-                </div>
-                <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-emerald-400 font-mono font-bold text-[11px]">
-                  Snapshots: {backups.length}
-                </span>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2.5">
-                <input
-                  type="text"
-                  value={backupNotes}
-                  onChange={(e) => setBackupNotes(e.target.value)}
-                  placeholder="Optional backup label (e.g. Before Month-End Closing)..."
-                  className="flex-1 px-3 py-2 rounded-xl border border-slate-300"
-                />
-                <button
-                  type="button"
-                  disabled={creatingBackup}
-                  onClick={handleManualBackupNow}
-                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center justify-center gap-2 shadow-xs cursor-pointer disabled:opacity-50 shrink-0"
-                >
-                  <Database className="w-4 h-4" />
-                  <span>{creatingBackup ? 'Creating Backup...' : 'Local Backup Only'}</span>
-                </button>
-              </div>
-
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-700">Active Backup Directory:</span>
-                  <span className="font-mono font-bold text-slate-900">
-                    {backupDir || form.backup_directory || 'D:\\AbrarMedicalStore\\Backups'}
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-600 bg-white border border-slate-200 rounded-lg p-2.5">
-                  <strong>Manual Control Policy:</strong> Automatic daily backups and background cloud sync
-                  are disabled. Use <strong>BACKUP &amp; SYNC NOW</strong> in the Super Admin Control Panel
-                  above whenever you want to back up locally and synchronize with the Cloud Database.
-                </div>
-              </div>
-            </div>
-
-            {/* Data Protection & Recovery Safeguards Card */}
-            <div className="lg:col-span-5 bg-slate-900 text-white rounded-2xl p-5 space-y-3 flex flex-col justify-between">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-emerald-400">
-                  <ShieldCheck className="w-5 h-5" />
-                  <h3 className="text-sm font-bold uppercase tracking-wider">
-                    Data Recovery & Safety Architecture
-                  </h3>
-                </div>
-                <ul className="space-y-1.5 text-[11px] text-slate-300 list-disc pl-4">
-                  <li>
-                    <strong>Pre-Restore Safety Snapshot:</strong> Restoring any backup automatically
-                    creates a fresh <code>pre_restore_safety</code> backup of the current database
-                    first.
-                  </li>
-                  <li>
-                    <strong>Integrity Check:</strong> Every backup is validated with{' '}
-                    <code>PRAGMA integrity_check</code> and core table verification before restore.
-                  </li>
-                  <li>
-                    <strong>Zero Silent Overwrites:</strong> Explicit administrator confirmation is
-                    required before restoring.
-                  </li>
-                </ul>
-              </div>
-
-              {verificationResult && (
-                <div className="p-3 rounded-xl bg-slate-950 border border-emerald-700/60 text-[11px] space-y-1">
-                  <div className="font-bold text-emerald-400">
-                    Verified: {verificationResult.filename} ({verificationResult.integrityCheck})
-                  </div>
-                  <div className="font-mono text-slate-300">
-                    Tables: {verificationResult.tablesCount} • Items:{' '}
-                    {verificationResult.coreCounts?.items} • Accounts:{' '}
-                    {verificationResult.coreCounts?.accounts} • Sales:{' '}
-                    {verificationResult.coreCounts?.sales} • Purchases:{' '}
-                    {verificationResult.coreCounts?.purchases}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
 
           {/* Backup History Table */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
@@ -1258,11 +1161,6 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       ===================================================================== */}
       {subTab === 'system-admin' && (
         <div className="space-y-4">
-          <SuperAdminOperatingModePanel
-            hasUnsavedInvoiceItems={hasUnsavedInvoiceItems}
-            onModeChanged={onOperatingModeChanged}
-            onDataChanged={fetchAdminData}
-          />
           <FirebaseCloudPanel
             totalLiveRecords={
               sysInfo?.recordCounts

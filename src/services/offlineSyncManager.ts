@@ -122,11 +122,33 @@ class OfflineSyncManager {
       // ignore storage error
     }
     if (next === 'OFFLINE') {
+      if (this.syncTimer) {
+        clearTimeout(this.syncTimer);
+        this.syncTimer = null;
+      }
       this.syncStatus = 'offline';
-    } else if (this.isOnline && this.pendingCount === 0 && this.failedCount === 0) {
-      this.syncStatus = 'synced';
+    } else if (this.isOnline) {
+      if (this.pendingCount === 0 && this.failedCount === 0) {
+        this.syncStatus = 'synced';
+      } else {
+        this.syncStatus = 'pending';
+        this.scheduleAutoSync(1500);
+      }
     }
     this.notify();
+  }
+
+  public scheduleAutoSync(delayMs = 4000): void {
+    if (this.operatingMode === 'OFFLINE' || !this.isOnline) return;
+    if (this.syncTimer) {
+      clearTimeout(this.syncTimer);
+    }
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      if (this.operatingMode === 'ONLINE' && this.isOnline && !this.isSyncing) {
+        this.syncNow({ manualTrigger: false }).catch(() => {});
+      }
+    }, delayMs);
   }
 
   private async init() {
@@ -140,11 +162,16 @@ class OfflineSyncManager {
     this.lastSyncedAt = await offlineStorage.getMeta('last_synced_at');
     await this.refreshPendingCount();
 
-    // Manual Control Only: track network connectivity status passively — NEVER trigger automatic sync on reconnect or timer!
+    // Local-First Automatic Sync: when internet reconnects and Super Admin selected ONLINE mode, sync pending items automatically
     window.addEventListener('online', () => {
       this.isOnline = true;
-      if (this.operatingMode === 'ONLINE' && this.syncStatus === 'offline') {
-        this.syncStatus = this.pendingCount > 0 ? 'pending' : 'synced';
+      if (this.operatingMode === 'ONLINE') {
+        if (this.syncStatus === 'offline') {
+          this.syncStatus = this.pendingCount > 0 ? 'pending' : 'synced';
+        }
+        if (this.pendingCount > 0 || this.failedCount > 0) {
+          this.scheduleAutoSync(2000);
+        }
       }
       this.notify();
     });
@@ -166,6 +193,8 @@ class OfflineSyncManager {
         this.isOnline = false;
       }
       this.syncStatus = 'offline';
+    } else if (this.pendingCount > 0) {
+      this.scheduleAutoSync(3000);
     }
     this.notify();
   }
@@ -268,24 +297,24 @@ class OfflineSyncManager {
 
   private getStatusMessage(): string {
     if (this.operatingMode === 'OFFLINE') {
-      return 'Offline Mode – Local DB Active.';
+      return 'Offline Mode – Working 100% Locally.';
     }
     if (!this.isOnline || this.syncStatus === 'offline') {
-      return 'Offline – Working Locally.';
+      return 'No Internet – Saving Locally (Will Auto-Sync).';
     }
     if (this.isSyncing || this.syncStatus === 'syncing') {
-      return 'Syncing – Please Wait.';
+      return 'Synchronizing Changes...';
     }
     if (this.failedCount > 0 || this.syncStatus === 'failed') {
-      return 'Failed – Changes Pending.';
+      return 'Sync Pending – Local Data Preserved.';
     }
     if (this.justCompletedSync && this.pendingCount === 0) {
-      return 'Synced – All Changes Saved.';
+      return 'All Records Synchronized.';
     }
     if (this.pendingCount > 0) {
-      return 'Pending – Manual Sync Ready.';
+      return `${this.pendingCount} Pending Record(s) Queued for Sync.`;
     }
-    return this.lastSyncedAt ? 'Synced – All Changes Saved.' : 'Online Mode – Connected.';
+    return this.lastSyncedAt ? 'Online – Synchronized.' : 'Online – Local-First Active.';
   }
 
   public getState(): SyncState {
@@ -358,12 +387,13 @@ class OfflineSyncManager {
       this.failedCount = queueFailed.length + extraFailedItems + extraFailedSales;
 
       if (!this.isSyncing) {
-        if (!this.isOnline) {
+        if (this.operatingMode === 'OFFLINE' || !this.isOnline) {
           this.syncStatus = 'offline';
         } else if (this.failedCount > 0) {
           this.syncStatus = 'failed';
         } else if (this.pendingCount > 0) {
           this.syncStatus = 'pending';
+          this.scheduleAutoSync(3500);
         } else {
           this.syncStatus = 'synced';
         }
@@ -665,16 +695,11 @@ class OfflineSyncManager {
 
   /**
    * Main sync method:
-   * 1. Checks server connection status (never wipes local IndexedDB on container restart/republish)
-   * 2. Auto-retries previously failed queue items and pushes pending changes in small batches (20 per batch)
-   * 3. Rehydrates server SQLite from local IndexedDB if a newly republished container started empty
-   * 4. Pulls incremental delta updates since lastSyncedAt + last_tombstone_id
+   * 1. When Super Admin selected OFFLINE MODE, makes ZERO network requests and keeps all work local.
+   * 2. When Super Admin selected ONLINE MODE and internet is available, pushes pending changes in batches
+   *    and pulls incremental delta updates since lastSyncedAt + last_tombstone_id.
    */
-  public async syncNow(options?: { manualTrigger?: boolean }): Promise<boolean> {
-    // Manual Control Only: block automatic/background sync calls and never hit cloud during OFFLINE MODE
-    if (!options?.manualTrigger) {
-      return false;
-    }
+  public async syncNow(_options?: { manualTrigger?: boolean }): Promise<boolean> {
     if (this.operatingMode === 'OFFLINE') {
       return false;
     }

@@ -62,12 +62,39 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
   // Protected Audit Logs
   const [protectedLogs, setProtectedLogs] = useState<Array<Record<string, any>>>([]);
 
+  const getAuthHeaders = useCallback((includeJson = true): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    if (includeJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+    try {
+      const rawSession =
+        window.sessionStorage.getItem('ams_active_tab_session_v2') ||
+        window.localStorage.getItem('ams_active_auth_session_v2');
+      if (rawSession) {
+        const parsed = JSON.parse(rawSession);
+        if (parsed?.token) {
+          headers['Authorization'] = `Bearer ${parsed.token}`;
+          return headers;
+        }
+      }
+      const legacyToken = window.localStorage.getItem('ams_session_token');
+      if (legacyToken) {
+        headers['Authorization'] = `Bearer ${legacyToken}`;
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return headers;
+  }, []);
+
   const loadBackupSettingsAndLogs = useCallback(async () => {
     try {
+      const authHeaders = getAuthHeaders(false);
       const [bRes, rPrev, lRes] = await Promise.all([
-        fetch('/api/enhancements/local-backup/settings').then((r) => r.json()),
-        fetch('/api/enhancements/master-reset/preview').then((r) => r.json()),
-        fetch('/api/enhancements/protected-audit-logs').then((r) => r.json()),
+        fetch('/api/enhancements/local-backup/settings', { headers: authHeaders }).then((r) => r.json()),
+        fetch('/api/enhancements/master-reset/preview', { headers: authHeaders }).then((r) => r.json()),
+        fetch('/api/enhancements/protected-audit-logs', { headers: authHeaders }).then((r) => r.json()),
       ]);
       if (bRes.success) {
         const rawDir = String(bRes.settings?.local_backup_folder || '').trim();
@@ -92,7 +119,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     } catch {
       // ignore
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     loadBackupSettingsAndLogs();
@@ -102,7 +129,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     try {
       const res = await fetch('/api/enhancements/local-backup/settings', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           local_backup_folder: backupFolder,
           auto_daily_backup: autoDaily,
@@ -123,7 +150,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     }
   };
 
-  // Part 13 & 14: CREATE LOCAL BACKUP (Saves .db to Server when online, or Offline IndexedDB Snapshot .ams.json when offline)
+  // Part 13 & 14: CREATE LOCAL BACKUP (Saves verified .db to D:\AbrarMedicalStore\Backups)
   const handleCreateLocalBackup = async () => {
     setCreatingBackup(true);
     setBanner(null);
@@ -133,17 +160,30 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
         try {
           const res = await fetch('/api/enhancements/local-backup/create', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(true),
             body: JSON.stringify({
               backup_type: 'manual_local',
+              custom_folder: backupFolder,
               notes: `Manual Local Backup to ${backupFolder}`,
             }),
           });
           const data = await res.json();
           if (res.ok && data.success) {
             const backupMeta = data.backup;
+            if (backupMeta.writtenDirectlyToDDrive) {
+              setBanner({
+                type: 'success',
+                message: `Verified D Drive Backup created at "${backupMeta.dDriveExactFilePath}" (${(
+                  Number(backupMeta.file_size_bytes || 0) / 1024
+                ).toFixed(1)} KB) — Integrity Check: PASSED.`,
+              });
+              createdOnlineDb = true;
+              await loadBackupSettingsAndLogs();
+              return;
+            }
+
             const downloadUrl = `/api/enhancements/local-backup/download/${backupMeta.id}`;
-            const binRes = await fetch(downloadUrl);
+            const binRes = await fetch(downloadUrl, { headers: getAuthHeaders(false) });
             const blob = await binRes.blob();
 
             let savedViaPicker = false;
@@ -278,7 +318,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
 
       const res = await fetch('/api/enhancements/local-backup/upload-verify', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           file_name: file.name,
           file_base64: base64Data,
@@ -343,7 +383,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
 
       const res = await fetch('/api/enhancements/local-backup/execute-restore', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           backup_id: stagedBackup.backup_id,
           staged_file_name: stagedBackup.staged_file_name,
@@ -376,7 +416,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     try {
       const res = await fetch('/api/enhancements/master-reset/request-code', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({ reset_mode: resetMode }),
       });
       const data = await res.json();
@@ -404,7 +444,7 @@ export const MasterResetAndLocalBackupPanel: React.FC<{
     try {
       const res = await fetch('/api/enhancements/master-reset/execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           reset_mode: resetMode,
           verification_code: resetOtpCode.trim(),

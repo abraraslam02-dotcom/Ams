@@ -16,6 +16,8 @@ import {
   bindInvoiceNumberRecordId,
   isTemporaryOrHeldInvoiceNumber,
   generateTemporaryHeldInvoiceNumber,
+  registerImportedInvoiceNumber,
+  normalizeInvoiceDateKey,
 } from '../services/invoiceSequenceService.ts';
 import {
   previewFIFOAllocation,
@@ -2114,11 +2116,15 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         preferredInventoryId: line.inventory_id ? Number(line.inventory_id) : null,
       });
 
+      const isExcelImport = body.is_excel_import === true;
+
       const bonusQuantity =
         quantity < 0 || looseQuantity < 0
           ? 0
           : line.bonus_quantity !== undefined && line.bonus_quantity !== ''
           ? round2(Math.max(0, Number(line.bonus_quantity)))
+          : isExcelImport
+          ? 0
           : evalOffer.bonus_quantity;
 
       const totalUnits = round2((quantity + bonusQuantity) * parsed.unitsPerPack + looseQuantity);
@@ -2150,7 +2156,9 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
           ? clampDiscountPercent(line.discount_1_percent ?? 0)
           : hasExplicitLegacyDisc
             ? clampDiscountPercent(line.discount_percent)
-            : clampDiscountPercent(evalOffer.effective_discount_percent);
+            : isExcelImport
+              ? 0
+              : clampDiscountPercent(evalOffer.effective_discount_percent);
       const d2Input =
         hasExplicitD1 || hasExplicitD2 ? clampDiscountPercent(line.discount_2_percent ?? 0) : 0;
 
@@ -2164,10 +2172,26 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
 
       const discount1Percent = seqDisc.discount_1_percent;
       const discount2Percent = seqDisc.discount_2_percent;
-      const netRate = seqDisc.net_rate;
-      const discountPercent = seqDisc.effective_discount_percent;
-      const discountAmount = seqDisc.discount_amount;
-      const taxableAmount = seqDisc.taxable_amount;
+      let netRate = seqDisc.net_rate;
+      let discountPercent = seqDisc.effective_discount_percent;
+      let discountAmount = seqDisc.discount_amount;
+      let taxableAmount = seqDisc.taxable_amount;
+
+      if (
+        isExcelImport &&
+        line.exact_discount_amount !== undefined &&
+        line.exact_discount_amount !== null &&
+        line.exact_discount_amount !== '' &&
+        Number.isFinite(Number(line.exact_discount_amount))
+      ) {
+        discountAmount = round2(Math.max(0, Math.min(grossAmount, Number(line.exact_discount_amount))));
+        taxableAmount = round2(grossAmount - discountAmount);
+        discountPercent = grossAmount > 0 ? round2((discountAmount / grossAmount) * 100) : 0;
+        if (d1Input === 0 && d2Input === 0 && quantity > 0 && looseQuantity === 0) {
+          netRate = round2(taxableAmount / quantity);
+        }
+      }
+
       const baseTaxCfg = useVarCustom
         ? resolveItemTaxConfig({
             tax_type: (variantRow?.tax_type ?? itemRow.tax_type) as string | undefined,
@@ -2193,7 +2217,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       const taxValue = resolvedLineTax.tax_value;
       const taxPercent = resolvedLineTax.tax_percent;
       // CRITICAL TAX RULE: Tax is ALWAYS calculated on ORIGINAL grossAmount BEFORE discounts (covers packs & loose quantities)
-      const taxAmount = calculateLineTax({
+      let taxAmount = calculateLineTax({
         grossAmount,
         quantity,
         looseQuantity,
@@ -2202,6 +2226,15 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         taxValue,
         taxPercent,
       });
+      if (
+        isExcelImport &&
+        line.exact_tax_amount !== undefined &&
+        line.exact_tax_amount !== null &&
+        line.exact_tax_amount !== '' &&
+        Number.isFinite(Number(line.exact_tax_amount))
+      ) {
+        taxAmount = round2(Math.max(0, Number(line.exact_tax_amount)));
+      }
       const lineTotal = round2(grossAmount + taxAmount - discountAmount);
 
       // Resolve batch in inventory with strict variant_key isolation, FIFO & Expiry / Block validation
@@ -2447,9 +2480,19 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     if (taxBasis === 'taxable_amount') baseForAdvanceTax = taxableAmount;
     else if (taxBasis === 'gross_amount') baseForAdvanceTax = grossTotal;
 
-    const advanceTaxAmount = advanceTaxApplicable
+    let advanceTaxAmount = advanceTaxApplicable
       ? round2((baseForAdvanceTax * advanceTaxRate) / 100)
       : 0;
+    if (
+      body.is_excel_import === true &&
+      body.exact_advance_tax_amount !== undefined &&
+      body.exact_advance_tax_amount !== null &&
+      body.exact_advance_tax_amount !== '' &&
+      Number.isFinite(Number(body.exact_advance_tax_amount)) &&
+      Number(body.exact_advance_tax_amount) >= 0
+    ) {
+      advanceTaxAmount = round2(Math.max(0, Number(body.exact_advance_tax_amount)));
+    }
 
     const totalTaxAmount = round2(totalGst + advanceTaxAmount);
     const netTotal = round2(taxableAmount + totalTaxAmount);
@@ -2490,6 +2533,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     // Editing an already-completed invoice strictly retains its original invoice number.
     let invoiceNumber: string;
     let allocatedPermanentNow = false;
+    let registerImportedInvoiceNow = false;
     if (saleId && existingSaleRow) {
       const wasTempOrHeld = isTemporaryOrHeldInvoiceNumber(
         existingSaleRow.invoice_number,
@@ -2513,6 +2557,20 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
           status === 'draft' ? 'draft' : 'held',
           invoiceDate
         );
+      } else if (
+        body.preserve_imported_invoice_number === true &&
+        body.invoice_number &&
+        String(body.invoice_number).trim()
+      ) {
+        const candidateInv = String(body.invoice_number).trim();
+        const existingDup = db
+          .prepare('SELECT id, invoice_number FROM sales WHERE UPPER(TRIM(invoice_number)) = UPPER(TRIM(?)) LIMIT 1')
+          .get(candidateInv) as { id: number; invoice_number: string } | undefined;
+        if (existingDup) {
+          throw new Error(`Duplicate Invoice Number "${candidateInv}" already exists (Sale ID #${existingDup.id}).`);
+        }
+        invoiceNumber = candidateInv;
+        registerImportedInvoiceNow = true;
       } else {
         invoiceNumber = allocateNextInvoiceNumber('SALE', invoiceDate);
         allocatedPermanentNow = true;
@@ -2704,6 +2762,8 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       finalSaleId = Number(resInsert.lastInsertRowid);
       if (allocatedPermanentNow) {
         bindInvoiceNumberRecordId(invoiceNumber, 'SALE', finalSaleId);
+      } else if (registerImportedInvoiceNow) {
+        registerImportedInvoiceNumber('SALE', invoiceNumber, invoiceDate, finalSaleId);
       }
     }
 
@@ -8118,3 +8178,1242 @@ salesRouter.get('/reports/:reportType', (req: Request, res: Response) => {
     res.status(500).json({ success: false, error: msg });
   }
 });
+
+// ============================================================================
+// SALES INVOICE EXCEL IMPORT — PREVIEW & TRANSACTIONAL COMMIT
+// ============================================================================
+
+export interface SalesExcelImportLineValidation {
+  rowNumber: number;
+  rawItemCode: string;
+  rawItemName: string;
+  matchedItemId: number | null;
+  matchedItemCode: string;
+  matchedItemName: string;
+  matchedVariantId: number | null;
+  matchedVariantCode: string | null;
+  matchedVariantName: string | null;
+  matchedBy: 'code' | 'name' | 'unmatched';
+  packing: string;
+  unitsPerPack: number;
+  batchNumber: string;
+  expiryDate: string;
+  quantity: number;
+  looseQuantity: number;
+  bonusQuantity: number;
+  totalUnits: number;
+  availablePacks: number;
+  availableUnits: number;
+  unitPrice: number;
+  looseRate: number;
+  grossAmount: number;
+  discount1Percent: number;
+  discount2Percent: number;
+  discountPercent: number;
+  discountAmount: number;
+  taxableAmount: number;
+  taxType: ItemTaxType;
+  taxValue: number;
+  taxPercent: number;
+  taxAmount: number;
+  calculatedNetAmount: number;
+  excelNetAmount: number | null;
+  remarks: string;
+  errors: string[];
+  hasMissingItem: boolean;
+  hasInvalidQuantity: boolean;
+  hasInvalidValue: boolean;
+}
+
+export interface SalesExcelImportInvoiceValidation {
+  index: number;
+  invoiceNumber: string;
+  willAutoAllocateNumber: boolean;
+  rawInvoiceDate: string;
+  normalizedInvoiceDate: string;
+  rawCustomerCode: string;
+  rawCustomerName: string;
+  matchedCustomerId: number | null;
+  matchedCustomerCode: string;
+  matchedCustomerName: string;
+  customerMatchedBy: 'code' | 'name' | 'walk_in_default' | 'unmatched';
+  invoiceType: 'Retail' | 'Wholesale';
+  paymentMode: 'Cash' | 'Credit' | 'Partial' | 'Bank';
+  salesman: string;
+  remarks: string;
+  lines: SalesExcelImportLineValidation[];
+  calculatedGrossTotal: number;
+  calculatedItemDiscountTotal: number;
+  invoiceDiscountAmount: number;
+  calculatedDiscountTotal: number;
+  calculatedTaxTotal: number;
+  advanceTaxAmount: number;
+  calculatedNetTotal: number;
+  excelNetTotal: number | null;
+  paidAmount: number;
+  balanceAmount: number;
+  status: 'valid' | 'duplicate' | 'invalid';
+  isDuplicate: boolean;
+  duplicateReason: string | null;
+  hasMissingCustomer: boolean;
+  hasMissingItems: boolean;
+  hasInvalidQuantities: boolean;
+  hasInvalidValues: boolean;
+  hasTotalMismatch: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+function parseFiniteNumOrNull(val: unknown): number | null {
+  if (val === undefined || val === null || val === '') return null;
+  if (typeof val === 'number') return Number.isFinite(val) ? val : null;
+  const cleaned = String(val).replace(/,/g, '').trim();
+  if (!cleaned) return null;
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+}
+
+function stripTrailingRemarksFromExportedItemName(rawName: string, rawRemarks?: string): string {
+  const trimmed = String(rawName || '').trim();
+  if (!trimmed) return '';
+  const rem = String(rawRemarks || '').trim();
+  if (rem && trimmed.toLowerCase().endsWith(` (${rem.toLowerCase()})`)) {
+    return trimmed.slice(0, trimmed.length - (` (${rem})`).length).trim();
+  }
+  return trimmed;
+}
+
+function normalizePaymentModeInput(rawMode: unknown, paidAmount: number, netTotal: number): {
+  mode: 'Cash' | 'Credit' | 'Partial' | 'Bank';
+  isValid: boolean;
+} {
+  const s = String(rawMode ?? '').trim();
+  if (!s) {
+    if (netTotal > 0 && paidAmount <= 0) return { mode: 'Credit', isValid: true };
+    if (netTotal > 0 && paidAmount > 0 && paidAmount < netTotal - 0.01) return { mode: 'Partial', isValid: true };
+    return { mode: 'Cash', isValid: true };
+  }
+  const lower = s.toLowerCase();
+  if (lower === 'cash') return { mode: 'Cash', isValid: true };
+  if (lower === 'credit') return { mode: 'Credit', isValid: true };
+  if (lower === 'partial' || lower === 'part') return { mode: 'Partial', isValid: true };
+  if (lower === 'bank' || lower === 'online' || lower === 'transfer' || lower === 'cheque') {
+    return { mode: 'Bank', isValid: true };
+  }
+  return { mode: 'Cash', isValid: false };
+}
+
+function validateAndBuildSalesImportPreview(rawInvoices: Array<Record<string, unknown>>) {
+  const db = getDatabase();
+  const todayIso = getPakistanDateISO();
+
+  const companySettingsRow = db
+    .prepare('SELECT allow_negative_stock, batch_wise_sales FROM company_settings ORDER BY id ASC LIMIT 1')
+    .get() as { allow_negative_stock?: number; batch_wise_sales?: number } | undefined;
+  const allowNegativeStock =
+    companySettingsRow && companySettingsRow.allow_negative_stock !== undefined
+      ? Number(companySettingsRow.allow_negative_stock) === 1
+      : true;
+  const batchWiseSales =
+    companySettingsRow && companySettingsRow.batch_wise_sales !== undefined
+      ? Number(companySettingsRow.batch_wise_sales) !== 0
+      : true;
+
+  // Preload accounts (customers + walk-in) for fast code-first, name-second matching
+  const accountRows = db
+    .prepare(`
+      SELECT id, account_code, account_name, main_group, sub_group, is_active, filer_status
+      FROM accounts
+      ORDER BY id ASC
+    `)
+    .all() as Array<{
+      id: number;
+      account_code: string;
+      account_name: string;
+      main_group: string;
+      sub_group: string;
+      is_active: number;
+      filer_status?: string;
+    }>;
+
+  const customerAccountsByCode = new Map<string, (typeof accountRows)[0]>();
+  const customerAccountsByName = new Map<string, (typeof accountRows)[0]>();
+  const allAccountsByCode = new Map<string, (typeof accountRows)[0]>();
+  const allAccountsByName = new Map<string, (typeof accountRows)[0]>();
+
+  for (const acc of accountRows) {
+    const codeKey = String(acc.account_code || '').trim().toLowerCase();
+    const nameKey = String(acc.account_name || '').trim().toLowerCase();
+    if (codeKey && !allAccountsByCode.has(codeKey)) allAccountsByCode.set(codeKey, acc);
+    if (nameKey && !allAccountsByName.has(nameKey)) allAccountsByName.set(nameKey, acc);
+
+    const isCustomerOrParty =
+      String(acc.sub_group || '').toLowerCase() === 'customer' ||
+      String(acc.main_group || '').toUpperCase() === 'PARTY ACCOUNTS' ||
+      codeKey === 'cus-1001';
+    if (isCustomerOrParty) {
+      if (codeKey && !customerAccountsByCode.has(codeKey)) customerAccountsByCode.set(codeKey, acc);
+      if (nameKey && !customerAccountsByName.has(nameKey)) customerAccountsByName.set(nameKey, acc);
+    }
+  }
+
+  // Ensure default Walk-in Cash Customer account exists
+  const walkInAccountId = getSystemAccountId('CUS-1001');
+  const walkInAccount =
+    accountRows.find((a) => a.id === walkInAccountId) ||
+    (db.prepare('SELECT id, account_code, account_name FROM accounts WHERE id = ?').get(walkInAccountId) as {
+      id: number;
+      account_code: string;
+      account_name: string;
+    });
+
+  // Preload items and variants for code-first, name-second matching
+  const itemRows = db.prepare('SELECT * FROM items ORDER BY id ASC').all() as Array<Record<string, unknown>>;
+  const variantRows = db
+    .prepare('SELECT * FROM item_variants WHERE COALESCE(is_active, 1) = 1 ORDER BY id ASC')
+    .all() as Array<Record<string, unknown>>;
+
+  const itemsById = new Map<number, Record<string, unknown>>();
+  const itemsByCode = new Map<string, Record<string, unknown>>();
+  const itemsByName = new Map<string, Record<string, unknown>>();
+
+  for (const item of itemRows) {
+    const id = Number(item.id);
+    itemsById.set(id, item);
+    const codeKey = String(item.item_code || '').trim().toLowerCase();
+    const nameKey = String(item.item_name || '').trim().toLowerCase();
+    if (codeKey && !itemsByCode.has(codeKey)) itemsByCode.set(codeKey, item);
+    if (nameKey && !itemsByName.has(nameKey)) itemsByName.set(nameKey, item);
+  }
+
+  const variantsByCode = new Map<string, Record<string, unknown>>();
+  const variantsByName = new Map<string, Record<string, unknown>>();
+  for (const v of variantRows) {
+    const vCode = String(v.variant_code || '').trim().toLowerCase();
+    const vName = String(v.variant_name || '').trim().toLowerCase();
+    if (vCode && !variantsByCode.has(vCode)) variantsByCode.set(vCode, v);
+    if (vName && !variantsByName.has(vName)) variantsByName.set(vName, v);
+  }
+
+  // Track cumulative stock units requested across valid invoices in this import batch
+  const cumulativeRequestedUnitsByItemVariant = new Map<string, number>();
+  const seenInvoiceNumbersInFile = new Map<string, number>();
+
+  const previewInvoices: SalesExcelImportInvoiceValidation[] = [];
+
+  for (let i = 0; i < rawInvoices.length; i++) {
+    const rawInv = rawInvoices[i] || {};
+    const invoiceErrors: string[] = [];
+    const invoiceWarnings: string[] = [];
+
+    let hasMissingCustomer = false;
+    let hasMissingItems = false;
+    let hasInvalidQuantities = false;
+    let hasInvalidValues = false;
+    let hasTotalMismatch = false;
+    let isDuplicate = false;
+    let duplicateReason: string | null = null;
+
+    const rawInvoiceNumber = String(rawInv.invoice_number ?? '').trim();
+    const willAutoAllocateNumber = !rawInvoiceNumber;
+
+    // 1. Duplicate Invoice Number Check (Database + In-File)
+    if (rawInvoiceNumber) {
+      const upperInv = rawInvoiceNumber.toUpperCase();
+      const firstFileIdx = seenInvoiceNumbersInFile.get(upperInv);
+      if (firstFileIdx !== undefined) {
+        isDuplicate = true;
+        duplicateReason = `Duplicate invoice number "${rawInvoiceNumber}" appears multiple times in this Excel file (first seen at Invoice #${firstFileIdx + 1}).`;
+      } else {
+        seenInvoiceNumbersInFile.set(upperInv, i);
+        const existingInDb = db
+          .prepare('SELECT id, invoice_number, invoice_date, customer_name FROM sales WHERE UPPER(TRIM(invoice_number)) = ? LIMIT 1')
+          .get(upperInv) as { id: number; invoice_number: string; invoice_date: string; customer_name: string } | undefined;
+        if (existingInDb) {
+          isDuplicate = true;
+          duplicateReason = `Invoice "${existingInDb.invoice_number}" already exists in the database (Date: ${existingInDb.invoice_date}, Customer: ${existingInDb.customer_name}).`;
+        }
+      }
+    }
+
+    // 2. Validate & Normalize Invoice Date
+    const rawInvoiceDate = String(rawInv.invoice_date ?? '').trim();
+    let normalizedInvoiceDate = todayIso;
+    if (!rawInvoiceDate) {
+      normalizedInvoiceDate = todayIso;
+      invoiceWarnings.push(`Invoice Date was empty; defaulting to ${todayIso}.`);
+    } else {
+      // Check if rawInvoiceDate is parseable into YYYY-MM-DD
+      const parsedDate = normalizeInvoiceDateKey(rawInvoiceDate);
+      const isRecognizedFormat =
+        /^\d{4}-\d{2}-\d{2}/.test(rawInvoiceDate) ||
+        /^\d{1,2}[-/][A-Za-z]{3}[-/]\d{4}$/.test(rawInvoiceDate) ||
+        /^\d{1,2}[-/]\d{1,2}[-/]\d{4}$/.test(rawInvoiceDate) ||
+        !Number.isNaN(new Date(rawInvoiceDate).getTime());
+      if (!isRecognizedFormat) {
+        hasInvalidValues = true;
+        invoiceErrors.push(`Invalid Invoice Date "${rawInvoiceDate}". Expected YYYY-MM-DD or DD-MMM-YYYY.`);
+      } else {
+        normalizedInvoiceDate = parsedDate;
+      }
+    }
+
+    // Check period lock
+    try {
+      assertPeriodOpen(normalizedInvoiceDate, 'import a Sales Invoice');
+    } catch (periodErr: unknown) {
+      hasInvalidValues = true;
+      invoiceErrors.push(periodErr instanceof Error ? periodErr.message : String(periodErr));
+    }
+
+    // 3. Match Customer (Code first, then Name)
+    const rawCustomerCode = String(rawInv.customer_code ?? '').trim();
+    const rawCustomerName = String(rawInv.customer_name ?? '').trim();
+
+    let matchedCustomerId: number | null = null;
+    let matchedCustomerCode = '';
+    let matchedCustomerName = '';
+    let customerMatchedBy: 'code' | 'name' | 'walk_in_default' | 'unmatched' = 'unmatched';
+
+    // Sometimes exported files put "CUS-1005 - City Pharmacy" or a code inside customer_name
+    let extractedCodeFromCustomerName = '';
+    let extractedNameFromCombo = '';
+    const comboMatch = rawCustomerName.match(/^([A-Za-z]{2,5}-\d{3,6})\s*[-:]\s*(.+)$/);
+    if (comboMatch) {
+      extractedCodeFromCustomerName = comboMatch[1].trim();
+      extractedNameFromCombo = comboMatch[2].trim();
+    }
+
+    const codeCandidates = [rawCustomerCode, extractedCodeFromCustomerName, rawCustomerName]
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    for (const codeCand of codeCandidates) {
+      const found = customerAccountsByCode.get(codeCand) || allAccountsByCode.get(codeCand);
+      if (found) {
+        matchedCustomerId = found.id;
+        matchedCustomerCode = found.account_code;
+        matchedCustomerName = found.account_name;
+        customerMatchedBy = 'code';
+        break;
+      }
+    }
+
+    if (!matchedCustomerId && (rawCustomerName || extractedNameFromCombo)) {
+      const nameCandidates = [rawCustomerName, extractedNameFromCombo]
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      for (const nameCand of nameCandidates) {
+        const found = customerAccountsByName.get(nameCand) || allAccountsByName.get(nameCand);
+        if (found) {
+          matchedCustomerId = found.id;
+          matchedCustomerCode = found.account_code;
+          matchedCustomerName = found.account_name;
+          customerMatchedBy = 'name';
+          break;
+        }
+      }
+    }
+
+    if (!matchedCustomerId) {
+      const isWalkInAlias =
+        (!rawCustomerCode && !rawCustomerName) ||
+        ['walk-in', 'walk in', 'walk-in customer', 'walk-in cash customer', 'cash customer', 'counter sale'].includes(
+          rawCustomerName.toLowerCase()
+        );
+      if (isWalkInAlias && !rawCustomerCode) {
+        matchedCustomerId = walkInAccount.id;
+        matchedCustomerCode = walkInAccount.account_code;
+        matchedCustomerName = walkInAccount.account_name;
+        customerMatchedBy = 'walk_in_default';
+      } else {
+        hasMissingCustomer = true;
+        const label = [rawCustomerCode ? `Code "${rawCustomerCode}"` : '', rawCustomerName ? `Name "${rawCustomerName}"` : '']
+          .filter(Boolean)
+          .join(' / ');
+        invoiceErrors.push(`Missing Customer: No existing customer account matched ${label}.`);
+      }
+    }
+
+    const rawInvoiceType = String(rawInv.invoice_type || 'Retail').trim();
+    const invoiceType: 'Retail' | 'Wholesale' =
+      rawInvoiceType.toLowerCase() === 'wholesale' ? 'Wholesale' : 'Retail';
+    const salesman = String(rawInv.salesman || 'Counter Pharmacist').trim() || 'Counter Pharmacist';
+    const remarks = String(rawInv.remarks || '').trim();
+
+    // 4. Validate Line Items (Code first, then Name)
+    const rawLines = Array.isArray(rawInv.items) ? (rawInv.items as Array<Record<string, unknown>>) : [];
+    if (rawLines.length === 0) {
+      hasInvalidQuantities = true;
+      invoiceErrors.push('Invoice has no line items.');
+    }
+
+    const validatedLines: SalesExcelImportLineValidation[] = [];
+    let calculatedGrossTotal = 0;
+    let calculatedItemDiscountTotal = 0;
+    let calculatedLineTaxTotal = 0;
+
+    for (let lineIdx = 0; lineIdx < rawLines.length; lineIdx++) {
+      const rawLine = rawLines[lineIdx] || {};
+      const rowNumber = Number(rawLine.row_number || lineIdx + 1);
+      const lineErrors: string[] = [];
+      let lineMissingItem = false;
+      let lineInvalidQty = false;
+      let lineInvalidVal = false;
+
+      const rawItemCode = String(rawLine.item_code ?? '').trim();
+      const rawItemName = String(rawLine.item_name ?? '').trim();
+      const lineRemarks = String(rawLine.remarks ?? '').trim();
+      const strippedItemName = stripTrailingRemarksFromExportedItemName(rawItemName, lineRemarks);
+
+      let matchedItemRow: Record<string, unknown> | undefined;
+      let matchedVariantRow: Record<string, unknown> | undefined;
+      let matchedBy: 'code' | 'name' | 'unmatched' = 'unmatched';
+
+      // Match by code first (item_code or variant_code)
+      if (rawItemCode) {
+        const codeKey = rawItemCode.toLowerCase();
+        const foundItem = itemsByCode.get(codeKey);
+        if (foundItem) {
+          matchedItemRow = foundItem;
+          matchedBy = 'code';
+        } else {
+          const foundVar = variantsByCode.get(codeKey);
+          if (foundVar) {
+            matchedVariantRow = foundVar;
+            matchedItemRow = itemsById.get(Number(foundVar.parent_item_id));
+            if (matchedItemRow) matchedBy = 'code';
+          }
+        }
+      }
+
+      // Then match by name (exact item_name, stripped item_name without trailing "(remarks)", or variant_name)
+      if (!matchedItemRow && (rawItemName || strippedItemName)) {
+        const nameCandidates = [rawItemName, strippedItemName];
+        // Also check if rawItemName ends with parenthetical remarks when remarks column wasn't separate
+        const parenMatch = rawItemName.match(/^(.+?)\s*\(([^)]+)\)$/);
+        if (parenMatch) {
+          nameCandidates.push(parenMatch[1].trim());
+        }
+        for (const cand of nameCandidates) {
+          const key = cand.trim().toLowerCase();
+          if (!key) continue;
+          const foundItem = itemsByName.get(key);
+          if (foundItem) {
+            matchedItemRow = foundItem;
+            matchedBy = 'name';
+            break;
+          }
+          const foundVar = variantsByName.get(key);
+          if (foundVar) {
+            matchedVariantRow = foundVar;
+            matchedItemRow = itemsById.get(Number(foundVar.parent_item_id));
+            if (matchedItemRow) {
+              matchedBy = 'name';
+              break;
+            }
+          }
+        }
+      }
+
+      if (!matchedItemRow) {
+        lineMissingItem = true;
+        hasMissingItems = true;
+        const itemLabel = [rawItemCode ? `Code "${rawItemCode}"` : '', rawItemName ? `Name "${rawItemName}"` : '']
+          .filter(Boolean)
+          .join(' / ');
+        lineErrors.push(`Row #${rowNumber}: Missing Item — no item in database matched ${itemLabel || 'blank item'}.`);
+      }
+
+      const matchedItemId = matchedItemRow ? Number(matchedItemRow.id) : null;
+      const matchedItemCode = matchedItemRow ? String(matchedItemRow.item_code || '') : '';
+      const matchedItemName = matchedItemRow ? String(matchedItemRow.item_name || '') : '';
+      const matchedVariantId = matchedVariantRow ? Number(matchedVariantRow.id) : null;
+      const matchedVariantCode = matchedVariantRow ? String(matchedVariantRow.variant_code || '') || null : null;
+      const matchedVariantName = matchedVariantRow ? String(matchedVariantRow.variant_name || '') || null : null;
+      const variantKey = matchedVariantId || 0;
+      const useVarCustom = Boolean(matchedVariantRow && Number(matchedVariantRow.use_parent_pricing ?? 1) === 0);
+
+      const parsedPacking = matchedItemRow
+        ? parsePacking(
+            String(rawLine.packing || matchedVariantRow?.packing || matchedItemRow.packing || '1x1'),
+            matchedVariantRow?.packing ? null : matchedItemRow
+          )
+        : { packing: String(rawLine.packing || '1x1'), unitsPerPack: 1, stripsPerBox: 1 };
+
+      // Validate Quantities
+      const qtyNum = parseFiniteNumOrNull(rawLine.quantity);
+      const looseQtyNum =
+        rawLine.loose_quantity !== undefined && rawLine.loose_quantity !== null && rawLine.loose_quantity !== ''
+          ? parseFiniteNumOrNull(rawLine.loose_quantity)
+          : 0;
+      const bonusQtyNum =
+        rawLine.bonus_quantity !== undefined && rawLine.bonus_quantity !== null && rawLine.bonus_quantity !== ''
+          ? parseFiniteNumOrNull(rawLine.bonus_quantity)
+          : 0;
+
+      if (qtyNum === null && (looseQtyNum === null || looseQtyNum === 0)) {
+        lineInvalidQty = true;
+        hasInvalidQuantities = true;
+        lineErrors.push(`Row #${rowNumber}: Invalid or non-numeric Quantity "${rawLine.quantity ?? ''}".`);
+      } else if (
+        (qtyNum !== null && qtyNum < 0) ||
+        (looseQtyNum !== null && looseQtyNum < 0) ||
+        (bonusQtyNum !== null && bonusQtyNum < 0)
+      ) {
+        lineInvalidQty = true;
+        hasInvalidQuantities = true;
+        lineErrors.push(`Row #${rowNumber}: Quantity, Loose Quantity, and Bonus cannot be negative in Excel import.`);
+      }
+
+      const quantity = round2(Math.max(0, qtyNum ?? 0));
+      const looseQuantity = round2(Math.max(0, looseQtyNum ?? 0));
+      const bonusQuantity = round2(Math.max(0, bonusQtyNum ?? 0));
+      const totalUnits = round2((quantity + bonusQuantity) * parsedPacking.unitsPerPack + looseQuantity);
+
+      if (!lineInvalidQty && quantity === 0 && looseQuantity === 0 && bonusQuantity === 0) {
+        lineInvalidQty = true;
+        hasInvalidQuantities = true;
+        lineErrors.push(`Row #${rowNumber}: Quantity cannot be zero.`);
+      }
+
+      // Validate Sale Rate
+      const baseWholesale = matchedItemRow
+        ? useVarCustom
+          ? Number(
+              matchedVariantRow?.wholesale_price ||
+                matchedVariantRow?.trade_price ||
+                matchedVariantRow?.retail_price ||
+                matchedItemRow.wholesale_price ||
+                matchedItemRow.trade_price ||
+                matchedItemRow.retail_price ||
+                0
+            )
+          : Number(matchedItemRow.wholesale_price || matchedItemRow.trade_price || matchedItemRow.retail_price || 0)
+        : 0;
+      const baseRetail = matchedItemRow
+        ? useVarCustom
+          ? Number(matchedVariantRow?.retail_price || matchedItemRow.retail_price || 0)
+          : Number(matchedItemRow.retail_price || 0)
+        : 0;
+      const defaultRate = invoiceType === 'Wholesale' ? round2(baseWholesale) : round2(baseRetail);
+
+      const hasRateInput = rawLine.unit_price !== undefined && rawLine.unit_price !== null && rawLine.unit_price !== '';
+      const parsedRate = hasRateInput ? parseFiniteNumOrNull(rawLine.unit_price) : defaultRate;
+      if (parsedRate === null || parsedRate < 0) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        lineErrors.push(`Row #${rowNumber}: Invalid Sale Rate "${rawLine.unit_price ?? ''}".`);
+      }
+      const unitPrice = round2(Math.max(0, parsedRate ?? 0));
+
+      const defaultLooseRate = round2(unitPrice / Math.max(1, parsedPacking.unitsPerPack));
+      const hasLooseRateInput =
+        rawLine.loose_rate !== undefined && rawLine.loose_rate !== null && rawLine.loose_rate !== '';
+      const parsedLooseRate = hasLooseRateInput ? parseFiniteNumOrNull(rawLine.loose_rate) : defaultLooseRate;
+      if (parsedLooseRate === null || parsedLooseRate < 0) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        lineErrors.push(`Row #${rowNumber}: Invalid Loose Rate "${rawLine.loose_rate ?? ''}".`);
+      }
+      const looseRate =
+        parsedLooseRate !== null && parsedLooseRate > 0 ? round2(parsedLooseRate) : defaultLooseRate;
+
+      const grossAmount = round2(quantity * unitPrice + looseQuantity * looseRate);
+
+      // Validate Line Discounts (supports Discount 1 %, Discount 2 %, Discount %, or flat Discount amount)
+      const d1Raw = parseFiniteNumOrNull(rawLine.discount_1_percent);
+      const d2Raw = parseFiniteNumOrNull(rawLine.discount_2_percent);
+      const dPctRaw = parseFiniteNumOrNull(rawLine.discount_percent);
+      const dAmtRaw = parseFiniteNumOrNull(rawLine.discount_amount);
+
+      if (
+        (d1Raw !== null && (d1Raw < 0 || d1Raw > 100)) ||
+        (d2Raw !== null && (d2Raw < 0 || d2Raw > 100)) ||
+        (dPctRaw !== null && (dPctRaw < 0 || dPctRaw > 100))
+      ) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        lineErrors.push(`Row #${rowNumber}: Discount percentage must be between 0% and 100%.`);
+      }
+      if (dAmtRaw !== null && (dAmtRaw < 0 || dAmtRaw > grossAmount + 0.05)) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        lineErrors.push(
+          `Row #${rowNumber}: Discount Amount (${dAmtRaw}) cannot be negative or exceed Gross Amount (${grossAmount}).`
+        );
+      }
+
+      const d1Input = d1Raw !== null || d2Raw !== null ? clampDiscountPercent(d1Raw ?? 0) : clampDiscountPercent(dPctRaw ?? 0);
+      const d2Input = d1Raw !== null || d2Raw !== null ? clampDiscountPercent(d2Raw ?? 0) : 0;
+
+      const seqDisc = calculateSequentialLineDiscount({
+        originalRate: unitPrice,
+        looseRate,
+        grossAmount,
+        discount1Percent: d1Input,
+        discount2Percent: d2Input,
+      });
+
+      const discount1Percent = seqDisc.discount_1_percent;
+      const discount2Percent = seqDisc.discount_2_percent;
+      let discountPercent = seqDisc.effective_discount_percent;
+      let discountAmount = seqDisc.discount_amount;
+      let taxableAmount = seqDisc.taxable_amount;
+
+      if (dAmtRaw !== null && dAmtRaw >= 0 && dAmtRaw <= grossAmount + 0.05) {
+        // Use exact flat discount amount from Excel when provided (or when exported Excel rounded discount)
+        if ((d1Input === 0 && d2Input === 0) || Math.abs(dAmtRaw - discountAmount) <= 1.0) {
+          discountAmount = round2(Math.min(grossAmount, Math.max(0, dAmtRaw)));
+          taxableAmount = round2(grossAmount - discountAmount);
+          discountPercent = grossAmount > 0 ? round2((discountAmount / grossAmount) * 100) : 0;
+        }
+      }
+
+      // Validate Line Tax (supports Tax % or flat Tax amount)
+      const taxPctRaw = parseFiniteNumOrNull(rawLine.tax_percent);
+      const taxAmtRaw = parseFiniteNumOrNull(rawLine.tax_amount);
+
+      if (taxPctRaw !== null && (taxPctRaw < 0 || taxPctRaw > 100)) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        lineErrors.push(`Row #${rowNumber}: Tax percentage must be between 0% and 100%.`);
+      }
+      if (taxAmtRaw !== null && taxAmtRaw < 0) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        lineErrors.push(`Row #${rowNumber}: Tax Amount cannot be negative.`);
+      }
+
+      const baseTaxCfg = matchedItemRow
+        ? useVarCustom
+          ? resolveItemTaxConfig({
+              tax_type: (matchedVariantRow?.tax_type ?? matchedItemRow.tax_type) as string | undefined,
+              tax_value: (matchedVariantRow?.tax_value ??
+                matchedVariantRow?.tax_percent ??
+                matchedItemRow.tax_value ??
+                matchedItemRow.tax_percent ??
+                0) as number,
+              tax_percent: (matchedVariantRow?.tax_percent ?? matchedItemRow.tax_percent ?? 0) as number,
+            })
+          : resolveItemTaxConfig({
+              tax_type: matchedItemRow.tax_type as string | undefined,
+              tax_value: (matchedItemRow.tax_value ?? matchedItemRow.tax_percent ?? 0) as number,
+              tax_percent: (matchedItemRow.tax_percent ?? 0) as number,
+            })
+        : { tax_type: 'percentage' as ItemTaxType, tax_value: 0, tax_percent: 0 };
+
+      let taxType: ItemTaxType = baseTaxCfg.tax_type;
+      let taxValue = baseTaxCfg.tax_value;
+      let taxPercent = baseTaxCfg.tax_percent;
+
+      // In Excel imports, if neither Tax % nor Tax Amount is provided (or both are 0), keep tax at 0 unless specified
+      if (taxPctRaw !== null) {
+        taxType = 'percentage';
+        taxValue = round2(Math.max(0, taxPctRaw));
+        taxPercent = taxValue;
+      } else if (taxAmtRaw !== null) {
+        taxType = 'percentage';
+        taxValue = grossAmount > 0 ? round2((Math.max(0, taxAmtRaw) / grossAmount) * 100) : 0;
+        taxPercent = taxValue;
+      } else if (rawLine.use_item_default_tax !== true) {
+        taxType = 'percentage';
+        taxValue = 0;
+        taxPercent = 0;
+      }
+
+      let taxAmount = calculateLineTax({
+        grossAmount,
+        quantity,
+        looseQuantity,
+        unitsPerPack: parsedPacking.unitsPerPack,
+        taxType,
+        taxValue,
+        taxPercent,
+      });
+
+      if (taxAmtRaw !== null && taxAmtRaw >= 0) {
+        if (taxPctRaw === null || Math.abs(taxAmtRaw - taxAmount) <= 1.0) {
+          taxAmount = round2(taxAmtRaw);
+        } else {
+          lineInvalidVal = true;
+          hasInvalidValues = true;
+          lineErrors.push(
+            `Row #${rowNumber}: Tax Amount (${taxAmtRaw}) does not match Tax ${taxPctRaw}% on Gross ${grossAmount} (expected ${taxAmount}).`
+          );
+        }
+      }
+
+      const calculatedNetAmount = round2(grossAmount + taxAmount - discountAmount);
+      const excelNetAmount = parseFiniteNumOrNull(rawLine.net_amount);
+
+      if (excelNetAmount !== null && Math.abs(excelNetAmount - calculatedNetAmount) > 1.0) {
+        lineInvalidVal = true;
+        hasInvalidValues = true;
+        hasTotalMismatch = true;
+        lineErrors.push(
+          `Row #${rowNumber}: Line Net Amount mismatch — Excel has ${round2(excelNetAmount)}, but calculated (Gross ${grossAmount} - Disc ${discountAmount} + Tax ${taxAmount}) is ${calculatedNetAmount}.`
+        );
+      }
+
+      // Check Batch & FIFO Stock Eligibility
+      let availablePacks = 0;
+      let availableUnits = 0;
+      let resolvedBatchNumber = String(rawLine.batch_number || '').trim();
+      let resolvedExpiryDate = String(rawLine.expiry_date || '').trim();
+
+      if (matchedItemId) {
+        if (batchWiseSales && resolvedBatchNumber) {
+          const explicitBatch = db
+            .prepare('SELECT * FROM inventory WHERE item_id = ? AND COALESCE(variant_key, 0) = ? AND batch_number = ?')
+            .get(matchedItemId, variantKey, resolvedBatchNumber) as Record<string, unknown> | undefined;
+          if (explicitBatch && totalUnits > 0) {
+            if (Number(explicitBatch.is_blocked || 0) === 1) {
+              lineInvalidQty = true;
+              hasInvalidQuantities = true;
+              lineErrors.push(
+                `Row #${rowNumber}: Batch "${resolvedBatchNumber}" for "${matchedItemName}" is Blocked and cannot be sold.`
+              );
+            }
+            const expStr = String(explicitBatch.expiry_date || '').slice(0, 10);
+            if (expStr && /^\d{4}-\d{2}-\d{2}$/.test(expStr) && expStr < todayIso) {
+              lineInvalidQty = true;
+              hasInvalidQuantities = true;
+              lineErrors.push(
+                `Row #${rowNumber}: Batch "${resolvedBatchNumber}" for "${matchedItemName}" is Expired (${expStr}).`
+              );
+            }
+          }
+        }
+
+        const itemTotalEligibleRow = db
+          .prepare(`
+            SELECT
+              COALESCE(SUM(total_stock_units), 0) AS total_units,
+              COALESCE(SUM(current_pack_qty), 0) AS total_packs
+            FROM inventory
+            WHERE item_id = ?
+              AND COALESCE(variant_key, 0) = ?
+              AND COALESCE(is_blocked, 0) = 0
+              AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
+          `)
+          .get(matchedItemId, variantKey, todayIso) as { total_units: number; total_packs: number } | undefined;
+
+        availableUnits = round2(Number(itemTotalEligibleRow?.total_units || 0));
+        availablePacks = round2(Number(itemTotalEligibleRow?.total_packs || 0));
+
+        if (!resolvedBatchNumber) {
+          const fifoBatch = db
+            .prepare(`
+              SELECT batch_number, expiry_date FROM inventory
+              WHERE item_id = ?
+                AND COALESCE(variant_key, 0) = ?
+                AND COALESCE(is_blocked, 0) = 0
+                AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE(?))
+              ORDER BY
+                CASE WHEN total_stock_units > 0 THEN 0 ELSE 1 END,
+                COALESCE(NULLIF(purchase_date, ''), DATE(created_at)) ASC,
+                CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN '9999-12-31' ELSE expiry_date END ASC,
+                id ASC
+              LIMIT 1
+            `)
+            .get(matchedItemId, variantKey, todayIso) as { batch_number?: string; expiry_date?: string } | undefined;
+          resolvedBatchNumber = String(fifoBatch?.batch_number || `BATCH-${matchedVariantCode || matchedItemCode}-01`);
+          if (!resolvedExpiryDate && fifoBatch?.expiry_date) {
+            resolvedExpiryDate = String(fifoBatch.expiry_date);
+          }
+        }
+
+        if (!allowNegativeStock && totalUnits > 0 && !isDuplicate) {
+          const stockKey = `${matchedItemId}:${variantKey}`;
+          const alreadyReserved = cumulativeRequestedUnitsByItemVariant.get(stockKey) || 0;
+          if (alreadyReserved + totalUnits > availableUnits) {
+            lineInvalidQty = true;
+            hasInvalidQuantities = true;
+            lineErrors.push(
+              `Row #${rowNumber}: Insufficient FIFO stock for "${matchedItemName}". Available: ${availablePacks} Packs (${availableUnits} Units), Requested: ${totalUnits} Units.`
+            );
+          }
+        }
+      }
+
+      calculatedGrossTotal = round2(calculatedGrossTotal + grossAmount);
+      calculatedItemDiscountTotal = round2(calculatedItemDiscountTotal + discountAmount);
+      calculatedLineTaxTotal = round2(calculatedLineTaxTotal + taxAmount);
+
+      for (const le of lineErrors) {
+        invoiceErrors.push(le);
+      }
+
+      validatedLines.push({
+        rowNumber,
+        rawItemCode,
+        rawItemName,
+        matchedItemId,
+        matchedItemCode,
+        matchedItemName,
+        matchedVariantId,
+        matchedVariantCode,
+        matchedVariantName,
+        matchedBy,
+        packing: parsedPacking.packing,
+        unitsPerPack: parsedPacking.unitsPerPack,
+        batchNumber: resolvedBatchNumber,
+        expiryDate: resolvedExpiryDate || '2028-12-31',
+        quantity,
+        looseQuantity,
+        bonusQuantity,
+        totalUnits,
+        availablePacks,
+        availableUnits,
+        unitPrice,
+        looseRate,
+        grossAmount,
+        discount1Percent,
+        discount2Percent,
+        discountPercent,
+        discountAmount,
+        taxableAmount,
+        taxType,
+        taxValue,
+        taxPercent,
+        taxAmount,
+        calculatedNetAmount,
+        excelNetAmount: excelNetAmount !== null ? round2(excelNetAmount) : null,
+        remarks: lineRemarks,
+        errors: lineErrors,
+        hasMissingItem: lineMissingItem,
+        hasInvalidQuantity: lineInvalidQty,
+        hasInvalidValue: lineInvalidVal,
+      });
+    }
+
+    // 5. Invoice-level Discount, Tax, Net Total & Payment validation
+    const excelHeaderTotalDiscount = parseFiniteNumOrNull(rawInv.discount_amount);
+    const excelInvoiceLevelDiscount = parseFiniteNumOrNull(rawInv.invoice_discount_amount);
+    let invoiceDiscountAmount = 0;
+
+    if (excelInvoiceLevelDiscount !== null) {
+      if (excelInvoiceLevelDiscount < 0) {
+        hasInvalidValues = true;
+        invoiceErrors.push(`Invoice-level discount (${excelInvoiceLevelDiscount}) cannot be negative.`);
+      } else {
+        invoiceDiscountAmount = round2(excelInvoiceLevelDiscount);
+      }
+    } else if (excelHeaderTotalDiscount !== null) {
+      if (excelHeaderTotalDiscount < 0) {
+        hasInvalidValues = true;
+        invoiceErrors.push(`Invoice discount (${excelHeaderTotalDiscount}) cannot be negative.`);
+      } else if (excelHeaderTotalDiscount > calculatedItemDiscountTotal + 0.05) {
+        // Summary sheet "Discount" column stores totalDiscountAmount = itemDiscountTotal + invoiceDiscountAmount
+        invoiceDiscountAmount = round2(excelHeaderTotalDiscount - calculatedItemDiscountTotal);
+      } else if (
+        calculatedItemDiscountTotal > 0 &&
+        Math.abs(excelHeaderTotalDiscount - calculatedItemDiscountTotal) > 1.0
+      ) {
+        hasInvalidValues = true;
+        hasTotalMismatch = true;
+        invoiceErrors.push(
+          `Invoice Discount mismatch: Summary Discount (${round2(excelHeaderTotalDiscount)}) is less than sum of line discounts (${calculatedItemDiscountTotal}).`
+        );
+      }
+    }
+
+    const calculatedDiscountTotal = round2(calculatedItemDiscountTotal + invoiceDiscountAmount);
+    if (calculatedDiscountTotal > calculatedGrossTotal + 0.05) {
+      hasInvalidValues = true;
+      invoiceErrors.push(
+        `Total Discount (${calculatedDiscountTotal}) exceeds Invoice Gross Total (${calculatedGrossTotal}).`
+      );
+    }
+
+    const excelAdvanceTax = parseFiniteNumOrNull(rawInv.advance_tax_amount);
+    let advanceTaxAmount = 0;
+    if (excelAdvanceTax !== null) {
+      if (excelAdvanceTax < 0) {
+        hasInvalidValues = true;
+        invoiceErrors.push(`Advance Tax (${excelAdvanceTax}) cannot be negative.`);
+      } else {
+        advanceTaxAmount = round2(excelAdvanceTax);
+      }
+    }
+
+    const calculatedTaxTotal = round2(calculatedLineTaxTotal + advanceTaxAmount);
+    const excelHeaderTax = parseFiniteNumOrNull(rawInv.tax_amount);
+    if (
+      excelHeaderTax !== null &&
+      Math.abs(excelHeaderTax - calculatedLineTaxTotal) > 1.0 &&
+      Math.abs(excelHeaderTax - calculatedTaxTotal) > 1.0
+    ) {
+      // If none of the lines had individual tax specified, but a header tax was provided on a single-line invoice,
+      // check if header tax mismatch should be flagged
+      hasInvalidValues = true;
+      hasTotalMismatch = true;
+      invoiceErrors.push(
+        `Invoice Tax mismatch: Excel header Tax is ${round2(excelHeaderTax)}, but sum of line taxes is ${calculatedLineTaxTotal}.`
+      );
+    }
+
+    const calculatedNetTotal = round2(calculatedGrossTotal - calculatedDiscountTotal + calculatedTaxTotal);
+    const excelNetTotal = parseFiniteNumOrNull(rawInv.net_total);
+
+    if (excelNetTotal !== null && Math.abs(excelNetTotal - calculatedNetTotal) > 1.0) {
+      hasInvalidValues = true;
+      hasTotalMismatch = true;
+      invoiceErrors.push(
+        `Invoice Net Total mismatch: Excel Net Total is ${round2(excelNetTotal)}, but calculated Net Total (Gross ${calculatedGrossTotal} - Discount ${calculatedDiscountTotal} + Tax ${calculatedTaxTotal}) is ${calculatedNetTotal}.`
+      );
+    }
+
+    const rawPaid = parseFiniteNumOrNull(rawInv.paid_amount);
+    const hasExplicitPaid = rawInv.paid_amount !== undefined && rawInv.paid_amount !== null && rawInv.paid_amount !== '';
+    if (hasExplicitPaid && (rawPaid === null || rawPaid < 0)) {
+      hasInvalidValues = true;
+      invoiceErrors.push(`Invalid Paid Amount "${rawInv.paid_amount ?? ''}". Paid Amount must be a number >= 0.`);
+    }
+
+    const prelimPaid = rawPaid !== null && rawPaid >= 0 ? round2(rawPaid) : 0;
+    const modeCheck = normalizePaymentModeInput(rawInv.payment_mode, prelimPaid, calculatedNetTotal);
+    if (!modeCheck.isValid) {
+      hasInvalidValues = true;
+      invoiceErrors.push(
+        `Invalid Payment Mode "${rawInv.payment_mode}". Allowed values: Cash, Credit, Partial, Bank.`
+      );
+    }
+    const paymentMode = modeCheck.mode;
+
+    let paidAmount = prelimPaid;
+    if (!hasExplicitPaid) {
+      paidAmount = paymentMode === 'Cash' || paymentMode === 'Bank' ? calculatedNetTotal : 0;
+    }
+
+    const balanceAmount = round2(calculatedNetTotal - paidAmount);
+
+    let status: 'valid' | 'duplicate' | 'invalid' = 'valid';
+    if (isDuplicate) {
+      status = 'duplicate';
+    } else if (invoiceErrors.length > 0) {
+      status = 'invalid';
+    }
+
+    // Reserve FIFO stock for valid invoices so subsequent invoices in the same upload are checked accurately
+    if (status === 'valid' && !allowNegativeStock) {
+      for (const vl of validatedLines) {
+        if (vl.matchedItemId && vl.totalUnits > 0) {
+          const stockKey = `${vl.matchedItemId}:${vl.matchedVariantId || 0}`;
+          cumulativeRequestedUnitsByItemVariant.set(
+            stockKey,
+            round2((cumulativeRequestedUnitsByItemVariant.get(stockKey) || 0) + vl.totalUnits)
+          );
+        }
+      }
+    }
+
+    previewInvoices.push({
+      index: i,
+      invoiceNumber: rawInvoiceNumber,
+      willAutoAllocateNumber,
+      rawInvoiceDate,
+      normalizedInvoiceDate,
+      rawCustomerCode,
+      rawCustomerName,
+      matchedCustomerId,
+      matchedCustomerCode,
+      matchedCustomerName,
+      customerMatchedBy,
+      invoiceType,
+      paymentMode,
+      salesman,
+      remarks,
+      lines: validatedLines,
+      calculatedGrossTotal,
+      calculatedItemDiscountTotal,
+      invoiceDiscountAmount,
+      calculatedDiscountTotal,
+      calculatedTaxTotal,
+      advanceTaxAmount,
+      calculatedNetTotal,
+      excelNetTotal: excelNetTotal !== null ? round2(excelNetTotal) : null,
+      paidAmount,
+      balanceAmount,
+      status,
+      isDuplicate,
+      duplicateReason,
+      hasMissingCustomer,
+      hasMissingItems,
+      hasInvalidQuantities,
+      hasInvalidValues,
+      hasTotalMismatch,
+      errors: invoiceErrors,
+      warnings: invoiceWarnings,
+    });
+  }
+
+  const summary = {
+    totalInvoices: previewInvoices.length,
+    validInvoices: previewInvoices.filter((inv) => inv.status === 'valid').length,
+    duplicateInvoices: previewInvoices.filter((inv) => inv.status === 'duplicate').length,
+    invalidInvoices: previewInvoices.filter((inv) => inv.status === 'invalid').length,
+    missingCustomersCount: previewInvoices.filter((inv) => inv.hasMissingCustomer).length,
+    missingItemsCount: previewInvoices.reduce(
+      (sum, inv) => sum + inv.lines.filter((l) => l.hasMissingItem).length,
+      0
+    ),
+    invalidQuantitiesCount: previewInvoices.reduce(
+      (sum, inv) => sum + inv.lines.filter((l) => l.hasInvalidQuantity).length,
+      0
+    ),
+    invalidValuesCount: previewInvoices.filter((inv) => inv.hasInvalidValues).length,
+    totalMismatchesCount: previewInvoices.filter((inv) => inv.hasTotalMismatch).length,
+  };
+
+  return { invoices: previewInvoices, summary };
+}
+
+/**
+ * POST /api/sales/import-excel/preview
+ * Validates parsed Excel invoices without writing to the database.
+ */
+salesRouter.post('/import-excel/preview', (req: Request, res: Response) => {
+  try {
+    const rawInvoices = Array.isArray(req.body?.invoices) ? req.body.invoices : [];
+    if (rawInvoices.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No sales invoices found in the uploaded Excel file.',
+      });
+    }
+    if (rawInvoices.length > 500) {
+      return res.status(400).json({
+        success: false,
+        error: 'Maximum 500 invoices can be imported in a single Excel upload.',
+      });
+    }
+
+    const preview = validateAndBuildSalesImportPreview(rawInvoices);
+    res.json({
+      success: true,
+      ...preview,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logSystemError({
+      module: 'sales',
+      operation: 'POST /api/sales/import-excel/preview',
+      userMessage: msg,
+      username: req.user?.username,
+    });
+    res.status(400).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * POST /api/sales/import-excel/commit
+ * Re-validates all submitted invoices, skips duplicate invoice numbers,
+ * rejects invalid invoices, and imports each valid invoice inside its own
+ * atomic database transaction via processSaleUpsert (updating stock, batches,
+ * customer ledger, cash/bank accounts, and journal entries).
+ */
+salesRouter.post('/import-excel/commit', (req: Request, res: Response) => {
+  try {
+    const rawInvoices = Array.isArray(req.body?.invoices) ? req.body.invoices : [];
+    if (rawInvoices.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No sales invoices provided for import.',
+      });
+    }
+    if (rawInvoices.length > 500) {
+      return res.status(400).json({
+        success: false,
+        error: 'Maximum 500 invoices can be imported in a single batch.',
+      });
+    }
+
+    triggerPreChangeBackupIfEnabled('import_sales_invoices_excel');
+
+    const { invoices: validatedInvoices } = validateAndBuildSalesImportPreview(rawInvoices);
+    const db = getDatabase();
+    const actorName = req.user?.full_name || req.user?.username || 'Super Admin';
+    const actorId = req.user?.id || null;
+
+    const importedInvoices: Array<{
+      id: number;
+      invoiceNumber: string;
+      invoiceDate: string;
+      customerName: string;
+      customerCode: string;
+      itemsCount: number;
+      netTotal: number;
+      paidAmount: number;
+      paymentMode: string;
+    }> = [];
+
+    const skippedDuplicates: Array<{
+      invoiceNumber: string;
+      invoiceDate: string;
+      customerName: string;
+      reason: string;
+    }> = [];
+
+    const failedInvoices: Array<{
+      invoiceNumber: string;
+      invoiceDate: string;
+      customerName: string;
+      errors: string[];
+    }> = [];
+
+    for (const inv of validatedInvoices) {
+      const displayInvNo = inv.invoiceNumber || `(Auto #${inv.index + 1})`;
+      const displayCustomer =
+        inv.matchedCustomerName || inv.rawCustomerName || inv.rawCustomerCode || 'Walk-in Cash Customer';
+
+      if (inv.status === 'duplicate') {
+        skippedDuplicates.push({
+          invoiceNumber: displayInvNo,
+          invoiceDate: inv.normalizedInvoiceDate,
+          customerName: displayCustomer,
+          reason: inv.duplicateReason || `Duplicate Invoice Number "${displayInvNo}".`,
+        });
+        continue;
+      }
+
+      if (inv.status === 'invalid') {
+        failedInvoices.push({
+          invoiceNumber: displayInvNo,
+          invoiceDate: inv.normalizedInvoiceDate,
+          customerName: displayCustomer,
+          errors: inv.errors.length > 0 ? inv.errors : ['Validation failed.'],
+        });
+        continue;
+      }
+
+      // Build the payload for processSaleUpsert (which executes inside a single SQLite transaction)
+      try {
+        const upsertBody: Record<string, unknown> = {
+          is_excel_import: true,
+          preserve_imported_invoice_number: Boolean(inv.invoiceNumber),
+          invoice_number: inv.invoiceNumber || undefined,
+          invoice_date: inv.normalizedInvoiceDate,
+          customer_account_id: inv.matchedCustomerId,
+          customer_name: inv.matchedCustomerName,
+          invoice_type: inv.invoiceType,
+          payment_mode: inv.paymentMode,
+          salesman: inv.salesman,
+          invoice_discount_amount: inv.invoiceDiscountAmount,
+          advance_tax_applicable: inv.advanceTaxAmount > 0 ? 1 : 0,
+          exact_advance_tax_amount: inv.advanceTaxAmount,
+          paid_amount: inv.paidAmount,
+          status: 'completed',
+          remarks: inv.remarks
+            ? inv.remarks
+            : `Imported from Excel${inv.invoiceNumber ? ` (${inv.invoiceNumber})` : ''}`,
+          items: inv.lines.map((line) => ({
+            item_id: line.matchedItemId,
+            variant_id: line.matchedVariantId,
+            packing: line.packing,
+            batch_number: line.batchNumber,
+            expiry_date: line.expiryDate,
+            quantity: line.quantity,
+            loose_quantity: line.looseQuantity,
+            bonus_quantity: line.bonusQuantity,
+            unit_price: line.unitPrice,
+            loose_rate: line.looseRate,
+            discount_1_percent: line.discount1Percent,
+            discount_2_percent: line.discount2Percent,
+            discount_percent: line.discountPercent,
+            exact_discount_amount: line.discountAmount,
+            tax_type: line.taxType,
+            tax_value: line.taxValue,
+            tax_percent: line.taxPercent,
+            exact_tax_amount: line.taxAmount,
+            remarks: line.remarks,
+          })),
+        };
+
+        const newSaleId = processSaleUpsert(null, upsertBody);
+
+        db.prepare('UPDATE sales SET created_by = ?, updated_by = ? WHERE id = ?').run(
+          actorName,
+          actorName,
+          newSaleId
+        );
+
+        const createdSale = db
+          .prepare('SELECT id, invoice_number, net_total, paid_amount FROM sales WHERE id = ?')
+          .get(newSaleId) as
+          | { id: number; invoice_number: string; net_total: number; paid_amount: number }
+          | undefined;
+
+        importedInvoices.push({
+          id: newSaleId,
+          invoiceNumber: createdSale?.invoice_number || inv.invoiceNumber || displayInvNo,
+          invoiceDate: inv.normalizedInvoiceDate,
+          customerName: inv.matchedCustomerName,
+          customerCode: inv.matchedCustomerCode,
+          itemsCount: inv.lines.length,
+          netTotal: Number(createdSale?.net_total ?? inv.calculatedNetTotal),
+          paidAmount: Number(createdSale?.paid_amount ?? inv.paidAmount),
+          paymentMode: inv.paymentMode,
+        });
+      } catch (txErr: unknown) {
+        const errMsg = txErr instanceof Error ? txErr.message : String(txErr);
+        // Check if failure was due to a concurrent duplicate invoice number insert
+        if (/duplicate invoice number|UNIQUE constraint failed: sales\.invoice_number/i.test(errMsg)) {
+          skippedDuplicates.push({
+            invoiceNumber: displayInvNo,
+            invoiceDate: inv.normalizedInvoiceDate,
+            customerName: displayCustomer,
+            reason: errMsg,
+          });
+        } else {
+          failedInvoices.push({
+            invoiceNumber: displayInvNo,
+            invoiceDate: inv.normalizedInvoiceDate,
+            customerName: displayCustomer,
+            errors: [errMsg],
+          });
+        }
+      }
+    }
+
+    if (importedInvoices.length > 0) {
+      try {
+        db.prepare(`
+          INSERT INTO auth_audit_logs (user_id, username, action, status, ip_address, details)
+          VALUES (?, ?, 'EXCEL_IMPORT_SALES', 'SUCCESS', ?, ?)
+        `).run(
+          actorId,
+          actorName,
+          req.ip || '',
+          `Imported ${importedInvoices.length} Sales Invoice(s) from Excel (${skippedDuplicates.length} duplicate(s) skipped, ${failedInvoices.length} failed)`
+        );
+      } catch {
+        // Ignore non-fatal audit log errors
+      }
+    }
+
+    res.json({
+      success: true,
+      summary: {
+        totalSubmitted: validatedInvoices.length,
+        successfulCount: importedInvoices.length,
+        skippedDuplicatesCount: skippedDuplicates.length,
+        failedCount: failedInvoices.length,
+      },
+      importedInvoices,
+      skippedDuplicates,
+      failedInvoices,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logSystemError({
+      module: 'sales',
+      operation: 'POST /api/sales/import-excel/commit',
+      userMessage: msg,
+      username: req.user?.username,
+    });
+    res.status(400).json({ success: false, error: msg });
+  }
+});
+

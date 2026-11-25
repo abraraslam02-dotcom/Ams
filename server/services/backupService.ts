@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { config, isTemporaryStoragePath, validatePermanentStorageLocation } from '../config.ts';
 import { getPakistanDateISO, getPakistanFilenameStamp } from '../utils/pakistanTime.ts';
@@ -11,7 +12,11 @@ import {
 } from '../db/connection.ts';
 import { runMigrations } from '../db/migrations.ts';
 import { bumpDbResetEpoch } from '../db/resetState.ts';
-import { isOfflineOperatingMode } from './operatingModeStore.ts';
+import {
+  isOfflineOperatingMode,
+  getPersistedOperatingModeState,
+  updatePersistedOperatingModeState,
+} from './operatingModeStore.ts';
 import {
   syncDatabaseToCloudSQL,
 } from './cloudPersistenceService.ts';
@@ -42,6 +47,7 @@ export interface BackupVerificationResult {
   modifiedAt: string;
   integrityCheck: string;
   tablesCount: number;
+  sha256?: string;
   coreCounts: {
     items: number;
     accounts: number;
@@ -54,14 +60,214 @@ export interface BackupVerificationResult {
   error?: string;
 }
 
+export interface DDriveFolderCheckResult {
+  configuredFolder: string;
+  resolvedLocalPath: string | null;
+  isWindowsHost: boolean;
+  driveExists: boolean;
+  folderExists: boolean;
+  writable: boolean;
+  requiresBrowserDDriveHelper: boolean;
+  error: string | null;
+}
+
 /**
- * Resolves the permanent backup directory:
- * - On Windows: permanently defaults to D:\AbrarMedicalStore\Backups\ (validating D:\ availability).
- * - On Linux/macOS: uses permanent config.primaryBackupDir (never a temporary folder).
+ * Returns the configured Windows D-Drive backup folder (defaults to D:\AbrarMedicalStore\Backups).
+ */
+export function getConfiguredDDriveBackupFolder(): string {
+  try {
+    const db = getDatabase();
+    const row = db
+      .prepare('SELECT local_backup_folder, backup_directory FROM company_settings LIMIT 1')
+      .get() as { local_backup_folder?: string; backup_directory?: string } | undefined;
+    const candidates = [
+      row?.local_backup_folder,
+      row?.backup_directory,
+      getPersistedOperatingModeState().dDriveConfiguredFolder,
+    ];
+    for (const raw of candidates) {
+      const clean = String(raw || '').trim();
+      if (
+        clean &&
+        clean !== 'data/backups' &&
+        clean !== './data/backups' &&
+        clean !== 'D:\\Abrar Medical Store Backups'
+      ) {
+        return clean;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return config.windowsPrimaryBackupDir || 'D:\\AbrarMedicalStore\\Backups';
+}
+
+/**
+ * Verifies whether a target directory exists and is writable by the server process.
+ * Never pretends a Windows D:\ drive exists on a Linux/Cloud Run host unless mounted (e.g. /mnt/d).
+ */
+export function checkDDriveBackupFolderStatus(customFolder?: string): DDriveFolderCheckResult {
+  const configuredFolder = String(customFolder || getConfiguredDDriveBackupFolder()).trim() || 'D:\\AbrarMedicalStore\\Backups';
+  const isWin = process.platform === 'win32';
+  const winDriveMatch = configuredFolder.match(/^([a-zA-Z]):[\\/]/);
+
+  if (winDriveMatch) {
+    const driveLetter = winDriveMatch[1].toUpperCase();
+    const driveRootWin = `${driveLetter}:\\`;
+    const relativeSubPath = configuredFolder
+      .slice(3)
+      .replace(/\\/g, '/');
+
+    if (isWin) {
+      const driveExists = fs.existsSync(driveRootWin);
+      if (!driveExists) {
+        return {
+          configuredFolder,
+          resolvedLocalPath: null,
+          isWindowsHost: true,
+          driveExists: false,
+          folderExists: false,
+          writable: false,
+          requiresBrowserDDriveHelper: false,
+          error: `Drive ${driveLetter}: is not available on this computer (${configuredFolder}). Please check that Drive ${driveLetter}: is connected and accessible.`,
+        };
+      }
+      try {
+        if (!fs.existsSync(configuredFolder)) {
+          fs.mkdirSync(configuredFolder, { recursive: true });
+        }
+        fs.accessSync(configuredFolder, fs.constants.R_OK | fs.constants.W_OK);
+        const probeFile = path.join(configuredFolder, `.ams_write_test_${Date.now()}.tmp`);
+        fs.writeFileSync(probeFile, 'ok', 'utf8');
+        fs.unlinkSync(probeFile);
+        return {
+          configuredFolder,
+          resolvedLocalPath: configuredFolder,
+          isWindowsHost: true,
+          driveExists: true,
+          folderExists: true,
+          writable: true,
+          requiresBrowserDDriveHelper: false,
+          error: null,
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          configuredFolder,
+          resolvedLocalPath: configuredFolder,
+          isWindowsHost: true,
+          driveExists: true,
+          folderExists: fs.existsSync(configuredFolder),
+          writable: false,
+          requiresBrowserDDriveHelper: false,
+          error: `Backup folder "${configuredFolder}" is not writable: ${msg}`,
+        };
+      }
+    } else {
+      // Server is running on Linux / Cloud Run / WSL. Check if /mnt/<drive> is mounted locally.
+      const wslMountRoot = `/mnt/${driveLetter.toLowerCase()}`;
+      if (fs.existsSync(wslMountRoot)) {
+        const mountedCandidate = path.join(wslMountRoot, relativeSubPath);
+        try {
+          if (!fs.existsSync(mountedCandidate)) {
+            fs.mkdirSync(mountedCandidate, { recursive: true });
+          }
+          fs.accessSync(mountedCandidate, fs.constants.R_OK | fs.constants.W_OK);
+          const probeFile = path.join(mountedCandidate, `.ams_write_test_${Date.now()}.tmp`);
+          fs.writeFileSync(probeFile, 'ok', 'utf8');
+          fs.unlinkSync(probeFile);
+          return {
+            configuredFolder,
+            resolvedLocalPath: mountedCandidate,
+            isWindowsHost: false,
+            driveExists: true,
+            folderExists: true,
+            writable: true,
+            requiresBrowserDDriveHelper: false,
+            error: null,
+          };
+        } catch {
+          // Fall through to browser D-Drive helper mode
+        }
+      }
+
+      return {
+        configuredFolder,
+        resolvedLocalPath: null,
+        isWindowsHost: false,
+        driveExists: false,
+        folderExists: false,
+        writable: false,
+        requiresBrowserDDriveHelper: true,
+        error: `Server is running in a Linux/Cloud environment and cannot directly access Windows "${configuredFolder}" without browser folder permission.`,
+      };
+    }
+  }
+
+  // Non-Windows custom path (e.g. local absolute path configured for server or testing)
+  const candidatePath = path.isAbsolute(configuredFolder)
+    ? configuredFolder
+    : path.resolve(path.dirname(config.databasePath), configuredFolder);
+
+  if (isTemporaryStoragePath(candidatePath)) {
+    return {
+      configuredFolder,
+      resolvedLocalPath: null,
+      isWindowsHost: isWin,
+      driveExists: false,
+      folderExists: false,
+      writable: false,
+      requiresBrowserDDriveHelper: false,
+      error: `Temporary directory "${candidatePath}" is not allowed for permanent backups.`,
+    };
+  }
+
+  try {
+    if (!fs.existsSync(candidatePath)) {
+      fs.mkdirSync(candidatePath, { recursive: true });
+    }
+    fs.accessSync(candidatePath, fs.constants.R_OK | fs.constants.W_OK);
+    const probeFile = path.join(candidatePath, `.ams_write_test_${Date.now()}.tmp`);
+    fs.writeFileSync(probeFile, 'ok', 'utf8');
+    fs.unlinkSync(probeFile);
+    return {
+      configuredFolder,
+      resolvedLocalPath: candidatePath,
+      isWindowsHost: isWin,
+      driveExists: true,
+      folderExists: true,
+      writable: true,
+      requiresBrowserDDriveHelper: false,
+      error: null,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      configuredFolder,
+      resolvedLocalPath: candidatePath,
+      isWindowsHost: isWin,
+      driveExists: false,
+      folderExists: fs.existsSync(candidatePath),
+      writable: false,
+      requiresBrowserDDriveHelper: false,
+      error: `Backup folder "${configuredFolder}" is unavailable or not writable: ${msg}`,
+    };
+  }
+}
+
+/**
+ * Resolves the permanent server-side backup directory:
+ * - If the configured D-Drive / custom folder is directly writable on this host, uses it.
+ * - Otherwise uses config.primaryBackupDir on the server disk so a verified server copy is always created.
  */
 export function getBackupDirectory(): string {
+  const dCheck = checkDDriveBackupFolderStatus();
+  if (dCheck.writable && dCheck.resolvedLocalPath) {
+    return dCheck.resolvedLocalPath;
+  }
+
   const storageCheck = validatePermanentStorageLocation();
-  if (!storageCheck.available) {
+  if (!storageCheck.available && process.platform === 'win32') {
     throw new Error(
       storageCheck.warning ||
         `Permanent backup drive is unavailable (${config.primaryBackupDir}).`
@@ -69,33 +275,6 @@ export function getBackupDirectory(): string {
   }
 
   const defaultDir = config.primaryBackupDir;
-
-  try {
-    const db = getDatabase();
-    const row = db
-      .prepare('SELECT backup_directory FROM company_settings LIMIT 1')
-      .get() as { backup_directory?: string } | undefined;
-    const customDir = row?.backup_directory ? String(row.backup_directory).trim() : '';
-    const isGenericLegacy =
-      !customDir ||
-      customDir === 'data/backups' ||
-      customDir === './data/backups' ||
-      customDir === 'D:\\Abrar Medical Store Backups';
-    if (!isGenericLegacy) {
-      const candidate = path.isAbsolute(customDir)
-        ? customDir
-        : path.resolve(path.dirname(config.databasePath), customDir);
-      if (!isTemporaryStoragePath(candidate)) {
-        if (!fs.existsSync(candidate)) {
-          fs.mkdirSync(candidate, { recursive: true });
-        }
-        return candidate;
-      }
-    }
-  } catch {
-    // Fallback to verified permanent backup directory
-  }
-
   if (!fs.existsSync(defaultDir)) {
     fs.mkdirSync(defaultDir, { recursive: true });
   }
@@ -637,18 +816,50 @@ export function getNextNumberedBackupFilename(date = new Date()): string {
   return `${prefix}${nextSeq}.db`;
 }
 
+export interface CreatedNumberedBackupResult extends BackupRecord {
+  localFolderPath: string;
+  verification: BackupVerificationResult;
+  sha256: string;
+  writtenDirectlyToDDrive: boolean;
+  requiresBrowserDDriveSave: boolean;
+  dDriveTargetFolder: string;
+  dDriveExactFilePath: string | null;
+  dDriveError: string | null;
+}
+
 /**
- * Creates a verified SQLite .db backup using the required Abrar_Backup_YYYY-MM-DD_NNN.db naming convention
- * and applies the retention policy (keep last 7 daily backups, last 4 weekly backups, never delete latest verified backup).
+ * Creates a verified SQLite .db backup using the required Abrar_Backup_YYYY-MM-DD_NNN.db naming convention,
+ * verifies D-Drive folder availability/writability, verifies SQLite integrity + SHA-256 hash after creation,
+ * and applies the retention policy.
  */
 export function createNumberedAbrarBackup(options: {
   backupType?: BackupType;
   createdBy?: string;
   notes?: string;
   localTargetFolder?: string;
-}): BackupRecord & { localFolderPath: string; verification: BackupVerificationResult } {
+  requireDirectDDriveWrite?: boolean;
+}): CreatedNumberedBackupResult {
   const db = getDatabase();
-  const backupDir = getBackupDirectory();
+  const dCheck = checkDDriveBackupFolderStatus(options.localTargetFolder);
+
+  if (options.requireDirectDDriveWrite && !dCheck.writable && !dCheck.requiresBrowserDDriveHelper) {
+    updatePersistedOperatingModeState({
+      dDriveBackupStatus: 'Failed',
+      dDriveBackupError: dCheck.error || `D Drive (${dCheck.configuredFolder}) is unavailable or not writable.`,
+    });
+    throw new Error(
+      dCheck.error || `D Drive (${dCheck.configuredFolder}) is unavailable or not writable.`
+    );
+  }
+
+  const backupDir = dCheck.writable && dCheck.resolvedLocalPath
+    ? dCheck.resolvedLocalPath
+    : config.primaryBackupDir;
+
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true });
+  }
+
   const filename = getNextNumberedBackupFilename(new Date());
   const targetPath = path.join(backupDir, filename);
   const backupType: BackupType = options.backupType || 'manual';
@@ -675,19 +886,41 @@ export function createNumberedAbrarBackup(options: {
     throw new Error(verification.error || 'Backup file failed integrity verification.');
   }
 
-  const settingsRow = db
-    .prepare('SELECT local_backup_folder FROM company_settings LIMIT 1')
-    .get() as { local_backup_folder?: string } | undefined;
-  const localFolderPath =
-    options.localTargetFolder ||
-    settingsRow?.local_backup_folder ||
-    config.windowsPrimaryBackupDir;
+  const fileBuf = fs.readFileSync(targetPath);
+  const sha256 = crypto.createHash('sha256').update(fileBuf).digest('hex');
+  verification.sha256 = sha256;
+
+  // Also ensure a copy exists in config.primaryBackupDir if backupDir is a different folder
+  try {
+    if (path.resolve(backupDir) !== path.resolve(config.primaryBackupDir)) {
+      if (!fs.existsSync(config.primaryBackupDir)) {
+        fs.mkdirSync(config.primaryBackupDir, { recursive: true });
+      }
+      const primaryCopyPath = path.join(config.primaryBackupDir, filename);
+      if (!fs.existsSync(primaryCopyPath)) {
+        fs.copyFileSync(targetPath, primaryCopyPath);
+      }
+    }
+  } catch {
+    // ignore secondary mirror warning
+  }
+
+  const writtenDirectlyToDDrive = Boolean(dCheck.writable && dCheck.resolvedLocalPath);
+  const dDriveTargetFolder = dCheck.configuredFolder;
+  const dDriveExactFilePath = writtenDirectlyToDDrive
+    ? dCheck.configuredFolder.includes('\\')
+      ? `${dCheck.configuredFolder.replace(/\\+$/, '')}\\${filename}`
+      : path.join(dCheck.resolvedLocalPath!, filename)
+    : null;
+  const completedIso = new Date().toISOString();
 
   const summaryText = `Items: ${verification.coreCounts.items}, Accounts: ${verification.coreCounts.accounts}, Sales: ${verification.coreCounts.sales}, Purchases: ${verification.coreCounts.purchases}, Batches: ${verification.coreCounts.inventoryBatches}, JEs: ${verification.coreCounts.journalEntries}`;
   const createdBy = options.createdBy || 'Super Admin';
   const notes =
     options.notes ||
-    `Verified Local Hard Drive Backup (${localFolderPath}\\${filename})`;
+    (writtenDirectlyToDDrive
+      ? `Verified D-Drive Backup (${dDriveExactFilePath})`
+      : `Verified Server SQLite Backup (${targetPath})`);
 
   const insertRes = db
     .prepare(
@@ -715,15 +948,49 @@ export function createNumberedAbrarBackup(options: {
     .prepare('SELECT * FROM backup_history WHERE id = ?')
     .get(insertRes.lastInsertRowid) as BackupRecord;
 
+  try {
+    db.prepare(
+      `UPDATE company_settings
+       SET last_successful_backup_at = ?,
+           last_backup_filename = ?,
+           last_backup_path = ?`
+    ).run(completedIso, filename, dDriveExactFilePath || targetPath);
+  } catch {
+    // ignore if columns not yet migrated
+  }
+
+  updatePersistedOperatingModeState({
+    localBackupStatus: 'Successful',
+    lastSuccessfulBackupAt: completedIso,
+    lastBackupFilename: filename,
+    lastBackupPath: dDriveExactFilePath || targetPath,
+    lastBackupSizeBytes: verification.fileSizeBytes,
+    lastBackupSha256: sha256,
+    lastBackupError: null,
+    dDriveConfiguredFolder: dDriveTargetFolder,
+    dDriveBackupStatus: writtenDirectlyToDDrive
+      ? 'Successful'
+      : dCheck.requiresBrowserDDriveHelper
+      ? 'Pending Save'
+      : 'Failed',
+    dDriveBackupPath: dDriveExactFilePath,
+    dDriveBackupError: writtenDirectlyToDDrive ? null : dCheck.error,
+  });
+
   // Apply retention policy
   applyBackupRetentionPolicy();
 
-  // Manual Control Only: Never automatically mirror local backups to Cloud in the background.
   return {
     ...createdRow,
     file_exists: fs.existsSync(targetPath),
-    localFolderPath,
+    localFolderPath: writtenDirectlyToDDrive ? dDriveTargetFolder : backupDir,
     verification,
+    sha256,
+    writtenDirectlyToDDrive,
+    requiresBrowserDDriveSave: dCheck.requiresBrowserDDriveHelper,
+    dDriveTargetFolder,
+    dDriveExactFilePath,
+    dDriveError: writtenDirectlyToDDrive ? null : dCheck.error,
   };
 }
 

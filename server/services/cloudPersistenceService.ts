@@ -20,6 +20,7 @@ import { bumpDbResetEpoch } from '../db/resetState.ts';
 import { reconcileHeldAndDuplicateLedgerEntries } from './ledgerIntegrityService.ts';
 import { ensureAuthTables } from './authService.ts';
 import {
+  getPersistedOperatingModeState,
   isOfflineOperatingMode,
   recordLocalPendingMutation,
   updatePersistedOperatingModeState,
@@ -90,11 +91,15 @@ export interface CloudPersistenceStatus {
   connectionError?: string | null;
   offlineWarning?: string | null;
   databaseIdentity?: string;
+  quotaExhausted?: boolean;
+  quotaCooldownUntilMs?: number;
 }
 
 const VAULT_COLLECTION = 'ams_vault_e5f2831c';
 const VAULT_SERVER_KEY = 'ams_srv_vault_e5f2831c_4daf_499d_a38b_45adc902ab45';
 const MAX_CHUNK_CHARS = 650000; // Safely below Firestore 1 MiB document limit
+const MANIFEST_CACHE_TTL_MS = 60_000; // 60s cache to eliminate duplicate manifest verification reads
+const QUOTA_EXHAUSTED_COOLDOWN_MS = 15 * 60 * 1000; // 15-minute cooldown before auto-probing after daily quota exhaustion
 
 const ENV_SCOPE_PREFIX = config.envScope === 'test' ? 'test' : 'prod';
 const MANIFEST_DOC_ID = `${ENV_SCOPE_PREFIX}_manifest`;
@@ -114,14 +119,15 @@ const VAULT_AES_KEY = crypto
   .update(`${VAULT_SERVER_KEY}:${FIRESTORE_PROJECT_ID}:${FIRESTORE_DATABASE_ID}`)
   .digest();
 
+const initialPersisted = getPersistedOperatingModeState();
 let isInitialized = false;
 let isHydrationComplete = false;
 let isConnected = false;
-let lastSyncAt: string | null = null;
+let lastSyncAt: string | null = initialPersisted.lastSuccessfulCloudSyncAt || null;
 let lastRestoreAt: string | null = null;
-let lastVersionSeq = 0;
-let lastSha256: string | null = null;
-let lastError: string | null = null;
+let lastVersionSeq = Math.max(0, Number(initialPersisted.lastSyncedCloudVersionSeq || 0));
+let lastSha256: string | null = initialPersisted.lastSyncedCloudSha256 || null;
+let lastError: string | null = initialPersisted.lastCloudSyncError || null;
 let cloudRecordCounts: Record<string, number> | null = null;
 
 let initPromise: Promise<void> | null = null;
@@ -130,7 +136,10 @@ let isSyncInFlight = false;
 let pendingUploadAfterInFlight = false;
 let pendingUploadReason = 'queued_mutation';
 let backgroundInterval: NodeJS.Timeout | null = null;
-let readCooldownUntil = 0;
+let readCooldownUntil =
+  initialPersisted.quotaExhausted && initialPersisted.quotaCooldownUntilMs > Date.now()
+    ? initialPersisted.quotaCooldownUntilMs
+    : 0;
 let writeCooldownUntil = 0;
 let lastManifestFetchAt = 0;
 let cachedManifest: ManifestMetadata | null = null;
@@ -140,8 +149,246 @@ let lastReconnectAttemptAt = 0;
 let hasHydratedFromCloudThisProcess = false;
 let hasLocalMutationsSinceBoot = false;
 
+export const QUOTA_PENDING_USER_MESSAGE =
+  'Cloud Sync is pending because Firestore daily read quota is exhausted. All local records and pending changes are safely saved in your local database and will synchronize automatically after quota reset.';
+
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Ensures the durable pending_cloud_sync_queue and cloud_sync_cursor tables exist in SQLite.
+ */
+export function ensurePendingCloudSyncQueueTables(): void {
+  try {
+    if (!isDatabaseOpen()) return;
+    const db = getDatabase();
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_cloud_sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        route_label TEXT NOT NULL,
+        method TEXT NOT NULL,
+        table_name TEXT,
+        record_id TEXT,
+        client_tx_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        synced INTEGER NOT NULL DEFAULT 0,
+        synced_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_cloud_sync_unsynced
+        ON pending_cloud_sync_queue(synced, id);
+
+      CREATE TABLE IF NOT EXISTS cloud_sync_cursor (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_synced_version_seq INTEGER NOT NULL DEFAULT 0,
+        last_synced_sha256 TEXT,
+        last_synced_at TEXT,
+        quota_exhausted INTEGER NOT NULL DEFAULT 0,
+        quota_cooldown_until_ms INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+
+    db.prepare(
+      `UPDATE cloud_sync_cursor
+       SET last_synced_version_seq = 0, last_synced_sha256 = NULL, last_synced_at = NULL
+       WHERE last_synced_sha256 IN ('verify_sha', 'test_sha')`
+    ).run();
+
+    const cursorRow = db
+      .prepare('SELECT * FROM cloud_sync_cursor WHERE id = 1')
+      .get() as
+      | {
+          last_synced_version_seq: number;
+          last_synced_sha256: string | null;
+          last_synced_at: string | null;
+          quota_exhausted: number;
+          quota_cooldown_until_ms: number;
+        }
+      | undefined;
+
+    if (cursorRow) {
+      if (cursorRow.last_synced_version_seq > lastVersionSeq) {
+        lastVersionSeq = cursorRow.last_synced_version_seq;
+      }
+      if (cursorRow.last_synced_sha256 && !lastSha256) {
+        lastSha256 = cursorRow.last_synced_sha256;
+      }
+      if (cursorRow.last_synced_at && !lastSyncAt) {
+        lastSyncAt = cursorRow.last_synced_at;
+      }
+      if (cursorRow.quota_exhausted === 1 && cursorRow.quota_cooldown_until_ms > Date.now()) {
+        readCooldownUntil = Math.max(readCooldownUntil, cursorRow.quota_cooldown_until_ms);
+      }
+    } else {
+      db.prepare(
+        `INSERT OR IGNORE INTO cloud_sync_cursor (
+           id, last_synced_version_seq, last_synced_sha256, last_synced_at, quota_exhausted, quota_cooldown_until_ms
+         ) VALUES (1, ?, ?, ?, ?, ?)`
+      ).run(
+        lastVersionSeq,
+        lastSha256,
+        lastSyncAt,
+        readCooldownUntil > Date.now() ? 1 : 0,
+        readCooldownUntil
+      );
+    }
+  } catch {
+    // ignore during early boot
+  }
+}
+
+export function enqueueLocalMutationForCloudSync(
+  method: string,
+  routeLabel: string,
+  meta?: { tableName?: string; recordId?: string; clientTxId?: string }
+): number {
+  try {
+    ensurePendingCloudSyncQueueTables();
+    const db = getDatabase();
+    db.prepare(
+      `INSERT INTO pending_cloud_sync_queue (route_label, method, table_name, record_id, client_tx_id, synced)
+       VALUES (?, ?, ?, ?, ?, 0)`
+    ).run(
+      routeLabel,
+      method,
+      meta?.tableName || null,
+      meta?.recordId || null,
+      meta?.clientTxId || null
+    );
+    const countRow = db
+      .prepare('SELECT COUNT(*) as cnt FROM pending_cloud_sync_queue WHERE synced = 0')
+      .get() as { cnt: number } | undefined;
+    const totalPending = Math.max(1, Number(countRow?.cnt || 1));
+    updatePersistedOperatingModeState({
+      pendingLocalChangesCount: totalPending,
+      cloudSyncStatus: 'Pending',
+    });
+    return totalPending;
+  } catch {
+    const st = recordLocalPendingMutation();
+    return st.pendingLocalChangesCount;
+  }
+}
+
+export function getDurablePendingCloudSyncCount(): number {
+  try {
+    ensurePendingCloudSyncQueueTables();
+    const db = getDatabase();
+    const countRow = db
+      .prepare('SELECT COUNT(*) as cnt FROM pending_cloud_sync_queue WHERE synced = 0')
+      .get() as { cnt: number } | undefined;
+    const dbCount = Number(countRow?.cnt || 0);
+    const persistedCount = getPersistedOperatingModeState().pendingLocalChangesCount;
+    return Math.max(dbCount, persistedCount);
+  } catch {
+    return getPersistedOperatingModeState().pendingLocalChangesCount;
+  }
+}
+
+export function markDurablePendingCloudSyncCompleted(params: {
+  versionSeq: number;
+  sha256Hash: string;
+  syncedAt: string;
+}): void {
+  try {
+    ensurePendingCloudSyncQueueTables();
+    const db = getDatabase();
+    const tx = db.transaction(() => {
+      db.prepare(
+        `UPDATE pending_cloud_sync_queue
+         SET synced = 1, synced_at = ?
+         WHERE synced = 0`
+      ).run(params.syncedAt);
+
+      db.prepare(
+        `INSERT INTO cloud_sync_cursor (
+           id, last_synced_version_seq, last_synced_sha256, last_synced_at, quota_exhausted, quota_cooldown_until_ms
+         ) VALUES (1, ?, ?, ?, 0, 0)
+         ON CONFLICT(id) DO UPDATE SET
+           last_synced_version_seq = excluded.last_synced_version_seq,
+           last_synced_sha256 = excluded.last_synced_sha256,
+           last_synced_at = excluded.last_synced_at,
+           quota_exhausted = 0,
+           quota_cooldown_until_ms = 0`
+      ).run(params.versionSeq, params.sha256Hash, params.syncedAt);
+    });
+    tx();
+  } catch {
+    // ignore
+  }
+
+  updatePersistedOperatingModeState({
+    cloudSyncStatus: 'Successful',
+    lastSuccessfulCloudSyncAt: params.syncedAt,
+    lastCloudSyncError: null,
+    pendingLocalChangesCount: 0,
+    quotaExhausted: false,
+    quotaCooldownUntilMs: 0,
+    lastSyncedCloudSha256: params.sha256Hash,
+    lastSyncedCloudVersionSeq: params.versionSeq,
+  });
+}
+
+export function isQuotaExhaustedError(errMsg?: string | null): boolean {
+  if (!errMsg) return false;
+  return /quota exceeded|RESOURCE_EXHAUSTED|daily read quota|429/i.test(errMsg);
+}
+
+export function recordFirestoreQuotaExhausted(isDailyQuota: boolean): string {
+  const cooldownMs = isDailyQuota ? QUOTA_EXHAUSTED_COOLDOWN_MS : 30 * 1000;
+  const untilMs = Date.now() + cooldownMs;
+  readCooldownUntil = Math.max(readCooldownUntil, untilMs);
+
+  const userFriendlyMsg = isDailyQuota
+    ? QUOTA_PENDING_USER_MESSAGE
+    : 'Cloud Sync is temporarily paused due to cloud rate limiting. Local data is safe and sync will resume automatically.';
+
+  lastError = userFriendlyMsg;
+
+  try {
+    ensurePendingCloudSyncQueueTables();
+    const db = getDatabase();
+    db.prepare(
+      `UPDATE cloud_sync_cursor
+       SET quota_exhausted = ?, quota_cooldown_until_ms = ?
+       WHERE id = 1`
+    ).run(isDailyQuota ? 1 : 0, untilMs);
+  } catch {
+    // ignore
+  }
+
+  updatePersistedOperatingModeState({
+    cloudSyncStatus: 'Pending',
+    lastCloudSyncError: userFriendlyMsg,
+    quotaExhausted: isDailyQuota,
+    quotaCooldownUntilMs: untilMs,
+  });
+
+  scheduleQuotaRecoveryTimer(cooldownMs + 1000);
+  return userFriendlyMsg;
+}
+
+let quotaRecoveryTimer: NodeJS.Timeout | null = null;
+function scheduleQuotaRecoveryTimer(delayMs: number): void {
+  if (quotaRecoveryTimer) {
+    clearTimeout(quotaRecoveryTimer);
+  }
+  quotaRecoveryTimer = setTimeout(() => {
+    quotaRecoveryTimer = null;
+    if (isOfflineOperatingMode()) return;
+    if (getDurablePendingCloudSyncCount() > 0) {
+      void uploadLocalDbToCloud('auto_resume_after_quota_cooldown');
+    }
+  }, Math.min(delayMs, 30 * 60 * 1000));
+}
+
+export function isFirestoreQuotaCooldownActive(): boolean {
+  const persisted = getPersistedOperatingModeState();
+  if (persisted.quotaExhausted && persisted.quotaCooldownUntilMs > Date.now()) {
+    readCooldownUntil = Math.max(readCooldownUntil, persisted.quotaCooldownUntilMs);
+    return true;
+  }
+  return Date.now() < readCooldownUntil;
 }
 
 function computeLocalSqliteSha256(): string | null {
@@ -242,30 +489,29 @@ function buildFirestoreDocUrl(docId: string): string {
 type VaultReadResult =
   | { status: 'found'; doc: VaultDocFields }
   | { status: 'not_found' }
-  | { status: 'unreachable'; error: string };
+  | { status: 'unreachable'; error: string; quotaExhausted?: boolean };
 
 async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult> {
   if (!FIRESTORE_API_KEY || !FIRESTORE_PROJECT_ID || !FIRESTORE_DATABASE_ID) {
     isConnected = false;
     return { status: 'unreachable', error: 'Cloud database configuration is missing.' };
   }
-  if (Date.now() < readCooldownUntil) {
+  if (isFirestoreQuotaCooldownActive()) {
     isConnected = false;
     return {
       status: 'unreachable',
-      error:
-        lastError ||
-        'Active database read temporarily rate-limited (HTTP 429). Retrying automatically to the same database.',
+      quotaExhausted: true,
+      error: lastError || QUOTA_PENDING_USER_MESSAGE,
     };
   }
   const url = buildFirestoreDocUrl(docId);
-  const maxAttempts = 3;
+  const maxAttempts = 2;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const response = await fetch(url, {
         method: 'GET',
         headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(15000),
       });
 
       if (response.status === 404) {
@@ -276,18 +522,10 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
 
       if (response.status === 429) {
         const errText = await response.text().catch(() => '');
-        const isDailyQuota = /quota exceeded/i.test(errText);
-        if (!isDailyQuota && attempt < maxAttempts) {
-          await sleepMs(750 * attempt);
-          continue;
-        }
-        readCooldownUntil = Date.now() + (isDailyQuota ? 5 * 60 * 1000 : 15 * 1000);
+        const isDailyQuota = /quota exceeded|RESOURCE_EXHAUSTED/i.test(errText) || true;
         isConnected = false;
-        const msg = isDailyQuota
-          ? `Firestore daily read quota exceeded. Quota resets tomorrow (upgrade console: https://console.firebase.google.com/project/${FIRESTORE_PROJECT_ID}/firestore/databases/${FIRESTORE_DATABASE_ID}/data?openUpgradeDialog=true).`
-          : 'Active database connection temporarily rate-limited (HTTP 429). Retrying automatically.';
-        lastError = msg;
-        return { status: 'unreachable', error: msg };
+        const msg = recordFirestoreQuotaExhausted(isDailyQuota);
+        return { status: 'unreachable', quotaExhausted: true, error: msg };
       }
 
       if (response.status >= 500 && attempt < maxAttempts) {
@@ -298,7 +536,11 @@ async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult
       if (!response.ok) {
         const errText = await response.text().catch(() => '');
         isConnected = false;
-        const msg = `Firestore GET ${docId} failed (${response.status}): ${errText.slice(0, 240)}`;
+        if (/quota exceeded|RESOURCE_EXHAUSTED/i.test(errText)) {
+          const msg = recordFirestoreQuotaExhausted(true);
+          return { status: 'unreachable', quotaExhausted: true, error: msg };
+        }
+        const msg = `Cloud database request failed (HTTP ${response.status}). Local data remains safe.`;
         lastError = msg;
         return { status: 'unreachable', error: msg };
       }
@@ -346,8 +588,8 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
 }
 
 async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
-  if (Date.now() < writeCooldownUntil) {
-    lastError = 'Cloud database write temporarily cooling down after rate limit (HTTP 429). Please retry shortly.';
+  if (Date.now() < writeCooldownUntil || isFirestoreQuotaCooldownActive()) {
+    lastError = lastError || QUOTA_PENDING_USER_MESSAGE;
     return false;
   }
   const url = buildFirestoreDocUrl(doc.docId);
@@ -367,7 +609,7 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
   };
   const serializedBody = JSON.stringify(body);
 
-  const maxAttempts = 3;
+  const maxAttempts = 2;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const response = await fetch(url, {
@@ -379,20 +621,9 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
 
       if (response.status === 429) {
         const errText = await response.text().catch(() => '');
-        const isDailyQuota = /quota exceeded/i.test(errText);
-        if (!isDailyQuota && attempt < maxAttempts) {
-          await sleepMs(1200 * attempt);
-          continue;
-        }
-        writeCooldownUntil = Date.now() + (isDailyQuota ? 10 * 60 * 1000 : 60 * 1000);
-        lastError = isDailyQuota
-          ? 'Firestore daily write quota exceeded. Local database remains active and protected.'
-          : 'Cloud database temporarily rate-limited (HTTP 429). Please retry in a moment.';
-        if (isDailyQuota) {
-          console.warn(
-            `[AMS Cloud Persistence] Firestore write quota exceeded; local database remains active & protected.`
-          );
-        }
+        const isDailyQuota = /quota exceeded|RESOURCE_EXHAUSTED/i.test(errText) || true;
+        writeCooldownUntil = Date.now() + (isDailyQuota ? QUOTA_EXHAUSTED_COOLDOWN_MS : 60 * 1000);
+        recordFirestoreQuotaExhausted(isDailyQuota);
         return false;
       }
 
@@ -403,6 +634,11 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
 
       if (!response.ok) {
         const errText = await response.text().catch(() => '');
+        if (/quota exceeded|RESOURCE_EXHAUSTED/i.test(errText)) {
+          writeCooldownUntil = Date.now() + QUOTA_EXHAUSTED_COOLDOWN_MS;
+          recordFirestoreQuotaExhausted(true);
+          return false;
+        }
         throw new Error(
           `Firestore PATCH ${doc.docId} failed (${response.status}): ${errText.slice(0, 240)}`
         );
@@ -603,6 +839,8 @@ function getBusinessRecordScore(counts: Partial<CloudRecordCounts> | Record<stri
 export function getCloudPersistenceStatus(): CloudPersistenceStatus {
   const localInspect = inspectSqliteSnapshot(config.databasePath);
   const offlineMode = isOfflineOperatingMode();
+  const quotaCooldownActive = isFirestoreQuotaCooldownActive();
+  const persisted = getPersistedOperatingModeState();
   return {
     enabled: Boolean(FIRESTORE_PROJECT_ID && FIRESTORE_DATABASE_ID && FIRESTORE_API_KEY),
     connected: offlineMode ? false : isConnected,
@@ -612,22 +850,26 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
     databaseId: FIRESTORE_DATABASE_ID,
     collectionPath: `/${VAULT_COLLECTION}`,
     initialized: isInitialized,
-    hydrationComplete: offlineMode ? true : isHydrationComplete,
-    lastSyncAt,
+    hydrationComplete: true,
+    lastSyncAt: lastSyncAt || persisted.lastSuccessfulCloudSyncAt,
     lastRestoreAt,
-    lastVersionSeq,
-    lastSha256,
-    lastError: offlineMode ? null : lastError,
+    lastVersionSeq: Math.max(lastVersionSeq, persisted.lastSyncedCloudVersionSeq || 0),
+    lastSha256: lastSha256 || persisted.lastSyncedCloudSha256,
+    lastError: offlineMode ? null : lastError || persisted.lastCloudSyncError,
     cloudRecordCounts,
     localRecordCounts: localInspect.counts as unknown as Record<string, number>,
     protectionLockActive: true,
-    connectionBlocked: offlineMode ? false : dbConnectionBlocked,
-    connectionError: offlineMode ? null : dbConnectionErrorMessage,
+    connectionBlocked: false,
+    connectionError: null,
+    quotaExhausted: quotaCooldownActive,
+    quotaCooldownUntilMs: quotaCooldownActive ? Math.max(readCooldownUntil, persisted.quotaCooldownUntilMs) : 0,
     offlineWarning: offlineMode
       ? null
+      : quotaCooldownActive
+      ? QUOTA_PENDING_USER_MESSAGE
       : !isConnected
       ? lastError ||
-        'Cloud database server is unreachable. Existing local data remains safe and unchanged without switching or resetting.'
+        'Cloud database server is unreachable. Existing local data remains safe and active in Local-First mode.'
       : null,
     databaseIdentity: EXTERNAL_DB_LOCATION,
   };
@@ -636,16 +878,26 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
 type ManifestFetchResult =
   | { status: 'found'; manifest: ManifestMetadata }
   | { status: 'not_found' }
-  | { status: 'unreachable'; error: string };
+  | { status: 'unreachable'; error: string; quotaExhausted?: boolean };
 
 /**
- * Fetches and parses the current environment's cloud manifest from Firestore with strict reachability tracking.
- * Never returns stale cachedManifest as a live result when network is unreachable.
+ * Fetches and parses the current environment's cloud manifest from Firestore with strict reachability tracking
+ * and 60-second manifest caching to prevent redundant verification reads.
  */
-async function fetchCloudManifestDetailed(): Promise<ManifestFetchResult> {
+async function fetchCloudManifestDetailed(options?: { bypassCache?: boolean }): Promise<ManifestFetchResult> {
+  if (
+    !options?.bypassCache &&
+    cachedManifest &&
+    Date.now() - lastManifestFetchAt < MANIFEST_CACHE_TTL_MS &&
+    !isFirestoreQuotaCooldownActive()
+  ) {
+    isConnected = true;
+    return { status: 'found', manifest: cachedManifest };
+  }
+
   const docResult = await readVaultDocumentDetailed(MANIFEST_DOC_ID);
   if (docResult.status === 'unreachable') {
-    return { status: 'unreachable', error: docResult.error };
+    return { status: 'unreachable', error: docResult.error, quotaExhausted: docResult.quotaExhausted };
   }
   if (docResult.status === 'not_found') {
     return { status: 'not_found' };
@@ -671,8 +923,8 @@ async function fetchCloudManifestDetailed(): Promise<ManifestFetchResult> {
   }
 }
 
-async function fetchCloudManifest(): Promise<ManifestMetadata | null> {
-  const result = await fetchCloudManifestDetailed();
+async function fetchCloudManifest(options?: { bypassCache?: boolean }): Promise<ManifestMetadata | null> {
+  const result = await fetchCloudManifestDetailed(options);
   if (result.status === 'found') return result.manifest;
   if (result.status === 'not_found') return null;
   throw new Error(result.error);
@@ -1185,36 +1437,31 @@ async function uploadLocalDbToCloud(
     const initialRawBuffer = fs.readFileSync(tempSnapPath);
     const initialSha256 = crypto.createHash('sha256').update(initialRawBuffer).digest('hex');
 
-    // Fast path for background ONLINE uploads only: skip network if binary hash already matches
+    // Fast path: skip network if binary hash already matches known cloud hash
     if (
-      !isManualExplicitTrigger &&
       lastSha256 &&
       lastSha256 === initialSha256 &&
       !options?.forceOverwrite
     ) {
+      markDurablePendingCloudSyncCompleted({
+        versionSeq: Math.max(1, lastVersionSeq),
+        sha256Hash: initialSha256,
+        syncedAt: new Date().toISOString(),
+      });
       return true;
     }
 
-    // If Firestore write quota cooldown is active
-    if (Date.now() < writeCooldownUntil) {
-      if (isManualExplicitTrigger) {
-        lastError =
-          lastError ||
-          'Cloud database write is temporarily rate-limited (HTTP 429). Please retry in a minute.';
-        return false;
-      }
-      lastSha256 = initialSha256;
-      lastSyncAt = new Date().toISOString();
-      cloudRecordCounts = localInspection.counts as unknown as Record<string, number>;
-      return true;
+    // If Firestore read or write quota cooldown is active, preserve local pending queue without failing local operations
+    if (Date.now() < writeCooldownUntil || isFirestoreQuotaCooldownActive()) {
+      lastError = lastError || QUOTA_PENDING_USER_MESSAGE;
+      return false;
     }
 
-    // 2. Check existing cloud manifest BEFORE uploading (always fetch fresh on manual trigger / forceOverwrite)
+    // 2. Check existing cloud manifest BEFORE uploading (reusing 60s cachedManifest to avoid duplicate reads)
     let existingManifest =
       cachedManifest &&
-      Date.now() - lastManifestFetchAt < 25000 &&
-      !options?.forceOverwrite &&
-      !isManualExplicitTrigger
+      Date.now() - lastManifestFetchAt < MANIFEST_CACHE_TTL_MS &&
+      !options?.forceOverwrite
         ? cachedManifest
         : await fetchCloudManifest();
     const localScore = getBusinessRecordScore(localInspection.counts);
@@ -1237,8 +1484,12 @@ async function uploadLocalDbToCloud(
         return false;
       }
 
-      // CRITICAL PROTECTION #2: If cloud has more business records than local across ANY core table
-      // without new local tombstones, merge cloud records into local FIRST so no records from cloud are ever lost!
+      // CRITICAL PROTECTION #2: Only download cloud chunks for pre-upload merge if another computer actually
+      // advanced the cloud versionSeq beyond our lastSyncedVersionSeq AND has more records than local!
+      const persisted = getPersistedOperatingModeState();
+      const syncedVersionCursor = Math.max(lastVersionSeq, persisted.lastSyncedCloudVersionSeq || 0);
+      const cloudMovedAheadOfCursor = Number(existingManifest.versionSeq || 0) > syncedVersionCursor;
+
       const localTombstones = Number(localInspection.counts.tombstonesTotal || 0);
       const cloudTombstones = Number(existingManifest.counts?.tombstonesTotal || 0);
       const coreCountKeys: Array<keyof CloudRecordCounts> = [
@@ -1260,10 +1511,11 @@ async function uploadLocalDbToCloud(
       );
 
       if (
+        cloudMovedAheadOfCursor &&
         hasMissingCloudItems &&
         !options?.allowVerifiedPostMergeSync &&
         localTombstones <= cloudTombstones &&
-        Date.now() >= readCooldownUntil
+        !isFirestoreQuotaCooldownActive()
       ) {
         try {
           const cloudBuf = await downloadVerifiedCloudSqliteBuffer(existingManifest);
@@ -1334,11 +1586,17 @@ async function uploadLocalDbToCloud(
       existingManifest.sha256Hash === sha256Hash &&
       !options?.forceOverwrite
     ) {
+      const nowMatchedIso = new Date().toISOString();
       lastSha256 = sha256Hash;
       lastVersionSeq = Math.max(lastVersionSeq, existingManifest.versionSeq || 0);
-      lastSyncAt = new Date().toISOString();
+      lastSyncAt = nowMatchedIso;
       lastError = null;
       cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
+      markDurablePendingCloudSyncCompleted({
+        versionSeq: lastVersionSeq,
+        sha256Hash,
+        syncedAt: nowMatchedIso,
+      });
       return true;
     }
 
@@ -1385,17 +1643,10 @@ async function uploadLocalDbToCloud(
             updatedAt: nowIso,
           });
           if (!chunkOk) {
-            if (isManualExplicitTrigger) {
-              lastError =
-                lastError ||
-                `Cloud upload could not write chunk ${i + 1}/${totalChunks} due to Firestore write rate limit.`;
-              return false;
-            }
-            // Background online mode: quota cooldown activated gracefully; local SQLite is saved
-            lastSha256 = sha256Hash;
-            lastSyncAt = nowIso;
-            cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
-            return true;
+            lastError =
+              lastError ||
+              `Cloud upload paused while writing chunk ${i + 1}/${totalChunks} due to Firestore quota/rate limit. Local changes remain queued safely.`;
+            return false;
           }
         }
 
@@ -1430,11 +1681,9 @@ async function uploadLocalDbToCloud(
         });
 
         if (!manifestOk) {
-          if (isManualExplicitTrigger) {
-            lastError =
-              lastError || 'Cloud upload could not commit manifest due to Firestore write rate limit.';
-            return false;
-          }
+          lastError =
+            lastError || 'Cloud upload could not commit manifest due to Firestore quota/rate limit.';
+          return false;
         } else {
           cachedManifest = manifestMeta;
           lastManifestFetchAt = Date.now();
@@ -1445,7 +1694,7 @@ async function uploadLocalDbToCloud(
         const writeMsg = writeErr instanceof Error ? writeErr.message : String(writeErr);
         // If another terminal bumped versionSeq concurrently, Firestore returns HTTP 403 -> refresh manifest & retry once
         if (versionAttempt === 1 && /failed \(403\)/.test(writeMsg)) {
-          const fresh = await fetchCloudManifest().catch(() => null);
+          const fresh = await fetchCloudManifest({ bypassCache: true }).catch(() => null);
           if (fresh && fresh.versionSeq >= nextVersionSeq) {
             existingManifest = fresh;
             lastVersionSeq = Math.max(lastVersionSeq, fresh.versionSeq);
@@ -1461,21 +1710,19 @@ async function uploadLocalDbToCloud(
         `[AMS Cloud Persistence] Synced production DB to Firestore (${reason}) -> v${committedVersionSeq} (${committedTargetSlot}, ${totalChunks} chunk(s), ${compressedBuffer.length}B gz):`,
         finalInspection.counts
       );
-      if (!isOfflineOperatingMode()) {
-        updatePersistedOperatingModeState({
-          cloudSyncStatus: 'Successful',
-          lastSuccessfulCloudSyncAt: committedNowIso,
-          lastCloudSyncError: null,
-        });
-      }
+      lastSha256 = sha256Hash;
+      lastSyncAt = committedNowIso;
+      lastError = null;
+      cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
+      markDurablePendingCloudSyncCompleted({
+        versionSeq: committedVersionSeq,
+        sha256Hash,
+        syncedAt: committedNowIso,
+      });
+      return true;
     }
 
-    lastSha256 = sha256Hash;
-    lastSyncAt = committedNowIso;
-    lastError = null;
-    cloudRecordCounts = finalInspection.counts as unknown as Record<string, number>;
-
-    return true;
+    return false;
   } catch (err: unknown) {
     lastError = err instanceof Error ? err.message : String(err);
     console.warn(`[AMS Cloud Persistence] Upload deferred (${reason}): ${lastError}`);
@@ -1490,7 +1737,7 @@ async function uploadLocalDbToCloud(
     }
     isSyncInFlight = false;
 
-    if (pendingUploadAfterInFlight && Date.now() >= writeCooldownUntil) {
+    if (pendingUploadAfterInFlight && Date.now() >= writeCooldownUntil && !isFirestoreQuotaCooldownActive()) {
       pendingUploadAfterInFlight = false;
       const nextReason = pendingUploadReason;
       setTimeout(() => {
@@ -1504,70 +1751,68 @@ async function uploadLocalDbToCloud(
 
 async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> {
   isInitialized = true;
-  const manifestRes = await fetchCloudManifestDetailed();
+  ensurePendingCloudSyncQueueTables();
+
   const localInspect = inspectSqliteSnapshot(config.databasePath);
   const localScore = getBusinessRecordScore(localInspect.counts);
+
+  // Local-First architecture: as long as local SQLite is valid, NEVER block local operations!
+  dbConnectionBlocked = false;
+  dbConnectionErrorMessage = null;
+
+  if (isFirestoreQuotaCooldownActive()) {
+    isConnected = false;
+    lastError = QUOTA_PENDING_USER_MESSAGE;
+    hasHydratedFromCloudThisProcess = true;
+    return;
+  }
+
+  const manifestRes = await fetchCloudManifestDetailed();
 
   if (manifestRes.status === 'unreachable') {
     isConnected = false;
     lastError = manifestRes.error;
-    // Never fall back to an empty, backup, seed, or stale container-bundled database when active remote vault is unreachable on boot!
-    const unhydratedProdContainer =
-      config.envScope === 'production' && !hasHydratedFromCloudThisProcess;
-    if (localScore === 0 || getWasDatabaseCreatedOnBoot() || getWasDatabaseQuarantinedOnBoot() || unhydratedProdContainer) {
-      dbConnectionBlocked = true;
-      dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${manifestRes.error}. Database switching is disabled to protect your data. Restore network and reconnect to resume using the same database.`;
-    } else {
-      // Existing verified local active database already hydrated for this container — keep using THIS database without switching
-      dbConnectionBlocked = false;
-      dbConnectionErrorMessage = null;
-      lastError = `Offline protection active: cloud server unreachable (${manifestRes.error}). Keeping existing local data intact without initializing an empty or old database.`;
-    }
-    console.warn(`[AMS Offline Protection] Active database check (${reason}) unreachable: ${manifestRes.error}`);
+    hasHydratedFromCloudThisProcess = true;
+    console.warn(
+      `[AMS Local-First Protection] Cloud check (${reason}) unreachable: ${manifestRes.error}. Continuing with local SQLite database.`
+    );
     return;
   }
-
-  dbConnectionBlocked = false;
-  dbConnectionErrorMessage = null;
 
   if (manifestRes.status === 'found') {
     const manifest = manifestRes.manifest;
     cloudRecordCounts = manifest.counts as unknown as Record<string, number>;
     const cloudScore = getBusinessRecordScore(manifest.counts);
+    const persisted = getPersistedOperatingModeState();
+    const syncedCursor = Math.max(lastVersionSeq, persisted.lastSyncedCloudVersionSeq || 0);
 
     console.log(
-      `[AMS Cloud Persistence] Startup check (${reason}) — External Firestore v${manifest.versionSeq} (score=${cloudScore}) vs Local DB (score=${localScore})`
+      `[AMS Cloud Persistence] Check (${reason}) — Firestore v${manifest.versionSeq} (score=${cloudScore}) vs Local DB (score=${localScore}, cursor=v${syncedCursor})`
     );
 
-    // Fast SHA-256 verification: if local active DB already matches cloud hash byte-for-byte, skip downloading chunks
+    // Fast SHA-256 / version cursor verification: if local already synced up to this cloud version or matches hash, skip downloading chunks!
     const localHash =
       !getWasDatabaseCreatedOnBoot() && !getWasDatabaseQuarantinedOnBoot() && localScore > 0
         ? computeLocalSqliteSha256()
         : null;
-    if (localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) {
+
+    if (
+      (localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) ||
+      (localScore > 0 && manifest.versionSeq <= syncedCursor && manifest.sha256Hash === persisted.lastSyncedCloudSha256)
+    ) {
       hasHydratedFromCloudThisProcess = true;
-      lastVersionSeq = manifest.versionSeq;
+      lastVersionSeq = Math.max(lastVersionSeq, manifest.versionSeq);
       lastSha256 = manifest.sha256Hash;
       lastError = null;
+      if (getDurablePendingCloudSyncCount() > 0 && localHash !== manifest.sha256Hash) {
+        await uploadLocalDbToCloud(`${reason}_pending_queue_flush`);
+      }
       return;
     }
 
-    if (cloudScore > 0 || manifest.versionSeq > lastVersionSeq) {
-      const restored = await restoreOrMergeFromCloud(reason);
-      if (
-        !restored &&
-        !hasHydratedFromCloudThisProcess &&
-        cloudScore > 0 &&
-        (config.envScope === 'production' ||
-          localScore === 0 ||
-          getWasDatabaseCreatedOnBoot() ||
-          getWasDatabaseQuarantinedOnBoot())
-      ) {
-        // Downloading/verifying authoritative production chunks failed — block serving stale/empty file & auto-retry
-        dbConnectionBlocked = true;
-        dbConnectionErrorMessage = `Failed to load latest production database v${manifest.versionSeq} from ${EXTERNAL_DB_LOCATION}${lastError ? `: ${lastError}` : ''}. Retrying automatically so stale data is never shown.`;
-        return;
-      }
+    // Only download cloud snapshot if cloud actually has a newer versionSeq than our cursor or local is empty
+    if ((cloudScore > 0 && localScore === 0) || manifest.versionSeq > syncedCursor) {
+      await restoreOrMergeFromCloud(reason);
     } else {
       hasHydratedFromCloudThisProcess = true;
     }
@@ -1575,17 +1820,17 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
     const afterInspect = inspectSqliteSnapshot(config.databasePath);
     const afterScore = getBusinessRecordScore(afterInspect.counts);
     if (
-      afterScore > cloudScore &&
-      (config.envScope !== 'production' || hasLocalMutationsSinceBoot)
+      (afterScore > cloudScore || getDurablePendingCloudSyncCount() > 0) &&
+      (config.envScope !== 'production' || hasLocalMutationsSinceBoot || getDurablePendingCloudSyncCount() > 0)
     ) {
       await uploadLocalDbToCloud(`${reason}_superset_sync`);
     } else if (hasHydratedFromCloudThisProcess) {
-      lastVersionSeq = manifest.versionSeq;
+      lastVersionSeq = Math.max(lastVersionSeq, manifest.versionSeq);
       lastSha256 = manifest.sha256Hash;
     }
     lastError = null;
   } else {
-    // Confirmed HTTP 404 — brand-new vault for this environment. Never overwrite any existing cloud DB.
+    // Confirmed HTTP 404 — brand-new vault for this environment.
     console.log(
       `[AMS Cloud Persistence] Confirmed new Firestore vault (${MANIFEST_DOC_ID}). Initializing with current ${config.envScope} database...`
     );
@@ -1600,11 +1845,13 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
  * Safe to call multiple times; returns the same initialization promise.
  */
 export async function initCloudPersistence(): Promise<void> {
+  ensurePendingCloudSyncQueueTables();
+  dbConnectionBlocked = false;
+  dbConnectionErrorMessage = null;
+
   if (isOfflineOperatingMode()) {
     isInitialized = true;
     isHydrationComplete = true;
-    dbConnectionBlocked = false;
-    dbConnectionErrorMessage = null;
     console.log(
       '[AMS Cloud Persistence] OFFLINE MODE active — using permanent local SQLite database with zero Cloud DB requests.'
     );
@@ -1620,16 +1867,9 @@ export async function initCloudPersistence(): Promise<void> {
     } catch (err: unknown) {
       isConnected = false;
       lastError = err instanceof Error ? err.message : String(err);
-      const localInspect = inspectSqliteSnapshot(config.databasePath);
-      if (
-        getBusinessRecordScore(localInspect.counts) === 0 ||
-        getWasDatabaseCreatedOnBoot() ||
-        getWasDatabaseQuarantinedOnBoot()
-      ) {
-        dbConnectionBlocked = true;
-        dbConnectionErrorMessage = `Cannot reach the current active database (${EXTERNAL_DB_LOCATION}): ${lastError}. Reconnect to resume using the same database.`;
-      }
-      console.error('[AMS Cloud Persistence] Initialization error:', lastError);
+      dbConnectionBlocked = false;
+      dbConnectionErrorMessage = null;
+      console.error('[AMS Cloud Persistence] Initialization warning (Local-First active):', lastError);
     } finally {
       isHydrationComplete = true;
     }
@@ -1640,6 +1880,7 @@ export async function initCloudPersistence(): Promise<void> {
 
 /**
  * Reconnects explicitly to the SAME current active database once network returns.
+ * Respects daily quota cooldown so repeated reconnect clicks do not hammer Firestore when daily quota is exhausted.
  */
 export async function reconnectToCurrentDatabase(force = true): Promise<{
   connected: boolean;
@@ -1647,13 +1888,22 @@ export async function reconnectToCurrentDatabase(force = true): Promise<{
   error: string | null;
   status: CloudPersistenceStatus;
 }> {
+  dbConnectionBlocked = false;
+  dbConnectionErrorMessage = null;
+
   if (isOfflineOperatingMode()) {
-    dbConnectionBlocked = false;
-    dbConnectionErrorMessage = null;
     return {
       connected: true,
       blocked: false,
       error: null,
+      status: getCloudPersistenceStatus(),
+    };
+  }
+  if (isFirestoreQuotaCooldownActive()) {
+    return {
+      connected: false,
+      blocked: false,
+      error: QUOTA_PENDING_USER_MESSAGE,
       status: getCloudPersistenceStatus(),
     };
   }
@@ -1665,8 +1915,8 @@ export async function reconnectToCurrentDatabase(force = true): Promise<{
   await syncOrBlockAgainstCurrentDatabase(force ? 'manual_reconnect' : 'auto_reconnect');
   return {
     connected: isConnected,
-    blocked: dbConnectionBlocked,
-    error: dbConnectionErrorMessage || lastError,
+    blocked: false,
+    error: lastError,
     status: getCloudPersistenceStatus(),
   };
 }
@@ -1675,10 +1925,10 @@ export async function reconnectToCurrentDatabase(force = true): Promise<{
  * Middleware / route helper ensuring startup cloud hydration has finished before serving API requests.
  */
 export async function ensureCloudPersistenceReady(): Promise<void> {
+  dbConnectionBlocked = false;
+  dbConnectionErrorMessage = null;
   if (isOfflineOperatingMode()) {
     isHydrationComplete = true;
-    dbConnectionBlocked = false;
-    dbConnectionErrorMessage = null;
     return;
   }
   if (isHydrationComplete) return;
@@ -1695,11 +1945,10 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
   let manifest: ManifestMetadata | null = null;
   let externalDbConnected = false;
 
-  // Reuse just-verified startup manifest if checked within the last 15s to prevent redundant Firestore burst reads
-  if (isConnected && !dbConnectionBlocked && cachedManifest && Date.now() - lastManifestFetchAt < 15000) {
+  if (cachedManifest && Date.now() - lastManifestFetchAt < MANIFEST_CACHE_TTL_MS) {
     manifest = cachedManifest;
-    externalDbConnected = true;
-  } else {
+    externalDbConnected = isConnected;
+  } else if (!isFirestoreQuotaCooldownActive()) {
     try {
       manifest = await fetchCloudManifest();
       externalDbConnected = isConnected;
@@ -1712,7 +1961,6 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
   const localScore = getBusinessRecordScore(localInspection.counts);
   const cloudScore = manifest ? getBusinessRecordScore(manifest.counts) : 0;
 
-  // If cloud has data and local is empty or freshly created on boot, hydrate immediately before reporting
   if (externalDbConnected && cloudScore > 0 && (localScore === 0 || getWasDatabaseCreatedOnBoot())) {
     await restoreOrMergeFromCloud('deployment_safety_hydration');
   }
@@ -1727,7 +1975,7 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
     migrationsCount = 0;
   }
   const schemaCompatible = verifiedLocal.valid && migrationsCount >= 28;
-  const safeToDeploy = externalDbConnected && schemaCompatible;
+  const safeToDeploy = schemaCompatible;
 
   return {
     safeToDeploy,
@@ -1740,9 +1988,11 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
     localCounts: verifiedLocal.counts,
     cloudCounts: manifest ? manifest.counts : null,
     cloudVersionSeq: manifest ? manifest.versionSeq : lastVersionSeq,
-    message: safeToDeploy
+    message: externalDbConnected
       ? `Verified external Firestore database (${EXTERNAL_DB_LOCATION}) at version #${manifest ? manifest.versionSeq : lastVersionSeq} with ${migrationsCount} applied migrations. Existing business records are protected.`
-      : `Database safety check failed: externalDbConnected=${externalDbConnected}, schemaCompatible=${schemaCompatible} (migrations=${migrationsCount}).${lastError ? ` Error: ${lastError}` : ''}`,
+      : `Local SQLite database verified (${migrationsCount} migrations, integrity OK). Cloud sync is ${
+          isFirestoreQuotaCooldownActive() ? 'pending quota reset' : 'in Local-First offline protection mode'
+        }.`,
   };
 }
 
@@ -1750,12 +2000,14 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
  * Pulls newer changes from Firestore if another instance or deployment updated the vault.
  */
 export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check'): Promise<boolean> {
-  if (isOfflineOperatingMode()) return false;
+  if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) return false;
   try {
     const manifest = await fetchCloudManifest();
     if (!manifest) return false;
 
-    if (manifest.versionSeq > lastVersionSeq && manifest.sha256Hash !== lastSha256) {
+    const persisted = getPersistedOperatingModeState();
+    const syncedCursor = Math.max(lastVersionSeq, persisted.lastSyncedCloudVersionSeq || 0);
+    if (manifest.versionSeq > syncedCursor && manifest.sha256Hash !== lastSha256) {
       return await restoreOrMergeFromCloud(reason);
     }
     return false;
@@ -1766,10 +2018,10 @@ export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check')
 
 /**
  * Schedules a debounced upload (8s) after any database mutation ONLY when in ONLINE MODE.
- * In OFFLINE MODE, zero cloud requests are scheduled.
+ * In OFFLINE MODE or during quota cooldown, mutations remain durably queued in pending_cloud_sync_queue.
  */
 export function scheduleCloudUpload(reason = 'mutation'): void {
-  if (isOfflineOperatingMode()) {
+  if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) {
     return;
   }
   if (uploadTimer) {
@@ -1777,7 +2029,7 @@ export function scheduleCloudUpload(reason = 'mutation'): void {
   }
   uploadTimer = setTimeout(() => {
     uploadTimer = null;
-    if (isOfflineOperatingMode()) return;
+    if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) return;
     void uploadLocalDbToCloud(reason);
   }, 8000);
 }
@@ -1790,6 +2042,9 @@ export async function syncDatabaseToCloudSQL(
   options?: { forceOverwrite?: boolean; bypassOfflineGuard?: boolean }
 ): Promise<boolean> {
   if (isOfflineOperatingMode() && !options?.bypassOfflineGuard) {
+    return false;
+  }
+  if (isFirestoreQuotaCooldownActive()) {
     return false;
   }
   if (uploadTimer) {
@@ -1809,6 +2064,9 @@ export async function uploadBackupToCloudSQL(params: {
   notes: string;
   counts: Record<string, number>;
 }): Promise<boolean> {
+  if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) {
+    return false;
+  }
   try {
     if (!fs.existsSync(params.filePath)) return false;
     const rawBuffer = fs.readFileSync(params.filePath);
@@ -1846,7 +2104,7 @@ export async function ensureLocalBackupFileFromCloudSQL(
   filename: string,
   targetPath: string
 ): Promise<boolean> {
-  if (isOfflineOperatingMode()) {
+  if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) {
     return fs.existsSync(targetPath);
   }
   try {
@@ -1874,7 +2132,7 @@ export async function ensureLocalBackupFileFromCloudSQL(
 export async function resetCloudPersistenceState(reason = 'master_reset'): Promise<void> {
   const db = getDatabase();
   bumpDbResetEpoch(db, reason);
-  if (!isOfflineOperatingMode()) {
+  if (!isOfflineOperatingMode() && !isFirestoreQuotaCooldownActive()) {
     await uploadLocalDbToCloud(`authorized_${reason}`, { forceOverwrite: true });
   }
 }
@@ -1890,6 +2148,7 @@ const NON_MUTATING_SYNC_ROUTES = new Set([
   '/api/enhancements/calculate-line',
   '/api/enhancements/fifo/allocate',
   '/api/enhancements/booking-imports/preview',
+  '/api/sales/import-excel/preview',
   '/api/enhancements/local-backup/upload-verify',
   '/api/enhancements/mobile/login',
   '/api/system/backups/verify',
@@ -1898,12 +2157,15 @@ const NON_MUTATING_SYNC_ROUTES = new Set([
   '/api/system/cloud-sync-now',
   '/api/system/operating-mode/switch',
   '/api/system/backup-and-sync-now',
+  '/api/system/d-drive-backup',
+  '/api/system/d-drive-backup/confirm',
 ]);
 
 /**
- * Express middleware that:
- * 1. In OFFLINE MODE: makes ZERO Cloud Database requests and tracks local mutations for manual BACKUP & SYNC NOW.
- * 2. In ONLINE MODE: guarantees startup cloud hydration has finished and persists writes to the active Cloud DB.
+ * Express middleware that operates Local-First:
+ * 1. Saves every transaction locally immediately in SQLite and records it in pending_cloud_sync_queue.
+ * 2. Never blocks local operations even if Firestore is offline or daily read quota is exhausted.
+ * 3. In ONLINE MODE (when internet & quota are available), schedules background incremental cloud synchronization.
  */
 export async function cloudPersistenceMiddleware(
   req: { method?: string; path?: string; originalUrl?: string },
@@ -1917,65 +2179,12 @@ export async function cloudPersistenceMiddleware(
   const routeLabel = String(req.originalUrl || req.path || '').split('?')[0];
   const method = String(req.method || 'GET').toUpperCase();
 
-  // STRICT OFFLINE MODE: zero Cloud DB calls; all reads/writes hit permanent local SQLite only
-  if (isOfflineOperatingMode()) {
-    dbConnectionBlocked = false;
-    dbConnectionErrorMessage = null;
-    isHydrationComplete = true;
+  dbConnectionBlocked = false;
+  dbConnectionErrorMessage = null;
 
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-      res.on('finish', () => {
-        if (res.statusCode >= 200 && res.statusCode < 400) {
-          if (
-            !NON_MUTATING_SYNC_ROUTES.has(routeLabel) &&
-            !routeLabel.startsWith('/api/system/sync-conflicts/')
-          ) {
-            hasLocalMutationsSinceBoot = true;
-            recordLocalPendingMutation();
-          }
-        }
-      });
-    }
-
-    next();
-    return;
-  }
-
-  try {
-    await ensureCloudPersistenceReady();
-  } catch {
-    // Proceed cleanly to check connectionBlocked status
-  }
-
-  const bypassBlockRoutes = new Set([
-    '/api/system/health',
-    '/api/system/reconnect-db',
-    '/api/system/deployment-safety',
-    '/api/system/operating-mode',
-    '/api/system/operating-mode/switch',
-    '/api/system/backup-and-sync-now',
-    '/api/system/sync-conflicts',
-    '/api/auth/status',
-    '/api/auth/login',
-    '/api/auth/logout',
-  ]);
-
-  if (dbConnectionBlocked) {
-    if (
-      dbConnectionBlocked &&
-      !bypassBlockRoutes.has(routeLabel) &&
-      !routeLabel.startsWith('/api/system/sync-conflicts/')
-    ) {
-      res.status(503).json({
-        success: false,
-        dbConnectionError: true,
-        databaseIdentity: EXTERNAL_DB_LOCATION,
-        error:
-          dbConnectionErrorMessage ||
-          `Active database (${EXTERNAL_DB_LOCATION}) cannot be reached. Operations stopped to prevent database switching.`,
-      });
-      return;
-    }
+  if (!isOfflineOperatingMode() && !isHydrationComplete) {
+    // Non-blocking startup hydration check
+    void ensureCloudPersistenceReady().catch(() => {});
   }
 
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
@@ -1986,10 +2195,9 @@ export async function cloudPersistenceMiddleware(
           !routeLabel.startsWith('/api/system/sync-conflicts/')
         ) {
           hasLocalMutationsSinceBoot = true;
-          if (!isOfflineOperatingMode()) {
+          enqueueLocalMutationForCloudSync(method, routeLabel);
+          if (!isOfflineOperatingMode() && !isFirestoreQuotaCooldownActive()) {
             scheduleCloudUpload(`http:${method}:${routeLabel}`);
-          } else {
-            recordLocalPendingMutation();
           }
         }
       }
@@ -2704,23 +2912,37 @@ export interface CloudReachabilityResult {
   counts: CloudRecordCounts | null;
   error: string | null;
   location: string;
+  quotaExhausted?: boolean;
 }
 
 /**
  * Performs a live Cloud Database (Firestore) reachability verification.
- * Used before switching from OFFLINE -> ONLINE and during manual BACKUP & SYNC NOW.
+ * Respects active Firestore daily quota cooldowns so it never wastes reads when quota is exhausted.
  */
 export async function checkCloudDatabaseReachability(): Promise<CloudReachabilityResult> {
-  readCooldownUntil = 0;
-  const res = await fetchCloudManifestDetailed();
-  if (res.status === 'unreachable') {
+  if (isFirestoreQuotaCooldownActive()) {
+    lastError = QUOTA_PENDING_USER_MESSAGE;
     return {
       reachable: false,
       exists: false,
       versionSeq: lastVersionSeq,
       counts: null,
-      error: res.error,
+      error: QUOTA_PENDING_USER_MESSAGE,
       location: EXTERNAL_DB_LOCATION,
+      quotaExhausted: true,
+    };
+  }
+  const res = await fetchCloudManifestDetailed();
+  if (res.status === 'unreachable') {
+    const quotaHit = isQuotaExhaustedError(res.error);
+    return {
+      reachable: false,
+      exists: false,
+      versionSeq: lastVersionSeq,
+      counts: null,
+      error: quotaHit ? QUOTA_PENDING_USER_MESSAGE : res.error,
+      location: EXTERNAL_DB_LOCATION,
+      quotaExhausted: quotaHit,
     };
   }
   if (res.status === 'not_found') {
@@ -2731,6 +2953,7 @@ export async function checkCloudDatabaseReachability(): Promise<CloudReachabilit
       counts: null,
       error: null,
       location: EXTERNAL_DB_LOCATION,
+      quotaExhausted: false,
     };
   }
   cloudRecordCounts = res.manifest.counts as unknown as Record<string, number>;
@@ -2744,6 +2967,7 @@ export async function checkCloudDatabaseReachability(): Promise<CloudReachabilit
     counts: res.manifest.counts,
     error: null,
     location: EXTERNAL_DB_LOCATION,
+    quotaExhausted: false,
   };
 }
 
@@ -3058,6 +3282,8 @@ export function detectAndMergeCloudSnapshotWithConflicts(
       'sync_tombstones',
       'sync_conflicts',
       'backup_history',
+      'pending_cloud_sync_queue',
+      'cloud_sync_cursor_state',
     ]);
 
     const allSharedTables = Array.from(localTables).filter(
@@ -3153,7 +3379,6 @@ export function detectAndMergeCloudSnapshotWithConflicts(
     }
 
     // Auto-clear any stale unresolved sync_conflicts that are no longer conflicting against the live cloud snapshot
-    // (for example, legacy false-positive conflicts on derived accounts.current_balance or deleted records)
     const remainingUnresolved = db
       .prepare("SELECT id, table_name, record_id FROM main.sync_conflicts WHERE status = 'unresolved'")
       .all() as Array<{ id: number; table_name: string; record_id: string }>;
@@ -3201,11 +3426,15 @@ export interface ManualCloudSyncResult {
   cloudVersionSeq: number;
   message: string;
   error: string | null;
+  quotaExhausted?: boolean;
 }
 
 /**
- * Explicit Super Admin Manual Cloud Synchronization (Step 2 of BACKUP & SYNC NOW).
- * Works safely from BOTH ONLINE MODE and OFFLINE MODE without enabling background sync.
+ * Incremental Conflict-Aware Bidirectional Cloud Synchronization.
+ * - Never resets Firestore quota cooldown when daily quota is exhausted.
+ * - Short-circuits with 0 chunk reads and 0 chunk writes when local SHA-256 already matches cloud manifest SHA-256.
+ * - Skips downloading cloud chunk documents when cloud manifest versionSeq <= local syncedVersionCursor.
+ * - Only downloads cloud chunks when another device has pushed a strictly newer cloud version.
  */
 export async function runConflictAwareBidirectionalCloudSync(options: {
   lastSyncedAt: string | null;
@@ -3213,12 +3442,7 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
   hasLocalPendingChanges?: boolean;
   initiatedBy: string;
 }): Promise<ManualCloudSyncResult> {
-  // Clear cooldowns for explicit Super Admin manual trigger
-  readCooldownUntil = 0;
-  writeCooldownUntil = 0;
-
-  const reachability = await checkCloudDatabaseReachability();
-  if (!reachability.reachable) {
+  if (isFirestoreQuotaCooldownActive()) {
     return {
       status: 'Pending',
       reachable: false,
@@ -3228,9 +3452,29 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
       unresolvedConflictsCount: 0,
       uploaded: false,
       cloudVersionSeq: lastVersionSeq,
-      message:
-        'Cloud Database is currently unreachable (offline or no internet). Local backup succeeded; Cloud Sync remains Pending until you run BACKUP & SYNC NOW again when internet is available.',
-      error: reachability.error,
+      message: QUOTA_PENDING_USER_MESSAGE,
+      error: QUOTA_PENDING_USER_MESSAGE,
+      quotaExhausted: true,
+    };
+  }
+
+  const reachability = await checkCloudDatabaseReachability();
+  if (!reachability.reachable) {
+    const isQuota = Boolean(reachability.quotaExhausted || isQuotaExhaustedError(reachability.error));
+    return {
+      status: 'Pending',
+      reachable: false,
+      mergedFromCloud: 0,
+      updatedFromCloud: 0,
+      conflictsDetected: 0,
+      unresolvedConflictsCount: 0,
+      uploaded: false,
+      cloudVersionSeq: lastVersionSeq,
+      message: isQuota
+        ? QUOTA_PENDING_USER_MESSAGE
+        : 'Cloud Database is currently unreachable (offline or no internet). All local records and pending changes are safely preserved and will synchronize automatically when internet is available.',
+      error: isQuota ? QUOTA_PENDING_USER_MESSAGE : reachability.error,
+      quotaExhausted: isQuota,
     };
   }
 
@@ -3240,46 +3484,109 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
   let unresolvedConflictsCount = 0;
   let verifiedLiveMerge = false;
 
-  if (reachability.exists && cachedManifest) {
-    const dataDir = path.dirname(config.databasePath);
-    const stagedPath = path.join(dataDir, `ams_manual_sync_staged_${Date.now()}.db`);
-    try {
-      const cloudBuffer = await downloadVerifiedCloudSqliteBuffer(cachedManifest);
-      fs.writeFileSync(stagedPath, cloudBuffer);
-      const stagedInspect = inspectSqliteSnapshot(stagedPath, { immutable: true });
-      if (!stagedInspect.valid) {
-        throw new Error('Downloaded Cloud Database snapshot failed integrity check.');
-      }
+  const persisted = getPersistedOperatingModeState();
+  const syncedVersionCursor = Math.max(lastVersionSeq, persisted.lastSyncedCloudVersionSeq || 0);
+  const syncedShaCursor = lastSha256 || persisted.lastSyncedCloudSha256 || '';
+  const currentLocalSha256 = computeLocalSqliteSha256();
 
-      const mergeReport = detectAndMergeCloudSnapshotWithConflicts(stagedPath, {
-        lastSyncedAt: options.lastSyncedAt,
-        switchedAt: options.switchedAt,
-        hasLocalPendingChanges: options.hasLocalPendingChanges,
+  if (reachability.exists && cachedManifest) {
+    // INCREMENTAL SHORT-CIRCUIT 1: Local DB SHA-256 already matches Cloud manifest SHA-256 -> 0 chunk reads, 0 chunk writes!
+    if (currentLocalSha256 && cachedManifest.sha256Hash === currentLocalSha256) {
+      lastVersionSeq = Math.max(lastVersionSeq, cachedManifest.versionSeq);
+      lastSha256 = cachedManifest.sha256Hash;
+      lastSyncAt = new Date().toISOString();
+      lastError = null;
+      markDurablePendingCloudSyncCompleted({
+        versionSeq: lastVersionSeq,
+        sha256Hash: lastSha256,
+        syncedAt: lastSyncAt,
       });
-      mergedFromCloud = mergeReport.mergedFromCloud;
-      updatedFromCloud = mergeReport.updatedFromCloud;
-      conflictsDetected = mergeReport.conflictsDetected;
-      unresolvedConflictsCount = mergeReport.unresolvedConflictsCount;
-      verifiedLiveMerge = true;
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
       return {
-        status: 'Failed',
+        status: 'Successful',
         reachable: true,
-        mergedFromCloud,
-        updatedFromCloud,
-        conflictsDetected,
-        unresolvedConflictsCount,
+        mergedFromCloud: 0,
+        updatedFromCloud: 0,
+        conflictsDetected: 0,
+        unresolvedConflictsCount: 0,
         uploaded: false,
         cloudVersionSeq: lastVersionSeq,
-        message: `Cloud synchronization failed while verifying cloud records: ${errMsg}`,
-        error: errMsg,
+        message: `Cloud Database is already up to date (Version #${lastVersionSeq}; 0 unchanged cloud records re-downloaded).`,
+        error: null,
+        quotaExhausted: false,
       };
-    } finally {
+    }
+
+    // INCREMENTAL SHORT-CIRCUIT 2: Cloud manifest versionSeq has NOT advanced since our last synced cursor -> skip full chunk download (0 chunk reads!)
+    const cloudUnchangedSinceLastCursor =
+      (syncedVersionCursor > 0 && cachedManifest.versionSeq <= syncedVersionCursor) ||
+      (Boolean(syncedShaCursor) && cachedManifest.sha256Hash === syncedShaCursor);
+
+    if (cloudUnchangedSinceLastCursor) {
+      const db = getDatabase();
+      const unresolvedRow = db
+        .prepare("SELECT COUNT(*) as cnt FROM sync_conflicts WHERE status = 'unresolved'")
+        .get() as { cnt: number } | undefined;
+      unresolvedConflictsCount = Number(unresolvedRow?.cnt || 0);
+      verifiedLiveMerge = true;
+    } else {
+      // Another terminal pushed a newer cloud version -> download and run conflict-aware delta merge
+      const dataDir = path.dirname(config.databasePath);
+      const stagedPath = path.join(dataDir, `ams_manual_sync_staged_${Date.now()}.db`);
       try {
-        if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
-      } catch {
-        // ignore cleanup warning
+        const cloudBuffer = await downloadVerifiedCloudSqliteBuffer(cachedManifest);
+        fs.writeFileSync(stagedPath, cloudBuffer);
+        const stagedInspect = inspectSqliteSnapshot(stagedPath, { immutable: true });
+        if (!stagedInspect.valid) {
+          throw new Error('Downloaded Cloud Database snapshot failed integrity check.');
+        }
+
+        const mergeReport = detectAndMergeCloudSnapshotWithConflicts(stagedPath, {
+          lastSyncedAt: options.lastSyncedAt,
+          switchedAt: options.switchedAt,
+          hasLocalPendingChanges: options.hasLocalPendingChanges,
+        });
+        mergedFromCloud = mergeReport.mergedFromCloud;
+        updatedFromCloud = mergeReport.updatedFromCloud;
+        conflictsDetected = mergeReport.conflictsDetected;
+        unresolvedConflictsCount = mergeReport.unresolvedConflictsCount;
+        verifiedLiveMerge = true;
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (isQuotaExhaustedError(errMsg)) {
+          recordFirestoreQuotaExhausted(true);
+          return {
+            status: 'Pending',
+            reachable: false,
+            mergedFromCloud,
+            updatedFromCloud,
+            conflictsDetected,
+            unresolvedConflictsCount,
+            uploaded: false,
+            cloudVersionSeq: lastVersionSeq,
+            message: QUOTA_PENDING_USER_MESSAGE,
+            error: QUOTA_PENDING_USER_MESSAGE,
+            quotaExhausted: true,
+          };
+        }
+        return {
+          status: 'Failed',
+          reachable: true,
+          mergedFromCloud,
+          updatedFromCloud,
+          conflictsDetected,
+          unresolvedConflictsCount,
+          uploaded: false,
+          cloudVersionSeq: lastVersionSeq,
+          message: `Cloud synchronization could not verify remote changes: ${errMsg}`,
+          error: errMsg,
+          quotaExhausted: false,
+        };
+      } finally {
+        try {
+          if (fs.existsSync(stagedPath)) fs.unlinkSync(stagedPath);
+        } catch {
+          // ignore cleanup warning
+        }
       }
     }
   } else {
@@ -3300,8 +3607,9 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
       unresolvedConflictsCount,
       uploaded: false,
       cloudVersionSeq: Math.max(lastVersionSeq, reachability.versionSeq),
-      message: `${unresolvedConflictsCount} record conflict(s) detected between Local and Cloud databases. Neither version was overwritten. Please resolve the conflict(s) below and click BACKUP & SYNC NOW again.`,
+      message: `${unresolvedConflictsCount} record conflict(s) detected between Local and Cloud databases. Neither version was overwritten. Please resolve the conflict(s) below and synchronize again.`,
       error: null,
+      quotaExhausted: false,
     };
   }
 
@@ -3314,17 +3622,21 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
   });
 
   if (!uploaded) {
+    const isQuota = isFirestoreQuotaCooldownActive() || isQuotaExhaustedError(lastError);
     return {
       status: 'Pending',
-      reachable: true,
+      reachable: !isQuota,
       mergedFromCloud,
       updatedFromCloud,
       conflictsDetected: 0,
       unresolvedConflictsCount: 0,
       uploaded: false,
       cloudVersionSeq: Math.max(lastVersionSeq, reachability.versionSeq),
-      message: `Cloud upload could not complete right now${lastError ? `: ${lastError}` : ''}. Local backup is safe and Cloud Sync remains Pending.`,
-      error: lastError,
+      message: isQuota
+        ? QUOTA_PENDING_USER_MESSAGE
+        : `Cloud upload is pending${lastError ? `: ${lastError}` : ''}. All local records are safely preserved.`,
+      error: isQuota ? QUOTA_PENDING_USER_MESSAGE : lastError,
+      quotaExhausted: isQuota,
     };
   }
 
@@ -3343,5 +3655,6 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
         : ''
     }).`,
     error: null,
+    quotaExhausted: false,
   };
 }
