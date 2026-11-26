@@ -72,6 +72,7 @@ import { BatchInventoryPanel } from './BatchInventoryPanel';
 import { PurchaseReturnPanel } from './PurchaseReturnPanel';
 import { PurchaseReportsPanel } from './PurchaseReportsPanel';
 import { NumericInput } from '../common/NumericInput';
+import { SimpleSyncStatusBar, RecordSyncBadge } from '../common/SimpleSyncStatusBar';
 import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { CustomExcelExportModal } from '../common/CustomExcelExportModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
@@ -272,6 +273,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const [editingPurchaseStatus, setEditingPurchaseStatus] = useState<string | null>(null);
   const editingPurchaseIdRef = useRef<number | null>(null);
   const isResumingPurchaseRef = useRef<boolean>(false);
+  const purchaseLoadReqSeqRef = useRef<number>(0);
+  const activeLoadingPurchaseIdRef = useRef<number | null>(null);
   useEffect(() => {
     editingPurchaseIdRef.current = editingPurchaseId;
   }, [editingPurchaseId]);
@@ -3730,32 +3733,70 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
   };
 
+  // Deduplicate loaded purchase detail rows by unique line ID (purchase_id + line_id)
+  // while preserving every distinct saved line item and all its fields.
+  const deduplicatePurchaseDetailRows = (rawItems: any[], fallbackPurchaseId?: number): any[] => {
+    if (!Array.isArray(rawItems)) return [];
+    const seenLineKeys = new Set<string>();
+    const result: any[] = [];
+    for (const it of rawItems) {
+      if (!it || Number(it.item_id || 0) <= 0) continue;
+      const lineId = Number(it.id || 0);
+      const purId = Number(it.purchase_id || fallbackPurchaseId || 0);
+      if (Number.isInteger(lineId) && lineId > 0) {
+        const key = `id:${purId}:${lineId}`;
+        if (seenLineKeys.has(key)) continue;
+        seenLineKeys.add(key);
+      }
+      result.push(it);
+    }
+    return result;
+  };
+
   // Resume specific Held / Draft purchase invoice into the datasheet
   const handleResumeHeldPurchase = async (purId: number) => {
+    if (isResumingPurchaseRef.current && activeLoadingPurchaseIdRef.current === purId) {
+      return;
+    }
+    const loadSeq = ++purchaseLoadReqSeqRef.current;
     isResumingPurchaseRef.current = true;
+    activeLoadingPurchaseIdRef.current = purId;
     try {
       setFormError(null);
-      const res: any = await api.getPurchaseDetails(purId);
-      const p = res?.purchase || res?.data || res;
-      if (!p || !p.id) {
-        throw new Error('Held purchase invoice could not be found in the active database.');
-      }
-      const rawItems = Array.isArray(res?.items) ? res.items : Array.isArray(p?.items) ? p.items : [];
 
+      // Clear the current invoice's temporary item grid and active local draft BEFORE loading saved detail records
       try {
         localStorage.removeItem(ACTIVE_PURCHASE_DRAFT_KEY);
       } catch {
         // ignore
       }
+      lastPromptedRateByRowRef.current = {};
+      isPricePromptOpenRef.current = false;
+      setPriceChangePrompt(null);
+      setActiveRowItemSearchIdx(null);
+      setActiveRowItemSearchField(null);
+      setRowItemSearchQuery('');
+      setLines(ensureMinimumPurchaseRows([], visibleRowCapacityRef.current, 0));
+
+      const res: any = await api.getPurchaseDetails(purId);
+      if (loadSeq !== purchaseLoadReqSeqRef.current) return;
+
+      const p = res?.purchase || res?.data || res;
+      if (!p || !p.id) {
+        throw new Error('Held purchase invoice could not be found in the active database.');
+      }
+      const rawItems = Array.isArray(res?.items) ? res.items : Array.isArray(p?.items) ? p.items : [];
+      const uniqueRawItems = deduplicatePurchaseDetailRows(rawItems, Number(p.id));
 
       const resumedDate = p.bill_date || getPakistanDateISO();
       const nextPreviewRes = await api
         .getNextPurchaseNumbers(resumedDate)
         .catch(() => ({ nextPurchaseNumber: p.bill_number || '' }));
+      if (loadSeq !== purchaseLoadReqSeqRef.current) return;
       const livePreviewNo = nextPreviewRes.nextPurchaseNumber || p.bill_number || '';
 
-      editingPurchaseIdRef.current = p.id;
-      setEditingPurchaseId(p.id);
+      editingPurchaseIdRef.current = Number(p.id);
+      setEditingPurchaseId(Number(p.id));
       setEditingPurchaseStatus('held');
       setBillNumber(livePreviewNo);
       setSupplierInvoiceNumber(
@@ -3779,7 +3820,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setPaidAmount(Math.max(0, Number(p.paid_amount ?? 0)));
       setPaidAmountManuallyEdited(true);
 
-      const loadedItems: PurchaseLineItem[] = rawItems.map((it: any) => {
+      const loadedItems: PurchaseLineItem[] = uniqueRawItems.map((it: any) => {
         const upp = Math.max(1, Number(it.units_per_pack || parseUnitsPerPack(it.packing)));
         const pRate = Number(it.purchase_rate || 0);
         const lRate =
@@ -3788,7 +3829,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             : round2(pRate / upp);
         return {
           id: it.id,
-          purchase_id: it.purchase_id,
+          purchase_id: it.purchase_id || Number(p.id),
           item_id: Number(it.item_id || 0),
           variant_id: it.variant_id ? Number(it.variant_id) : null,
           variant_code: it.variant_code || '',
@@ -3834,7 +3875,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
-      isResumingPurchaseRef.current = false;
+      if (loadSeq === purchaseLoadReqSeqRef.current) {
+        isResumingPurchaseRef.current = false;
+        activeLoadingPurchaseIdRef.current = null;
+      }
     }
   };
 
@@ -3980,8 +4024,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         }
       }
 
-      const sanitizedItems = validLines.map((l) => ({
+      const activeEditingPurchaseId = editingPurchaseId || editingPurchaseIdRef.current;
+      const deduplicatedValidLines = deduplicatePurchaseDetailRows(
+        validLines,
+        activeEditingPurchaseId || undefined
+      );
+
+      const sanitizedItems = deduplicatedValidLines.map((l) => ({
         ...l,
+        id: l.id,
+        purchase_id: l.purchase_id || activeEditingPurchaseId || undefined,
         variant_id: l.variant_id || null,
         variant_code: l.variant_id ? (l.variant_code || null) : null,
         variant_name: l.variant_id ? (l.variant_name || null) : null,
@@ -4006,6 +4058,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }));
 
       const payload = {
+        ...(activeEditingPurchaseId ? { id: activeEditingPurchaseId } : {}),
         bill_number: billNumber,
         supplier_invoice_number: supplierInvoiceNumber.trim() || billNumber,
         bill_date: billDate,
@@ -4023,7 +4076,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         remarks: notes,
         status: targetStatus,
         from_hold_conversion: Boolean(
-          editingPurchaseId &&
+          activeEditingPurchaseId &&
             String(editingPurchaseStatus || '').trim().toLowerCase() !== 'completed' &&
             targetStatus === 'completed'
         ),
@@ -4032,8 +4085,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       };
 
       setSavingInvoice(true);
-      if (editingPurchaseId) {
-        const postedPurId = editingPurchaseId;
+      if (activeEditingPurchaseId) {
+        const postedPurId = activeEditingPurchaseId;
         const res = await api.updatePurchase(postedPurId, payload);
         const savedId = res.purchase?.id || postedPurId;
         const savedBillNo = res.purchase?.bill_number || billNumber;
@@ -4654,9 +4707,30 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   // Load Purchase Invoice into Edit Form
   const handleEditPurchase = async (purId: number) => {
+    if (isResumingPurchaseRef.current && activeLoadingPurchaseIdRef.current === purId) {
+      return;
+    }
+    const loadSeq = ++purchaseLoadReqSeqRef.current;
     isResumingPurchaseRef.current = true;
+    activeLoadingPurchaseIdRef.current = purId;
     try {
+      // Clear current invoice's temporary item grid and draft state before loading saved detail records
+      try {
+        localStorage.removeItem(ACTIVE_PURCHASE_DRAFT_KEY);
+      } catch {
+        // ignore
+      }
+      lastPromptedRateByRowRef.current = {};
+      isPricePromptOpenRef.current = false;
+      setPriceChangePrompt(null);
+      setActiveRowItemSearchIdx(null);
+      setActiveRowItemSearchField(null);
+      setRowItemSearchQuery('');
+      setLines(ensureMinimumPurchaseRows([], visibleRowCapacityRef.current, 0));
+
       const res: any = await api.getPurchaseDetails(purId);
+      if (loadSeq !== purchaseLoadReqSeqRef.current) return;
+
       const p: PurchaseInvoice = res?.purchase || res?.data || res;
       if (!p || !p.id) {
         throw new Error('Purchase invoice could not be found in the active database.');
@@ -4666,15 +4740,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         : Array.isArray((p as any)?.items)
         ? (p as any).items
         : [];
+      const uniquePItems = deduplicatePurchaseDetailRows(pItems, Number(p.id));
 
-      try {
-        localStorage.removeItem(ACTIVE_PURCHASE_DRAFT_KEY);
-      } catch {
-        // ignore
-      }
-
-      editingPurchaseIdRef.current = p.id;
-      setEditingPurchaseId(p.id);
+      editingPurchaseIdRef.current = Number(p.id);
+      setEditingPurchaseId(Number(p.id));
       setEditingPurchaseStatus(String(p.status || 'completed').trim().toLowerCase());
       setBillNumber(p.bill_number || '');
       setBillDate(p.bill_date || getPakistanDateISO());
@@ -4692,7 +4761,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setPaymentAccountId(p.payment_account_id ? String(p.payment_account_id) : '');
       setPaidAmount(Math.max(0, Number(p.paid_amount ?? 0)));
       setPaidAmountManuallyEdited(true);
-      const normalizedItems: PurchaseLineItem[] = pItems.map((it: any) => {
+      const normalizedItems: PurchaseLineItem[] = uniquePItems.map((it: any) => {
         const upp = Math.max(1, Number(it.units_per_pack || parseUnitsPerPack(it.packing)));
         const pRate = Number(it.purchase_rate || 0);
         const lRate =
@@ -4701,6 +4770,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             : round2(pRate / upp);
         return {
           ...it,
+          id: it.id,
+          purchase_id: it.purchase_id || Number(p.id),
           item_id: Number(it.item_id || 0),
           variant_id: it.variant_id ? Number(it.variant_id) : null,
           variant_code: it.variant_id ? (it.variant_code || '') : '',
@@ -4733,7 +4804,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
-      isResumingPurchaseRef.current = false;
+      if (loadSeq === purchaseLoadReqSeqRef.current) {
+        isResumingPurchaseRef.current = false;
+        activeLoadingPurchaseIdRef.current = null;
+      }
     }
   };
 
@@ -9143,7 +9217,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       {/* TAB 2: PURCHASE REGISTER & HISTORY */}
       {subTab === 'register' && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="space-y-3">
+          <SimpleSyncStatusBar onSyncCompleted={fetchWorkspaceData} />
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
           <div className="px-6 py-4 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-bold">Confirmed Purchase Invoices Register</h3>
@@ -9202,13 +9278,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   <th className="py-3 px-2.5 text-right">Net Total</th>
                   <th className="py-3 px-2.5 text-right">Paid</th>
                   <th className="py-3 px-2.5 text-center">Status</th>
+                  <th className="py-3 px-2.5 text-center">Sync Status</th>
                   <th className="py-3 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {purchases.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="py-10 text-center text-slate-500">
+                    <td colSpan={13} className="py-10 text-center text-slate-500">
                       No purchase invoices recorded yet.
                     </td>
                   </tr>
@@ -9275,6 +9352,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           {p.status}
                         </span>
                       </td>
+                      <td className="py-2.5 px-2.5 text-center">
+                        <RecordSyncBadge syncStatus={(p as any).sync_status} />
+                      </td>
                       <td className="py-2.5 px-3 text-right">
                         <div className="inline-flex items-center gap-1">
                           <button
@@ -9322,6 +9402,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
               </tbody>
             </table>
           </div>
+        </div>
         </div>
       )}
 
@@ -9843,9 +9924,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       <tr
                         key={h.id}
                         onClick={() => handleResumeHeldPurchase(h.id)}
-                        onDoubleClick={() => handleResumeHeldPurchase(h.id)}
                         className="hover:bg-amber-50/70 transition-colors cursor-pointer"
-                        title="Click or double-click to open this held purchase invoice in the datasheet"
+                        title="Click to open this held purchase invoice in the datasheet"
                       >
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">{h.bill_number}</td>
                         <td className="px-3 py-2 font-mono text-slate-600">{formatAppDate(h.bill_date)}</td>

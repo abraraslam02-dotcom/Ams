@@ -15,6 +15,8 @@ import {
   WifiOff,
   FolderOpen,
   Upload,
+  Download,
+  Monitor,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { api, getStoredAuthToken } from '../../services/api';
@@ -63,6 +65,7 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
   const [lastOperationResult, setLastOperationResult] = useState<BackupAndSyncNowResponse | null>(null);
   const [resolvingConflictId, setResolvingConflictId] = useState<number | null>(null);
   const [resolvingAll, setResolvingAll] = useState<boolean>(false);
+  const [downloadingInstaller, setDownloadingInstaller] = useState<'full' | 'shortcut' | null>(null);
   const [pendingSwitchConfirm, setPendingSwitchConfirm] = useState<{
     targetMode: SystemOperatingMode;
     message: string;
@@ -71,6 +74,29 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
     type: 'success' | 'warning' | 'error';
     message: string;
   } | null>(null);
+
+  const handleDownloadWindowsInstaller = async (type: 'full' | 'shortcut') => {
+    if (downloadingInstaller) return;
+    try {
+      setDownloadingInstaller(type);
+      setFeedback(null);
+      await api.downloadWindowsInstaller(type);
+      setFeedback({
+        type: 'success',
+        message:
+          type === 'full'
+            ? 'Downloaded Abrar-Medical-Store-Windows-Installer.zip. Extract it on your Windows PC and double-click Install-Abrar-Medical-Store.bat to install locally with your database and zero Firestore quota limits.'
+            : 'Downloaded Install-Abrar-Medical-Store-Shortcut.bat. Double-click it on Windows to create your Desktop & Start Menu POS shortcut.',
+      });
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to download Windows installation file.',
+      });
+    } finally {
+      setDownloadingInstaller(null);
+    }
+  };
 
   const loadStatus = useCallback(async () => {
     try {
@@ -633,16 +659,46 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
 
         {/* Quota Exhaustion Clear Banner */}
         {status?.quotaExhausted && (
-          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 flex items-start gap-2.5">
-            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <div className="font-bold">
-                Cloud Sync is Pending Because Firestore Daily Read Quota Is Exhausted
-              </div>
-              <div className="text-[11px] mt-0.5 leading-relaxed">
-                All sales, purchases, stock, ledgers, cashbook entries, and pending changes are safely saved in your local database. You can continue working all day and create D Drive backups normally. Cloud Synchronization will resume automatically after the daily quota resets without re-downloading the entire database.
+          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-col gap-2.5">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold">
+                  Cloud Sync is Pending Because Firestore Daily Read Quota Is Exhausted
+                </div>
+                <div className="text-[11px] mt-0.5 leading-relaxed">
+                  All sales, purchases, stock, ledgers, cashbook entries, and pending changes are safely saved in your local database. Automatic background cloud sync has been throttled to protect daily quota. For unlimited daily transactions with zero Firestore quota limits, switch to Local Offline Mode or install directly on your Windows PC.
+                </div>
               </div>
             </div>
+            {isSuperAdmin && (
+              <div className="flex flex-wrap items-center gap-2 pl-6">
+                {!isOffline && (
+                  <button
+                    type="button"
+                    disabled={switchingTo !== null}
+                    onClick={() => void handleSwitchMode('OFFLINE')}
+                    className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <WifiOff className="w-3.5 h-3.5" />
+                    <span>Switch to OFFLINE MODE Now (Zero Quota)</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={downloadingInstaller !== null}
+                  onClick={() => void handleDownloadWindowsInstaller('full')}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>
+                    {downloadingInstaller === 'full'
+                      ? 'Building Windows Installer...'
+                      : 'Download Windows Local Installer (.zip)'}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -966,6 +1022,53 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
             </div>
           </div>
         </div>
+
+        {/* SECTION 2B: WINDOWS DESKTOP & LOCAL OFFLINE INSTALLER */}
+        {isSuperAdmin && (
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-indigo-600 text-white shrink-0">
+                <Monitor className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="font-extrabold text-slate-900 text-xs">
+                  Windows Installation Package (Local Desktop App + Database)
+                </div>
+                <div className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                  Install Abrar Medical Store directly on your Windows 10/11 PC (<span className="font-mono">D:\AbrarMedicalStore</span>) with your live database snapshot, Desktop &amp; Start Menu shortcut, and Local Offline Mode (no daily Firestore quota limits).
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={downloadingInstaller !== null}
+                onClick={() => void handleDownloadWindowsInstaller('full')}
+                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-extrabold text-xs flex items-center gap-2 shadow-xs cursor-pointer"
+              >
+                <Download className={`w-3.5 h-3.5 ${downloadingInstaller === 'full' ? 'animate-bounce' : ''}`} />
+                <span>
+                  {downloadingInstaller === 'full'
+                    ? 'Preparing Windows Installer...'
+                    : 'Download Full Windows Installer (.zip)'}
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={downloadingInstaller !== null}
+                onClick={() => void handleDownloadWindowsInstaller('shortcut')}
+                className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-300 disabled:opacity-50 text-slate-800 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Monitor className="w-3.5 h-3.5 text-indigo-600" />
+                <span>
+                  {downloadingInstaller === 'shortcut'
+                    ? 'Downloading...'
+                    : 'Desktop Shortcut (.bat)'}
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* SECTION 3: CONFLICT DETECTION & SAFE RESOLUTION */}
         {(conflicts.length > 0 || (status?.unresolvedConflictsCount ?? 0) > 0) && (

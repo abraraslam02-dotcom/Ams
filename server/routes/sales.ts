@@ -1,4 +1,4 @@
-import { getPakistanDateISO } from '../utils/pakistanTime.ts';
+import { getPakistanDateISO, parseUtcTimestamp } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -34,6 +34,34 @@ import {
   resolveLineSequentialDiscounts,
   type ItemTaxType,
 } from '../utils/taxCalculation.ts';
+import {
+  getCloudSyncResponseMeta,
+  getPendingCloudClientTxIds,
+  recordCloudMutationCommittedInRoute,
+  type CloudSyncResponseMeta,
+} from '../services/cloudPersistenceService.ts';
+
+function resolveSaleRowSyncStatus(
+  row: Record<string, unknown>,
+  cloudSync: CloudSyncResponseMeta,
+  pendingTxIds: Set<string>
+): CloudSyncResponseMeta['status'] {
+  if (cloudSync.offlineMode) return 'local_saved';
+  const txId = String(row.client_request_id || row.client_tx_id || '').trim();
+  const nonSyncedStatus: CloudSyncResponseMeta['status'] =
+    cloudSync.status === 'sync_error' ? 'sync_error' : 'pending_sync';
+  if (txId && pendingTxIds.has(txId)) return nonSyncedStatus;
+  if (cloudSync.cloudConfirmed) return 'synced';
+  if (cloudSync.lastSyncAt) {
+    const syncMs = parseUtcTimestamp(cloudSync.lastSyncAt)?.getTime() || 0;
+    const rowMs = parseUtcTimestamp((row.updated_at || row.created_at) as string | null)?.getTime() || 0;
+    if (syncMs > 0 && rowMs > 0 && rowMs <= syncMs) {
+      return 'synced';
+    }
+    return nonSyncedStatus;
+  }
+  return nonSyncedStatus;
+}
 
 export const salesRouter = Router();
 
@@ -1036,8 +1064,15 @@ salesRouter.get('/', (req: Request, res: Response) => {
       }
     }
 
+    const cloudSync = getCloudSyncResponseMeta();
+    const pendingTxIds = getPendingCloudClientTxIds();
+    for (const row of rows) {
+      row.sync_status = resolveSaleRowSyncStatus(row, cloudSync, pendingTxIds);
+    }
+
     res.json({
       success: true,
+      cloudSync,
       count: rows.length,
       totalCount: Number(countRow?.totalCount || 0),
       page: pageNum,
@@ -3521,11 +3556,14 @@ salesRouter.post('/', (req: Request, res: Response) => {
         const existingItems = db
           .prepare('SELECT * FROM sale_items WHERE sale_id = ?')
           .all(existingByReqId.id);
+        const cloudSync = getCloudSyncResponseMeta(clientRequestId);
         return res.status(200).json({
           success: true,
           idempotentDuplicatePrevented: true,
           message: 'Sales invoice was already confirmed and saved.',
-          data: { ...existingByReqId, items: existingItems },
+          cloudSync,
+          sync_status: cloudSync.status,
+          data: { ...existingByReqId, items: existingItems, sync_status: cloudSync.status },
         });
       }
     }
@@ -3555,10 +3593,18 @@ salesRouter.post('/', (req: Request, res: Response) => {
       `Created Sales Invoice ${created.invoice_number} (Status: ${created.status}, Net: Rs. ${created.net_total})`
     );
 
+    const cloudSync = recordCloudMutationCommittedInRoute(res, 'POST', '/api/sales', {
+      tableName: 'sales',
+      recordId: String(saleId),
+      clientTxId: clientRequestId || String(created.client_request_id || ''),
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Sales invoice saved successfully.',
-      data: { ...created, items },
+      cloudSync,
+      sync_status: cloudSync.status,
+      data: { ...created, items, sync_status: cloudSync.status },
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -3669,10 +3715,18 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
       `Updated Sales Invoice ${updated.invoice_number} (Status: ${updated.status}, Net: Rs. ${updated.net_total})`
     );
 
+    const cloudSync = recordCloudMutationCommittedInRoute(res, 'PUT', `/api/sales/${saleId}`, {
+      tableName: 'sales',
+      recordId: String(saleId),
+      clientTxId: reqClientId || String(updated.client_request_id || ''),
+    });
+
     return res.json({
       success: true,
       message: 'Sales invoice updated successfully.',
-      data: { ...updated, items },
+      cloudSync,
+      sync_status: cloudSync.status,
+      data: { ...updated, items, sync_status: cloudSync.status },
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

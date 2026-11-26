@@ -240,18 +240,56 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
               )}
 
               {/* Footer Actions */}
-              <div className="pt-2 border-t border-slate-200 flex items-center justify-between gap-2">
+              <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
                   <HelpCircle className="w-3.5 h-3.5 text-slate-400" />
                   <span>Works on Windows, macOS, Linux &amp; Android Chrome</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowGuideModal(false)}
-                  className="px-4 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer"
-                >
-                  Close
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const safeOrigin = String(currentAppUrl).replace(/["^&|<>]/g, '');
+                      const bat = [
+                        '@echo off',
+                        'setlocal EnableExtensions',
+                        `set "TARGET_URL=${safeOrigin}"`,
+                        'powershell -NoProfile -ExecutionPolicy Bypass -Command ^',
+                        '  "$ws = New-Object -ComObject WScript.Shell; ' +
+                          "$desk = [Environment]::GetFolderPath('Desktop'); " +
+                          "$menu = [Environment]::GetFolderPath('Programs'); " +
+                          "$pf = [Environment]::GetFolderPath('ProgramFiles'); " +
+                          "$pf86 = [Environment]::GetFolderPath('ProgramFilesX86'); " +
+                          "$localApp = [Environment]::GetFolderPath('LocalApplicationData'); " +
+                          "$candidates = @((Join-Path $pf 'Google\\Chrome\\Application\\chrome.exe'), (Join-Path $pf86 'Google\\Chrome\\Application\\chrome.exe'), (Join-Path $localApp 'Google\\Chrome\\Application\\chrome.exe'), (Join-Path $pf86 'Microsoft\\Edge\\Application\\msedge.exe'), (Join-Path $pf 'Microsoft\\Edge\\Application\\msedge.exe')); " +
+                          '$browser = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1; ' +
+                          "foreach ($dir in @($desk, $menu)) { $s = $ws.CreateShortcut((Join-Path $dir 'Abrar Medical Store POS.lnk')); if ($browser) { $s.TargetPath = $browser; $s.Arguments = '--app=' + '%TARGET_URL%'; $s.IconLocation = $browser + ',0'; } else { $s.TargetPath = '%TARGET_URL%'; } $s.Description = 'Abrar Medical Store - POS'; $s.Save(); }\"",
+                        'start "" "%TARGET_URL%"',
+                        'exit /b 0',
+                      ].join('\r\n');
+                      const blob = new Blob([bat], { type: 'application/x-bat' });
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = 'Install-Abrar-Medical-Store-Shortcut.bat';
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      window.URL.revokeObjectURL(url);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Windows Shortcut (.bat)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowGuideModal(false)}
+                    className="px-4 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             </div>
           </div>

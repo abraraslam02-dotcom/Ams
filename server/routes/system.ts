@@ -38,6 +38,10 @@ import {
   resolveAllSyncConflicts,
 } from '../services/operatingModeService.ts';
 import { APP_VERSION as SHARED_APP_VERSION, getBuildMetadata } from '../utils/buildInfo.ts';
+import {
+  buildWindowsFullInstallerZip,
+  generateCloudShortcutBatContent,
+} from '../services/windowsInstallerService.ts';
 
 export const systemRouter = Router();
 
@@ -3107,6 +3111,71 @@ systemRouter.post(
   }
 );
 
+/**
+ * GET /api/system/windows-installer/download?type=full|shortcut
+ * Generates and downloads either:
+ * - type=full (Super Admin / Admin): Abrar-Medical-Store-Windows-Installer.zip (complete local Windows server + desktop app + DB snapshot)
+ * - type=shortcut (any authenticated user): Install-Abrar-Medical-Store-Shortcut.bat (1-click Desktop & Start Menu POS shortcut)
+ */
+systemRouter.get(
+  '/windows-installer/download',
+  authenticateToken,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const type = String(req.query?.type || 'full').trim().toLowerCase();
+
+    if (type === 'shortcut') {
+      const protocol = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+      const host = String(req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000').split(',')[0].trim();
+      const origin = `${protocol}://${host}`;
+      const bat = generateCloudShortcutBatContent(origin);
+      res.setHeader('Content-Type', 'application/x-bat; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="Install-Abrar-Medical-Store-Shortcut.bat"'
+      );
+      return res.status(200).send(bat);
+    }
+
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only Super Admin or Administrator can download the full Windows Installer package.',
+      });
+    }
+
+    let pkg: { zipPath: string; filename: string; cleanup: () => void } | null = null;
+    try {
+      pkg = await buildWindowsFullInstallerZip();
+      try {
+        const db = getDatabase();
+        db.prepare(
+          `INSERT INTO auth_audit_logs (user_id, username, action, status, ip_address, details)
+           VALUES (?, ?, 'WINDOWS_INSTALLER_DOWNLOADED', 'INFO', ?, ?)`
+        ).run(
+          req.user?.id || null,
+          req.user?.username || 'Super Admin',
+          req.ip || '',
+          `Downloaded ${pkg.filename}`
+        );
+      } catch {
+        // ignore non-critical audit log failure
+      }
+
+      return res.download(pkg.zipPath, pkg.filename, () => {
+        pkg?.cleanup();
+      });
+    } catch (err: unknown) {
+      pkg?.cleanup();
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        error: `Failed to build Windows installer package: ${msg}`,
+      });
+    }
+  }
+);
+
 export { triggerPreChangeBackupIfEnabled, logSystemError };
+
 
 

@@ -1,4 +1,4 @@
-import { getPakistanDateISO } from '../utils/pakistanTime.ts';
+import { getPakistanDateISO, parseUtcTimestamp } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -26,6 +26,34 @@ import {
   resolveItemTaxConfig,
   resolveLineSequentialDiscounts,
 } from '../utils/taxCalculation.ts';
+import {
+  getCloudSyncResponseMeta,
+  getPendingCloudClientTxIds,
+  recordCloudMutationCommittedInRoute,
+  type CloudSyncResponseMeta,
+} from '../services/cloudPersistenceService.ts';
+
+function resolvePurchaseRowSyncStatus(
+  row: Record<string, unknown>,
+  cloudSync: CloudSyncResponseMeta,
+  pendingTxIds: Set<string>
+): CloudSyncResponseMeta['status'] {
+  if (cloudSync.offlineMode) return 'local_saved';
+  const txId = String(row.client_request_id || row.client_tx_id || '').trim();
+  const nonSyncedStatus: CloudSyncResponseMeta['status'] =
+    cloudSync.status === 'sync_error' ? 'sync_error' : 'pending_sync';
+  if (txId && pendingTxIds.has(txId)) return nonSyncedStatus;
+  if (cloudSync.cloudConfirmed) return 'synced';
+  if (cloudSync.lastSyncAt) {
+    const syncMs = parseUtcTimestamp(cloudSync.lastSyncAt)?.getTime() || 0;
+    const rowMs = parseUtcTimestamp((row.updated_at || row.created_at) as string | null)?.getTime() || 0;
+    if (syncMs > 0 && rowMs > 0 && rowMs <= syncMs) {
+      return 'synced';
+    }
+    return nonSyncedStatus;
+  }
+  return nonSyncedStatus;
+}
 
 export const purchasesRouter = Router();
 
@@ -1778,6 +1806,12 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
       }
     }
 
+    const cloudSync = getCloudSyncResponseMeta();
+    const pendingTxIds = getPendingCloudClientTxIds();
+    for (const p of purchases) {
+      p.sync_status = resolvePurchaseRowSyncStatus(p, cloudSync, pendingTxIds);
+    }
+
     const stats = db
       .prepare(`
         SELECT
@@ -1796,6 +1830,7 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
 
     return res.json({
       success: true,
+      cloudSync,
       purchases,
       stats,
     });
@@ -2045,15 +2080,69 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     appliedAdvRate = Math.max(0, round2(customAdvanceTaxRate));
   }
 
-  // Process Line Items with strict decimal precision
+  // Process Line Items with strict decimal precision and unique line ID deduplication
   let grossTotal = 0;
   let itemDiscountTotal = 0;
 
+  const existingDbLineIds = new Set<number>();
+  if (existingPurchaseId) {
+    const existingRows = db
+      .prepare('SELECT id FROM purchase_items WHERE purchase_id = ?')
+      .all(existingPurchaseId) as Array<{ id: number }>;
+    for (const r of existingRows) {
+      const lid = Number(r.id);
+      if (Number.isInteger(lid) && lid > 0) {
+        existingDbLineIds.add(lid);
+      }
+    }
+  }
+
+  const seenIncomingLineIds = new Set<string>();
+  const usedPreservedLineIds = new Set<number>();
+  const deduplicatedInputItems: Array<Record<string, any>> = [];
+  for (const rawItem of items) {
+    if (!rawItem || Number(rawItem.item_id || 0) <= 0) continue;
+    const rawLineId = Number(rawItem.id || 0);
+    const rawPurchaseId = Number(rawItem.purchase_id || existingPurchaseId || 0);
+    const clientLineKey = rawItem.client_line_key ? String(rawItem.client_line_key).trim() : '';
+
+    if (Number.isInteger(rawLineId) && rawLineId > 0) {
+      const compositeIdKey = `id:${rawPurchaseId}:${rawLineId}`;
+      if (seenIncomingLineIds.has(compositeIdKey)) {
+        continue;
+      }
+      seenIncomingLineIds.add(compositeIdKey);
+    } else if (clientLineKey) {
+      const compositeClientKey = `ck:${rawPurchaseId}:${clientLineKey}`;
+      if (seenIncomingLineIds.has(compositeClientKey)) {
+        continue;
+      }
+      seenIncomingLineIds.add(compositeClientKey);
+    }
+    deduplicatedInputItems.push(rawItem);
+  }
+
+  if (deduplicatedInputItems.length === 0) {
+    throw new Error('At least one valid line item is required on a Purchase Invoice.');
+  }
+
   const processedLines: Array<Record<string, any>> = [];
 
-  for (let i = 0; i < items.length; i++) {
-    const raw = items[i];
+  for (let i = 0; i < deduplicatedInputItems.length; i++) {
+    const raw = deduplicatedInputItems[i];
     const rowIdx = i + 1;
+    const candidateLineId = Number(raw.id || 0);
+    let preservedLineId: number | null = null;
+    if (
+      existingPurchaseId &&
+      Number.isInteger(candidateLineId) &&
+      candidateLineId > 0 &&
+      existingDbLineIds.has(candidateLineId) &&
+      !usedPreservedLineIds.has(candidateLineId)
+    ) {
+      preservedLineId = candidateLineId;
+      usedPreservedLineIds.add(candidateLineId);
+    }
 
     const itemId = parseInt(String(raw.item_id), 10);
     const dbItem = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId) as
@@ -2232,6 +2321,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
           ? round2(Number(raw.master_loose_rate))
           : null,
       remarks: String(raw.remarks || '').trim(),
+      preservedLineId,
     });
   }
 
@@ -2517,6 +2607,24 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
     }
   }
 
+  // If updating an existing purchase (including Hold -> Reload -> Hold or Hold -> Complete),
+  // record tombstones for any removed line IDs and clear previous purchase_items before re-inserting.
+  if (existingPurchaseId) {
+    try {
+      const insertTombstoneStmt = db.prepare(
+        "INSERT OR IGNORE INTO sync_tombstones (table_name, record_id, deleted_at) VALUES ('purchase_items', ?, CURRENT_TIMESTAMP)"
+      );
+      for (const oldLineId of existingDbLineIds) {
+        if (!usedPreservedLineIds.has(oldLineId)) {
+          insertTombstoneStmt.run(String(oldLineId));
+        }
+      }
+    } catch {
+      // ignore if sync_tombstones table is not present
+    }
+    db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(existingPurchaseId);
+  }
+
   // Insert Purchase Items & Update Batch-wise Stock in Inventory
   const insertItemStmt = db.prepare(`
     INSERT INTO purchase_items (
@@ -2529,6 +2637,19 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount, taxable_amount,
       tax_type, tax_value, tax_percent, tax_amount, line_total, returned_quantity, remarks
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+  `);
+
+  const insertItemWithIdStmt = db.prepare(`
+    INSERT INTO purchase_items (
+      id, purchase_id, item_id, inventory_id,
+      variant_id, variant_code, variant_name,
+      item_code, company_name, item_name, packing, units_per_pack,
+      batch_number, manufacturing_date, expiry_date,
+      quantity, bonus_quantity, pack_quantity, loose_quantity, loose_rate, total_units,
+      purchase_rate, mrp_rate, gross_amount,
+      discount_1_percent, discount_2_percent, net_rate, discount_percent, discount_amount, taxable_amount,
+      tax_type, tax_value, tax_percent, tax_amount, line_total, returned_quantity, remarks
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
   `);
 
   for (const line of processedLines) {
@@ -2841,43 +2962,84 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       }
     }
 
-    insertItemStmt.run(
-      purchaseId,
-      line.itemId,
-      inventoryId,
-      line.variantId || null,
-      line.variantCode || null,
-      line.variantName || null,
-      line.itemCode,
-      line.companyName,
-      line.itemName,
-      line.packing,
-      line.parsedPack.unitsPerPack,
-      line.batchNo,
-      line.mfgDate,
-      line.expiryDate,
-      line.qty,
-      line.bonusQty,
-      line.totalPacksAdded,
-      line.looseQty,
-      line.looseRate,
-      line.totalLooseUnits,
-      line.purchaseRate,
-      line.mrpRate,
-      line.lineGross,
-      line.disc1Pct,
-      line.disc2Pct,
-      line.netRate,
-      line.discPct,
-      line.lineItemDisc,
-      line.lineTaxable,
-      line.taxType,
-      line.taxValue,
-      line.taxPct,
-      line.lineTaxAmount,
-      line.lineNet,
-      line.remarks || ''
-    );
+    if (line.preservedLineId) {
+      insertItemWithIdStmt.run(
+        line.preservedLineId,
+        purchaseId,
+        line.itemId,
+        inventoryId,
+        line.variantId || null,
+        line.variantCode || null,
+        line.variantName || null,
+        line.itemCode,
+        line.companyName,
+        line.itemName,
+        line.packing,
+        line.parsedPack.unitsPerPack,
+        line.batchNo,
+        line.mfgDate,
+        line.expiryDate,
+        line.qty,
+        line.bonusQty,
+        line.totalPacksAdded,
+        line.looseQty,
+        line.looseRate,
+        line.totalLooseUnits,
+        line.purchaseRate,
+        line.mrpRate,
+        line.lineGross,
+        line.disc1Pct,
+        line.disc2Pct,
+        line.netRate,
+        line.discPct,
+        line.lineItemDisc,
+        line.lineTaxable,
+        line.taxType,
+        line.taxValue,
+        line.taxPct,
+        line.lineTaxAmount,
+        line.lineNet,
+        line.remarks || ''
+      );
+    } else {
+      insertItemStmt.run(
+        purchaseId,
+        line.itemId,
+        inventoryId,
+        line.variantId || null,
+        line.variantCode || null,
+        line.variantName || null,
+        line.itemCode,
+        line.companyName,
+        line.itemName,
+        line.packing,
+        line.parsedPack.unitsPerPack,
+        line.batchNo,
+        line.mfgDate,
+        line.expiryDate,
+        line.qty,
+        line.bonusQty,
+        line.totalPacksAdded,
+        line.looseQty,
+        line.looseRate,
+        line.totalLooseUnits,
+        line.purchaseRate,
+        line.mrpRate,
+        line.lineGross,
+        line.disc1Pct,
+        line.disc2Pct,
+        line.netRate,
+        line.discPct,
+        line.lineItemDisc,
+        line.lineTaxable,
+        line.taxType,
+        line.taxValue,
+        line.taxPct,
+        line.lineTaxAmount,
+        line.lineNet,
+        line.remarks || ''
+      );
+    }
   }
 
   // Post Balanced Double-Entry Accounting Entries (strictly for completed purchases)
@@ -3296,11 +3458,14 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
         const existingItems = db
           .prepare('SELECT * FROM purchase_items WHERE purchase_id = ?')
           .all(existingByReq.id);
+        const cloudSync = getCloudSyncResponseMeta(clientRequestId);
         return res.status(200).json({
           success: true,
           idempotentDuplicatePrevented: true,
           message: 'Purchase Invoice was already confirmed and saved.',
-          purchase: existingByReq,
+          cloudSync,
+          sync_status: cloudSync.status,
+          purchase: { ...existingByReq, sync_status: cloudSync.status },
           items: existingItems,
         });
       }
@@ -3314,10 +3479,24 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
     const username = req.user?.username || 'Super Admin';
     let newPurchaseId = 0;
 
+    // Defensive check: if payload references an existing held/draft purchase ID, update it in place rather than duplicating
+    const candidateExistingId = Number(req.body?.id || req.body?.editing_purchase_id || 0);
+    const existingHeldRow =
+      Number.isInteger(candidateExistingId) && candidateExistingId > 0
+        ? (db
+            .prepare('SELECT id, status FROM purchases WHERE id = ?')
+            .get(candidateExistingId) as { id: number; status: string } | undefined)
+        : undefined;
+    const targetExistingHeldId =
+      existingHeldRow && isHeldOrDraftStatus(existingHeldRow.status) ? existingHeldRow.id : undefined;
+
     const createTx = db.transaction(() => {
-      newPurchaseId = executePurchasePosting(req.body);
+      if (targetExistingHeldId) {
+        reverseExistingPurchase(targetExistingHeldId, 'Held Purchase Update', 'edit');
+      }
+      newPurchaseId = executePurchasePosting(req.body, targetExistingHeldId);
       db.prepare(
-        'UPDATE purchases SET created_by = ?, updated_by = ?, client_request_id = ? WHERE id = ?'
+        'UPDATE purchases SET created_by = COALESCE(created_by, ?), updated_by = ?, client_request_id = COALESCE(?, client_request_id) WHERE id = ?'
       ).run(username, username, clientRequestId || null, newPurchaseId);
     });
 
@@ -3348,10 +3527,18 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
       `Created Purchase Invoice ${created.bill_number} (Supplier: ${created.supplier_name}, Net: Rs. ${created.net_total})`
     );
 
+    const cloudSync = recordCloudMutationCommittedInRoute(res, 'POST', '/api/purchases', {
+      tableName: 'purchases',
+      recordId: String(newPurchaseId),
+      clientTxId: clientRequestId || String(created.client_request_id || ''),
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Purchase Invoice confirmed. Batch stock, Advance Tax, and Double-Entry ledgers updated.',
-      purchase: created,
+      cloudSync,
+      sync_status: cloudSync.status,
+      purchase: { ...created, sync_status: cloudSync.status },
       items,
     });
   } catch (error: unknown) {
@@ -3436,7 +3623,6 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
     const username = req.user?.username || 'Super Admin';
     const editTx = db.transaction(() => {
       reverseExistingPurchase(id, 'Invoice Edit & Re-posting', 'edit');
-      db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(id);
       executePurchasePosting(req.body, id);
       db.prepare('UPDATE purchases SET updated_by = ?, client_request_id = COALESCE(?, client_request_id) WHERE id = ?').run(
         username,
@@ -3472,10 +3658,18 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
       `Updated Purchase Invoice ${updated.bill_number} (Net: Rs. ${updated.net_total})`
     );
 
+    const cloudSync = recordCloudMutationCommittedInRoute(res, 'PUT', `/api/purchases/${id}`, {
+      tableName: 'purchases',
+      recordId: String(id),
+      clientTxId: reqClientId || String(updated.client_request_id || ''),
+    });
+
     return res.json({
       success: true,
       message: 'Purchase Invoice updated with formal double-entry reversal and re-posting.',
-      purchase: updated,
+      cloudSync,
+      sync_status: cloudSync.status,
+      purchase: { ...updated, sync_status: cloudSync.status },
       items,
     });
   } catch (error: unknown) {
@@ -3506,6 +3700,18 @@ function handleCancelOrDeletePurchase(req: Request, res: Response) {
     if (isHeldOrDraftStatus(existing.status)) {
       const discardTx = db.transaction(() => {
         cleanupPurchaseJournalEntries(id, { includeEditReversalAdjustments: true });
+        try {
+          db.prepare(
+            `INSERT OR IGNORE INTO sync_tombstones (table_name, record_id, deleted_at)
+             SELECT 'purchase_items', CAST(id AS TEXT), CURRENT_TIMESTAMP FROM purchase_items WHERE purchase_id = ?`
+          ).run(id);
+          db.prepare(
+            `INSERT OR IGNORE INTO sync_tombstones (table_name, record_id, deleted_at)
+             VALUES ('purchases', ?, CURRENT_TIMESTAMP)`
+          ).run(String(id));
+        } catch {
+          // ignore if sync_tombstones table is not present
+        }
         db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(id);
         db.prepare('DELETE FROM purchases WHERE id = ?').run(id);
       });

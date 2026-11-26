@@ -18,7 +18,12 @@ import {
   StockLedgerEntry,
   PhysicalVerification,
 } from '../types/inventory';
-import { offlineStorage } from './offlineStorage';
+import {
+  offlineStorage,
+  isUnsyncedRecordStatus,
+  normalizeRecordSyncStatus,
+  type RecordSyncStatus,
+} from './offlineStorage';
 import { offlineSyncManager } from './offlineSyncManager';
 import type {
   CompleteItemLogResponse,
@@ -929,6 +934,29 @@ export const api = {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  /**
+   * Download Windows Desktop / Local Server Installer (.zip) or Shortcut (.bat)
+   */
+  async downloadWindowsInstaller(type: 'full' | 'shortcut' = 'full'): Promise<void> {
+    const res = await authFetch(`/api/system/windows-installer/download?type=${encodeURIComponent(type)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to generate Windows installation file.');
+    }
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download =
+      type === 'shortcut'
+        ? 'Install-Abrar-Medical-Store-Shortcut.bat'
+        : 'Abrar-Medical-Store-Windows-Installer.zip';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2621,8 +2649,7 @@ export const api = {
             for (const loc of existingLocal) {
               const locSt = String(loc?.status || '').trim().toLowerCase();
               const isHeldLoc = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt);
-              const isPendingLoc =
-                loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+              const isPendingLoc = isUnsyncedRecordStatus(loc?.sync_status);
               const sid = Number(loc?.server_id || loc?.id || 0);
               if (isHeldLoc && !isPendingLoc && sid > 0 && !seenServerIds.has(sid) && loc?.client_tx_id) {
                 offlineStorage.delete('purchases', String(loc.client_tx_id)).catch(() => {});
@@ -2632,7 +2659,7 @@ export const api = {
 
           let extraCount = 0;
           for (const loc of existingLocal) {
-            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+            if (!isUnsyncedRecordStatus(loc?.sync_status)) {
               continue;
             }
             const locSt = String(loc?.status || '').trim().toLowerCase();
@@ -2647,7 +2674,10 @@ export const api = {
             }
             const bNo = String(loc?.bill_number || loc?.invoice_number || '').toLowerCase();
             if (bNo && seenBills.has(bNo)) continue;
-            srvList.push(loc);
+            srvList.push({
+              ...loc,
+              sync_status: normalizeRecordSyncStatus(loc?.sync_status),
+            });
             extraCount++;
           }
           if (srvList.length > 0) {
@@ -2658,9 +2688,23 @@ export const api = {
               const sid = Number(loc?.server_id || loc?.id || 0);
               if (sid > 0 && sid < 1_000_000_000_000) localPurBySrvId.set(sid, loc);
             }
+            const cloudFallbackStatus: RecordSyncStatus = data.cloudSync?.status
+              ? normalizeRecordSyncStatus(data.cloudSync.status)
+              : 'synced';
             const toStore = srvList.map((p: any) => {
               const txKey = String(p.client_tx_id || `PUR-${p.id || p.bill_number || p.invoice_number || Date.now()}`);
               const loc = localPurByKey.get(txKey) || localPurBySrvId.get(Number(p.id));
+              if (loc && isUnsyncedRecordStatus(loc.sync_status) && p.sync_status !== 'synced') {
+                return {
+                  ...p,
+                  ...loc,
+                  server_id: p.server_id || p.id || loc.server_id,
+                  client_tx_id: loc.client_tx_id || txKey,
+                  sync_status: p.sync_status
+                    ? normalizeRecordSyncStatus(p.sync_status)
+                    : normalizeRecordSyncStatus(loc.sync_status),
+                };
+              }
               const srvItems = Array.isArray(p?.items) ? p.items : Array.isArray(p?.lines) ? p.lines : null;
               const locItems = Array.isArray(loc?.items) && loc.items.length > 0
                 ? loc.items
@@ -2674,7 +2718,7 @@ export const api = {
                 ...(preserveLocItems ? { items: locItems, lines: loc?.lines || locItems } : {}),
                 server_id: p.server_id || p.id,
                 client_tx_id: txKey,
-                sync_status: p.sync_status || 'synced',
+                sync_status: p.sync_status ? normalizeRecordSyncStatus(p.sync_status) : cloudFallbackStatus,
               };
             });
             offlineStorage.bulkPut('purchases', toStore).catch(() => {});
@@ -2796,15 +2840,34 @@ export const api = {
    * Purchase Module - Get Single Purchase Invoice with Items & Journal Lines
    */
   async getPurchaseDetails(id: number | string) {
+    const deduplicatePurLines = (rawList: any[], purId: number | string) => {
+      if (!Array.isArray(rawList)) return [];
+      const seenLineIds = new Set<string>();
+      const out: any[] = [];
+      for (const item of rawList) {
+        if (!item || Number(item.item_id || 0) <= 0) continue;
+        const lineId = Number(item.id || 0);
+        const pId = Number(item.purchase_id || purId || 0);
+        if (Number.isInteger(lineId) && lineId > 0) {
+          const key = `id:${pId}:${lineId}`;
+          if (seenLineIds.has(key)) continue;
+          seenLineIds.add(key);
+        }
+        out.push(item);
+      }
+      return out;
+    };
+
     try {
       const { res, data } = await authFetchRetryHtml(`/api/purchases/${id}`);
       if (res.ok && data.success) {
-        const resolvedItems =
+        const rawResolvedItems =
           Array.isArray(data.items) && data.items.length > 0
             ? data.items
             : Array.isArray(data.purchase?.items)
             ? data.purchase.items
             : [];
+        const resolvedItems = deduplicatePurLines(rawResolvedItems, data.purchase?.id || id);
         const normalizedPurchase = data.purchase
           ? { ...data.purchase, items: resolvedItems }
           : data.data
@@ -2833,7 +2896,7 @@ export const api = {
     );
     if (found || cached) {
       const basePurchase = found || cached?.purchase || cached?.data || {};
-      const resolvedItems =
+      const rawResolvedItems =
         Array.isArray(found?.items) && found.items.length > 0
           ? found.items
           : Array.isArray(found?.lines) && found.lines.length > 0
@@ -2843,6 +2906,7 @@ export const api = {
           : Array.isArray(cached?.purchase?.items) && cached.purchase.items.length > 0
           ? cached.purchase.items
           : [];
+      const resolvedItems = deduplicatePurLines(rawResolvedItems, basePurchase?.id || id);
       const normalizedPurchase = {
         ...basePurchase,
         paid_amount: Number(basePurchase.paid_amount ?? 0),
@@ -2865,57 +2929,177 @@ export const api = {
    * Purchase Module - Create Confirmed or Held/Draft Purchase Invoice (with offline fallback)
    */
   async createPurchase(payload: any) {
+    const nowIso = new Date().toISOString();
+    const syncState = offlineSyncManager.getState();
+    const deviceId = syncState.deviceId;
+    const isOfflineMode = syncState.operatingMode === 'OFFLINE';
+    const clientTxId = String(
+      payload.client_request_id ||
+        payload.client_tx_id ||
+        (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `PUR-TX-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`)
+    );
+    const payloadWithTx = {
+      ...payload,
+      client_request_id: clientTxId,
+      client_tx_id: clientTxId,
+    };
+    const isHeldOrDraft = ['held', 'hold', 'on_hold', 'on hold', 'draft', 'temp', 'temporary'].includes(
+      String(payload.status || '').trim().toLowerCase()
+    );
+
+    // Safeguard #1 & #2: Persist permanently in local IndexedDB + sync_queue BEFORE network/server save
+    const preSaveRecord = {
+      id: Date.now(),
+      ...payloadWithTx,
+      items: Array.isArray(payload.items) ? payload.items : [],
+      client_tx_id: clientTxId,
+      client_request_id: clientTxId,
+      sync_status: 'local_saved' as RecordSyncStatus,
+      local_modified: true,
+      sync_error: null,
+      created_at: payload.created_at || nowIso,
+      updated_at: nowIso,
+    };
+    await offlineStorage.put('purchases', preSaveRecord);
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: deviceId,
+      action: isHeldOrDraft ? 'HOLD_PURCHASE' : 'CREATE_PURCHASE',
+      entity: 'purchases',
+      local_id: clientTxId,
+      payload: payloadWithTx,
+      status: 'local_saved',
+      server_persisted: false,
+      cloud_confirmed: false,
+      created_at: nowIso,
+    });
+
     try {
       const res = await authFetch('/api/purchases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payloadWithTx),
       });
-      const data = await res.json();
+      const data = await parseJsonSafe(res);
       if (res.ok && data.success) {
         const savedPur = data.purchase || data.data || {};
+        const canonicalId = savedPur.id || data.purchaseId || preSaveRecord.id;
+        const canonicalTxId = String(savedPur.client_tx_id || savedPur.client_request_id || clientTxId);
+        const cloudConfirmed = Boolean(data.cloudSync?.cloudConfirmed);
+        const finalSyncStatus: RecordSyncStatus = cloudConfirmed
+          ? 'synced'
+          : normalizeRecordSyncStatus(
+              data.cloudSync?.status ||
+                data.sync_status ||
+                (isOfflineMode ? 'local_saved' : 'pending_sync')
+            );
+        const serverItems =
+          Array.isArray(data.items) && data.items.length > 0
+            ? data.items
+            : Array.isArray(savedPur.items) && savedPur.items.length > 0
+            ? savedPur.items
+            : Array.isArray(payload.items)
+            ? payload.items
+            : [];
         const purRecord = {
-          ...payload,
+          ...payloadWithTx,
           ...savedPur,
-          id: savedPur.id || data.purchaseId || Date.now(),
+          id: canonicalId,
+          server_id: canonicalId,
           bill_number: savedPur.bill_number || savedPur.invoice_number || data.billNumber || payload.bill_number,
           invoice_number: savedPur.invoice_number || savedPur.bill_number || data.billNumber || payload.invoice_number,
-          client_tx_id:
-            payload.client_tx_id ||
-            savedPur.client_tx_id ||
-            `PUR-${savedPur.id || data.purchaseId || Date.now()}`,
-          items: Array.isArray(payload.items) ? payload.items : savedPur.items || [],
-          sync_status: 'synced',
+          client_tx_id: canonicalTxId,
+          client_request_id: canonicalTxId,
+          items: serverItems,
+          sync_status: finalSyncStatus,
+          local_modified: !cloudConfirmed,
+          sync_error: data.cloudSync?.lastError || null,
+          updated_at: savedPur.updated_at || nowIso,
         };
-        offlineStorage.put('purchases', purRecord).catch(() => {});
+        if (canonicalTxId !== clientTxId) {
+          await offlineStorage.delete('purchases', clientTxId).catch(() => {});
+          await offlineStorage.delete('sync_queue', clientTxId).catch(() => {});
+        }
+        await offlineStorage.put('purchases', purRecord);
+        await offlineStorage
+          .cacheApiData(`purchase_details_${canonicalId}`, {
+            ...data,
+            purchase: purRecord,
+            data: purRecord,
+            items: serverItems,
+          })
+          .catch(() => {});
+
+        // Safeguard #3: Never remove sync_queue entry unless Firestore confirmed server-side persistence
+        if (cloudConfirmed) {
+          await offlineStorage.updateSyncItemStatus(canonicalTxId, 'synced', {
+            server_id: canonicalId,
+            server_invoice_number: purRecord.bill_number,
+            server_persisted: true,
+            cloud_confirmed: true,
+          });
+        } else {
+          await offlineStorage.enqueueSync({
+            client_tx_id: canonicalTxId,
+            device_id: deviceId,
+            action: isHeldOrDraft ? 'HOLD_PURCHASE' : 'CREATE_PURCHASE',
+            entity: 'purchases',
+            local_id: String(canonicalId),
+            payload: purRecord,
+            status: finalSyncStatus,
+            server_id: canonicalId,
+            server_invoice_number: purRecord.bill_number,
+            server_persisted: true,
+            cloud_confirmed: false,
+            error: data.cloudSync?.lastError || null,
+            created_at: preSaveRecord.created_at,
+          });
+        }
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
+        if (data.purchase) data.purchase = purRecord;
+        if (data.data) data.data = purRecord;
+        data.sync_status = finalSyncStatus;
         return data;
       }
-      if (res.status >= 400 && res.status < 500 && data.error) {
-        throw new Error(data.error);
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+        // Deterministic validation error: rollback pre-save draft
+        await offlineStorage.delete('purchases', clientTxId).catch(() => {});
+        await offlineStorage.delete('sync_queue', clientTxId).catch(() => {});
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
+        throw new Error(data?.error || `Purchase invoice rejected (HTTP ${res.status})`);
       }
     } catch (err: any) {
-      if (err?.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+      const msg = String(err?.message || '');
+      const isTransient =
+        msg === 'NON_JSON_HTML_RESPONSE' ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false);
+      if (msg && !isTransient) {
         throw err;
       }
-      // Offline fallback: save locally to IndexedDB & queue for automatic background sync
+      // Offline / transient fallback: save locally to IndexedDB & queue for automatic background sync
     }
 
-    const offlineRes = await offlineSyncManager.queueOfflinePurchase(payload);
+    const offlineRes = await offlineSyncManager.queueOfflinePurchase(payloadWithTx);
     return {
       ...offlineRes,
       success: true,
       offline: true,
+      sync_status: offlineRes.purchase?.sync_status || 'local_saved',
       message:
         'Purchase invoice saved offline in local database. Will automatically synchronize when online.',
       purchase: {
-        id: offlineRes.client_tx_id,
+        ...offlineRes.purchase,
+        id: offlineRes.purchase?.id || offlineRes.client_tx_id,
         invoice_number: offlineRes.invoice_number,
-        ...payload,
       },
       data: {
-        id: offlineRes.client_tx_id,
+        ...offlineRes.purchase,
+        id: offlineRes.purchase?.id || offlineRes.client_tx_id,
         invoice_number: offlineRes.invoice_number,
-        ...payload,
       },
     };
   },
@@ -2924,35 +3108,104 @@ export const api = {
    * Purchase Module - Update Purchase Invoice (with Double-Entry Reversal & offline fallback)
    */
   async updatePurchase(id: number | string, payload: any) {
+    const nowIso = new Date().toISOString();
+    const syncState = offlineSyncManager.getState();
+    const deviceId = syncState.deviceId;
+    const isOfflineMode = syncState.operatingMode === 'OFFLINE';
+    const existingLocalPur = await offlineStorage.getAll<any>('purchases').catch(() => []);
+    const existing = existingLocalPur.find(
+      (p) =>
+        String(p.id) === String(id) ||
+        String(p.server_id) === String(id) ||
+        String(p.client_tx_id) === String(id)
+    );
+    const opTxId = String(
+      payload.client_request_id ||
+        payload.client_tx_id ||
+        existing?.client_tx_id ||
+        `TX-UPD-PUR-${id}-${Date.now()}`
+    );
+    const payloadWithTx = {
+      ...payload,
+      client_request_id: opTxId,
+      client_tx_id: opTxId,
+    };
+    const recordKey = String(existing?.client_tx_id || opTxId);
+    const existingQueueEntry = await offlineStorage.get<any>('sync_queue', opTxId).catch(() => undefined);
+
+    // Safeguard #1 & #2: Persist local IndexedDB snapshot BEFORE sending PUT
+    const preUpdateRecord = {
+      ...(existing || {}),
+      ...payloadWithTx,
+      id,
+      server_id: existing?.server_id || (Number(id) > 0 && Number(id) < 1_000_000_000_000 ? Number(id) : existing?.server_id),
+      items: Array.isArray(payload.items) ? payload.items : existing?.items || [],
+      client_tx_id: recordKey,
+      client_request_id: opTxId,
+      sync_status: 'local_saved' as RecordSyncStatus,
+      local_modified: true,
+      sync_error: null,
+      updated_at: nowIso,
+    };
+    await offlineStorage.put('purchases', preUpdateRecord);
+    await offlineStorage.enqueueSync({
+      client_tx_id: opTxId,
+      device_id: deviceId,
+      action: 'UPDATE_PURCHASE',
+      entity: 'purchases',
+      local_id: String(id),
+      payload: { ...payloadWithTx, id },
+      status: 'local_saved',
+      server_persisted: false,
+      cloud_confirmed: false,
+      created_at: existingQueueEntry?.created_at || nowIso,
+    });
+
     try {
       const res = await authFetch(`/api/purchases/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payloadWithTx),
       });
-      const data = await res.json();
+      const data = await parseJsonSafe(res);
       if (res.ok && data.success) {
         const savedPur = data.purchase || data.data || {};
         const canonicalId = savedPur.id || id;
-        const canonicalTxId = savedPur.client_tx_id || payload.client_tx_id || `PUR-${canonicalId}`;
+        const canonicalTxId = String(savedPur.client_tx_id || savedPur.client_request_id || recordKey);
+        const cloudConfirmed = Boolean(data.cloudSync?.cloudConfirmed);
+        const finalSyncStatus: RecordSyncStatus = cloudConfirmed
+          ? 'synced'
+          : normalizeRecordSyncStatus(
+              data.cloudSync?.status ||
+                data.sync_status ||
+                (isOfflineMode ? 'local_saved' : 'pending_sync')
+            );
+        const serverItems =
+          Array.isArray(data.items) && data.items.length > 0
+            ? data.items
+            : Array.isArray(payload.items)
+            ? payload.items
+            : savedPur.items || [];
         const purRecord = {
-          ...payload,
+          ...payloadWithTx,
           ...savedPur,
           id: canonicalId,
           server_id: canonicalId,
           client_tx_id: canonicalTxId,
-          items: Array.isArray(data.items) ? data.items : Array.isArray(payload.items) ? payload.items : savedPur.items || [],
-          sync_status: 'synced',
+          client_request_id: canonicalTxId,
+          items: serverItems,
+          sync_status: finalSyncStatus,
+          local_modified: !cloudConfirmed,
+          sync_error: data.cloudSync?.lastError || null,
+          updated_at: savedPur.updated_at || nowIso,
         };
-        const existingLocalPur = await offlineStorage.getAll<any>('purchases').catch(() => []);
         for (const loc of existingLocalPur) {
           const matchesSamePur =
             String(loc.id) === String(canonicalId) || String(loc.server_id) === String(canonicalId);
-          if (matchesSamePur && loc.client_tx_id && String(loc.client_tx_id) !== String(canonicalTxId)) {
+          if (matchesSamePur && loc.client_tx_id && String(loc.client_tx_id) !== canonicalTxId) {
             await offlineStorage.delete('purchases', String(loc.client_tx_id)).catch(() => {});
           }
         }
-        // Purge any queued sync operations referencing this held/updated purchase so old held states never replay
         const queuedPurOps = await offlineStorage.getAll<any>('sync_queue').catch(() => []);
         for (const qItem of queuedPurOps) {
           if (qItem?.entity !== 'purchases') continue;
@@ -2962,50 +3215,108 @@ export const api = {
             qLocalId === String(canonicalId) ||
             qLocalId === String(id) ||
             qPayloadId === String(canonicalId) ||
-            qPayloadId === String(id);
-          if (matchesQueuedPur && qItem?.client_tx_id) {
+            qPayloadId === String(id) ||
+            String(qItem?.client_tx_id) === opTxId;
+          if (!matchesQueuedPur || !qItem?.client_tx_id) continue;
+          // Only delete queued items when Firestore confirmed OR it's a superseded op from an older edit
+          if (cloudConfirmed || String(qItem.client_tx_id) !== canonicalTxId) {
             await offlineStorage.delete('sync_queue', String(qItem.client_tx_id)).catch(() => {});
           }
         }
-        await offlineStorage.put('purchases', purRecord).catch(() => {});
+        if (!cloudConfirmed) {
+          await offlineStorage.enqueueSync({
+            client_tx_id: canonicalTxId,
+            device_id: deviceId,
+            action: 'UPDATE_PURCHASE',
+            entity: 'purchases',
+            local_id: String(canonicalId),
+            payload: purRecord,
+            status: finalSyncStatus,
+            server_id: canonicalId,
+            server_invoice_number: purRecord.bill_number,
+            server_persisted: true,
+            cloud_confirmed: false,
+            error: data.cloudSync?.lastError || null,
+            created_at: existingQueueEntry?.created_at || nowIso,
+          });
+        }
+        await offlineStorage.put('purchases', purRecord);
+        await offlineStorage
+          .cacheApiData(`purchase_details_${canonicalId}`, {
+            ...data,
+            purchase: purRecord,
+            data: purRecord,
+            items: serverItems,
+          })
+          .catch(() => {});
         await offlineSyncManager.refreshPendingCount().catch(() => {});
+        if (data.purchase) data.purchase = purRecord;
+        if (data.data) data.data = purRecord;
+        data.sync_status = finalSyncStatus;
         return data;
       }
-      if (res.status >= 400 && res.status < 500 && data.error) {
-        throw new Error(data.error);
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+        if (existing) {
+          await offlineStorage.put('purchases', existing).catch(() => {});
+        } else {
+          await offlineStorage.delete('purchases', recordKey).catch(() => {});
+        }
+        if (existingQueueEntry) {
+          await offlineStorage.put('sync_queue', existingQueueEntry).catch(() => {});
+        } else {
+          await offlineStorage.delete('sync_queue', opTxId).catch(() => {});
+        }
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
+        throw new Error(data?.error || `Failed to update purchase invoice (HTTP ${res.status})`);
       }
     } catch (err: any) {
-      if (err?.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+      const msg = String(err?.message || '');
+      const isTransient =
+        msg === 'NON_JSON_HTML_RESPONSE' ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false);
+      if (msg && !isTransient) {
         throw err;
       }
     }
 
-    const client_tx_id = `TX-UPD-PUR-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-    const allPurchases = await offlineStorage.getAll<any>('purchases');
-    const existing = allPurchases.find(
-      (p) => String(p.id) === String(id) || String(p.client_tx_id) === String(id)
-    );
+    const offlineStatus: RecordSyncStatus =
+      isOfflineMode || (typeof navigator !== 'undefined' && navigator.onLine === false)
+        ? 'local_saved'
+        : 'pending_sync';
     const updatedRecord = {
-      ...(existing || {}),
-      ...payload,
-      id,
-      client_tx_id: existing?.client_tx_id || String(id),
-      sync_status: 'pending_sync',
+      ...preUpdateRecord,
+      sync_status: offlineStatus,
       updated_at: new Date().toISOString(),
     };
     await offlineStorage.put('purchases', updatedRecord);
+    await offlineStorage
+      .cacheApiData(`purchase_details_${id}`, {
+        success: true,
+        offline: true,
+        purchase: updatedRecord,
+        data: updatedRecord,
+        items: updatedRecord.items,
+      })
+      .catch(() => {});
     await offlineStorage.enqueueSync({
-      client_tx_id,
-      device_id: 'POS-LOCAL',
+      client_tx_id: opTxId,
+      device_id: deviceId,
       action: 'UPDATE_PURCHASE',
       entity: 'purchases',
       local_id: String(id),
-      payload: { ...payload, id },
-      created_at: new Date().toISOString(),
+      payload: { ...payloadWithTx, id },
+      status: offlineStatus,
+      server_persisted: false,
+      cloud_confirmed: false,
+      created_at: existingQueueEntry?.created_at || nowIso,
     });
+    await offlineSyncManager.refreshPendingCount().catch(() => {});
     return {
       success: true,
       offline: true,
+      sync_status: offlineStatus,
       purchase: updatedRecord,
       data: updatedRecord,
       message: 'Purchase invoice updated locally (Offline Mode). Will synchronize when online.',
@@ -3412,17 +3723,23 @@ export const api = {
           const seenServerIds = new Set<number>(
             rows.map((s: any) => Number(s?.id || s?.server_id || 0)).filter((sid) => sid > 0)
           );
+          const cloudFallbackStatus: RecordSyncStatus = data.cloudSync?.status
+            ? normalizeRecordSyncStatus(data.cloudSync.status)
+            : 'synced';
           const enriched = rows.map((srvSale: any) => {
             const txKey = String(srvSale.client_tx_id || `SRV-SALE-${srvSale.id}`);
             seenKeys.add(txKey);
             if (srvSale.invoice_number) seenInvNos.add(String(srvSale.invoice_number).toLowerCase());
             const loc = localByTx.get(txKey) || localBySrvId.get(Number(srvSale.id));
             if (loc?.client_tx_id) seenKeys.add(String(loc.client_tx_id));
-            if (
-              loc &&
-              (loc.sync_status === 'pending' || loc.sync_status === 'syncing' || loc.sync_status === 'failed')
-            ) {
-              return { ...srvSale, ...loc };
+            if (loc && isUnsyncedRecordStatus(loc.sync_status) && srvSale.sync_status !== 'synced') {
+              return {
+                ...srvSale,
+                ...loc,
+                sync_status: srvSale.sync_status
+                  ? normalizeRecordSyncStatus(srvSale.sync_status)
+                  : normalizeRecordSyncStatus(loc.sync_status),
+              };
             }
             const srvItems = Array.isArray(srvSale?.items)
               ? srvSale.items
@@ -3441,8 +3758,10 @@ export const api = {
               ...(preserveLocItems ? { items: locItems, lines: loc?.lines || locItems } : {}),
               server_id: srvSale.server_id || srvSale.id,
               client_tx_id: loc?.client_tx_id || txKey,
-              sync_status: 'synced' as const,
-              sync_error: null,
+              sync_status: srvSale.sync_status
+                ? normalizeRecordSyncStatus(srvSale.sync_status)
+                : cloudFallbackStatus,
+              sync_error: srvSale.sync_error || null,
             };
             toCache.push(merged);
             return merged;
@@ -3461,14 +3780,13 @@ export const api = {
             !params?.endDate;
 
           // Reconcile stale synced held records in IndexedDB:
-          // 1) Any local held/draft record whose server_id or invoice_number matches a completed/posted/cancelled server invoice must be removed
-          // 2) On unfiltered held list, remove any non-pending local held record no longer present in server held list
+          // 1) Any local held/draft record whose server_id matches a completed/posted/cancelled server invoice must be removed
+          // 2) On unfiltered held list, remove any genuinely synced local held record no longer present in server held list
           for (const loc of existingLocal) {
             const locSt = String(loc?.status || '').trim().toLowerCase();
             const isHeldLoc = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt);
             if (!isHeldLoc || !loc?.client_tx_id) continue;
-            const isPendingLoc =
-              loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+            const isPendingLoc = isUnsyncedRecordStatus(loc?.sync_status);
             const sid = Number(loc?.server_id || loc?.id || 0);
             const matchedNonHeldServerRow =
               sid > 0
@@ -3489,13 +3807,12 @@ export const api = {
             }
           }
 
-          // Include ONLY genuinely unsynced offline invoices (pending/syncing/failed) not yet pushed to server
+          // Include ALL genuinely unsynced offline invoices (local_saved / pending_sync / sync_error) not yet on server
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
             const locSt = String(loc.status || '').trim().toLowerCase();
-            const isPendingLoc = loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
-            if (!isPendingLoc) {
+            if (!isUnsyncedRecordStatus(loc?.sync_status)) {
               continue;
             }
             const key = String(loc?.client_tx_id || '');
@@ -3531,7 +3848,10 @@ export const api = {
               const hay = `${loc.invoice_number || ''} ${loc.customer_name || ''} ${loc.salesman || ''}`.toLowerCase();
               if (!hay.includes(qLower)) continue;
             }
-            enriched.push(loc);
+            enriched.push({
+              ...loc,
+              sync_status: normalizeRecordSyncStatus(loc?.sync_status),
+            });
             mergedExtraCount++;
           }
 
@@ -3761,14 +4081,54 @@ export const api = {
    */
   async createSale(payload: any) {
     const nowIso = new Date().toISOString();
-    const deviceId = offlineSyncManager.getState().deviceId;
-    const clientTxId =
+    const syncState = offlineSyncManager.getState();
+    const deviceId = syncState.deviceId;
+    const isOfflineMode = syncState.operatingMode === 'OFFLINE';
+    const clientTxId = String(
       payload.client_request_id ||
-      payload.client_tx_id ||
-      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `TX-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+        payload.client_tx_id ||
+        (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `TX-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`)
+    );
     const payloadWithTx = { ...payload, client_request_id: clientTxId, client_tx_id: clientTxId };
+    const isHeldOrDraft = [
+      'held',
+      'hold',
+      'on_hold',
+      'on hold',
+      'draft',
+      'pending',
+      'temp',
+      'temporary',
+    ].includes(String(payload.status || '').trim().toLowerCase());
+
+    // Safeguard #1 & #2: Save permanently in local IndexedDB + sync_queue BEFORE network/server save
+    const preSaveRecord = {
+      id: Date.now(),
+      ...payloadWithTx,
+      items: Array.isArray(payload.items) ? payload.items : [],
+      client_tx_id: clientTxId,
+      client_request_id: clientTxId,
+      sync_status: 'local_saved' as RecordSyncStatus,
+      local_modified: true,
+      sync_error: null,
+      created_at: payload.created_at || nowIso,
+      updated_at: nowIso,
+    };
+    await offlineStorage.put('sales', preSaveRecord);
+    await offlineStorage.enqueueSync({
+      client_tx_id: clientTxId,
+      device_id: deviceId,
+      action: isHeldOrDraft ? 'HOLD_SALE' : 'CREATE_SALE',
+      entity: 'sales',
+      local_id: clientTxId,
+      payload: payloadWithTx,
+      status: 'local_saved',
+      server_persisted: false,
+      cloud_confirmed: false,
+      created_at: nowIso,
+    });
 
     try {
       const res = await authFetch('/api/sales', {
@@ -3776,47 +4136,94 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payloadWithTx),
       });
-      const data = await res.json();
+      const data = await parseJsonSafe(res);
       if (res.ok && data.success) {
         const savedInvoice = data.invoice || data.data || data.sale;
-        if (savedInvoice) {
-          const saleRecord = {
-            ...payloadWithTx,
-            ...savedInvoice,
-            id: savedInvoice.id || Date.now(),
-            server_id: savedInvoice.id,
-            client_tx_id: savedInvoice.client_tx_id || clientTxId,
-            items: savedInvoice.items || payload.items || [],
-            sync_status: 'synced' as const,
-            local_modified: false,
-            sync_error: null,
-            created_at: savedInvoice.created_at || nowIso,
-            updated_at: savedInvoice.updated_at || nowIso,
-          };
-          const existingSales = await offlineStorage.getAll<any>('sales').catch(() => []);
-          for (const loc of existingSales) {
-            const sameServer = savedInvoice.id && (Number(loc?.id) === Number(savedInvoice.id) || Number(loc?.server_id) === Number(savedInvoice.id));
-            if (sameServer && loc?.client_tx_id && String(loc.client_tx_id) !== String(saleRecord.client_tx_id)) {
-              await offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
-            }
+        const cloudConfirmed = Boolean(data.cloudSync?.cloudConfirmed);
+        const finalSyncStatus: RecordSyncStatus = cloudConfirmed
+          ? 'synced'
+          : normalizeRecordSyncStatus(
+              data.cloudSync?.status ||
+                data.sync_status ||
+                (isOfflineMode ? 'local_saved' : 'pending_sync')
+            );
+        const canonicalId = savedInvoice?.id || preSaveRecord.id;
+        const canonicalTxId = String(savedInvoice?.client_tx_id || savedInvoice?.client_request_id || clientTxId);
+        const saleRecord = {
+          ...payloadWithTx,
+          ...(savedInvoice || {}),
+          id: canonicalId,
+          server_id: savedInvoice?.id || preSaveRecord.id,
+          client_tx_id: canonicalTxId,
+          client_request_id: canonicalTxId,
+          items: savedInvoice?.items || payload.items || [],
+          sync_status: finalSyncStatus,
+          local_modified: !cloudConfirmed,
+          sync_error: data.cloudSync?.lastError || null,
+          created_at: savedInvoice?.created_at || preSaveRecord.created_at,
+          updated_at: savedInvoice?.updated_at || nowIso,
+        };
+        const existingSales = await offlineStorage.getAll<any>('sales').catch(() => []);
+        for (const loc of existingSales) {
+          const sameServer =
+            savedInvoice?.id &&
+            (Number(loc?.id) === Number(savedInvoice.id) || Number(loc?.server_id) === Number(savedInvoice.id));
+          if (sameServer && loc?.client_tx_id && String(loc.client_tx_id) !== canonicalTxId) {
+            await offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
           }
-          await offlineStorage.put('sales', saleRecord);
-          if (data.invoice) data.invoice = saleRecord;
-          if (data.data) data.data = saleRecord;
-          await offlineSyncManager.refreshPendingCount();
         }
+        if (canonicalTxId !== clientTxId) {
+          await offlineStorage.delete('sales', clientTxId).catch(() => {});
+          await offlineStorage.delete('sync_queue', clientTxId).catch(() => {});
+        }
+        await offlineStorage.put('sales', saleRecord);
+
+        // Safeguard #3: Only clear sync_queue once Firestore confirms persistence
+        if (cloudConfirmed) {
+          await offlineStorage.updateSyncItemStatus(canonicalTxId, 'synced', {
+            server_id: canonicalId,
+            server_invoice_number: saleRecord.invoice_number,
+            server_persisted: true,
+            cloud_confirmed: true,
+          });
+        } else {
+          await offlineStorage.enqueueSync({
+            client_tx_id: canonicalTxId,
+            device_id: deviceId,
+            action: isHeldOrDraft ? 'HOLD_SALE' : 'CREATE_SALE',
+            entity: 'sales',
+            local_id: String(canonicalId),
+            payload: saleRecord,
+            status: finalSyncStatus,
+            server_id: canonicalId,
+            server_invoice_number: saleRecord.invoice_number,
+            server_persisted: true,
+            cloud_confirmed: false,
+            error: data.cloudSync?.lastError || null,
+            created_at: preSaveRecord.created_at,
+          });
+        }
+
+        if (data.invoice) data.invoice = saleRecord;
+        if (data.data) data.data = saleRecord;
+        data.sync_status = finalSyncStatus;
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
         return data;
       }
-      if (res.status >= 400 && res.status < 500 && data.error) {
-        throw new Error(data.error);
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+        await offlineStorage.delete('sales', clientTxId).catch(() => {});
+        await offlineStorage.delete('sync_queue', clientTxId).catch(() => {});
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
+        throw new Error(data?.error || `Sales invoice rejected (HTTP ${res.status})`);
       }
     } catch (err: any) {
-      if (
-        err?.message &&
-        !err.message.includes('Failed to fetch') &&
-        !err.message.includes('NetworkError') &&
-        (typeof navigator === 'undefined' || navigator.onLine !== false)
-      ) {
+      const msg = String(err?.message || '');
+      const isTransient =
+        msg === 'NON_JSON_HTML_RESPONSE' ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false);
+      if (msg && !isTransient) {
         throw err;
       }
       // Offline fallback: save locally to IndexedDB & queue for automatic background sync
@@ -3828,6 +4235,7 @@ export const api = {
     await offlineSyncManager.refreshPendingCount();
     return {
       offline: true,
+      sync_status: latestSale?.sync_status || 'local_saved',
       message: 'Invoice saved locally (Offline Mode). Will sync automatically when online.',
       invoice: {
         ...latestSale,
@@ -3843,7 +4251,9 @@ export const api = {
    */
   async updateSale(id: number | string, payload: any) {
     const nowIso = new Date().toISOString();
-    const deviceId = offlineSyncManager.getState().deviceId;
+    const syncState = offlineSyncManager.getState();
+    const deviceId = syncState.deviceId;
+    const isOfflineMode = syncState.operatingMode === 'OFFLINE';
     const allSales = await offlineStorage.getAll<any>('sales').catch(() => []);
     const existing = allSales.find(
       (s) =>
@@ -3851,34 +4261,84 @@ export const api = {
         String(s.server_id) === String(id) ||
         String(s.client_tx_id) === String(id)
     );
+    const opTxId = String(
+      payload.client_request_id ||
+        payload.client_tx_id ||
+        existing?.client_tx_id ||
+        `TX-UPD-SALE-${id}-${Date.now()}`
+    );
+    const payloadWithTx = {
+      ...payload,
+      client_request_id: opTxId,
+      client_tx_id: opTxId,
+    };
+    const recordKey = String(existing?.client_tx_id || opTxId);
+    const existingQueueEntry = await offlineStorage.get<any>('sync_queue', opTxId).catch(() => undefined);
+
+    // Safeguard #1 & #2: Persist updated invoice locally BEFORE sending PUT
+    const preUpdateRecord = {
+      ...(existing || {}),
+      ...payloadWithTx,
+      id,
+      server_id: existing?.server_id || (Number(id) > 0 && Number(id) < 1_000_000_000_000 ? Number(id) : existing?.server_id),
+      client_tx_id: recordKey,
+      client_request_id: opTxId,
+      items: Array.isArray(payload.items) ? payload.items : existing?.items || [],
+      sync_status: 'local_saved' as RecordSyncStatus,
+      local_modified: true,
+      sync_error: null,
+      created_at: existing?.created_at || nowIso,
+      updated_at: nowIso,
+    };
+    await offlineStorage.put('sales', preUpdateRecord);
+    await offlineStorage.enqueueSync({
+      client_tx_id: opTxId,
+      device_id: deviceId,
+      action: 'UPDATE_SALE',
+      entity: 'sales',
+      local_id: String(id),
+      payload: { ...payloadWithTx, id },
+      status: 'local_saved',
+      server_persisted: false,
+      cloud_confirmed: false,
+      created_at: existingQueueEntry?.created_at || nowIso,
+    });
 
     try {
       const res = await authFetch(`/api/sales/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payloadWithTx),
       });
-      const data = await res.json();
+      const data = await parseJsonSafe(res);
       if (res.ok && data.success) {
         const savedInvoice = data.invoice || data.data || data.sale;
         const canonicalId = savedInvoice?.id || existing?.id || id;
         const txKey = String(
           savedInvoice?.client_tx_id ||
             savedInvoice?.client_request_id ||
-            existing?.client_tx_id ||
-            `SRV-SALE-${canonicalId}`
+            recordKey
         );
+        const cloudConfirmed = Boolean(data.cloudSync?.cloudConfirmed);
+        const finalSyncStatus: RecordSyncStatus = cloudConfirmed
+          ? 'synced'
+          : normalizeRecordSyncStatus(
+              data.cloudSync?.status ||
+                data.sync_status ||
+                (isOfflineMode ? 'local_saved' : 'pending_sync')
+            );
         const saleRecord = {
           ...(existing || {}),
-          ...payload,
+          ...payloadWithTx,
           ...(savedInvoice || {}),
           id: canonicalId,
           server_id: canonicalId,
           client_tx_id: txKey,
+          client_request_id: txKey,
           items: savedInvoice?.items || payload.items || existing?.items || [],
-          sync_status: 'synced' as const,
-          local_modified: false,
-          sync_error: null,
+          sync_status: finalSyncStatus,
+          local_modified: !cloudConfirmed,
+          sync_error: data.cloudSync?.lastError || null,
           created_at: existing?.created_at || savedInvoice?.created_at || nowIso,
           updated_at: savedInvoice?.updated_at || nowIso,
         };
@@ -3892,7 +4352,6 @@ export const api = {
             await offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
           }
         }
-        // Purge any queued sync operations referencing this held/updated invoice so they never replay an old held state
         const queuedOps = await offlineStorage.getAll<any>('sync_queue').catch(() => []);
         for (const qItem of queuedOps) {
           if (qItem?.entity !== 'sales') continue;
@@ -3903,61 +4362,90 @@ export const api = {
             qLocalId === String(id) ||
             qPayloadId === String(canonicalId) ||
             qPayloadId === String(id) ||
+            String(qItem?.client_tx_id) === opTxId ||
             (existing?.client_tx_id && String(qItem?.client_tx_id) === String(existing.client_tx_id));
-          if (matchesQueuedSale && qItem?.client_tx_id) {
+          if (!matchesQueuedSale || !qItem?.client_tx_id) continue;
+          if (cloudConfirmed || String(qItem.client_tx_id) !== txKey) {
             await offlineStorage.delete('sync_queue', String(qItem.client_tx_id)).catch(() => {});
           }
+        }
+        if (!cloudConfirmed) {
+          await offlineStorage.enqueueSync({
+            client_tx_id: txKey,
+            device_id: deviceId,
+            action: 'UPDATE_SALE',
+            entity: 'sales',
+            local_id: String(canonicalId),
+            payload: saleRecord,
+            status: finalSyncStatus,
+            server_id: canonicalId,
+            server_invoice_number: saleRecord.invoice_number,
+            server_persisted: true,
+            cloud_confirmed: false,
+            error: data.cloudSync?.lastError || null,
+            created_at: existingQueueEntry?.created_at || nowIso,
+          });
         }
         await offlineStorage.put('sales', saleRecord);
         if (data.invoice) data.invoice = saleRecord;
         if (data.data) data.data = saleRecord;
-        await offlineSyncManager.refreshPendingCount();
+        data.sync_status = finalSyncStatus;
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
         return data;
       }
-      if (res.status >= 400 && data?.error) {
-        throw new Error(data.error);
-      }
-      if (!res.ok) {
-        throw new Error(`Failed to update sales invoice (HTTP ${res.status})`);
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+        if (existing) {
+          await offlineStorage.put('sales', existing).catch(() => {});
+        } else {
+          await offlineStorage.delete('sales', recordKey).catch(() => {});
+        }
+        if (existingQueueEntry) {
+          await offlineStorage.put('sync_queue', existingQueueEntry).catch(() => {});
+        } else {
+          await offlineStorage.delete('sync_queue', opTxId).catch(() => {});
+        }
+        await offlineSyncManager.refreshPendingCount().catch(() => {});
+        throw new Error(data?.error || `Failed to update sales invoice (HTTP ${res.status})`);
       }
     } catch (err: any) {
-      if (
-        err?.message &&
-        !err.message.includes('Failed to fetch') &&
-        !err.message.includes('NetworkError') &&
-        (typeof navigator === 'undefined' || navigator.onLine !== false)
-      ) {
+      const msg = String(err?.message || '');
+      const isTransient =
+        msg === 'NON_JSON_HTML_RESPONSE' ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false);
+      if (msg && !isTransient) {
         throw err;
       }
     }
 
-    const client_tx_id = `TX-UPD-SALE-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-    const recordKey = existing?.client_tx_id || String(id);
+    const offlineStatus: RecordSyncStatus =
+      isOfflineMode || (typeof navigator !== 'undefined' && navigator.onLine === false)
+        ? 'local_saved'
+        : 'pending_sync';
     const updatedRecord = {
-      ...(existing || {}),
-      ...payload,
-      id,
-      client_tx_id: recordKey,
-      sync_status: 'pending',
-      local_modified: true,
-      sync_error: null,
-      created_at: existing?.created_at || nowIso,
-      updated_at: nowIso,
+      ...preUpdateRecord,
+      sync_status: offlineStatus,
+      updated_at: new Date().toISOString(),
     };
     await offlineStorage.put('sales', updatedRecord);
     await offlineStorage.enqueueSync({
-      client_tx_id,
+      client_tx_id: opTxId,
       device_id: deviceId,
       action: 'UPDATE_SALE',
       entity: 'sales',
       local_id: String(id),
-      payload: { ...payload, id },
-      created_at: nowIso,
+      payload: { ...payloadWithTx, id },
+      status: offlineStatus,
+      server_persisted: false,
+      cloud_confirmed: false,
+      created_at: existingQueueEntry?.created_at || nowIso,
     });
-    await offlineSyncManager.refreshPendingCount();
+    await offlineSyncManager.refreshPendingCount().catch(() => {});
     return {
       success: true,
       offline: true,
+      sync_status: offlineStatus,
       invoice: updatedRecord,
       data: updatedRecord,
       message: 'Sales invoice updated locally (Offline Mode). Will sync automatically when online.',

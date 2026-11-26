@@ -11,6 +11,7 @@ import {
   closeDatabaseConnection,
   reopenDatabaseConnection,
   syncRuntimeToSeedDatabase,
+  checkpointDatabaseWal,
   getWasDatabaseCreatedOnBoot,
   getWasDatabaseQuarantinedOnBoot,
   markDatabaseHydratedFromCloud,
@@ -99,7 +100,8 @@ const VAULT_COLLECTION = 'ams_vault_e5f2831c';
 const VAULT_SERVER_KEY = 'ams_srv_vault_e5f2831c_4daf_499d_a38b_45adc902ab45';
 const MAX_CHUNK_CHARS = 650000; // Safely below Firestore 1 MiB document limit
 const MANIFEST_CACHE_TTL_MS = 60_000; // 60s cache to eliminate duplicate manifest verification reads
-const QUOTA_EXHAUSTED_COOLDOWN_MS = 15 * 60 * 1000; // 15-minute cooldown before auto-probing after daily quota exhaustion
+const QUOTA_EXHAUSTED_COOLDOWN_MS = 30 * 60 * 1000; // 30-minute cooldown before auto-probing after daily quota exhaustion
+const AUTO_UPLOAD_MIN_INTERVAL_MS = 10 * 60 * 1000; // Batch automatic background cloud uploads at least 10 minutes apart to protect Firestore daily quota
 
 const ENV_SCOPE_PREFIX = config.envScope === 'test' ? 'test' : 'prod';
 const MANIFEST_DOC_ID = `${ENV_SCOPE_PREFIX}_manifest`;
@@ -146,6 +148,7 @@ let cachedManifest: ManifestMetadata | null = null;
 let dbConnectionBlocked = false;
 let dbConnectionErrorMessage: string | null = null;
 let lastReconnectAttemptAt = 0;
+let lastAutoUploadAt = 0;
 let hasHydratedFromCloudThisProcess = false;
 let hasLocalMutationsSinceBoot = false;
 
@@ -245,16 +248,30 @@ export function enqueueLocalMutationForCloudSync(
   try {
     ensurePendingCloudSyncQueueTables();
     const db = getDatabase();
-    db.prepare(
-      `INSERT INTO pending_cloud_sync_queue (route_label, method, table_name, record_id, client_tx_id, synced)
-       VALUES (?, ?, ?, ?, ?, 0)`
-    ).run(
-      routeLabel,
-      method,
-      meta?.tableName || null,
-      meta?.recordId || null,
-      meta?.clientTxId || null
-    );
+    const cleanTxId = meta?.clientTxId ? String(meta.clientTxId).trim() : null;
+    if (cleanTxId) {
+      const existing = db
+        .prepare('SELECT id FROM pending_cloud_sync_queue WHERE synced = 0 AND client_tx_id = ? LIMIT 1')
+        .get(cleanTxId) as { id: number } | undefined;
+      if (!existing) {
+        db.prepare(
+          `INSERT INTO pending_cloud_sync_queue (route_label, method, table_name, record_id, client_tx_id, synced)
+           VALUES (?, ?, ?, ?, ?, 0)`
+        ).run(
+          routeLabel,
+          method,
+          meta?.tableName || null,
+          meta?.recordId || null,
+          cleanTxId
+        );
+      }
+    } else {
+      db.prepare(
+        `INSERT INTO pending_cloud_sync_queue (route_label, method, table_name, record_id, client_tx_id, synced)
+         VALUES (?, ?, ?, ?, NULL, 0)`
+      ).run(routeLabel, method, meta?.tableName || null, meta?.recordId || null);
+    }
+    hasLocalMutationsSinceBoot = true;
     const countRow = db
       .prepare('SELECT COUNT(*) as cnt FROM pending_cloud_sync_queue WHERE synced = 0')
       .get() as { cnt: number } | undefined;
@@ -265,6 +282,7 @@ export function enqueueLocalMutationForCloudSync(
     });
     return totalPending;
   } catch {
+    hasLocalMutationsSinceBoot = true;
     const st = recordLocalPendingMutation();
     return st.pendingLocalChangesCount;
   }
@@ -283,6 +301,102 @@ export function getDurablePendingCloudSyncCount(): number {
   } catch {
     return getPersistedOperatingModeState().pendingLocalChangesCount;
   }
+}
+
+export function getPendingCloudClientTxIds(): Set<string> {
+  const out = new Set<string>();
+  try {
+    ensurePendingCloudSyncQueueTables();
+    const db = getDatabase();
+    const rows = db
+      .prepare(
+        "SELECT client_tx_id FROM pending_cloud_sync_queue WHERE synced = 0 AND client_tx_id IS NOT NULL AND TRIM(client_tx_id) != ''"
+      )
+      .all() as Array<{ client_tx_id: string }>;
+    for (const r of rows) {
+      if (r.client_tx_id) out.add(String(r.client_tx_id).trim());
+    }
+  } catch {
+    // ignore
+  }
+  return out;
+}
+
+export interface CloudSyncResponseMeta {
+  status: 'local_saved' | 'pending_sync' | 'synced' | 'sync_error';
+  cloudConfirmed: boolean;
+  offlineMode: boolean;
+  quotaExhausted: boolean;
+  pendingCloudSyncCount: number;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  versionSeq: number;
+}
+
+export function getCloudSyncResponseMeta(clientTxId?: string | null): CloudSyncResponseMeta {
+  const offlineMode = isOfflineOperatingMode();
+  const quotaExhausted = isFirestoreQuotaCooldownActive();
+  const pendingCloudSyncCount = getDurablePendingCloudSyncCount();
+  const pendingIds = getPendingCloudClientTxIds();
+  const persisted = getPersistedOperatingModeState();
+  const txPending = Boolean(clientTxId && pendingIds.has(String(clientTxId).trim()));
+  const cloudConfirmed =
+    !offlineMode &&
+    !quotaExhausted &&
+    isConnected &&
+    pendingCloudSyncCount === 0 &&
+    !txPending;
+
+  const effectiveError = offlineMode ? null : lastError || persisted.lastCloudSyncError || null;
+  const isTransientOrQuotaError =
+    quotaExhausted ||
+    isQuotaExhaustedError(effectiveError) ||
+    /unreachable|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|network/i.test(effectiveError || '');
+  const hasHardSyncError =
+    !offlineMode &&
+    !cloudConfirmed &&
+    !quotaExhausted &&
+    (persisted.cloudSyncStatus === 'Failed' || (Boolean(effectiveError) && !isTransientOrQuotaError));
+
+  const status: CloudSyncResponseMeta['status'] = offlineMode
+    ? 'local_saved'
+    : cloudConfirmed
+    ? 'synced'
+    : hasHardSyncError
+    ? 'sync_error'
+    : 'pending_sync';
+
+  return {
+    status,
+    cloudConfirmed,
+    offlineMode,
+    quotaExhausted,
+    pendingCloudSyncCount,
+    lastSyncAt: lastSyncAt || persisted.lastSuccessfulCloudSyncAt || null,
+    lastError: effectiveError,
+    versionSeq: Math.max(lastVersionSeq, persisted.lastSyncedCloudVersionSeq || 0),
+  };
+}
+
+/**
+ * Synchronously checkpoints SQLite WAL, records a committed local transaction in
+ * pending_cloud_sync_queue BEFORE the HTTP response is sent, marks res.locals so middleware
+ * does not double-enqueue, and returns honest Firestore persistence metadata.
+ */
+export function recordCloudMutationCommittedInRoute(
+  res: { locals?: Record<string, unknown> },
+  method: string,
+  routeLabel: string,
+  meta?: { tableName?: string; recordId?: string; clientTxId?: string }
+): CloudSyncResponseMeta {
+  hasLocalMutationsSinceBoot = true;
+  checkpointDatabaseWal();
+  enqueueLocalMutationForCloudSync(method, routeLabel, meta);
+  if (!res.locals) {
+    res.locals = {};
+  }
+  res.locals._cloudMutationEnqueued = true;
+  return getCloudSyncResponseMeta(meta?.clientTxId);
 }
 
 export function markDurablePendingCloudSyncCompleted(params: {
@@ -1060,6 +1174,16 @@ function mergeMissingRowsFromCloudDb(cloudDbFilePath: string, reason: string): n
         ),
       ];
 
+      const childLineParentCols: Record<string, string> = {
+        purchase_items: 'purchase_id',
+        sale_items: 'sale_id',
+        sale_return_items: 'return_id',
+        purchase_return_items: 'return_id',
+        journal_entry_lines: 'journal_entry_id',
+        accounting_voucher_lines: 'voucher_id',
+        party_supply_items: 'party_supply_id',
+      };
+
       db.pragma('foreign_keys = OFF');
       const mergeTx = db.transaction(() => {
         for (const tableName of allSharedTables) {
@@ -1080,24 +1204,52 @@ function mergeMissingRowsFromCloudDb(cloudDbFilePath: string, reason: string): n
           if (sharedCols.length === 0) continue;
 
           const quotedCols = sharedCols.map((c) => `"${c}"`).join(', ');
+          const selectCols = sharedCols.map((c) => `c."${c}"`).join(', ');
           const hasId = sharedCols.includes('id');
+          const txIdCol = sharedCols.includes('client_request_id')
+            ? 'client_request_id'
+            : sharedCols.includes('client_tx_id')
+            ? 'client_tx_id'
+            : null;
+          const parentCol =
+            childLineParentCols[tableName] && sharedCols.includes(childLineParentCols[tableName])
+              ? childLineParentCols[tableName]
+              : null;
+
+          const whereParts: string[] = [];
+          const runParams: unknown[] = [];
 
           if (hasId && localTables.has('sync_tombstones')) {
-            const stmt = db.prepare(
-              `INSERT OR IGNORE INTO main."${tableName}" (${quotedCols})
-               SELECT ${quotedCols} FROM cloud_snap."${tableName}"
-               WHERE CAST(id AS TEXT) NOT IN (SELECT CAST(record_id AS TEXT) FROM main.sync_tombstones WHERE table_name = ?)`
+            whereParts.push(
+              `CAST(c.id AS TEXT) NOT IN (SELECT CAST(record_id AS TEXT) FROM main.sync_tombstones WHERE table_name = ?)`
             );
-            const res = stmt.run(tableName);
-            totalInsertedOrUpdated += Number(res.changes || 0);
-          } else {
-            const stmt = db.prepare(
-              `INSERT OR IGNORE INTO main."${tableName}" (${quotedCols})
-               SELECT ${quotedCols} FROM cloud_snap."${tableName}"`
-            );
-            const res = stmt.run();
-            totalInsertedOrUpdated += Number(res.changes || 0);
+            runParams.push(tableName);
           }
+          if (txIdCol && localTables.has('sync_tombstones')) {
+            whereParts.push(
+              `(c."${txIdCol}" IS NULL OR TRIM(c."${txIdCol}") = '' OR c."${txIdCol}" NOT IN (SELECT client_tx_id FROM main.sync_tombstones WHERE table_name = ? AND client_tx_id IS NOT NULL))`
+            );
+            runParams.push(tableName);
+          }
+          if (txIdCol) {
+            whereParts.push(
+              `(c."${txIdCol}" IS NULL OR TRIM(c."${txIdCol}") = '' OR c."${txIdCol}" NOT IN (SELECT "${txIdCol}" FROM main."${tableName}" WHERE "${txIdCol}" IS NOT NULL AND TRIM("${txIdCol}") != ''))`
+            );
+          }
+          if (parentCol) {
+            whereParts.push(
+              `(c."${parentCol}" IS NULL OR c."${parentCol}" NOT IN (SELECT DISTINCT "${parentCol}" FROM main."${tableName}" WHERE "${parentCol}" IS NOT NULL))`
+            );
+          }
+
+          const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
+          const stmt = db.prepare(
+            `INSERT OR IGNORE INTO main."${tableName}" (${quotedCols})
+             SELECT ${selectCols} FROM cloud_snap."${tableName}" c
+             ${whereClause}`
+          );
+          const res = stmt.run(...runParams);
+          totalInsertedOrUpdated += Number(res.changes || 0);
         }
 
         // Reconcile sequences so invoice / item / voucher / account codes never regress or duplicate
@@ -1240,14 +1392,22 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
     }
 
     try {
-      const freshlyBootedContainerDb = getWasDatabaseCreatedOnBoot() || getWasDatabaseQuarantinedOnBoot();
-      const shouldAuthoritativelyRestoreFromVault =
-        config.envScope !== 'test' &&
-        !hasHydratedFromCloudThisProcess &&
+      const durablePendingCount = getDurablePendingCloudSyncCount();
+      const localDbIsEmptyOrCorrupt =
+        !localInspectBefore.valid ||
+        localScore === 0 ||
+        getWasDatabaseCreatedOnBoot() ||
+        getWasDatabaseQuarantinedOnBoot();
+      // NEVER replace a non-empty or pending local database with a full cloud binary overwrite.
+      // Full binary replacement is strictly restricted to empty/missing/quarantined container boots with 0 pending local sync rows.
+      const canFullReplaceEmptyLocal =
+        localDbIsEmptyOrCorrupt &&
+        localScore === 0 &&
+        durablePendingCount === 0 &&
         !hasLocalMutationsSinceBoot &&
         cloudScore > 0;
 
-      if ((localScore === 0 || freshlyBootedContainerDb || shouldAuthoritativelyRestoreFromVault) && cloudScore > 0) {
+      if (canFullReplaceEmptyLocal) {
         // Checkpoint and close active connection FIRST so any WAL frames are flushed cleanly before safety snapshot
         closeDatabaseConnection();
 
@@ -1310,22 +1470,31 @@ async function restoreOrMergeFromCloud(reason: string): Promise<boolean> {
         cloudRecordCounts = stagedInspect.counts as unknown as Record<string, number>;
 
         console.log(
-          `[AMS Cloud Persistence] RESTORED LIVE ${config.envScope.toUpperCase()} DATABASE FROM FIRESTORE (${reason}) — Version #${manifest.versionSeq}:`,
+          `[AMS Cloud Persistence] RESTORED EMPTY ${config.envScope.toUpperCase()} DATABASE FROM FIRESTORE (${reason}) — Version #${manifest.versionSeq}:`,
           stagedInspect.counts
         );
         return true;
       }
 
-      // Both local and cloud have data -> Non-destructive union merge!
-      const mergedCount = mergeMissingRowsFromCloudDb(stagedCloudPath, reason);
+      // Local DB has existing records or pending sync queue -> STRICT non-destructive conflict-aware merge!
+      // Newer local records and unuploaded local transactions are NEVER overwritten or deleted.
+      const persistedState = getPersistedOperatingModeState();
+      const conflictReport = detectAndMergeCloudSnapshotWithConflicts(stagedCloudPath, {
+        lastSyncedAt: persistedState.lastSuccessfulCloudSyncAt,
+        switchedAt: persistedState.switchedAt,
+        hasLocalPendingChanges: durablePendingCount > 0 || hasLocalMutationsSinceBoot,
+      });
+      const mergedMissingCount = mergeMissingRowsFromCloudDb(stagedCloudPath, reason);
       markDatabaseHydratedFromCloud();
       hasHydratedFromCloudThisProcess = true;
-      if (manifest.versionSeq > lastVersionSeq) {
+      if (manifest.versionSeq > lastVersionSeq && durablePendingCount === 0) {
         lastVersionSeq = manifest.versionSeq;
       }
       lastSha256 = manifest.sha256Hash;
       lastRestoreAt = new Date().toISOString();
-      return mergedCount > 0;
+      return (
+        conflictReport.mergedFromCloud + conflictReport.updatedFromCloud + mergedMissingCount > 0
+      );
     } finally {
       try {
         if (fs.existsSync(stagedCloudPath)) {
@@ -1522,6 +1691,11 @@ async function uploadLocalDbToCloud(
           const mergeTempPath = path.join(dataDir, `ams_preupload_merge_${Date.now()}.db`);
           fs.writeFileSync(mergeTempPath, cloudBuf);
           try {
+            detectAndMergeCloudSnapshotWithConflicts(mergeTempPath, {
+              lastSyncedAt: persisted.lastSuccessfulCloudSyncAt,
+              switchedAt: persisted.switchedAt,
+              hasLocalPendingChanges: getDurablePendingCloudSyncCount() > 0 || hasLocalMutationsSinceBoot,
+            });
             mergeMissingRowsFromCloudDb(mergeTempPath, `pre_upload_reconcile:${reason}`);
           } finally {
             if (fs.existsSync(mergeTempPath)) fs.unlinkSync(mergeTempPath);
@@ -1706,6 +1880,7 @@ async function uploadLocalDbToCloud(
     }
 
     if (manifestOk) {
+      lastAutoUploadAt = Date.now();
       console.log(
         `[AMS Cloud Persistence] Synced production DB to Firestore (${reason}) -> v${committedVersionSeq} (${committedTargetSlot}, ${totalChunks} chunk(s), ${compressedBuffer.length}B gz):`,
         finalInspection.counts
@@ -1796,21 +1971,42 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
         ? computeLocalSqliteSha256()
         : null;
 
+    const pendingCountBeforeSync = getDurablePendingCloudSyncCount();
+    const hasUnsyncedLocalWork = pendingCountBeforeSync > 0 || hasLocalMutationsSinceBoot;
+
     if (
-      (localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) ||
-      (localScore > 0 && manifest.versionSeq <= syncedCursor && manifest.sha256Hash === persisted.lastSyncedCloudSha256)
+      !hasUnsyncedLocalWork &&
+      ((localHash && manifest.sha256Hash && localHash === manifest.sha256Hash) ||
+        (localScore > 0 &&
+          manifest.versionSeq <= syncedCursor &&
+          manifest.sha256Hash === persisted.lastSyncedCloudSha256))
     ) {
       hasHydratedFromCloudThisProcess = true;
       lastVersionSeq = Math.max(lastVersionSeq, manifest.versionSeq);
       lastSha256 = manifest.sha256Hash;
       lastError = null;
-      if (getDurablePendingCloudSyncCount() > 0 && localHash !== manifest.sha256Hash) {
-        await uploadLocalDbToCloud(`${reason}_pending_queue_flush`);
+      return;
+    }
+
+    // UPLOAD-BEFORE-MERGE ORDERING:
+    // If local SQLite holds unsynced pending mutations, preserve local records, non-destructively
+    // reconcile any newer cloud additions (never overwriting newer local rows), and upload local
+    // pending mutations to Firestore BEFORE advancing the cloud cursor!
+    if (hasUnsyncedLocalWork && localScore > 0) {
+      hasHydratedFromCloudThisProcess = true;
+      if (cloudScore > 0 && manifest.versionSeq > syncedCursor) {
+        await restoreOrMergeFromCloud(`${reason}_non_destructive_reconcile_before_upload`);
+      }
+      const uploadedPending = await uploadLocalDbToCloud(`${reason}_pending_upload_first`, {
+        allowVerifiedPostMergeSync: true,
+      });
+      if (uploadedPending) {
+        lastError = null;
       }
       return;
     }
 
-    // Only download cloud snapshot if cloud actually has a newer versionSeq than our cursor or local is empty
+    // Only download/merge cloud snapshot if cloud has a newer versionSeq than our cursor or local is empty
     if ((cloudScore > 0 && localScore === 0) || manifest.versionSeq > syncedCursor) {
       await restoreOrMergeFromCloud(reason);
     } else {
@@ -1823,7 +2019,9 @@ async function syncOrBlockAgainstCurrentDatabase(reason: string): Promise<void> 
       (afterScore > cloudScore || getDurablePendingCloudSyncCount() > 0) &&
       (config.envScope !== 'production' || hasLocalMutationsSinceBoot || getDurablePendingCloudSyncCount() > 0)
     ) {
-      await uploadLocalDbToCloud(`${reason}_superset_sync`);
+      await uploadLocalDbToCloud(`${reason}_superset_sync`, {
+        allowVerifiedPostMergeSync: true,
+      });
     } else if (hasHydratedFromCloudThisProcess) {
       lastVersionSeq = Math.max(lastVersionSeq, manifest.versionSeq);
       lastSha256 = manifest.sha256Hash;
@@ -2002,6 +2200,13 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
 export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check'): Promise<boolean> {
   if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) return false;
   try {
+    // Upload pending local records first before pulling/merging cloud records
+    if (getDurablePendingCloudSyncCount() > 0 || hasLocalMutationsSinceBoot) {
+      const uploadedPending = await uploadLocalDbToCloud(`${reason}_upload_pending_before_pull`);
+      if (!uploadedPending || getDurablePendingCloudSyncCount() > 0) {
+        return false;
+      }
+    }
     const manifest = await fetchCloudManifest();
     if (!manifest) return false;
 
@@ -2017,21 +2222,29 @@ export async function pullFromCloudPersistenceIfNewer(reason = 'periodic_check')
 }
 
 /**
- * Schedules a debounced upload (8s) after any database mutation ONLY when in ONLINE MODE.
- * In OFFLINE MODE or during quota cooldown, mutations remain durably queued in pending_cloud_sync_queue.
+ * Schedules a batched background upload after database mutations ONLY when in ONLINE MODE.
+ * Enforces a 10-minute minimum interval between automatic full-snapshot uploads so normal
+ * billing, purchase hold/reload, and editing workflows never exhaust Firestore daily quota.
+ * Manual "Sync Cloud Now" and server shutdown flush immediately without waiting.
  */
 export function scheduleCloudUpload(reason = 'mutation'): void {
   if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) {
     return;
   }
   if (uploadTimer) {
-    clearTimeout(uploadTimer);
+    return; // Already scheduled; batch additional mutations into the pending sync
   }
+  const now = Date.now();
+  const elapsed = lastAutoUploadAt > 0 ? now - lastAutoUploadAt : AUTO_UPLOAD_MIN_INTERVAL_MS;
+  const remainingInterval = Math.max(0, AUTO_UPLOAD_MIN_INTERVAL_MS - elapsed);
+  const delayMs = Math.max(45_000, remainingInterval);
+
   uploadTimer = setTimeout(() => {
     uploadTimer = null;
     if (isOfflineOperatingMode() || isFirestoreQuotaCooldownActive()) return;
+    lastAutoUploadAt = Date.now();
     void uploadLocalDbToCloud(reason);
-  }, 8000);
+  }, delayMs);
 }
 
 /**
@@ -2168,9 +2381,10 @@ const NON_MUTATING_SYNC_ROUTES = new Set([
  * 3. In ONLINE MODE (when internet & quota are available), schedules background incremental cloud synchronization.
  */
 export async function cloudPersistenceMiddleware(
-  req: { method?: string; path?: string; originalUrl?: string },
+  req: { method?: string; path?: string; originalUrl?: string; body?: Record<string, unknown> },
   res: {
     statusCode: number;
+    locals?: Record<string, unknown>;
     status: (code: number) => { json: (body: unknown) => void };
     on: (event: string, listener: () => void) => void;
   },
@@ -2195,7 +2409,15 @@ export async function cloudPersistenceMiddleware(
           !routeLabel.startsWith('/api/system/sync-conflicts/')
         ) {
           hasLocalMutationsSinceBoot = true;
-          enqueueLocalMutationForCloudSync(method, routeLabel);
+          checkpointDatabaseWal();
+          if (!res.locals?._cloudMutationEnqueued) {
+            const clientTxId = req.body?.client_request_id
+              ? String(req.body.client_request_id).trim()
+              : req.body?.client_tx_id
+              ? String(req.body.client_tx_id).trim()
+              : undefined;
+            enqueueLocalMutationForCloudSync(method, routeLabel, { clientTxId });
+          }
           if (!isOfflineOperatingMode() && !isFirestoreQuotaCooldownActive()) {
             scheduleCloudUpload(`http:${method}:${routeLabel}`);
           }
@@ -2238,9 +2460,14 @@ export function hydrateSqliteFromCloudRecords(
 
   try {
     const tombRows = db
-      .prepare('SELECT table_name, record_id FROM sync_tombstones')
-      .all() as Array<{ table_name: string; record_id: string }>;
+      .prepare('SELECT table_name, record_id, client_tx_id FROM sync_tombstones')
+      .all() as Array<{ table_name: string; record_id: string; client_tx_id?: string | null }>;
     const tombSet = new Set(tombRows.map((t) => `${t.table_name}:${t.record_id}`));
+    const tombTxSet = new Set(
+      tombRows
+        .filter((t) => t.client_tx_id)
+        .map((t) => `${t.table_name}:${String(t.client_tx_id).trim()}`)
+    );
 
     const tx = db.transaction(() => {
       // 1. Accounts / Parties
@@ -2396,7 +2623,9 @@ export function hydrateSqliteFromCloudRecords(
       const salesList = Array.isArray(rawInvoices) ? rawInvoices : [];
       for (const s of salesList) {
         const id = Number(s?.server_id || s?.id || 0);
+        const sClientTxId = String(s?.client_tx_id || s?.client_request_id || '').trim();
         if (id > 0 && tombSet.has(`sales:${id}`)) continue;
+        if (sClientTxId && tombTxSet.has(`sales:${sClientTxId}`)) continue;
         const invNo = String(s?.invoice_number || '').trim();
         if (!invNo) continue;
 
@@ -2543,7 +2772,9 @@ export function hydrateSqliteFromCloudRecords(
       const purchaseList = Array.isArray(extra?.purchases) ? extra!.purchases : [];
       for (const p of purchaseList) {
         const id = Number(p?.server_id || p?.id || 0);
+        const pClientTxId = String(p?.client_tx_id || p?.client_request_id || '').trim();
         if (id > 0 && tombSet.has(`purchases:${id}`)) continue;
+        if (pClientTxId && tombTxSet.has(`purchases:${pClientTxId}`)) continue;
         const billNo = String(p?.bill_number || p?.invoice_number || '').trim();
         if (!billNo) continue;
 
@@ -3060,10 +3291,17 @@ export function detectAndMergeCloudSnapshotWithConflicts(
 
       const hasUpdatedAt = sharedCols.includes('updated_at');
       const hasCreatedAt = sharedCols.includes('created_at');
+      const txCol = sharedCols.includes('client_request_id')
+        ? 'client_request_id'
+        : sharedCols.includes('client_tx_id')
+        ? 'client_tx_id'
+        : null;
+      const pendingTxSet = getPendingCloudClientTxIds();
       const selectCols = Array.from(
         new Set([
           'id',
           ...(sharedCols.includes(rule.labelCol) ? [rule.labelCol] : []),
+          ...(txCol ? [txCol] : []),
           ...(hasUpdatedAt ? ['updated_at'] : []),
           ...(hasCreatedAt ? ['created_at'] : []),
           ...activeCompareCols,
@@ -3092,6 +3330,17 @@ export function detectAndMergeCloudSnapshotWithConflicts(
         const recId = String(cloudRow.id);
         const localRow = localById.get(recId);
         if (!localRow) continue;
+
+        const localTxVal = txCol ? String(localRow[txCol] || '').trim() : '';
+        const cloudTxVal = txCol ? String(cloudRow[txCol] || '').trim() : '';
+        if (localTxVal && pendingTxSet.has(localTxVal)) {
+          // Local transaction is still pending Firestore confirmation — never overwrite
+          continue;
+        }
+        if (localTxVal && cloudTxVal && localTxVal !== cloudTxVal) {
+          // Distinct transactions sharing an auto-increment numeric ID across terminals — never overwrite local
+          continue;
+        }
 
         const changedFields = activeCompareCols.filter(
           (col) => normalizeCompareValue(localRow[col]) !== normalizeCompareValue(cloudRow[col])
@@ -3290,6 +3539,16 @@ export function detectAndMergeCloudSnapshotWithConflicts(
       (t) => !skipTables.has(t) && cloudTables.has(t)
     );
 
+    const childLineParentCols: Record<string, string> = {
+      purchase_items: 'purchase_id',
+      sale_items: 'sale_id',
+      sale_return_items: 'return_id',
+      purchase_return_items: 'return_id',
+      journal_entry_lines: 'journal_entry_id',
+      accounting_voucher_lines: 'voucher_id',
+      party_supply_items: 'party_supply_id',
+    };
+
     db.pragma('foreign_keys = OFF');
     try {
       const mergeTx = db.transaction(() => {
@@ -3309,8 +3568,17 @@ export function detectAndMergeCloudSnapshotWithConflicts(
 
           const quotedCols = sharedCols.map((c) => `"${c}"`).join(', ');
           const hasId = sharedCols.includes('id');
+          const txIdCol = sharedCols.includes('client_request_id')
+            ? 'client_request_id'
+            : sharedCols.includes('client_tx_id')
+            ? 'client_tx_id'
+            : null;
           const rule = ALLOWED_CONFLICT_TABLES.find((r) => r.table === tableName);
           const natKey = rule?.naturalKeyCol && sharedCols.includes(rule.naturalKeyCol) ? rule.naturalKeyCol : null;
+          const parentCol =
+            childLineParentCols[tableName] && sharedCols.includes(childLineParentCols[tableName])
+              ? childLineParentCols[tableName]
+              : null;
 
           const whereParts: string[] = [];
           const params: unknown[] = [];
@@ -3321,8 +3589,24 @@ export function detectAndMergeCloudSnapshotWithConflicts(
             );
             params.push(tableName);
           }
+          if (txIdCol && localTables.has('sync_tombstones')) {
+            whereParts.push(
+              `(c."${txIdCol}" IS NULL OR TRIM(c."${txIdCol}") = '' OR c."${txIdCol}" NOT IN (SELECT client_tx_id FROM main.sync_tombstones WHERE table_name = ? AND client_tx_id IS NOT NULL))`
+            );
+            params.push(tableName);
+          }
           if (hasId) {
             whereParts.push(`c.id NOT IN (SELECT id FROM main."${tableName}")`);
+          }
+          if (txIdCol) {
+            whereParts.push(
+              `(c."${txIdCol}" IS NULL OR TRIM(c."${txIdCol}") = '' OR c."${txIdCol}" NOT IN (SELECT "${txIdCol}" FROM main."${tableName}" WHERE "${txIdCol}" IS NOT NULL AND TRIM("${txIdCol}") != ''))`
+            );
+          }
+          if (parentCol) {
+            whereParts.push(
+              `(c."${parentCol}" IS NULL OR c."${parentCol}" NOT IN (SELECT DISTINCT "${parentCol}" FROM main."${tableName}" WHERE "${parentCol}" IS NOT NULL))`
+            );
           }
           if (natKey) {
             whereParts.push(

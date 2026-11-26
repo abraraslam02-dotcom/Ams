@@ -43,6 +43,20 @@ export type OfflineSyncEntity =
   | 'vouchers'
   | 'cash_book';
 
+export type RecordSyncStatus = 'local_saved' | 'pending_sync' | 'synced' | 'sync_error';
+
+export function normalizeRecordSyncStatus(raw?: string | null): RecordSyncStatus {
+  const s = String(raw || '').trim().toLowerCase();
+  if (s === 'local_saved' || s === 'offline') return 'local_saved';
+  if (s === 'sync_error' || s === 'failed') return 'sync_error';
+  if (s === 'pending_sync' || s === 'pending' || s === 'syncing') return 'pending_sync';
+  return 'synced';
+}
+
+export function isUnsyncedRecordStatus(raw?: string | null): boolean {
+  return normalizeRecordSyncStatus(raw) !== 'synced';
+}
+
 export interface OfflineSyncItem {
   client_tx_id: string; // Unique UUID generated on creation
   device_id: string; // Counter / Device ID
@@ -51,12 +65,21 @@ export interface OfflineSyncItem {
   local_id: string | number;
   payload: any;
   created_at: string;
-  status: 'pending' | 'syncing' | 'synced' | 'failed';
+  status:
+    | 'local_saved'
+    | 'pending_sync'
+    | 'pending'
+    | 'syncing'
+    | 'synced'
+    | 'failed'
+    | 'sync_error';
   retry_count: number;
   error?: string | null;
   server_id?: string | number | null;
   server_invoice_number?: string | null;
   synced_at?: string | null;
+  server_persisted?: boolean;
+  cloud_confirmed?: boolean;
 }
 
 export interface OfflineMetaRecord {
@@ -344,12 +367,19 @@ class OfflineStorage {
 
   // --- SYNC QUEUE OPERATIONS ---
 
-  async enqueueSync(item: Omit<OfflineSyncItem, 'status' | 'retry_count'>): Promise<OfflineSyncItem> {
+  async enqueueSync(
+    item: Omit<OfflineSyncItem, 'status' | 'retry_count'> & {
+      status?: OfflineSyncItem['status'];
+      retry_count?: number;
+    }
+  ): Promise<OfflineSyncItem> {
     const fullItem: OfflineSyncItem = {
       ...item,
-      status: 'pending',
-      retry_count: 0,
-      error: null,
+      status: item.status || 'pending_sync',
+      retry_count: item.retry_count ?? 0,
+      error: item.error ?? null,
+      server_persisted: Boolean(item.server_persisted),
+      cloud_confirmed: Boolean(item.cloud_confirmed),
     };
     await this.put('sync_queue', fullItem);
     return fullItem;
@@ -357,28 +387,39 @@ class OfflineStorage {
 
   async getPendingSyncItems(): Promise<OfflineSyncItem[]> {
     const all = await this.getAll<OfflineSyncItem>('sync_queue');
-    const syncedToPrune = all.filter((i) => i.status === 'synced');
-    for (const s of syncedToPrune) {
+    // NEVER remove a pending item unless Firestore has confirmed server-side persistence
+    const confirmedToPrune = all.filter((i) => i.status === 'synced' && i.cloud_confirmed === true);
+    for (const s of confirmedToPrune) {
       if (s.client_tx_id) {
         await this.delete('sync_queue', s.client_tx_id).catch(() => {});
       }
     }
     return all
-      .filter((i) => i.status === 'pending' || i.status === 'failed')
+      .filter((i) => !(i.status === 'synced' && i.cloud_confirmed === true))
       .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  }
+
+  async getServerPushPendingItems(): Promise<OfflineSyncItem[]> {
+    const all = await this.getPendingSyncItems();
+    return all.filter(
+      (i) =>
+        i.server_persisted !== true &&
+        i.status !== 'syncing' &&
+        !(i.status === 'synced' && i.cloud_confirmed === true)
+    );
   }
 
   async getFailedSyncItems(): Promise<OfflineSyncItem[]> {
     const all = await this.getAll<OfflineSyncItem>('sync_queue');
     return all
-      .filter((i) => i.status === 'failed')
+      .filter((i) => i.status === 'failed' || i.status === 'sync_error')
       .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   }
 
   async retryFailedSyncItems(): Promise<number> {
     const failed = await this.getFailedSyncItems();
     for (const item of failed) {
-      item.status = 'pending';
+      item.status = 'pending_sync';
       item.error = null;
       await this.put('sync_queue', item);
     }
@@ -387,22 +428,123 @@ class OfflineStorage {
 
   async updateSyncItemStatus(
     clientTxId: string,
-    status: 'pending' | 'syncing' | 'synced' | 'failed',
-    extra?: { error?: string | null; server_id?: any; server_invoice_number?: string }
+    status: OfflineSyncItem['status'],
+    extra?: {
+      error?: string | null;
+      server_id?: any;
+      server_invoice_number?: string;
+      server_persisted?: boolean;
+      cloud_confirmed?: boolean;
+    }
   ): Promise<void> {
     const existing = await this.get<OfflineSyncItem>('sync_queue', clientTxId);
     if (!existing) return;
-    if (status === 'synced') {
+    if (status === 'synced' && extra?.cloud_confirmed === true) {
       await this.delete('sync_queue', clientTxId).catch(() => {});
       return;
     }
-    existing.status = status;
+    // If Express/SQLite persisted the record but Firestore has NOT yet confirmed it,
+    // keep the record durably in sync_queue as pending_sync (or sync_error).
+    existing.status = status === 'synced' ? 'pending_sync' : status;
     if (extra?.error !== undefined) existing.error = extra.error;
     if (extra?.server_id !== undefined) existing.server_id = extra.server_id;
     if (extra?.server_invoice_number !== undefined)
       existing.server_invoice_number = extra.server_invoice_number;
-    if (status === 'failed') existing.retry_count = (existing.retry_count || 0) + 1;
+    if (extra?.server_persisted !== undefined) existing.server_persisted = extra.server_persisted;
+    if (extra?.cloud_confirmed !== undefined) existing.cloud_confirmed = extra.cloud_confirmed;
+    if (status === 'synced') existing.synced_at = new Date().toISOString();
+    if (status === 'failed' || status === 'sync_error') {
+      existing.retry_count = (existing.retry_count || 0) + 1;
+    }
     await this.put('sync_queue', existing);
+  }
+
+  async confirmQueueItemsInCloud(params: {
+    cloudConfirmed: boolean;
+    pendingClientTxIds?: string[];
+    offlineMode?: boolean;
+    syncError?: string | null;
+  }): Promise<number> {
+    if (params.offlineMode) return 0;
+    const all = await this.getAll<OfflineSyncItem>('sync_queue');
+    if (all.length === 0) return 0;
+
+    const serverPendingSet = new Set(
+      (params.pendingClientTxIds || []).map((id) => String(id || '').trim()).filter(Boolean)
+    );
+    let confirmedCount = 0;
+
+    for (const qItem of all) {
+      if (qItem.server_persisted !== true) continue;
+      const txId = String(qItem.client_tx_id || '').trim();
+      if (!txId) continue;
+
+      const isConfirmed = Boolean(params.cloudConfirmed) && !serverPendingSet.has(txId);
+      const targetStore =
+        qItem.entity === 'cash_book'
+          ? 'cash_book'
+          : qItem.entity === 'sales' ||
+            qItem.entity === 'purchases' ||
+            qItem.entity === 'sale_returns' ||
+            qItem.entity === 'purchase_returns' ||
+            qItem.entity === 'items' ||
+            qItem.entity === 'accounts'
+          ? qItem.entity
+          : null;
+
+      if (isConfirmed) {
+        if (targetStore) {
+          try {
+            if (targetStore === 'items' || targetStore === 'accounts') {
+              const numId = Number(qItem.server_id || qItem.local_id || 0);
+              if (numId > 0) {
+                const rec = await this.get<any>(targetStore, numId);
+                if (rec) {
+                  await this.put(targetStore, { ...rec, sync_status: 'synced', local_modified: false });
+                }
+              }
+            } else {
+              const rec = await this.get<any>(targetStore, txId);
+              if (rec) {
+                await this.put(targetStore, {
+                  ...rec,
+                  sync_status: 'synced',
+                  local_modified: false,
+                  sync_error: null,
+                });
+              }
+            }
+          } catch {
+            // ignore non-critical store update
+          }
+        }
+        await this.delete('sync_queue', txId).catch(() => {});
+        confirmedCount++;
+      } else {
+        const nextStatus: OfflineSyncItem['status'] = params.syncError ? 'sync_error' : 'pending_sync';
+        qItem.status = nextStatus;
+        qItem.cloud_confirmed = false;
+        if (params.syncError !== undefined) qItem.error = params.syncError;
+        await this.put('sync_queue', qItem).catch(() => {});
+
+        if (targetStore && targetStore !== 'items' && targetStore !== 'accounts') {
+          try {
+            const rec = await this.get<any>(targetStore, txId);
+            if (rec && rec.sync_status !== nextStatus) {
+              await this.put(targetStore, {
+                ...rec,
+                sync_status: nextStatus,
+                sync_error: params.syncError || null,
+              });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    return confirmedCount;
   }
 
   // --- OFFLINE LOCAL BACKUP & RESTORATION ---

@@ -90,16 +90,23 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const getSyncBadgeInfo = () => {
     if (isOfflineMode) {
       return {
-        label: 'OFFLINE MODE • Local DB',
-        badgeClass: 'bg-amber-100 text-amber-950 border border-amber-400',
-        icon: <HardDrive className="w-3.5 h-3.5 text-amber-700" />,
+        label: 'OFFLINE MODE • Local Saved',
+        badgeClass: 'bg-sky-50 text-sky-900 border border-sky-300',
+        icon: <HardDrive className="w-3.5 h-3.5 text-sky-700" />,
       };
     }
     if (!syncState.isOnline) {
       return {
-        label: 'ONLINE MODE • Network Disconnected',
+        label: 'Local Saved • Network Offline',
+        badgeClass: 'bg-sky-50 text-sky-900 border border-sky-300',
+        icon: <WifiOff className="w-3.5 h-3.5 text-sky-700" />,
+      };
+    }
+    if (syncState.syncErrorCount > 0 || syncState.syncStatus === 'sync_error' || syncState.syncStatus === 'failed') {
+      return {
+        label: 'ONLINE MODE • Sync Error',
         badgeClass: 'bg-rose-50 text-rose-800 border border-rose-300',
-        icon: <WifiOff className="w-3.5 h-3.5 text-rose-600" />,
+        icon: <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />,
       };
     }
     if (unresolvedConflicts > 0) {
@@ -109,8 +116,17 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />,
       };
     }
+    if (pendingChanges > 0 || syncState.quotaExhausted) {
+      return {
+        label: syncState.quotaExhausted
+          ? 'Pending Sync • Quota Cooldown'
+          : 'ONLINE MODE • Pending Sync',
+        badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300',
+        icon: <Clock className="w-3.5 h-3.5 text-amber-600" />,
+      };
+    }
     return {
-      label: 'ONLINE MODE • Cloud DB',
+      label: 'ONLINE MODE • Synced',
       badgeClass: 'bg-emerald-50 text-emerald-800 border border-emerald-300',
       icon: <Wifi className="w-3.5 h-3.5 text-emerald-600" />,
     };
@@ -225,9 +241,17 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   <span className="font-semibold text-slate-800">{formattedLastSync}</span>
                 </div>
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Pending Local Changes:</span>
-                  <span className="font-mono font-bold text-slate-900">{pendingChanges}</span>
+                  <span className="text-slate-500 font-medium">Local Saved / Pending Sync:</span>
+                  <span className="font-mono font-bold text-slate-900">
+                    {syncState.localSavedCount} Local / {syncState.pendingSyncCount || pendingChanges} Pending
+                  </span>
                 </div>
+                {syncState.syncErrorCount > 0 && (
+                  <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-rose-50 border border-rose-200">
+                    <span className="text-rose-700 font-semibold">Sync Errors:</span>
+                    <span className="font-mono font-bold text-rose-800">{syncState.syncErrorCount}</span>
+                  </div>
+                )}
                 {unresolvedConflicts > 0 && (
                   <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-rose-50 border border-rose-200">
                     <span className="text-rose-700 font-semibold">Unresolved Conflicts:</span>

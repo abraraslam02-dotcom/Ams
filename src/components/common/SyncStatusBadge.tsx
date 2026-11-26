@@ -12,7 +12,7 @@ import {
   Laptop,
 } from 'lucide-react';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
-import { offlineStorage, OfflineSyncItem } from '../../services/offlineStorage';
+import { offlineStorage, OfflineSyncItem, normalizeRecordSyncStatus } from '../../services/offlineStorage';
 import { formatPKTTime } from '../../utils/formatters';
 
 export const SyncStatusBadge: React.FC = () => {
@@ -78,18 +78,18 @@ export const SyncStatusBadge: React.FC = () => {
   };
 
   const renderBadgeContent = () => {
-    if (!syncState.isOnline || syncState.syncStatus === 'offline') {
+    if (!syncState.isOnline || syncState.syncStatus === 'offline' || syncState.syncStatus === 'local_saved') {
       return (
         <button
           onClick={handleOpenModal}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition-colors cursor-pointer shadow-2xs"
-          title="Working Offline. Local data is safely saved in IndexedDB."
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-50 text-sky-900 border border-sky-300 hover:bg-sky-100 transition-colors cursor-pointer shadow-2xs"
+          title="Local Saved in IndexedDB. Pending transactions will sync automatically when online."
         >
-          <CloudOff className="w-3.5 h-3.5 text-amber-600 animate-pulse" />
-          <span>Offline Mode</span>
+          <CloudOff className="w-3.5 h-3.5 text-sky-600" />
+          <span>Local Saved</span>
           {syncState.pendingCount > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-500 text-white">
-              {syncState.pendingCount} Pending
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-sky-600 text-white">
+              {syncState.pendingCount} Local
             </span>
           )}
         </button>
@@ -109,32 +109,32 @@ export const SyncStatusBadge: React.FC = () => {
       );
     }
 
-    if (syncState.syncStatus === 'failed') {
+    if (syncState.syncStatus === 'sync_error' || syncState.syncStatus === 'failed' || syncState.syncErrorCount > 0) {
       return (
         <button
           onClick={handleOpenModal}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-50 text-rose-800 border border-rose-300 hover:bg-rose-100 transition-colors cursor-pointer shadow-2xs"
-          title="Sync encountered an error. Click to view and retry."
+          title="Sync Error — Local data preserved in IndexedDB. Click to view and retry."
         >
           <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
-          <span>Sync Failed</span>
-          {syncState.pendingCount > 0 && (
+          <span>Sync Error</span>
+          {(syncState.syncErrorCount || syncState.pendingCount) > 0 && (
             <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-rose-600 text-white">
-              {syncState.pendingCount}
+              {syncState.syncErrorCount || syncState.pendingCount}
             </span>
           )}
         </button>
       );
     }
 
-    if (syncState.pendingCount > 0) {
+    if (syncState.pendingCount > 0 || syncState.syncStatus === 'pending_sync') {
       return (
         <button
           onClick={handleOpenModal}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-50 text-sky-800 border border-sky-300 hover:bg-sky-100 transition-colors cursor-pointer shadow-2xs"
-          title={`${syncState.pendingCount} pending local transactions queued for sync.`}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition-colors cursor-pointer shadow-2xs"
+          title={`${syncState.pendingCount} pending local transaction(s) awaiting cloud confirmation.`}
         >
-          <Cloud className="w-3.5 h-3.5 text-sky-600" />
+          <Cloud className="w-3.5 h-3.5 text-amber-600" />
           <span>Pending Sync ({syncState.pendingCount})</span>
         </button>
       );
@@ -144,7 +144,7 @@ export const SyncStatusBadge: React.FC = () => {
       <button
         onClick={handleOpenModal}
         className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 transition-colors cursor-pointer shadow-2xs"
-        title={`100% Synced • ${syncState.counterName}`}
+        title={`Synced • ${syncState.counterName}`}
       >
         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
         <span className="hidden sm:inline">Synced</span>
@@ -356,14 +356,22 @@ export const SyncStatusBadge: React.FC = () => {
                         </div>
                         <span
                           className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                            item.status === 'failed'
+                            normalizeRecordSyncStatus(item.status) === 'sync_error'
                               ? 'bg-rose-100 text-rose-800'
-                              : item.status === 'syncing'
-                              ? 'bg-blue-100 text-blue-800'
+                              : normalizeRecordSyncStatus(item.status) === 'local_saved'
+                              ? 'bg-sky-100 text-sky-800'
+                              : normalizeRecordSyncStatus(item.status) === 'synced'
+                              ? 'bg-emerald-100 text-emerald-800'
                               : 'bg-amber-100 text-amber-800'
                           }`}
                         >
-                          {item.status.toUpperCase()}
+                          {normalizeRecordSyncStatus(item.status) === 'sync_error'
+                            ? 'SYNC ERROR'
+                            : normalizeRecordSyncStatus(item.status) === 'local_saved'
+                            ? 'LOCAL SAVED'
+                            : normalizeRecordSyncStatus(item.status) === 'synced'
+                            ? 'SYNCED'
+                            : 'PENDING SYNC'}
                         </span>
                       </div>
                     ))}

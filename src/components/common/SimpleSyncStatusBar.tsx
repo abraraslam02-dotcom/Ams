@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { RefreshCw, Wifi, WifiOff, Clock, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Wifi, WifiOff, Clock, CheckCircle2, AlertTriangle, HardDrive } from 'lucide-react';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
+import { normalizeRecordSyncStatus } from '../../services/offlineStorage';
 import { formatAppDateTime } from '../../utils/formatters';
 
 interface SimpleSyncStatusBarProps {
@@ -55,7 +56,7 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
       >
         <span
           className={`flex items-center gap-1 font-semibold ${
-            syncState.isOnline
+            syncState.isOnline && !isOfflineMode
               ? dark
                 ? 'text-emerald-400'
                 : 'text-emerald-700'
@@ -64,21 +65,27 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
               : 'text-amber-700'
           }`}
         >
-          {syncState.isOnline ? (
+          {syncState.isOnline && !isOfflineMode ? (
             <Wifi className="w-3.5 h-3.5" />
           ) : (
             <WifiOff className="w-3.5 h-3.5" />
           )}
-          <span>{syncState.isOnline ? 'Online' : 'Offline'}</span>
+          <span>{isOfflineMode ? 'Local Saved' : syncState.isOnline ? 'Online' : 'Offline'}</span>
         </span>
+
+        {syncState.localSavedCount > 0 && (
+          <span className={dark ? 'text-sky-300' : 'text-sky-700'}>
+            Local Saved: <strong>{syncState.localSavedCount}</strong>
+          </span>
+        )}
 
         <span className={dark ? 'text-slate-400' : 'text-slate-500'}>
-          Pending: <strong className={dark ? 'text-white' : 'text-slate-900'}>{syncState.pendingCount}</strong>
+          Pending Sync: <strong className={dark ? 'text-white' : 'text-slate-900'}>{syncState.pendingSyncCount}</strong>
         </span>
 
-        {syncState.failedCount > 0 && (
+        {syncState.syncErrorCount > 0 && (
           <span className={dark ? 'text-rose-400' : 'text-rose-700'}>
-            Failed: <strong>{syncState.failedCount}</strong>
+            Sync Error: <strong>{syncState.syncErrorCount}</strong>
           </span>
         )}
 
@@ -102,7 +109,7 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
     <div className="bg-white rounded-xl border border-slate-200 px-4 py-2.5 shadow-2xs flex flex-wrap items-center justify-between gap-3 text-xs print:hidden">
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-2">
-          {syncState.isOnline ? (
+          {syncState.isOnline && !isOfflineMode ? (
             <span className="inline-flex items-center gap-1.5 font-bold text-emerald-700">
               <Wifi className="w-4 h-4 text-emerald-600" />
               <span>Online</span>
@@ -110,15 +117,17 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
           ) : (
             <span className="inline-flex items-center gap-1.5 font-bold text-amber-700">
               <WifiOff className="w-4 h-4 text-amber-600" />
-              <span>Offline</span>
+              <span>{isOfflineMode ? 'Offline Mode' : 'Offline'}</span>
             </span>
           )}
           <span className="text-slate-300">|</span>
           <span
             className={`font-semibold ${
-              syncState.syncStatus === 'failed'
+              syncState.syncStatus === 'sync_error' || syncState.syncStatus === 'failed'
                 ? 'text-rose-700'
-                : syncState.syncStatus === 'offline'
+                : syncState.syncStatus === 'offline' || syncState.syncStatus === 'local_saved'
+                ? 'text-sky-700'
+                : syncState.syncStatus === 'pending_sync' || syncState.syncStatus === 'pending'
                 ? 'text-amber-700'
                 : 'text-slate-700'
             }`}
@@ -134,11 +143,14 @@ export const SimpleSyncStatusBar: React.FC<SimpleSyncStatusBarProps> = ({
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="text-slate-600">
-            Pending: <strong className="font-mono text-slate-900">{syncState.pendingCount}</strong>
+          <span className="text-sky-700">
+            Local Saved: <strong className="font-mono">{syncState.localSavedCount}</strong>
           </span>
-          <span className={syncState.failedCount > 0 ? 'text-rose-700' : 'text-slate-600'}>
-            Failed: <strong className="font-mono">{syncState.failedCount}</strong>
+          <span className="text-amber-700">
+            Pending Sync: <strong className="font-mono">{syncState.pendingSyncCount}</strong>
+          </span>
+          <span className={syncState.syncErrorCount > 0 ? 'text-rose-700' : 'text-slate-600'}>
+            Sync Error: <strong className="font-mono">{syncState.syncErrorCount}</strong>
           </span>
         </div>
       </div>
@@ -164,25 +176,33 @@ interface RecordSyncBadgeProps {
 }
 
 export const RecordSyncBadge: React.FC<RecordSyncBadgeProps> = ({ syncStatus }) => {
-  const status = String(syncStatus || 'synced').toLowerCase();
-  if (status === 'failed') {
+  const status = normalizeRecordSyncStatus(syncStatus);
+  if (status === 'sync_error') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold whitespace-nowrap">
         <AlertTriangle className="w-3 h-3" />
-        <span>Failed</span>
+        <span>Sync Error</span>
       </span>
     );
   }
-  if (status === 'pending' || status === 'syncing') {
+  if (status === 'local_saved') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-50 text-sky-800 border border-sky-200 text-[10px] font-bold whitespace-nowrap">
+        <HardDrive className="w-3 h-3" />
+        <span>Local Saved</span>
+      </span>
+    );
+  }
+  if (status === 'pending_sync') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold whitespace-nowrap">
         <Clock className="w-3 h-3" />
-        <span>Pending</span>
+        <span>Pending Sync</span>
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold whitespace-nowrap">
       <CheckCircle2 className="w-3 h-3" />
       <span>Synced</span>
     </span>

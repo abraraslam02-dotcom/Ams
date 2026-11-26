@@ -1,4 +1,4 @@
-import { getPakistanDateISO } from '../utils/pakistanTime.ts';
+import { getPakistanDateISO, parseUtcTimestamp } from '../utils/pakistanTime.ts';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDatabase } from '../db/connection.ts';
@@ -13,9 +13,36 @@ import { getDbResetEpoch, getDbResetTimestamp } from '../db/resetState.ts';
 import {
   ensureCloudPersistenceReady,
   getCloudPersistenceStatus,
+  getCloudSyncResponseMeta,
+  getPendingCloudClientTxIds,
   hydrateSqliteFromCloudRecords,
+  pullFromCloudPersistenceIfNewer,
+  recordCloudMutationCommittedInRoute,
   syncDatabaseToCloudSQL,
+  type CloudSyncResponseMeta,
 } from '../services/cloudPersistenceService.ts';
+
+function resolveSyncPullRowStatus(
+  row: Record<string, any>,
+  cloudSync: CloudSyncResponseMeta,
+  pendingTxIds: Set<string>
+): CloudSyncResponseMeta['status'] {
+  if (cloudSync.offlineMode) return 'local_saved';
+  const txId = String(row.client_request_id || row.client_tx_id || '').trim();
+  const nonSyncedStatus: CloudSyncResponseMeta['status'] =
+    cloudSync.status === 'sync_error' ? 'sync_error' : 'pending_sync';
+  if (txId && pendingTxIds.has(txId)) return nonSyncedStatus;
+  if (cloudSync.cloudConfirmed) return 'synced';
+  if (cloudSync.lastSyncAt) {
+    const syncMs = parseUtcTimestamp(cloudSync.lastSyncAt)?.getTime() || 0;
+    const rowMs = parseUtcTimestamp(row.updated_at || row.created_at)?.getTime() || 0;
+    if (syncMs > 0 && rowMs > 0 && rowMs <= syncMs) {
+      return 'synced';
+    }
+    return nonSyncedStatus;
+  }
+  return nonSyncedStatus;
+}
 
 export const syncRouter = Router();
 
@@ -203,6 +230,9 @@ syncRouter.get('/status', (_req: Request, res: Response) => {
       .prepare('SELECT synced_at FROM sync_audit_log ORDER BY id DESC LIMIT 1')
       .get() as { synced_at?: string } | undefined;
 
+    const cloudSync = getCloudSyncResponseMeta();
+    const pendingCloudClientTxIds = Array.from(getPendingCloudClientTxIds());
+
     return res.json({
       success: true,
       online: true,
@@ -213,6 +243,8 @@ syncRouter.get('/status', (_req: Request, res: Response) => {
       lastSyncAt: lastSyncRow?.synced_at || null,
       dbResetEpoch: getDbResetEpoch(db),
       dbResetAt: getDbResetTimestamp(db),
+      cloudSync,
+      pendingCloudClientTxIds,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -231,7 +263,11 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     res.setHeader('Expires', '0');
 
     await ensureCloudPersistenceReady();
+    // Upload pending local SQLite mutations to Firestore BEFORE pulling/merging cloud records
+    await pullFromCloudPersistenceIfNewer('api_sync_pull').catch(() => false);
     ensureSyncTables();
+    const pullCloudMeta = getCloudSyncResponseMeta();
+    const pullPendingTxIds = getPendingCloudClientTxIds();
     const db = getDatabase();
     const deviceId = String(req.query.device_id || 'unknown');
     const counterName = String(req.query.counter_name || 'Main Counter');
@@ -341,7 +377,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
         item_count: lines.length,
         items: lines,
         lines,
-        sync_status: 'synced',
+        sync_status: resolveSyncPullRowStatus(s, pullCloudMeta, pullPendingTxIds),
       };
     });
 
@@ -402,7 +438,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
         invoice_number: p.bill_number || p.invoice_number || `PUR-${p.id}`,
         item_count: lines.length,
         items: lines,
-        sync_status: 'synced',
+        sync_status: resolveSyncPullRowStatus(p, pullCloudMeta, pullPendingTxIds),
       };
     });
 
@@ -440,7 +476,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
         ...cb,
         server_id: cb.id,
         client_tx_id: cb.client_tx_id || `SERVER-CB-${cb.id}`,
-        sync_status: 'synced',
+        sync_status: resolveSyncPullRowStatus(cb, pullCloudMeta, pullPendingTxIds),
       }));
     } catch {
       // ignore if table not yet queried
@@ -474,7 +510,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
         server_id: sr.id,
         client_tx_id: sr.client_tx_id || `SERVER-SR-${sr.id}`,
         items: srMap.get(Number(sr.id)) || [],
-        sync_status: 'synced',
+        sync_status: resolveSyncPullRowStatus(sr, pullCloudMeta, pullPendingTxIds),
       }));
     } catch {
       // ignore
@@ -507,7 +543,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
         server_id: pr.id,
         client_tx_id: pr.client_tx_id || `SERVER-PR-${pr.id}`,
         items: prMap.get(Number(pr.id)) || [],
-        sync_status: 'synced',
+        sync_status: resolveSyncPullRowStatus(pr, pullCloudMeta, pullPendingTxIds),
       }));
     } catch {
       // ignore
@@ -633,6 +669,8 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
       tombstones,
       maxTombstoneId,
       tableMeta,
+      cloudSync: pullCloudMeta,
+      pendingCloudClientTxIds: Array.from(pullPendingTxIds),
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -653,7 +691,14 @@ syncRouter.post('/push', (req: Request, res: Response) => {
     const items = req.body?.items || req.body?.operations;
 
     if (!Array.isArray(items) || items.length === 0) {
-      return res.json({ success: true, results: [] });
+      const cloudSync = getCloudSyncResponseMeta();
+      return res.json({
+        success: true,
+        results: [],
+        cloudSync,
+        cloud_confirmed: cloudSync.cloudConfirmed,
+        sync_status: cloudSync.status,
+      });
     }
 
     const results: Array<{
@@ -936,7 +981,6 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           const purchaseId = db.transaction(() => {
             if (targetId > 0 && existingPurRow) {
               reverseExistingPurchase(targetId, 'Offline Sync Edit & Re-posting', 'edit');
-              db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(targetId);
             }
             const pId = executePurchasePosting(
               {
@@ -1721,11 +1765,29 @@ syncRouter.post('/push', (req: Request, res: Response) => {
       }
     }
 
+    let syncedItemsCount = 0;
+    for (const r of results) {
+      if (r.status === 'synced') {
+        syncedItemsCount++;
+        recordCloudMutationCommittedInRoute(res, 'POST', '/api/sync/push', {
+          recordId: r.server_id ? String(r.server_id) : undefined,
+          clientTxId: r.client_tx_id,
+        });
+      }
+    }
+    const cloudSync =
+      syncedItemsCount > 0
+        ? getCloudSyncResponseMeta()
+        : getCloudSyncResponseMeta();
+
     return res.json({
       success: true,
       deviceId,
       processedCount: results.length,
       results,
+      cloudSync,
+      cloud_confirmed: cloudSync.cloudConfirmed,
+      sync_status: cloudSync.status,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -1871,13 +1933,31 @@ syncRouter.post('/rehydrate', authenticateToken, async (req: Request, res: Respo
       result.restoredVouchers;
 
     if (totalRestored > 0) {
+      const restoredTxIds: string[] = [];
+      for (const inv of rawBodyInvoices) {
+        const tx = String(inv?.client_request_id || inv?.client_tx_id || '').trim();
+        if (tx) restoredTxIds.push(tx);
+      }
+      for (const pur of rawPurchases) {
+        const tx = String(pur?.client_request_id || pur?.client_tx_id || '').trim();
+        if (tx) restoredTxIds.push(tx);
+      }
+      if (restoredTxIds.length > 0) {
+        for (const txId of restoredTxIds) {
+          recordCloudMutationCommittedInRoute(res, 'POST', '/api/sync/rehydrate', { clientTxId: txId });
+        }
+      } else {
+        recordCloudMutationCommittedInRoute(res, 'POST', '/api/sync/rehydrate');
+      }
       await syncDatabaseToCloudSQL('client_indexeddb_rehydrate');
     }
 
+    const cloudSync = getCloudSyncResponseMeta();
     return res.json({
       success: true,
       ...result,
       totalRestored,
+      cloudSync,
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
