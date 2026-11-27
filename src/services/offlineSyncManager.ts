@@ -956,7 +956,7 @@ class OfflineSyncManager {
       }
 
       // Step 2b (Upload-Before-Pull Safeguard #4): If any local sales/purchases/items remain unsynced
-      // in IndexedDB (not yet pushed), push/rehydrate them to server SQLite & Firestore BEFORE pulling.
+      // in IndexedDB (not yet pushed), push/rehydrate them to server SQLite & Cloud SQL PostgreSQL BEFORE pulling.
       const [localSalesCheck, localPurchasesCheck, localItemsCheck] = await Promise.all([
         offlineStorage.getAll<any>('sales'),
         offlineStorage.getAll<any>('purchases'),
@@ -1163,7 +1163,7 @@ class OfflineSyncManager {
             await offlineStorage.cacheApiData('advance_tax_settings', pullData.advanceTaxSettings);
           }
 
-          // Reconcile sync_queue entries against authoritative Firestore confirmation state
+          // Reconcile sync_queue entries against authoritative Cloud SQL PostgreSQL confirmation state
           await offlineStorage.confirmQueueItemsInCloud({
             cloudConfirmed: Boolean(pullData.cloudSync?.cloudConfirmed),
             pendingClientTxIds: Array.isArray(pullData.pendingCloudClientTxIds)
@@ -1204,12 +1204,7 @@ class OfflineSyncManager {
         this.lastError = syncErrorMsg || `${this.syncErrorCount} record(s) encountered a sync error.`;
       } else if (this.pendingCount > 0) {
         this.syncStatus = 'pending_sync';
-        this.lastError = this.quotaExhausted
-          ? 'Cloud quota exhausted; local changes safely queued.'
-          : null;
-        if (this.quotaExhausted && this.operatingMode === 'ONLINE' && this.isOnline) {
-          this.scheduleAutoSync(30000);
-        }
+        this.lastError = null;
       } else {
         this.syncStatus = 'synced';
         this.lastError = null;
@@ -1396,7 +1391,7 @@ class OfflineSyncManager {
       }
     }
 
-    // 3. Queue for synchronization (never deleted until Firestore confirms persistence)
+    // 3. Queue for synchronization (never deleted until Cloud SQL PostgreSQL confirms persistence)
     await offlineStorage.enqueueSync({
       client_tx_id: clientTxId,
       device_id: this.deviceId,
@@ -1573,7 +1568,7 @@ class OfflineSyncManager {
       }
     }
 
-    // 3. Queue for synchronization (never deleted until Firestore confirms persistence)
+    // 3. Queue for synchronization (never deleted until Cloud SQL PostgreSQL confirms persistence)
     await offlineStorage.enqueueSync({
       client_tx_id: clientTxId,
       device_id: this.deviceId,

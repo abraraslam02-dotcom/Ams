@@ -3032,7 +3032,7 @@ export const api = {
           })
           .catch(() => {});
 
-        // Safeguard #3: Never remove sync_queue entry unless Firestore confirmed server-side persistence
+        // Safeguard #3: Never remove sync_queue entry unless Cloud SQL PostgreSQL confirmed server-side persistence
         if (cloudConfirmed) {
           await offlineStorage.updateSyncItemStatus(canonicalTxId, 'synced', {
             server_id: canonicalId,
@@ -3218,7 +3218,7 @@ export const api = {
             qPayloadId === String(id) ||
             String(qItem?.client_tx_id) === opTxId;
           if (!matchesQueuedPur || !qItem?.client_tx_id) continue;
-          // Only delete queued items when Firestore confirmed OR it's a superseded op from an older edit
+          // Only delete queued items when Cloud SQL PostgreSQL confirmed OR it's a superseded op from an older edit
           if (cloudConfirmed || String(qItem.client_tx_id) !== canonicalTxId) {
             await offlineStorage.delete('sync_queue', String(qItem.client_tx_id)).catch(() => {});
           }
@@ -4178,7 +4178,7 @@ export const api = {
         }
         await offlineStorage.put('sales', saleRecord);
 
-        // Safeguard #3: Only clear sync_queue once Firestore confirms persistence
+        // Safeguard #3: Only clear sync_queue once Cloud SQL PostgreSQL confirms persistence
         if (cloudConfirmed) {
           await offlineStorage.updateSyncItemStatus(canonicalTxId, 'synced', {
             server_id: canonicalId,

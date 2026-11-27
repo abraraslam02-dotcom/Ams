@@ -29,7 +29,6 @@ import {
   checkCloudDatabaseReachability,
   getCloudPersistenceStatus,
   getDurablePendingCloudSyncCount,
-  isFirestoreQuotaCooldownActive,
   runConflictAwareBidirectionalCloudSync,
 } from './cloudPersistenceService.ts';
 import { reconcileHeldAndDuplicateLedgerEntries } from './ledgerIntegrityService.ts';
@@ -271,7 +270,6 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
     state.pendingLocalChangesCount || 0,
     getDurablePendingCloudSyncCount()
   );
-  const quotaActive = isFirestoreQuotaCooldownActive();
 
   let activeBackupDir = config.primaryBackupDir;
   try {
@@ -285,7 +283,7 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
     activeDatabaseLabel:
       state.mode === 'OFFLINE'
         ? 'Local SQLite Database (Offline Mode — Zero Cloud Requests)'
-        : 'Local-First SQLite + Automatic Cloud Sync (Online Mode)',
+        : 'Local SQLite Primary + Cloud SQL PostgreSQL (Manual Sync Ready)',
     switchedAt: state.switchedAt,
     switchedBy: state.switchedBy,
     manualControlOnly: true,
@@ -301,11 +299,11 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
     dDriveBackupError: state.dDriveBackupError || null,
     dDriveConfiguredFolder: state.dDriveConfiguredFolder || 'D:\\AbrarMedicalStore\\Backups',
     dDriveFolderCheck: dDriveCheck,
-    cloudSyncStatus: quotaActive ? 'Pending' : state.cloudSyncStatus,
+    cloudSyncStatus: state.cloudSyncStatus,
     lastSuccessfulCloudSyncAt: state.lastSuccessfulCloudSyncAt,
     lastCloudSyncError: state.lastCloudSyncError,
-    quotaExhausted: quotaActive,
-    quotaCooldownUntilMs: state.quotaCooldownUntilMs || 0,
+    quotaExhausted: false,
+    quotaCooldownUntilMs: 0,
     pendingLocalChangesCount: durablePendingCount,
     unresolvedConflictsCount,
     storage: {
@@ -328,7 +326,7 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
       databaseIdentity: cloudStatus.databaseIdentity || cloudStatus.externalLocation,
       lastVersionSeq: cloudStatus.lastVersionSeq,
       lastError: state.mode === 'OFFLINE' ? null : cloudStatus.lastError,
-      quotaExhausted: quotaActive,
+      quotaExhausted: false,
     },
   };
 }
@@ -336,7 +334,7 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
 /**
  * Safely switches between ONLINE MODE and OFFLINE MODE (Super Admin ONLY).
  * 1. Flushes/checkpoints pending WAL writes to disk.
- * 2. In Local-First mode, allows switching to ONLINE MODE even if Firestore quota is temporarily exhausted
+ * 2. In Local-First mode, allows switching to ONLINE MODE cleanly for manual Cloud SQL PostgreSQL sync
  *    (so automatic sync will resume as soon as quota resets) or after verifying cloud reachability.
  */
 export async function switchOperatingMode(params: {
@@ -498,9 +496,7 @@ export async function switchOperatingMode(params: {
     switched: true,
     mode: 'ONLINE',
     previousMode,
-    message: cloudCheck.quotaExhausted
-      ? 'Switched to ONLINE MODE. Local operations continue normally; Cloud Sync is Pending because Firestore daily read quota is exhausted and will resume automatically after quota reset.'
-      : `Switched to ONLINE MODE. Automatic Cloud Synchronization is active.${syncSummaryMsg}`,
+    message: `Switched to ONLINE MODE. Manual Cloud SQL PostgreSQL synchronization is ready.${syncSummaryMsg}`,
     pendingLocalChangesCount: finalStatus.pendingLocalChangesCount,
     unresolvedConflictsCount: finalStatus.unresolvedConflictsCount,
     status: finalStatus,

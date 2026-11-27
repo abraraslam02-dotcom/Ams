@@ -85,7 +85,7 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
         type: 'success',
         message:
           type === 'full'
-            ? 'Downloaded Abrar-Medical-Store-Windows-Installer.zip. Extract it on your Windows PC and double-click Install-Abrar-Medical-Store.bat to install locally with your database and zero Firestore quota limits.'
+            ? 'Downloaded Abrar-Medical-Store-Windows-Installer.zip. Extract it on your Windows PC and double-click Install-Abrar-Medical-Store.bat to install locally with your permanent D: drive SQLite database.'
             : 'Downloaded Install-Abrar-Medical-Store-Shortcut.bat. Double-click it on Windows to create your Desktop & Start Menu POS shortcut.',
       });
     } catch (err: unknown) {
@@ -603,9 +603,7 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
                 : 'Not synced yet'}
             </div>
             <div className="text-[11px] text-slate-600">
-              {status?.quotaExhausted
-                ? 'Cloud Sync Pending (Daily Read Quota Exhausted — Local Data Safe)'
-                : `Status: ${status?.cloudSyncStatus || 'Ready'} • Cloud Version #${status?.cloud?.lastVersionSeq ?? 0}`}
+              {`Status: ${status?.cloudSyncStatus || 'Ready'} • Cloud SQL Version #${status?.cloud?.lastVersionSeq ?? 0}`}
             </div>
           </div>
 
@@ -657,48 +655,16 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
           </div>
         </div>
 
-        {/* Quota Exhaustion Clear Banner */}
-        {status?.quotaExhausted && (
-          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-col gap-2.5">
-            <div className="flex items-start gap-2.5">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <div className="font-bold">
-                  Cloud Sync is Pending Because Firestore Daily Read Quota Is Exhausted
-                </div>
-                <div className="text-[11px] mt-0.5 leading-relaxed">
-                  All sales, purchases, stock, ledgers, cashbook entries, and pending changes are safely saved in your local database. Automatic background cloud sync has been throttled to protect daily quota. For unlimited daily transactions with zero Firestore quota limits, switch to Local Offline Mode or install directly on your Windows PC.
-                </div>
+        {/* Cloud SQL Connection Error Banner (if last manual sync failed) */}
+        {status?.lastCloudSyncError && (
+          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold">Last Cloud SQL Sync Notice</div>
+              <div className="text-[11px] mt-0.5 leading-relaxed">
+                {status.lastCloudSyncError} — All local transactions remain safely stored in your local SQLite database.
               </div>
             </div>
-            {isSuperAdmin && (
-              <div className="flex flex-wrap items-center gap-2 pl-6">
-                {!isOffline && (
-                  <button
-                    type="button"
-                    disabled={switchingTo !== null}
-                    onClick={() => void handleSwitchMode('OFFLINE')}
-                    className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <WifiOff className="w-3.5 h-3.5" />
-                    <span>Switch to OFFLINE MODE Now (Zero Quota)</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  disabled={downloadingInstaller !== null}
-                  onClick={() => void handleDownloadWindowsInstaller('full')}
-                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Download className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>
-                    {downloadingInstaller === 'full'
-                      ? 'Building Windows Installer...'
-                      : 'Download Windows Local Installer (.zip)'}
-                  </span>
-                </button>
-              </div>
-            )}
           </div>
         )}
 
@@ -1035,7 +1001,7 @@ export const SuperAdminOperatingModePanel: React.FC<SuperAdminOperatingModePanel
                   Windows Installation Package (Local Desktop App + Database)
                 </div>
                 <div className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
-                  Install Abrar Medical Store directly on your Windows 10/11 PC (<span className="font-mono">D:\AbrarMedicalStore</span>) with your live database snapshot, Desktop &amp; Start Menu shortcut, and Local Offline Mode (no daily Firestore quota limits).
+                  Install Abrar Medical Store directly on your Windows 10/11 PC (<span className="font-mono">D:\AbrarMedicalStore</span>) with your permanent SQLite database on D: drive, Desktop &amp; Start Menu shortcut, and full Offline Mode with manual Cloud SQL PostgreSQL sync.
                 </div>
               </div>
             </div>

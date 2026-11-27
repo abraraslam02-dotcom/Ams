@@ -171,7 +171,7 @@ echo   Desktop Shortcut : Abrar Medical Store POS
 echo   App Directory    : %APP_DIR%
 echo   Database File    : %TARGET_DB%
 echo   Backups Folder   : %BACKUP_DIR%
-echo   Local Mode       : OFFLINE (Instant speed, ZERO Firestore quota limits)
+echo   Local Mode       : OFFLINE (Permanent SQLite on D: Drive + Manual Cloud SQL PostgreSQL Sync)
 echo ============================================================================
 echo.
 echo Starting Abrar Medical Store POS now...
@@ -259,7 +259,7 @@ Step 3: The installer automatically:
         - Copies the application to C:\\AbrarMedicalStore\\App
         - Protects any existing D:\\AbrarMedicalStore\\Database\\ams_medical.db
           (or copies your live database snapshot if no DB exists yet)
-        - Configures Local-First OFFLINE MODE so you NEVER hit Firestore daily quota limits
+        - Configures Local-First OFFLINE MODE on D: drive with manual Cloud SQL PostgreSQL sync
         - Creates "Abrar Medical Store POS" on your Windows Desktop & Start Menu
 
 DAILY USE
@@ -423,7 +423,6 @@ include_files = [
     'vite.config.ts',
     'index.html',
     'favicon.ico',
-    'firebase-applet-config.json',
     'server.ts',
     'metadata.json',
 ]

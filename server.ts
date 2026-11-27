@@ -32,7 +32,6 @@ import { ensureAuthTables } from './server/services/authService.ts';
 import { reconcileHeldAndDuplicateLedgerEntries } from './server/services/ledgerIntegrityService.ts';
 import {
   initCloudPersistence,
-  syncDatabaseToCloudSQL,
   cloudPersistenceMiddleware,
   runPreDeploymentSafetyChecks,
   stopCloudPersistenceBackgroundLoop,
@@ -95,7 +94,7 @@ async function startServer() {
     if (getWasDatabaseQuarantinedOnBoot()) {
       deferredBootVerificationForCloudRecovery = true;
       console.warn(
-        '[AMS DB] Local database file failed integrity verification and was safely quarantined. Deferring migration & audit until verified Cloud Firestore hydration completes.'
+        '[AMS DB] Local database file failed integrity verification and was safely quarantined. Please restore from a verified local backup or run manual Cloud SQL PostgreSQL sync.'
       );
     } else {
       const preBootCounts = captureCoreTableCounts(activeDb);
@@ -588,21 +587,8 @@ self.addEventListener('fetch', (event) => {
       setTimeout(() => process.exit(0), 1000).unref();
     };
 
-    if (isOfflineOperatingMode()) {
-      // STRICT OFFLINE MODE: Zero Cloud DB requests on shutdown — checkpoint & close local DB cleanly
-      finishExit();
-      return;
-    }
-
-    const timeoutGuard = setTimeout(finishExit, 4500);
-    timeoutGuard.unref();
-
-    syncDatabaseToCloudSQL(`shutdown_${signal}`)
-      .catch(() => {})
-      .finally(() => {
-        clearTimeout(timeoutGuard);
-        finishExit();
-      });
+    // Local SQLite is primary; checkpoint WAL cleanly and close without triggering unexpected network calls on shutdown
+    finishExit();
   };
 
   process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));

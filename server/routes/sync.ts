@@ -263,7 +263,7 @@ syncRouter.get('/pull', async (req: Request, res: Response) => {
     res.setHeader('Expires', '0');
 
     await ensureCloudPersistenceReady();
-    // Upload pending local SQLite mutations to Firestore BEFORE pulling/merging cloud records
+    // Local SQLite mutations are durably queued for manual Cloud SQL PostgreSQL Sync Now
     await pullFromCloudPersistenceIfNewer('api_sync_pull').catch(() => false);
     ensureSyncTables();
     const pullCloudMeta = getCloudSyncResponseMeta();
@@ -1900,7 +1900,7 @@ syncRouter.get('/audit-logs', (req: Request, res: Response) => {
  * POST /api/sync/rehydrate
  * Non-destructively merges any client IndexedDB records that are missing on the server
  * (INSERT OR IGNORE, strictly respecting sync_tombstones so deleted records are never resurrected)
- * and persists the merged superset to Google Cloud Firestore.
+ * and persists the merged superset to local SQLite (and queues for Cloud SQL PostgreSQL).
  */
 syncRouter.post('/rehydrate', authenticateToken, async (req: Request, res: Response) => {
   try {

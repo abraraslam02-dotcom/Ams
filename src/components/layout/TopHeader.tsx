@@ -4,7 +4,6 @@ import {
   Users2, ShieldCheck, LogOut, CheckCircle2, AlertTriangle, Download, Database, SlidersHorizontal, Cloud, HardDrive,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { useFirebase } from '../../context/FirebaseContext';
 import { DatabaseDiagnostics } from '../../types/database';
 import { OperatingModeStatus } from '../../types/system';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
@@ -31,7 +30,6 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onNavigateToUsers, onNavigateToMoreOptions, onNavigateToOperatingMode, onNavigateToAudit, onNavigateToClearDemoData, compact = false,
 }) => {
   const { user, isSuperAdmin, logout } = useAuth();
-  const { firebaseUser, firestoreStatus, signInWithGoogle, signOutFirebase } = useFirebase();
   const [now, setNow] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncPopoverOpen, setSyncPopoverOpen] = useState(false);
@@ -116,11 +114,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />,
       };
     }
-    if (pendingChanges > 0 || syncState.quotaExhausted) {
+    if (pendingChanges > 0) {
       return {
-        label: syncState.quotaExhausted
-          ? 'Pending Sync • Quota Cooldown'
-          : 'ONLINE MODE • Pending Sync',
+        label: 'ONLINE MODE • Pending Sync',
         badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300',
         icon: <Clock className="w-3.5 h-3.5 text-amber-600" />,
       };
@@ -324,17 +320,6 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             {isSuperAdmin && onNavigateToMoreOptions && item(<SlidersHorizontal className="w-4 h-4 text-emerald-600" />, 'Sales Invoice More Options', onNavigateToMoreOptions)}
             {item(<ShieldCheck className="w-4 h-4 text-slate-600" />, 'System Logs', onNavigateToAudit)}
             {item(<Database className="w-4 h-4 text-slate-600" />, 'Database Status', onNavigateToClearDemoData)}
-            {item(
-              <Cloud className={`w-4 h-4 ${firestoreStatus === 'connected' ? 'text-indigo-600' : 'text-slate-400'}`} />,
-              firebaseUser ? `Google: ${firebaseUser.email?.split('@')[0]} (Sign Out)` : 'Connect Google Cloud',
-              () => {
-                if (firebaseUser) {
-                  void signOutFirebase();
-                } else {
-                  void signInWithGoogle().catch(() => {});
-                }
-              }
-            )}
 
             <div className="my-1 border-t border-slate-100" />
             {item(<LogOut className="w-4 h-4 text-rose-600" />, 'Log Out', () => { logout(); }, true)}

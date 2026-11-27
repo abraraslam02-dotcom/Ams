@@ -20,7 +20,6 @@ import {
 } from '../services/backupService.ts';
 import {
   getCloudPersistenceStatus,
-  ensureLocalBackupFileFromCloudSQL,
   runPreDeploymentSafetyChecks,
   syncDatabaseToCloudSQL,
   reconnectToCurrentDatabase,
@@ -161,7 +160,7 @@ systemRouter.post('/reconnect-db', async (_req: Request, res: Response) => {
 
 /**
  * Pre-Deployment & Runtime Database Safety Verification
- * Verifies external Firestore connection, existing records, schema compatibility, and non-destructive protection lock.
+ * Verifies local SQLite integrity, Cloud SQL PostgreSQL reachability, existing records, and non-destructive protection lock.
  */
 systemRouter.get('/deployment-safety', async (_req: Request, res: Response) => {
   try {
@@ -1023,7 +1022,6 @@ systemRouter.post('/backups/verify', authenticateToken, async (req: Request, res
       return res.status(400).json({ success: false, error: 'backupId or filename is required.' });
     }
 
-    await ensureLocalBackupFileFromCloudSQL(resolvedFilename, filePath);
     const verification = verifyBackupFile(filePath);
     return res.json({
       success: true,
@@ -1057,16 +1055,6 @@ systemRouter.post('/backups/restore', authenticateToken, async (req: Request, re
         success: false,
         error: 'Explicit confirmation ("RESTORE") is required before restoring a database backup.',
       });
-    }
-
-    if (backupId) {
-      const db = getDatabase();
-      const row = db
-        .prepare('SELECT filename, file_path FROM backup_history WHERE id = ?')
-        .get(Number(backupId)) as { filename: string; file_path: string } | undefined;
-      if (row) {
-        await ensureLocalBackupFileFromCloudSQL(row.filename, row.file_path);
-      }
     }
 
     const result = restoreDatabaseFromBackup({
@@ -1111,10 +1099,6 @@ systemRouter.get('/backups/download/:id', authenticateToken, async (req: Request
     const row = db
       .prepare('SELECT * FROM backup_history WHERE id = ?')
       .get(backupId) as { filename: string; file_path: string } | undefined;
-
-    if (row) {
-      await ensureLocalBackupFileFromCloudSQL(row.filename, row.file_path);
-    }
 
     if (!row || !fs.existsSync(row.file_path)) {
       return res.status(404).json({

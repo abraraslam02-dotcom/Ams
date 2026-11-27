@@ -14,13 +14,9 @@ import {
 import { runMigrations } from '../db/migrations.ts';
 import { bumpDbResetEpoch } from '../db/resetState.ts';
 import {
-  isOfflineOperatingMode,
   getPersistedOperatingModeState,
   updatePersistedOperatingModeState,
 } from './operatingModeStore.ts';
-import {
-  syncDatabaseToCloudSQL,
-} from './cloudPersistenceService.ts';
 
 export type BackupType = 'manual' | 'daily_auto' | 'pre_change' | 'pre_restore_safety';
 
@@ -740,10 +736,8 @@ export function restoreDatabaseFromBackup(options: {
       `Restored database from ${targetFilename} (Safety backup created: ${safetyBackup.filename})`
     );
 
-  // Only sync restored database to Cloud when actively in ONLINE mode; never initiate cloud calls in OFFLINE mode
-  if (!isOfflineOperatingMode()) {
-    syncDatabaseToCloudSQL(`restore:${targetFilename}`).catch(() => {});
-  }
+  // Backup & Restore operates 100% independently of Cloud Synchronization.
+  // Users can manually run Sync Now later if they wish to sync the restored local database to Cloud SQL PostgreSQL.
 
   return {
     success: true,

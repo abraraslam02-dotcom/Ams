@@ -387,7 +387,7 @@ class OfflineStorage {
 
   async getPendingSyncItems(): Promise<OfflineSyncItem[]> {
     const all = await this.getAll<OfflineSyncItem>('sync_queue');
-    // NEVER remove a pending item unless Firestore has confirmed server-side persistence
+    // NEVER remove a pending item unless Cloud SQL PostgreSQL has confirmed server-side persistence
     const confirmedToPrune = all.filter((i) => i.status === 'synced' && i.cloud_confirmed === true);
     for (const s of confirmedToPrune) {
       if (s.client_tx_id) {
@@ -443,7 +443,7 @@ class OfflineStorage {
       await this.delete('sync_queue', clientTxId).catch(() => {});
       return;
     }
-    // If Express/SQLite persisted the record but Firestore has NOT yet confirmed it,
+    // If Express/SQLite persisted the record but Cloud SQL PostgreSQL has NOT yet confirmed it,
     // keep the record durably in sync_queue as pending_sync (or sync_error).
     existing.status = status === 'synced' ? 'pending_sync' : status;
     if (extra?.error !== undefined) existing.error = extra.error;
