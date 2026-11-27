@@ -67,7 +67,8 @@ function readStateFromDisk(): PersistedOperatingModeState {
     if (fs.existsSync(cfgPath)) {
       const raw = fs.readFileSync(cfgPath, 'utf8');
       const parsed = JSON.parse(raw) as Partial<PersistedOperatingModeState>;
-      const mode: SystemOperatingMode = parsed.mode === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+      const mode: SystemOperatingMode =
+        parsed.mode === 'ONLINE' && parsed.switchedBy ? 'ONLINE' : 'OFFLINE';
       const quotaCooldownUntilMs = Math.max(0, Number(parsed.quotaCooldownUntilMs || 0));
       const quotaExhausted = Boolean(parsed.quotaExhausted) && quotaCooldownUntilMs > Date.now();
       return {

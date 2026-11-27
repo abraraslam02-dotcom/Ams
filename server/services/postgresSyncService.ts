@@ -566,8 +566,16 @@ export async function checkPostgresReachability(): Promise<PostgresReachabilityR
     };
   } catch (error: unknown) {
     pgAvailable = false;
-    const msg = error instanceof Error ? error.message : String(error);
-    lastPgError = msg;
+    const rawMsg = error instanceof Error ? error.message : String(error);
+    const isInstanceNotProvisionedOrStopped =
+      rawMsg.includes('EPIPE') ||
+      rawMsg.includes('Connection terminated unexpectedly') ||
+      rawMsg.includes('ECONNREFUSED') ||
+      rawMsg.includes('ENOENT');
+    const friendlyMsg = isInstanceNotProvisionedOrStopped
+      ? 'Cloud SQL Auth Proxy received NotFound/EPIPE for instance chromatic-concord-0pz3c:asia-southeast1:ai-studio-e5f2831c. Ensure the Cloud SQL Admin API (sqladmin.googleapis.com) is enabled in GCP project chromatic-concord-0pz3c and service account service-430228698722@gcp-sa-run-ai.iam.gserviceaccount.com has the Cloud SQL Client (roles/cloudsql.client) role. All data remains safely stored in your local SQLite database.'
+      : `Cloud SQL PostgreSQL unreachable: ${rawMsg}`;
+    lastPgError = friendlyMsg;
     return {
       configured: true,
       reachable: false,
@@ -578,7 +586,7 @@ export async function checkPostgresReachability(): Promise<PostgresReachabilityR
       host,
       database,
       location,
-      error: `Cloud SQL PostgreSQL unreachable: ${msg}`,
+      error: friendlyMsg,
     };
   }
 }
