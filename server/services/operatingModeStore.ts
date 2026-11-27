@@ -34,7 +34,7 @@ export interface PersistedOperatingModeState {
 }
 
 const DEFAULT_STATE: PersistedOperatingModeState = {
-  mode: 'ONLINE',
+  mode: 'OFFLINE',
   switchedAt: null,
   switchedBy: null,
   localBackupStatus: 'Not Run',

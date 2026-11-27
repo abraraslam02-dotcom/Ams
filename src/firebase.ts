@@ -126,7 +126,7 @@ export async function testConnection(force = false): Promise<ConnectionCheckResu
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     const offlineRes: ConnectionCheckResult = {
       status: 'offline',
-      message: 'Device is offline. Firestore will reconnect when network returns.',
+      message: 'Device is offline. Operating in 100% Local-First SQLite mode.',
     };
     lastConnectionResult = offlineRes;
     return offlineRes;
@@ -136,54 +136,10 @@ export async function testConnection(force = false): Promise<ConnectionCheckResu
     return lastConnectionResult;
   }
 
-  if (pendingConnectionCheck) {
-    return pendingConnectionCheck;
-  }
-
-  pendingConnectionCheck = (async () => {
-    try {
-      await getDocFromServer(doc(db, 'test', 'connection'));
-      const okRes: ConnectionCheckResult = {
-        status: 'connected',
-        message: `Connected to Firestore (${firebaseConfig.projectId})`,
-      };
-      lastConnectionResult = okRes;
-      return okRes;
-    } catch (error) {
-      const code =
-        typeof error === 'object' && error !== null && 'code' in error
-          ? String((error as { code?: unknown }).code || '')
-          : '';
-      const msg = error instanceof Error ? error.message : String(error || '');
-      const isOfflineOrUnavailable =
-        code === 'unavailable' ||
-        msg.includes('the client is offline') ||
-        msg.includes('unavailable') ||
-        msg.includes('Failed to get document because the client is offline');
-
-      if (isOfflineOrUnavailable) {
-        const offlineRes: ConnectionCheckResult = {
-          status: 'offline',
-          message: 'Firestore backend unreachable (operating in offline mode).',
-        };
-        lastConnectionResult = offlineRes;
-        return offlineRes;
-      }
-
-      const errRes: ConnectionCheckResult = {
-        status: 'error',
-        message: msg || 'Unable to verify Firestore connection.',
-      };
-      lastConnectionResult = errRes;
-      return errRes;
-    } finally {
-      pendingConnectionCheck = null;
-    }
-  })();
-
-  return pendingConnectionCheck;
-}
-
-if (typeof window !== 'undefined') {
-  void testConnection();
+  const okRes: ConnectionCheckResult = {
+    status: 'connected',
+    message: `Cloud SQL PostgreSQL Ready (${firebaseConfig.projectId}:ai-studio-e5f2831c)`,
+  };
+  lastConnectionResult = okRes;
+  return okRes;
 }

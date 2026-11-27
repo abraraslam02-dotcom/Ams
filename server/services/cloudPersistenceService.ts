@@ -26,6 +26,13 @@ import {
   recordLocalPendingMutation,
   updatePersistedOperatingModeState,
 } from './operatingModeStore.ts';
+import {
+  getCloudSqlStatusSummary,
+  isCloudSqlConfigured,
+  mirrorAllSqliteTablesToPostgres,
+  readCloudSqlVaultDoc,
+  writeCloudSqlVaultDoc,
+} from './postgresSyncService.ts';
 
 function loadFirebaseConfig(): { projectId?: string; firestoreDatabaseId?: string; apiKey?: string } {
   try {
@@ -113,7 +120,9 @@ const FIRESTORE_DATABASE_ID = String(
 );
 const FIRESTORE_API_KEY = String(firebaseConfig.apiKey || '');
 
-const EXTERNAL_DB_LOCATION = `projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/${VAULT_COLLECTION} [${ENV_SCOPE_PREFIX.toUpperCase()}: ${MANIFEST_DOC_ID}]`;
+const EXTERNAL_DB_LOCATION = isCloudSqlConfigured()
+  ? `Cloud SQL PostgreSQL (${process.env.SQL_DB_NAME || 'postgres'} @ chromatic-concord-0pz3c:ai-studio-e5f2831c) [${ENV_SCOPE_PREFIX.toUpperCase()}: ${MANIFEST_DOC_ID}]`
+  : `Local-First SQLite Primary (${config.databasePath})`;
 
 // Deterministic 32-byte AES-256-GCM key derived from project & vault constants
 const VAULT_AES_KEY = crypto
@@ -497,6 +506,10 @@ function scheduleQuotaRecoveryTimer(delayMs: number): void {
 }
 
 export function isFirestoreQuotaCooldownActive(): boolean {
+  // Cloud SQL PostgreSQL has no daily document read quota; clear any legacy Firestore quota cooldown when Cloud SQL is configured
+  if (isCloudSqlConfigured()) {
+    return false;
+  }
   const persisted = getPersistedOperatingModeState();
   if (persisted.quotaExhausted && persisted.quotaCooldownUntilMs > Date.now()) {
     readCooldownUntil = Math.max(readCooldownUntil, persisted.quotaCooldownUntilMs);
@@ -606,92 +619,36 @@ type VaultReadResult =
   | { status: 'unreachable'; error: string; quotaExhausted?: boolean };
 
 async function readVaultDocumentDetailed(docId: string): Promise<VaultReadResult> {
-  if (!FIRESTORE_API_KEY || !FIRESTORE_PROJECT_ID || !FIRESTORE_DATABASE_ID) {
-    isConnected = false;
-    return { status: 'unreachable', error: 'Cloud database configuration is missing.' };
-  }
-  if (isFirestoreQuotaCooldownActive()) {
+  if (!isCloudSqlConfigured()) {
     isConnected = false;
     return {
       status: 'unreachable',
-      quotaExhausted: true,
-      error: lastError || QUOTA_PENDING_USER_MESSAGE,
+      error: 'Cloud SQL PostgreSQL is not configured. Operating in 100% Local-First SQLite mode.',
     };
   }
-  const url = buildFirestoreDocUrl(docId);
-  const maxAttempts = 2;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (response.status === 404) {
-        isConnected = true;
-        readCooldownUntil = 0;
-        return { status: 'not_found' };
-      }
-
-      if (response.status === 429) {
-        const errText = await response.text().catch(() => '');
-        const isDailyQuota = /quota exceeded|RESOURCE_EXHAUSTED/i.test(errText) || true;
-        isConnected = false;
-        const msg = recordFirestoreQuotaExhausted(isDailyQuota);
-        return { status: 'unreachable', quotaExhausted: true, error: msg };
-      }
-
-      if (response.status >= 500 && attempt < maxAttempts) {
-        await sleepMs(600 * attempt);
-        continue;
-      }
-
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        isConnected = false;
-        if (/quota exceeded|RESOURCE_EXHAUSTED/i.test(errText)) {
-          const msg = recordFirestoreQuotaExhausted(true);
-          return { status: 'unreachable', quotaExhausted: true, error: msg };
-        }
-        const msg = `Cloud database request failed (HTTP ${response.status}). Local data remains safe.`;
-        lastError = msg;
-        return { status: 'unreachable', error: msg };
-      }
-
+  try {
+    const pgRes = await readCloudSqlVaultDoc(docId);
+    if (pgRes.status === 'found') {
       isConnected = true;
       readCooldownUntil = 0;
-      const json = (await response.json()) as {
-        fields?: Record<string, { stringValue?: string; integerValue?: string }>;
-      };
-      const f = json.fields || {};
-      return {
-        status: 'found',
-        doc: {
-          vaultKey: String(f.vaultKey?.stringValue || ''),
-          docId: String(f.docId?.stringValue || docId),
-          chunkIndex: Number(f.chunkIndex?.integerValue || 0),
-          totalChunks: Number(f.totalChunks?.integerValue || 1),
-          versionSeq: Number(f.versionSeq?.integerValue || 1),
-          sha256Hash: String(f.sha256Hash?.stringValue || ''),
-          payload: String(f.payload?.stringValue || ''),
-          recordCounts: String(f.recordCounts?.stringValue || '{}'),
-          updatedByEnv: String(f.updatedByEnv?.stringValue || 'unknown'),
-          updatedAt: String(f.updatedAt?.stringValue || ''),
-        },
-      };
-    } catch (err: unknown) {
-      if (attempt < maxAttempts) {
-        await sleepMs(500 * attempt);
-        continue;
-      }
-      isConnected = false;
-      const msg = err instanceof Error ? err.message : String(err);
-      lastError = msg;
-      return { status: 'unreachable', error: msg };
+      lastError = null;
+      return { status: 'found', doc: pgRes.doc };
     }
+    if (pgRes.status === 'not_found') {
+      isConnected = true;
+      readCooldownUntil = 0;
+      lastError = null;
+      return { status: 'not_found' };
+    }
+    isConnected = false;
+    lastError = pgRes.error;
+    return { status: 'unreachable', error: pgRes.error };
+  } catch (err: unknown) {
+    isConnected = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    lastError = msg;
+    return { status: 'unreachable', error: msg };
   }
-  return { status: 'unreachable', error: lastError || 'Unable to read Firestore document.' };
 }
 
 async function readVaultDocument(docId: string): Promise<VaultDocFields | null> {
@@ -702,75 +659,37 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
 }
 
 async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
-  if (Date.now() < writeCooldownUntil || isFirestoreQuotaCooldownActive()) {
-    lastError = lastError || QUOTA_PENDING_USER_MESSAGE;
+  if (!isCloudSqlConfigured()) {
     return false;
   }
-  const url = buildFirestoreDocUrl(doc.docId);
-  const body = {
-    fields: {
-      vaultKey: { stringValue: VAULT_SERVER_KEY },
-      docId: { stringValue: doc.docId },
-      chunkIndex: { integerValue: String(Math.max(0, Math.floor(doc.chunkIndex))) },
-      totalChunks: { integerValue: String(Math.max(1, Math.floor(doc.totalChunks))) },
-      versionSeq: { integerValue: String(Math.max(1, Math.floor(doc.versionSeq))) },
-      sha256Hash: { stringValue: doc.sha256Hash },
-      payload: { stringValue: doc.payload },
-      recordCounts: { stringValue: doc.recordCounts.slice(0, 3900) },
-      updatedByEnv: { stringValue: (doc.updatedByEnv || 'server').slice(0, 110) },
-      updatedAt: { stringValue: doc.updatedAt || new Date().toISOString() },
-    },
-  };
-  const serializedBody = JSON.stringify(body);
-
-  const maxAttempts = 2;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const response = await fetch(url, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: serializedBody,
-        signal: AbortSignal.timeout(25000),
-      });
-
-      if (response.status === 429) {
-        const errText = await response.text().catch(() => '');
-        const isDailyQuota = /quota exceeded|RESOURCE_EXHAUSTED/i.test(errText) || true;
-        writeCooldownUntil = Date.now() + (isDailyQuota ? QUOTA_EXHAUSTED_COOLDOWN_MS : 60 * 1000);
-        recordFirestoreQuotaExhausted(isDailyQuota);
-        return false;
-      }
-
-      if (response.status >= 500 && attempt < maxAttempts) {
-        await sleepMs(800 * attempt);
-        continue;
-      }
-
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        if (/quota exceeded|RESOURCE_EXHAUSTED/i.test(errText)) {
-          writeCooldownUntil = Date.now() + QUOTA_EXHAUSTED_COOLDOWN_MS;
-          recordFirestoreQuotaExhausted(true);
-          return false;
-        }
-        throw new Error(
-          `Firestore PATCH ${doc.docId} failed (${response.status}): ${errText.slice(0, 240)}`
-        );
-      }
+  try {
+    const ok = await writeCloudSqlVaultDoc({
+      vaultKey: VAULT_SERVER_KEY,
+      docId: doc.docId,
+      chunkIndex: Math.max(0, Math.floor(doc.chunkIndex)),
+      totalChunks: Math.max(1, Math.floor(doc.totalChunks)),
+      versionSeq: Math.max(1, Math.floor(doc.versionSeq)),
+      sha256Hash: doc.sha256Hash,
+      payload: doc.payload,
+      recordCounts: doc.recordCounts.slice(0, 3900),
+      updatedByEnv: (doc.updatedByEnv || 'server').slice(0, 110),
+      updatedAt: doc.updatedAt || new Date().toISOString(),
+    });
+    if (ok) {
       isConnected = true;
       writeCooldownUntil = 0;
-      return true;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isHttpClientError = /failed \(4\d\d\)/.test(msg);
-      if (!isHttpClientError && attempt < maxAttempts) {
-        await sleepMs(800 * attempt);
-        continue;
+      lastError = null;
+      // Also mirror relational tables in background when manifest commits
+      if (doc.docId === MANIFEST_DOC_ID) {
+        void mirrorAllSqliteTablesToPostgres().catch(() => {});
       }
-      throw err;
     }
+    return ok;
+  } catch (err: unknown) {
+    isConnected = false;
+    lastError = err instanceof Error ? err.message : String(err);
+    return false;
   }
-  return false;
 }
 
 /**
@@ -955,14 +874,15 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
   const offlineMode = isOfflineOperatingMode();
   const quotaCooldownActive = isFirestoreQuotaCooldownActive();
   const persisted = getPersistedOperatingModeState();
+  const pgSummary = getCloudSqlStatusSummary();
   return {
-    enabled: Boolean(FIRESTORE_PROJECT_ID && FIRESTORE_DATABASE_ID && FIRESTORE_API_KEY),
-    connected: offlineMode ? false : isConnected,
-    provider: 'firestore-enterprise-vault',
+    enabled: pgSummary.configured,
+    connected: offlineMode ? false : isConnected || pgSummary.connected,
+    provider: 'sqlite-persistent-central',
     externalLocation: EXTERNAL_DB_LOCATION,
     projectId: FIRESTORE_PROJECT_ID,
-    databaseId: FIRESTORE_DATABASE_ID,
-    collectionPath: `/${VAULT_COLLECTION}`,
+    databaseId: pgSummary.database || 'ai-studio-e5f2831c',
+    collectionPath: `/ams_cloudsql_vault_docs`,
     initialized: isInitialized,
     hydrationComplete: true,
     lastSyncAt: lastSyncAt || persisted.lastSuccessfulCloudSyncAt,
@@ -975,15 +895,13 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
     protectionLockActive: true,
     connectionBlocked: false,
     connectionError: null,
-    quotaExhausted: quotaCooldownActive,
-    quotaCooldownUntilMs: quotaCooldownActive ? Math.max(readCooldownUntil, persisted.quotaCooldownUntilMs) : 0,
+    quotaExhausted: false,
+    quotaCooldownUntilMs: 0,
     offlineWarning: offlineMode
       ? null
-      : quotaCooldownActive
-      ? QUOTA_PENDING_USER_MESSAGE
       : !isConnected
       ? lastError ||
-        'Cloud database server is unreachable. Existing local data remains safe and active in Local-First mode.'
+        'Cloud SQL database is currently asleep or offline. Existing local SQLite data remains 100% safe and active in Local-First mode.'
       : null,
     databaseIdentity: EXTERNAL_DB_LOCATION,
   };
@@ -2046,34 +1964,24 @@ export async function initCloudPersistence(): Promise<void> {
   ensurePendingCloudSyncQueueTables();
   dbConnectionBlocked = false;
   dbConnectionErrorMessage = null;
+  isInitialized = true;
+  isHydrationComplete = true;
+  hasHydratedFromCloudThisProcess = true;
 
-  if (isOfflineOperatingMode()) {
-    isInitialized = true;
-    isHydrationComplete = true;
-    console.log(
-      '[AMS Cloud Persistence] OFFLINE MODE active — using permanent local SQLite database with zero Cloud DB requests.'
-    );
-    return;
+  // Clear any legacy Firestore quota exhaustion flags in persisted operating mode state
+  const persisted = getPersistedOperatingModeState();
+  if (persisted.quotaExhausted || (persisted.lastCloudSyncError && /Firestore daily read quota/i.test(persisted.lastCloudSyncError))) {
+    updatePersistedOperatingModeState({
+      quotaExhausted: false,
+      quotaCooldownUntilMs: 0,
+      lastCloudSyncError: null,
+      cloudSyncStatus: persisted.cloudSyncStatus === 'Failed' ? 'Pending' : persisted.cloudSyncStatus,
+    });
   }
-  if (initPromise) {
-    return initPromise;
-  }
 
-  initPromise = (async () => {
-    try {
-      await syncOrBlockAgainstCurrentDatabase('startup_hydration');
-    } catch (err: unknown) {
-      isConnected = false;
-      lastError = err instanceof Error ? err.message : String(err);
-      dbConnectionBlocked = false;
-      dbConnectionErrorMessage = null;
-      console.error('[AMS Cloud Persistence] Initialization warning (Local-First active):', lastError);
-    } finally {
-      isHydrationComplete = true;
-    }
-  })();
-
-  return initPromise;
+  // Strictly lazy connection policy: do not probe Cloud SQL at startup.
+  // Cloud SQL connections occur on-demand when the user switches to ONLINE MODE or clicks Sync Now.
+  return;
 }
 
 /**

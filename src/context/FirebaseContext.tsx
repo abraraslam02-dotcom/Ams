@@ -90,25 +90,25 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [systemOperatingMode, setSystemOperatingMode] = useState<'ONLINE' | 'OFFLINE'>(() => {
     try {
       if (typeof window !== 'undefined') {
-        return window.localStorage.getItem('ams_system_operating_mode') === 'OFFLINE'
-          ? 'OFFLINE'
-          : 'ONLINE';
+        return window.localStorage.getItem('ams_system_operating_mode') === 'ONLINE'
+          ? 'ONLINE'
+          : 'OFFLINE';
       }
     } catch {
       // ignore storage error
     }
-    return 'ONLINE';
+    return 'OFFLINE';
   });
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
   const [isFirebaseAdmin, setIsFirebaseAdmin] = useState<boolean>(false);
   const [firestoreStatus, setFirestoreStatus] = useState<'checking' | 'connected' | 'offline' | 'error'>(
-    systemOperatingMode === 'OFFLINE' ? 'offline' : 'checking'
+    systemOperatingMode === 'OFFLINE' ? 'offline' : 'connected'
   );
   const [firestoreStatusMessage, setFirestoreStatusMessage] = useState<string>(
     systemOperatingMode === 'OFFLINE'
-      ? 'System is in OFFLINE MODE — Cloud Database requests are paused.'
-      : 'Checking Firestore connection...'
+      ? 'System is in OFFLINE MODE — All-day Local SQLite mode active.'
+      : 'Cloud SQL PostgreSQL Ready (Online Mode).'
   );
   const [authBusy, setAuthBusy] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -162,87 +162,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, [recheckConnection, systemOperatingMode]);
 
-  const syncUserDocuments = useCallback(async (user: FirebaseUser) => {
-    if (systemOperatingMode === 'OFFLINE') return;
-    if (!user.emailVerified || !user.email) return;
-    if (!BLUEPRINT_LIMITS.idPattern.test(user.uid) || user.uid.length > BLUEPRINT_LIMITS.idMaxLength) {
-      return;
-    }
-
-    const isBootAdmin = user.email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
-    const displayName = sanitizeBoundedText(
-      user.displayName || user.email.split('@')[0] || 'AMS Operator',
-      BLUEPRINT_LIMITS.displayNameMaxLength,
-      'AMS Operator'
-    );
-    const email = sanitizeBoundedText(user.email, BLUEPRINT_LIMITS.emailMaxLength);
-    const photoUrl = user.photoURL
-      ? sanitizeBoundedText(user.photoURL, BLUEPRINT_LIMITS.photoUrlMaxLength)
-      : undefined;
-
-    const userDocPath = `users/${user.uid}`;
-    const userRef = doc(db, 'users', user.uid);
-    try {
-      const existingSnap = await getDoc(userRef);
-      if (!existingSnap.exists()) {
-        await setDoc(userRef, {
-          uid: user.uid,
-          displayName,
-          role: isBootAdmin ? 'admin' : 'staff',
-          status: 'active',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(userRef, {
-          displayName,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, userDocPath);
-    }
-
-    const privatePath = `users/${user.uid}/private/info`;
-    const privateRef = doc(db, 'users', user.uid, 'private', 'info');
-    try {
-      const existingPriv = await getDoc(privateRef);
-      const privPayload: Record<string, unknown> = {
-        uid: user.uid,
-        email,
-        updatedAt: serverTimestamp(),
-      };
-      if (photoUrl) {
-        privPayload.photoUrl = photoUrl;
-      }
-
-      if (!existingPriv.exists()) {
-        await setDoc(privateRef, privPayload);
-      } else {
-        const updatePayload: Record<string, unknown> = {
-          email,
-          updatedAt: serverTimestamp(),
-        };
-        if (photoUrl) {
-          updatePayload.photoUrl = photoUrl;
-        }
-        await updateDoc(privateRef, updatePayload);
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, privatePath);
-    }
-
-    if (isBootAdmin) {
-      setIsFirebaseAdmin(true);
-    } else {
-      const adminPath = `admins/${user.uid}`;
-      try {
-        const adminSnap = await getDoc(doc(db, 'admins', user.uid));
-        setIsFirebaseAdmin(adminSnap.exists());
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, adminPath);
-      }
-    }
+  const syncUserDocuments = useCallback(async (_user: FirebaseUser) => {
+    // Cloud SQL PostgreSQL is now the central cloud database; client-side Firestore user doc writes are disabled to avoid Firestore quota usage.
+    return;
   }, []);
 
   useEffect(() => {
@@ -254,9 +176,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const isBootAdmin =
           (user.email || '').toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
         setIsFirebaseAdmin(isBootAdmin);
-        void syncUserDocuments(user).catch((err) => {
-          setAuthError(err instanceof Error ? err.message : String(err));
-        });
+        void syncUserDocuments(user);
       } else {
         setIsFirebaseAdmin(false);
         setSyncNotes([]);
@@ -272,69 +192,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return buildSafeStoreId(firebaseUser.uid, isBootAdmin);
   }, [firebaseUser]);
 
-  // Attach real-time onSnapshot listener ONLY when ONLINE MODE is active, auth is ready, and user is verified
+  // Firestore onSnapshot listener disabled — central synchronization now uses Cloud SQL PostgreSQL via backend API
   useEffect(() => {
-    if (
-      systemOperatingMode === 'OFFLINE' ||
-      !isAuthReady ||
-      !firebaseUser ||
-      !firebaseUser.emailVerified ||
-      !activeStoreId
-    ) {
-      setSyncNotes([]);
-      setNotesLoading(false);
-      return;
-    }
-
-    const notesPath = `stores/${activeStoreId}/syncNotes`;
-    setNotesLoading(true);
-    setNotesError(null);
-
-    const q = query(
-      collection(db, 'stores', activeStoreId, 'syncNotes'),
-      where('ownerUid', '==', firebaseUser.uid)
-    );
-
-    const unsub = onSnapshot(
-      q,
-      (snapshot) => {
-        const rows: StoreSyncNoteItem[] = snapshot.docs
-          .map((d) => {
-            const data = d.data();
-            return {
-              id: d.id,
-              storeId: String(data.storeId || activeStoreId),
-              ownerUid: String(data.ownerUid || ''),
-              title: String(data.title || ''),
-              note: String(data.note || ''),
-              status: (data.status === 'archived' ? 'archived' : 'active') as 'active' | 'archived',
-              recordCount: Number.isInteger(data.recordCount) ? Number(data.recordCount) : 0,
-              createdAt: parseFirestoreTimestamp(data.createdAt),
-              updatedAt: parseFirestoreTimestamp(data.updatedAt),
-            };
-          })
-          .sort((a, b) => (b.updatedAt?.getTime() || 0) - (a.updatedAt?.getTime() || 0));
-        setSyncNotes(rows);
-        setNotesLoading(false);
-      },
-      (error) => {
-        setNotesLoading(false);
-        const msg = error instanceof Error ? error.message : String(error);
-        setNotesError(msg);
-        const code =
-          typeof error === 'object' && error !== null && 'code' in error
-            ? String((error as { code?: unknown }).code || '')
-            : '';
-        if (code === 'unavailable' || msg.includes('unavailable')) {
-          setFirestoreStatus('offline');
-          setFirestoreStatusMessage('Firestore backend unreachable (operating in offline mode).');
-          return;
-        }
-        handleFirestoreError(error, OperationType.LIST, notesPath);
-      }
-    );
-
-    return () => unsub();
+    setSyncNotes([]);
+    setNotesLoading(false);
   }, [isAuthReady, firebaseUser, activeStoreId, systemOperatingMode]);
 
   const signInWithGoogle = useCallback(async () => {

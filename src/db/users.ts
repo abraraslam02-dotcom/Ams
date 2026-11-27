@@ -1,4 +1,3 @@
-// src/db/users.ts
 import { db } from './index.ts';
 import { users } from './schema.ts';
 import { eq } from 'drizzle-orm';
@@ -9,14 +8,19 @@ export async function getOrCreateUser(uid: string, email: string, displayName?: 
       .insert(users)
       .values({
         uid,
+        username: email || uid,
+        fullName: displayName || email || uid,
         email,
-        displayName: displayName || null,
+        passwordHash: 'oauth_managed',
+        salt: '',
+        role: 'Super Admin',
+        status: 'Active',
       })
       .onConflictDoUpdate({
         target: users.uid,
         set: {
           email,
-          ...(displayName ? { displayName } : {}),
+          ...(displayName ? { fullName: displayName } : {}),
         },
       })
       .returning();

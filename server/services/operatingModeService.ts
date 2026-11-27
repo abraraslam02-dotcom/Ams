@@ -443,30 +443,20 @@ export async function switchOperatingMode(params: {
 
   // Target mode is ONLINE:
   const cloudCheck = await checkCloudDatabaseReachability();
-  if (!cloudCheck.reachable && !cloudCheck.quotaExhausted) {
-    return {
-      success: false,
-      switched: false,
-      mode: previousMode,
-      previousMode,
-      message: `Cannot switch to ONLINE MODE because the Cloud Database is unreachable (${cloudCheck.error || 'no internet connection'}). System remains safely in OFFLINE MODE with all local records preserved.`,
-      warning: cloudCheck.error,
-      pendingLocalChangesCount: pendingCount,
-      unresolvedConflictsCount,
-      status: getOperatingModeFullStatus(),
-    };
-  }
 
   const nowIso = new Date().toISOString();
   updatePersistedOperatingModeState({
     mode: 'ONLINE',
     switchedAt: nowIso,
     switchedBy: params.username,
+    quotaExhausted: false,
+    quotaCooldownUntilMs: 0,
+    ...(cloudCheck.reachable ? { lastCloudSyncError: null } : {}),
   });
   syncModeMetadataToDb();
   checkpointDatabaseWal();
 
-  // If online and not in quota cooldown, trigger incremental sync in background for any pending local changes
+  // If online and reachable, trigger incremental sync in background for any pending local changes
   let syncSummaryMsg = '';
   if (cloudCheck.reachable && !cloudCheck.quotaExhausted && pendingCount > 0 && unresolvedConflictsCount === 0) {
     try {
@@ -484,11 +474,14 @@ export async function switchOperatingMode(params: {
           pendingLocalChangesCount: 0,
         });
         syncModeMetadataToDb();
-        syncSummaryMsg = ` Synchronized pending offline changes automatically (Cloud Version #${autoSync.cloudVersionSeq}).`;
+        syncSummaryMsg = ` Synchronized pending offline changes to Cloud SQL PostgreSQL (Cloud Version #${autoSync.cloudVersionSeq}).`;
       }
     } catch {
       // background sync will retry safely
     }
+  } else if (!cloudCheck.reachable) {
+    syncSummaryMsg =
+      ' Local SQLite operations remain 100% active; Cloud SQL PostgreSQL will synchronize automatically once the instance wakes up.';
   }
 
   writeOperatingModeAuditLog({
