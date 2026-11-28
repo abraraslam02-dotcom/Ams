@@ -10,25 +10,24 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
-  limit,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
   Timestamp,
   updateDoc,
+  where,
 } from 'firebase/firestore';
 import {
   auth,
+  buildFirestoreErrorInfo,
   db,
   firebaseConfig,
-  handleFirestoreError,
   OperationType,
   testFirebaseConnection,
   type FirestoreErrorInfo,
 } from '../firebase';
+import { authFetch } from '../services/api';
 
 export interface CloudSyncCheckpointNote {
   id: string;
@@ -176,13 +175,8 @@ function formatTimestampIso(value: unknown): string {
   return new Date().toISOString();
 }
 
-function getLocalAuthHeaders(): Record<string, string> {
-  const token =
-    typeof window !== 'undefined' ? window.localStorage.getItem('ams_auth_token') : null;
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+function trimTrailingDot(msg: string): string {
+  return msg.trim().replace(/\.+$/, '');
 }
 
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -226,12 +220,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
    */
   const refreshLocalSyncStatus = useCallback(async () => {
     try {
-      const token =
-        typeof window !== 'undefined' ? window.localStorage.getItem('ams_auth_token') : null;
-      if (!token) return;
-      const res = await fetch('/api/system/firebase-sync/status', {
-        headers: getLocalAuthHeaders(),
-      });
+      const res = await authFetch('/api/system/firebase-sync/status');
       if (res.ok) {
         const data = (await res.json()) as LocalFirebaseSyncStatus;
         setLocalSyncStatus(data);
@@ -255,7 +244,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (result.reachable) {
       setConnectionStatus('connected');
       setConnectionMessage(null);
-    } else if (result.error?.includes(' client is offline')) {
+    } else if (result.error?.includes('client is offline')) {
       setConnectionStatus('offline');
       setConnectionMessage(result.error);
     } else {
@@ -283,42 +272,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   /**
-   * Ensures the user profile & store workspace exist in Firestore ONLY when a manual sync operation is invoked.
+   * Ensures the store workspace (and optional user profile) exists in Firestore ONLY when a manual sync operation is invoked.
    */
   const ensureWorkspaceForManualSync = useCallback(async (user: FirebaseUser): Promise<string> => {
     const storeId = sanitizeStoreId(user.uid);
-    const displayName = (user.displayName || 'Abrar Medical Operator').slice(0, 100);
+    const displayName = (user.displayName || 'Abrar Medical Operator').trim().slice(0, 100) || 'Abrar Medical Operator';
     const storeName = 'Abrar Medical Store';
-    const email = (user.email || 'operator@example.com').slice(0, 254);
+    const rawEmail = (user.email || 'operator@example.com').trim().slice(0, 254);
+    const email = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(rawEmail)
+      ? rawEmail
+      : 'operator@example.com';
     const roleLabel = email === 'abrar.aslam02@gmail.com' ? 'super_admin' : 'operator';
 
-    const publicRef = doc(db, 'users', user.uid);
-    const publicSnap = await getDoc(publicRef);
-    if (!publicSnap.exists()) {
-      await setDoc(publicRef, {
-        uid: user.uid,
-        displayName,
-        storeName,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    const privateRef = doc(db, 'users', user.uid, 'private', 'info');
-    const privateSnap = await getDoc(privateRef);
-    if (!privateSnap.exists()) {
-      await setDoc(privateRef, {
-        uid: user.uid,
-        email,
-        roleLabel,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    const storeRef = doc(db, 'stores', storeId);
-    const storeSnap = await getDoc(storeRef);
-    if (!storeSnap.exists()) {
+    // 1. Always upsert the parent StoreWorkspace first (Master Gate parent document)
+    const storePath = `stores/${storeId}`;
+    try {
+      const storeRef = doc(db, 'stores', storeId);
       await setDoc(storeRef, {
         storeId,
         storeName,
@@ -327,6 +296,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+    } catch (storeErr) {
+      const info = buildFirestoreErrorInfo(storeErr, OperationType.WRITE, storePath);
+      setLastFirestoreError(info);
+      throw new Error(
+        `Firestore permission error on ${storePath}: ${trimTrailingDot(info.error)}`
+      );
+    }
+
+    // 2. Best-effort upsert of public & private operator profile metadata (non-blocking)
+    try {
+      const publicRef = doc(db, 'users', user.uid);
+      await setDoc(publicRef, {
+        uid: user.uid,
+        displayName,
+        storeName,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      const privateRef = doc(db, 'users', user.uid, 'private', 'info');
+      await setDoc(privateRef, {
+        uid: user.uid,
+        email,
+        roleLabel,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch {
+      // Non-fatal profile metadata sync
     }
 
     setActiveStoreId(storeId);
@@ -335,29 +333,34 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   /**
    * Explicitly fetches sync checkpoint notes from Firestore ONLY when requested during manual operations.
+   * Queries with where('ownerUid', '==', ownerUid) and sorts in memory so zero composite indexes are required.
    */
-  const fetchManualSyncNotes = useCallback(async (storeId: string) => {
+  const fetchManualSyncNotes = useCallback(async (storeId: string, ownerUid?: string) => {
+    const uid = ownerUid || auth.currentUser?.uid;
+    if (!uid) return;
     try {
       const notesQuery = query(
         collection(db, 'stores', storeId, 'syncNotes'),
-        orderBy('createdAt', 'desc'),
-        limit(25)
+        where('ownerUid', '==', uid)
       );
       const snap = await getDocs(notesQuery);
-      const list: CloudSyncCheckpointNote[] = snap.docs.map((docSnap) => {
-        const d = docSnap.data();
-        return {
-          id: docSnap.id,
-          storeId: String(d.storeId || storeId),
-          ownerUid: String(d.ownerUid || ''),
-          title: String(d.title || ''),
-          note: String(d.note || ''),
-          recordCount: Number(d.recordCount || 0),
-          status: d.status === 'archived' ? 'archived' : 'active',
-          createdAtIso: formatTimestampIso(d.createdAt),
-          updatedAtIso: formatTimestampIso(d.updatedAt),
-        };
-      });
+      const list: CloudSyncCheckpointNote[] = snap.docs
+        .map((docSnap): CloudSyncCheckpointNote => {
+          const d = docSnap.data();
+          return {
+            id: docSnap.id,
+            storeId: String(d.storeId || storeId),
+            ownerUid: String(d.ownerUid || uid),
+            title: String(d.title || ''),
+            note: String(d.note || ''),
+            recordCount: Number(d.recordCount || 0),
+            status: d.status === 'archived' ? 'archived' : 'active',
+            createdAtIso: formatTimestampIso(d.createdAt),
+            updatedAtIso: formatTimestampIso(d.updatedAt),
+          };
+        })
+        .sort((a, b) => b.createdAtIso.localeCompare(a.createdAtIso))
+        .slice(0, 25);
       setSyncNotes(list);
     } catch {
       // non-fatal during manual checkpoint list refresh
@@ -428,10 +431,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
 
     try {
-      // 1. Export all business transactions from Local SQLite
-      const exportRes = await fetch('/api/system/firebase-sync/export', {
-        headers: getLocalAuthHeaders(),
-      });
+      // 1. Export all business transactions from Local SQLite using authenticated session fetch
+      const exportRes = await authFetch('/api/system/firebase-sync/export');
       const exportData = await exportRes.json();
       if (!exportRes.ok || !exportData.success) {
         throw new Error(exportData.error || 'Failed to export business transactions from Local SQLite.');
@@ -447,8 +448,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         recordsPayload: string;
         checksum: string;
       }> = Array.isArray(exportData.batches) ? exportData.batches : [];
-      const totalRecords = Number(exportData.totalRecords || 0);
-      const syncSessionId = String(exportData.syncSessionId || `sync_${Date.now()}`);
+      const totalRecords = Math.max(0, Math.floor(Number(exportData.totalRecords || 0)));
+      const syncSessionId = String(exportData.syncSessionId || `sync_${Date.now()}`).slice(0, 128);
       const overallSha256 = String(exportData.overallSha256 || '');
       const summary = exportData.summary as BusinessDataSummary;
 
@@ -469,10 +470,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       // 3. Upload each batch document sequentially (resumable, bounded size, verified checksum)
       const uploadedBatchIds = new Set<string>();
+      const totalBatchCount = Math.max(1, batches.length);
+
       for (let i = 0; i < batches.length; i++) {
         const b = batches[i];
-        uploadedBatchIds.add(b.batchId);
-        const pct = Math.min(90, 15 + Math.round(((i + 1) / Math.max(1, batches.length)) * 75));
+        const safeBatchId = String(b.batchId || `batch_${i + 1}`)
+          .replace(/[^a-zA-Z0-9_-]/g, '_')
+          .slice(0, 128);
+        uploadedBatchIds.add(safeBatchId);
+
+        const pct = Math.min(90, 15 + Math.round(((i + 1) / totalBatchCount) * 75));
         setSyncProgress({
           active: true,
           operation: 'upload',
@@ -483,28 +490,39 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           message: `Uploading batch ${i + 1} of ${batches.length} (${b.tableName} — ${b.recordCount} records)...`,
         });
 
-        const batchRef = doc(db, 'stores', storeId, 'syncBatches', b.batchId);
-        await setDoc(batchRef, {
-          storeId,
-          ownerUid: firebaseUser.uid,
-          syncSessionId,
-          tableName: b.tableName,
-          batchIndex: b.batchIndex,
-          totalBatches: b.totalBatches,
-          recordCount: b.recordCount,
-          recordsPayload: b.recordsPayload,
-          checksum: b.checksum,
-          status: 'active',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+        const batchPath = `stores/${storeId}/syncBatches/${safeBatchId}`;
+        try {
+          const batchRef = doc(db, 'stores', storeId, 'syncBatches', safeBatchId);
+          await setDoc(batchRef, {
+            storeId,
+            ownerUid: firebaseUser.uid,
+            syncSessionId,
+            tableName: String(b.tableName || 'accounts').slice(0, 80),
+            batchIndex: Math.max(0, Math.floor(Number(b.batchIndex ?? i))),
+            totalBatches: Math.max(1, Math.floor(Number(b.totalBatches || totalBatchCount))),
+            recordCount: Math.max(0, Math.floor(Number(b.recordCount || 0))),
+            recordsPayload: String(b.recordsPayload || '[]'),
+            checksum: String(b.checksum || '00000000').slice(0, 128),
+            status: 'active',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (batchErr) {
+          const info = buildFirestoreErrorInfo(batchErr, OperationType.WRITE, batchPath);
+          setLastFirestoreError(info);
+          throw new Error(
+            `Firestore permission error on ${batchPath} (${b.tableName}): ${trimTrailingDot(info.error)}`
+          );
+        }
       }
 
       // 4. Remove any obsolete batch documents from older sync sessions that are no longer part of the current snapshot
       try {
-        const existingBatchesSnap = await getDocs(
-          collection(db, 'stores', storeId, 'syncBatches')
+        const existingBatchesQuery = query(
+          collection(db, 'stores', storeId, 'syncBatches'),
+          where('ownerUid', '==', firebaseUser.uid)
         );
+        const existingBatchesSnap = await getDocs(existingBatchesQuery);
         for (const existingDoc of existingBatchesSnap.docs) {
           if (!uploadedBatchIds.has(existingDoc.id)) {
             await deleteDoc(doc(db, 'stores', storeId, 'syncBatches', existingDoc.id));
@@ -515,25 +533,29 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       // 5. Record a checkpoint summary note in /stores/{storeId}/syncNotes
-      const noteId = sanitizeNoteId(`checkpoint_${Date.now()}`);
       const noteText = `Uploaded ${totalRecords} business records (${summary.salesCount} sales, ${summary.purchasesCount} purchases, ${summary.accountsCount} accounts, ${summary.itemsCount} items, ${summary.inventoryBatchesCount} stock batches, ${summary.journalEntriesCount} journal entries) in ${batches.length} verified batch(es).`;
-      await setDoc(doc(db, 'stores', storeId, 'syncNotes', noteId), {
-        storeId,
-        ownerUid: firebaseUser.uid,
-        title: `Manual Business Sync (${new Date().toLocaleString()})`.slice(0, 120),
-        note: noteText.slice(0, 600),
-        recordCount: totalRecords,
-        status: 'active',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      try {
+        const noteId = sanitizeNoteId(`checkpoint_${Date.now()}`);
+        await setDoc(doc(db, 'stores', storeId, 'syncNotes', noteId), {
+          storeId,
+          ownerUid: firebaseUser.uid,
+          title: `Manual Business Sync (${new Date().toLocaleString()})`.slice(0, 120),
+          note: noteText.slice(0, 600),
+          recordCount: totalRecords,
+          status: 'active',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Non-fatal checkpoint note write
+      }
 
-      await fetchManualSyncNotes(storeId);
+      await fetchManualSyncNotes(storeId, firebaseUser.uid);
 
       // 6. Record successful manual upload in local SQLite state
-      await fetch('/api/system/firebase-sync/record-result', {
+      await authFetch('/api/system/firebase-sync/record-result', {
         method: 'POST',
-        headers: getLocalAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           operation: 'upload',
           status: 'Successful',
@@ -563,11 +585,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
       return true;
     } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const rawErrMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = trimTrailingDot(rawErrMsg);
       try {
-        await fetch('/api/system/firebase-sync/record-result', {
+        await authFetch('/api/system/firebase-sync/record-result', {
           method: 'POST',
-          headers: getLocalAuthHeaders(),
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             operation: 'upload',
             status: 'Failed',
@@ -631,11 +654,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       setConnectionStatus('connected');
       setConnectionMessage(null);
 
-      const batchesQuery = query(
-        collection(db, 'stores', storeId, 'syncBatches'),
-        orderBy('batchIndex', 'asc')
-      );
-      const snap = await getDocs(batchesQuery);
+      const batchesPath = `stores/${storeId}/syncBatches`;
+      let snap;
+      try {
+        const batchesQuery = query(
+          collection(db, 'stores', storeId, 'syncBatches'),
+          where('ownerUid', '==', firebaseUser.uid)
+        );
+        snap = await getDocs(batchesQuery);
+      } catch (listErr) {
+        const info = buildFirestoreErrorInfo(listErr, OperationType.LIST, batchesPath);
+        setLastFirestoreError(info);
+        throw new Error(
+          `Firestore permission error listing ${batchesPath}: ${trimTrailingDot(info.error)}`
+        );
+      }
 
       if (snap.empty) {
         throw new Error(
@@ -643,17 +676,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         );
       }
 
-      const downloadedBatches = snap.docs.map((docSnap) => {
-        const d = docSnap.data();
-        return {
-          batchId: docSnap.id,
-          tableName: String(d.tableName || ''),
-          batchIndex: Number(d.batchIndex || 0),
-          recordCount: Number(d.recordCount || 0),
-          recordsPayload: String(d.recordsPayload || '[]'),
-          checksum: String(d.checksum || ''),
-        };
-      });
+      const downloadedBatches = snap.docs
+        .map((docSnap) => {
+          const d = docSnap.data();
+          return {
+            batchId: docSnap.id,
+            tableName: String(d.tableName || ''),
+            batchIndex: Number(d.batchIndex || 0),
+            recordCount: Number(d.recordCount || 0),
+            recordsPayload: String(d.recordsPayload || '[]'),
+            checksum: String(d.checksum || ''),
+          };
+        })
+        .sort((a, b) => a.batchIndex - b.batchIndex);
 
       setSyncProgress({
         active: true,
@@ -665,9 +700,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         message: `Downloaded ${downloadedBatches.length} batch(es). Creating pre-restore Local SQLite backup and merging transactions atomically...`,
       });
 
-      const restoreRes = await fetch('/api/system/firebase-sync/restore', {
+      const restoreRes = await authFetch('/api/system/firebase-sync/restore', {
         method: 'POST',
-        headers: getLocalAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           batches: downloadedBatches,
         }),
@@ -678,7 +713,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         throw new Error(restoreData.error || 'Failed to restore business transactions into Local SQLite.');
       }
 
-      await fetchManualSyncNotes(storeId);
+      await fetchManualSyncNotes(storeId, firebaseUser.uid);
       await refreshLocalSyncStatus();
 
       setSyncProgress({
@@ -697,7 +732,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
       return true;
     } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const rawErrMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = trimTrailingDot(rawErrMsg);
       await refreshLocalSyncStatus();
       setSyncProgress({
         active: false,
@@ -718,9 +754,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const clearSyncErrors = useCallback(async () => {
     try {
-      await fetch('/api/system/firebase-sync/clear-errors', {
+      await authFetch('/api/system/firebase-sync/clear-errors', {
         method: 'POST',
-        headers: getLocalAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
       });
       await refreshLocalSyncStatus();
       setLastActionNotice({
@@ -757,9 +793,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
-        await fetchManualSyncNotes(storeId);
+        await fetchManualSyncNotes(storeId, firebaseUser.uid);
       } catch (error) {
-        const info = handleFirestoreError(error, OperationType.CREATE, path);
+        const info = buildFirestoreErrorInfo(error, OperationType.CREATE, path);
         setLastFirestoreError(info);
       }
     },
@@ -778,9 +814,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           status: 'archived',
           updatedAt: serverTimestamp(),
         });
-        await fetchManualSyncNotes(activeStoreId);
+        await fetchManualSyncNotes(activeStoreId, firebaseUser.uid);
       } catch (error) {
-        const info = handleFirestoreError(error, OperationType.UPDATE, path);
+        const info = buildFirestoreErrorInfo(error, OperationType.UPDATE, path);
         setLastFirestoreError(info);
       }
     },
@@ -793,9 +829,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const path = `stores/${activeStoreId}/syncNotes/${noteId}`;
       try {
         await deleteDoc(doc(db, 'stores', activeStoreId, 'syncNotes', noteId));
-        await fetchManualSyncNotes(activeStoreId);
+        await fetchManualSyncNotes(activeStoreId, firebaseUser.uid);
       } catch (error) {
-        const info = handleFirestoreError(error, OperationType.DELETE, path);
+        const info = buildFirestoreErrorInfo(error, OperationType.DELETE, path);
         setLastFirestoreError(info);
       }
     },

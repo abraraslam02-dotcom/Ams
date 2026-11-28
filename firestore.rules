@@ -3,10 +3,18 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ===============================================================
+    // GLOBAL DEFAULT-DENY SAFETY NET
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
     // GLOBAL HELPER FUNCTIONS (8 CORE SECURITY PILLARS)
     // ===============================================================
     function isAuthenticated() {
-      return request.auth != null && request.auth.token.email_verified == true;
+      return request.auth != null &&
+        (!('email_verified' in request.auth.token) || request.auth.token.email_verified == true);
     }
 
     function isOwner(userId) {
@@ -14,8 +22,9 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() &&
-        request.auth.token.email == "abrar.aslam02@gmail.com";
+      return request.auth != null &&
+        request.auth.token.email == "abrar.aslam02@gmail.com" &&
+        request.auth.token.email_verified == true;
     }
 
     function incoming() {
@@ -30,14 +39,14 @@ service cloud.firestore {
       return id is string &&
         id.size() >= 3 &&
         id.size() <= 128 &&
-        id.matches('^[a-zA-Z0-9_-]+$');
+        id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     function isValidEmail(email) {
       return email is string &&
         email.size() >= 5 &&
         email.size() <= 254 &&
-        email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+        email.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$');
     }
 
     function isParentStoreOwner(storeId) {
@@ -55,7 +64,7 @@ service cloud.firestore {
       let keys = ['uid', 'displayName', 'storeName', 'createdAt', 'updatedAt'];
       return data.keys().hasAll(keys) &&
         data.keys().hasOnly(keys) &&
-        data.uid is string && data.uid == userId &&
+        data.uid is string && data.uid.size() >= 3 && data.uid.size() <= 128 && data.uid == userId &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
         data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 120 &&
         data.createdAt is timestamp &&
@@ -66,8 +75,9 @@ service cloud.firestore {
       let keys = ['uid', 'email', 'roleLabel', 'createdAt', 'updatedAt'];
       return data.keys().hasAll(keys) &&
         data.keys().hasOnly(keys) &&
-        data.uid is string && data.uid == userId &&
+        data.uid is string && data.uid.size() >= 3 && data.uid.size() <= 128 && data.uid == userId &&
         isValidEmail(data.email) &&
+        data.roleLabel is string && data.roleLabel.size() >= 3 && data.roleLabel.size() <= 32 &&
         data.roleLabel in ['operator', 'super_admin'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -77,9 +87,10 @@ service cloud.firestore {
       let keys = ['storeId', 'storeName', 'ownerUid', 'status', 'createdAt', 'updatedAt'];
       return data.keys().hasAll(keys) &&
         data.keys().hasOnly(keys) &&
-        data.storeId is string && data.storeId == storeId &&
+        data.storeId is string && data.storeId.size() >= 3 && data.storeId.size() <= 128 && data.storeId == storeId &&
         data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 120 &&
         data.ownerUid is string && data.ownerUid.size() >= 3 && data.ownerUid.size() <= 128 &&
+        data.status is string && data.status.size() >= 3 && data.status.size() <= 32 &&
         data.status in ['active', 'archived'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -89,11 +100,13 @@ service cloud.firestore {
       let keys = ['storeId', 'ownerUid', 'title', 'note', 'recordCount', 'status', 'createdAt', 'updatedAt'];
       return data.keys().hasAll(keys) &&
         data.keys().hasOnly(keys) &&
-        data.storeId is string && data.storeId == storeId &&
+        data.storeId is string && data.storeId.size() >= 3 && data.storeId.size() <= 128 && data.storeId == storeId &&
         data.ownerUid is string && data.ownerUid.size() >= 3 && data.ownerUid.size() <= 128 &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
         data.note is string && data.note.size() >= 1 && data.note.size() <= 600 &&
-        data.recordCount is int && data.recordCount >= 0 && data.recordCount <= 10000000 &&
+        (data.recordCount is int || data.recordCount is number) &&
+        data.recordCount >= 0 && data.recordCount <= 10000000 &&
+        data.status is string && data.status.size() >= 3 && data.status.size() <= 32 &&
         data.status in ['active', 'archived'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -116,15 +129,19 @@ service cloud.firestore {
       ];
       return data.keys().hasAll(keys) &&
         data.keys().hasOnly(keys) &&
-        data.storeId is string && data.storeId == storeId &&
+        data.storeId is string && data.storeId.size() >= 3 && data.storeId.size() <= 128 && data.storeId == storeId &&
         data.ownerUid is string && data.ownerUid.size() >= 3 && data.ownerUid.size() <= 128 &&
         data.syncSessionId is string && data.syncSessionId.size() >= 3 && data.syncSessionId.size() <= 128 &&
         data.tableName is string && data.tableName.size() >= 2 && data.tableName.size() <= 80 &&
-        data.batchIndex is int && data.batchIndex >= 0 && data.batchIndex <= 10000 &&
-        data.totalBatches is int && data.totalBatches >= 1 && data.totalBatches <= 10000 &&
-        data.recordCount is int && data.recordCount >= 0 && data.recordCount <= 100000 &&
-        data.recordsPayload is string && data.recordsPayload.size() >= 2 && data.recordsPayload.size() <= 800000 &&
+        (data.batchIndex is int || data.batchIndex is number) &&
+        data.batchIndex >= 0 && data.batchIndex <= 10000 &&
+        (data.totalBatches is int || data.totalBatches is number) &&
+        data.totalBatches >= 1 && data.totalBatches <= 10000 &&
+        (data.recordCount is int || data.recordCount is number) &&
+        data.recordCount >= 0 && data.recordCount <= 100000 &&
+        data.recordsPayload is string && data.recordsPayload.size() >= 2 && data.recordsPayload.size() <= 900000 &&
         data.checksum is string && data.checksum.size() >= 8 && data.checksum.size() <= 128 &&
+        data.status is string && data.status.size() >= 3 && data.status.size() <= 32 &&
         data.status in ['active', 'archived'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -139,18 +156,22 @@ service cloud.firestore {
 
       allow create: if isAuthenticated() &&
         isValidId(userId) &&
-        (isOwner(userId) || isAdmin()) &&
         isValidUserPublic(incoming(), userId) &&
+        (isOwner(userId) || isAdmin()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
 
       allow update: if isAuthenticated() &&
         isValidId(userId) &&
-        (isOwner(userId) || isAdmin()) &&
         isValidUserPublic(incoming(), userId) &&
+        (isOwner(userId) || isAdmin()) &&
         incoming().uid == existing().uid &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time;
+        (incoming().createdAt == existing().createdAt || incoming().createdAt == request.time) &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'storeName', 'createdAt', 'updatedAt'])
+        );
 
       allow delete: if isAdmin();
 
@@ -164,8 +185,8 @@ service cloud.firestore {
         allow create: if isAuthenticated() &&
           isValidId(userId) &&
           docId == 'info' &&
-          (isOwner(userId) || isAdmin()) &&
           isValidUserPrivate(incoming(), userId) &&
+          (isOwner(userId) || isAdmin()) &&
           (incoming().roleLabel == 'operator' || isAdmin()) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
@@ -173,12 +194,16 @@ service cloud.firestore {
         allow update: if isAuthenticated() &&
           isValidId(userId) &&
           docId == 'info' &&
-          (isOwner(userId) || isAdmin()) &&
           isValidUserPrivate(incoming(), userId) &&
+          (isOwner(userId) || isAdmin()) &&
           incoming().uid == existing().uid &&
-          incoming().createdAt == existing().createdAt &&
+          (incoming().createdAt == existing().createdAt || incoming().createdAt == request.time) &&
           (incoming().roleLabel == existing().roleLabel || isAdmin()) &&
-          incoming().updatedAt == request.time;
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['email', 'roleLabel', 'createdAt', 'updatedAt'])
+          );
 
         allow delete: if isAdmin();
       }
@@ -190,7 +215,12 @@ service cloud.firestore {
     match /stores/{storeId} {
       allow get: if isAuthenticated() &&
         isValidId(storeId) &&
-        (resource == null || resource.data.ownerUid == request.auth.uid || isAdmin());
+        (
+          storeId == 'store_' + request.auth.uid ||
+          isAdmin() ||
+          resource == null ||
+          (resource != null && resource.data.ownerUid == request.auth.uid)
+        );
 
       allow list: if isAuthenticated() &&
         (resource.data.ownerUid == request.auth.uid || isAdmin());
@@ -205,13 +235,17 @@ service cloud.firestore {
 
       allow update: if isAuthenticated() &&
         isValidId(storeId) &&
-        (existing().ownerUid == request.auth.uid || isAdmin()) &&
-        (existing().status != 'archived' || isAdmin()) &&
         isValidStoreWorkspace(incoming(), storeId) &&
-        incoming().storeId == existing().storeId &&
-        incoming().ownerUid == existing().ownerUid &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time;
+        (storeId == 'store_' + request.auth.uid || existing().ownerUid == request.auth.uid || isAdmin()) &&
+        (existing().status != 'archived' || isAdmin()) &&
+        incoming().storeId == storeId &&
+        (incoming().ownerUid == request.auth.uid || isAdmin()) &&
+        (incoming().createdAt == existing().createdAt || incoming().createdAt == request.time) &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['storeName', 'status', 'createdAt', 'updatedAt'])
+        );
 
       allow delete: if isAdmin();
 
@@ -222,42 +256,48 @@ service cloud.firestore {
         allow get: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(noteId) &&
-          isParentStoreOwner(storeId) &&
-          (resource == null || resource.data.ownerUid == request.auth.uid || isAdmin());
+          (
+            storeId == 'store_' + request.auth.uid ||
+            isAdmin() ||
+            resource == null ||
+            (resource != null && resource.data.ownerUid == request.auth.uid)
+          );
 
         allow list: if isAuthenticated() &&
-          isValidId(storeId) &&
-          isParentStoreOwner(storeId) &&
           (resource.data.ownerUid == request.auth.uid || isAdmin());
 
         allow create: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(noteId) &&
-          isParentStoreOwner(storeId) &&
           isValidSyncCheckpointNote(incoming(), storeId) &&
           (incoming().ownerUid == request.auth.uid || isAdmin()) &&
           incoming().status == 'active' &&
           incoming().createdAt == request.time &&
-          incoming().updatedAt == request.time;
+          incoming().updatedAt == request.time &&
+          isParentStoreOwner(storeId);
 
         allow update: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(noteId) &&
-          isParentStoreOwner(storeId) &&
+          isValidSyncCheckpointNote(incoming(), storeId) &&
           (existing().ownerUid == request.auth.uid || isAdmin()) &&
           (existing().status != 'archived' || isAdmin()) &&
-          isValidSyncCheckpointNote(incoming(), storeId) &&
           incoming().storeId == existing().storeId &&
           incoming().ownerUid == existing().ownerUid &&
           incoming().createdAt == existing().createdAt &&
-          incoming().updatedAt == request.time;
+          incoming().updatedAt == request.time &&
+          isParentStoreOwner(storeId) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'note', 'recordCount', 'status', 'updatedAt'])
+          );
 
         allow delete: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(noteId) &&
-          isParentStoreOwner(storeId) &&
           (existing().ownerUid == request.auth.uid || isAdmin()) &&
-          (existing().status != 'archived' || isAdmin());
+          (existing().status != 'archived' || isAdmin()) &&
+          isParentStoreOwner(storeId);
       }
 
       // ===============================================================
@@ -267,50 +307,60 @@ service cloud.firestore {
         allow get: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(batchId) &&
-          isParentStoreOwner(storeId) &&
-          (resource == null || resource.data.ownerUid == request.auth.uid || isAdmin());
+          (
+            storeId == 'store_' + request.auth.uid ||
+            isAdmin() ||
+            resource == null ||
+            (resource != null && resource.data.ownerUid == request.auth.uid)
+          );
 
         allow list: if isAuthenticated() &&
-          isValidId(storeId) &&
-          isParentStoreOwner(storeId) &&
           (resource.data.ownerUid == request.auth.uid || isAdmin());
 
         allow create: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(batchId) &&
-          isParentStoreOwner(storeId) &&
           isValidBusinessSyncBatch(incoming(), storeId) &&
           (incoming().ownerUid == request.auth.uid || isAdmin()) &&
           incoming().status == 'active' &&
           incoming().createdAt == request.time &&
-          incoming().updatedAt == request.time;
+          incoming().updatedAt == request.time &&
+          isParentStoreOwner(storeId);
 
         allow update: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(batchId) &&
-          isParentStoreOwner(storeId) &&
+          isValidBusinessSyncBatch(incoming(), storeId) &&
           (existing().ownerUid == request.auth.uid || isAdmin()) &&
           (existing().status != 'archived' || isAdmin()) &&
-          isValidBusinessSyncBatch(incoming(), storeId) &&
           incoming().storeId == existing().storeId &&
           incoming().ownerUid == existing().ownerUid &&
-          incoming().createdAt == existing().createdAt &&
-          incoming().updatedAt == request.time;
+          (incoming().createdAt == existing().createdAt || incoming().createdAt == request.time) &&
+          incoming().updatedAt == request.time &&
+          isParentStoreOwner(storeId) &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'syncSessionId',
+              'tableName',
+              'batchIndex',
+              'totalBatches',
+              'recordCount',
+              'recordsPayload',
+              'checksum',
+              'status',
+              'createdAt',
+              'updatedAt'
+            ])
+          );
 
         allow delete: if isAuthenticated() &&
           isValidId(storeId) &&
           isValidId(batchId) &&
-          isParentStoreOwner(storeId) &&
           (existing().ownerUid == request.auth.uid || isAdmin()) &&
-          (existing().status != 'archived' || isAdmin());
+          (existing().status != 'archived' || isAdmin()) &&
+          isParentStoreOwner(storeId);
       }
-    }
-
-    // ===============================================================
-    // DEFAULT DENY SAFETY NET
-    // ===============================================================
-    match /{document=**} {
-      allow read, write: if false;
     }
   }
 }

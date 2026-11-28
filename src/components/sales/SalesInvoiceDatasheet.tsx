@@ -509,8 +509,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [discountOverrideBy, setDiscountOverrideBy] = useState<string>('');
   const [discountOverrideReason, setDiscountOverrideReason] = useState<string>('');
 
-  const [advanceTaxApplicable, setAdvanceTaxApplicable] = useState<boolean>(false);
-  const [advanceTaxRate, setAdvanceTaxRate] = useState<number>(0);
+  const [customerFilerStatus, setCustomerFilerStatus] = useState<'Filer' | 'Non-Filer' | 'Exempt'>('Filer');
+  const [advanceTaxApplicable, setAdvanceTaxApplicable] = useState<boolean>(true);
+  const [advanceTaxRate, setAdvanceTaxRate] = useState<number>(0.5);
   const [isTaxOverridden, setIsTaxOverridden] = useState<boolean>(false);
   const [taxOverrideReason, setTaxOverrideReason] = useState<string>('');
   const [taxOverrideAuthorizedBy, setTaxOverrideAuthorizedBy] = useState<string>('Store Administrator');
@@ -884,8 +885,28 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             }
             setInvoiceDiscountPercent(Number(parsed.invoiceDiscountPercent || 0));
             setInvoiceDiscountAmount(Number(parsed.invoiceDiscountAmount || 0));
-            setAdvanceTaxApplicable(Boolean(parsed.advanceTaxApplicable));
-            setAdvanceTaxRate(Number(parsed.advanceTaxRate || 0));
+            if (
+              parsed.customerFilerStatus &&
+              ['Filer', 'Non-Filer', 'Exempt'].includes(String(parsed.customerFilerStatus))
+            ) {
+              setCustomerFilerStatus(parsed.customerFilerStatus);
+            } else {
+              const draftCust = partyCusts.find((c: any) => Number(c.id) === Number(parsed.customerAccountId || 0));
+              const draftWalkin = partyCusts.find((c: any) => c.account_code === 'CUS-1001');
+              const resolvedFiler = (draftCust?.filer_status || draftWalkin?.filer_status || 'Filer') as
+                | 'Filer'
+                | 'Non-Filer'
+                | 'Exempt';
+              setCustomerFilerStatus(resolvedFiler);
+            }
+            setAdvanceTaxApplicable(
+              parsed.advanceTaxApplicable !== undefined ? Boolean(parsed.advanceTaxApplicable) : true
+            );
+            setAdvanceTaxRate(
+              parsed.advanceTaxRate !== undefined
+                ? Number(parsed.advanceTaxRate)
+                : Number(taxRes.settings?.filer_rate ?? 0.5)
+            );
             setIsTaxOverridden(Boolean(parsed.isTaxOverridden));
             setTaxOverrideReason(parsed.taxOverrideReason || '');
             if (parsed.paidAmountInput !== undefined && parsed.paidAmountInput !== null) {
@@ -909,6 +930,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
       if (nextNumRes.nextInvoiceNumber) {
         setInvoiceNumber(nextNumRes.nextInvoiceNumber);
+      }
+      const walkinCust = partyCusts.find((c: any) => c.account_code === 'CUS-1001');
+      if (walkinCust && ['Filer', 'Non-Filer', 'Exempt'].includes(String(walkinCust.filer_status))) {
+        setCustomerFilerStatus(walkinCust.filer_status as 'Filer' | 'Non-Filer' | 'Exempt');
       }
       // Requirement 7: New Sales Invoice must start with an empty Customer field (never auto-select previous/default customer)
       if (activeSalesmen.length > 0 && !salesmanId) {
@@ -1311,6 +1336,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       paymentMode,
       invoiceDiscountPercent,
       invoiceDiscountAmount,
+      customerFilerStatus,
       advanceTaxApplicable,
       advanceTaxRate,
       isTaxOverridden,
@@ -1340,6 +1366,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     paymentMode,
     invoiceDiscountPercent,
     invoiceDiscountAmount,
+    customerFilerStatus,
     advanceTaxApplicable,
     advanceTaxRate,
     isTaxOverridden,
@@ -1394,8 +1421,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setPaymentAccountId(inv.payment_account_id ? Number(inv.payment_account_id) : null);
         setInvoiceDiscountPercent(Number(inv.invoice_discount_percent || 0));
         setInvoiceDiscountAmount(Number(inv.invoice_discount_amount || 0));
-        setAdvanceTaxApplicable(Boolean(inv.advance_tax_applicable));
-        setAdvanceTaxRate(Number(inv.advance_tax_rate || 0));
+        const resumedCust = customers.find((c) => Number(c.id) === Number(inv.customer_account_id || 0));
+        const resumedFiler = (
+          ['Filer', 'Non-Filer', 'Exempt'].includes(String(inv.customer_filer_status))
+            ? inv.customer_filer_status
+            : resumedCust?.filer_status || 'Filer'
+        ) as 'Filer' | 'Non-Filer' | 'Exempt';
+        setCustomerFilerStatus(resumedFiler);
+        setAdvanceTaxApplicable(
+          inv.advance_tax_applicable !== undefined && inv.advance_tax_applicable !== null
+            ? Boolean(Number(inv.advance_tax_applicable))
+            : true
+        );
+        setAdvanceTaxRate(Number(inv.advance_tax_rate ?? 0));
         setIsTaxOverridden(Boolean(inv.is_tax_overridden));
         setTaxOverrideReason(String(inv.tax_override_reason || ''));
         const rawPaidAmt = Number(inv.paid_amount ?? 0);
@@ -1669,17 +1707,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   // Selected Customer Object
   const selectedCustomer =
-    customers.find((c) => Number(c.id) === Number(customerAccountId)) || customers[0] || null;
-  const customerFilerStatus: 'Filer' | 'Non-Filer' | 'Exempt' =
-    (selectedCustomer?.filer_status as 'Filer' | 'Non-Filer' | 'Exempt') || 'Non-Filer';
+    (customerAccountId > 0
+      ? customers.find((c) => Number(c.id) === Number(customerAccountId))
+      : customers.find((c) => c.account_code === 'CUS-1001')) || null;
 
-  // Configured Advance Tax Rate based on Customer Filer Status
-  const configuredTaxRate =
-    customerFilerStatus === 'Filer'
-      ? round2(taxSettings?.filer_rate ?? 0.5)
-      : customerFilerStatus === 'Non-Filer'
-      ? round2(taxSettings?.non_filer_rate ?? 2.5)
-      : round2(taxSettings?.exempt_rate ?? 0);
+  // Configured Advance Tax Rate based on Customer Filer Status & Active Settings (matches Purchase logic)
+  const taxSettingsActive = !taxSettings || taxSettings.status === 'Active';
+  const configuredTaxRate = !taxSettingsActive
+    ? 0
+    : customerFilerStatus === 'Filer'
+    ? round2(taxSettings?.filer_rate ?? 0.5)
+    : customerFilerStatus === 'Non-Filer'
+    ? round2(taxSettings?.non_filer_rate ?? 2.5)
+    : round2(taxSettings?.exempt_rate ?? 0);
 
   useEffect(() => {
     if (!isTaxOverridden) {
@@ -3077,9 +3117,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const taxableAmount = round2(grossAmount - totalDiscount);
   const gstAmount = round2(validRows.reduce((s, r) => s + r.tax_amount, 0));
 
-  const effectiveAdvTaxRate = advanceTaxApplicable ? round2(advanceTaxRate) : 0;
+  const effectiveAdvTaxRate = advanceTaxApplicable
+    ? isTaxOverridden
+      ? Math.max(0, round2(advanceTaxRate))
+      : configuredTaxRate
+    : 0;
+  const advTaxBasis = taxSettings?.calculation_basis || 'taxable_plus_gst';
+  const advanceTaxBase =
+    advTaxBasis === 'taxable_amount'
+      ? taxableAmount
+      : advTaxBasis === 'gross_amount'
+      ? grossAmount
+      : round2(taxableAmount + gstAmount);
   const advanceTaxAmount = advanceTaxApplicable
-    ? round2(((taxableAmount + gstAmount) * effectiveAdvTaxRate) / 100)
+    ? round2((advanceTaxBase * effectiveAdvTaxRate) / 100)
     : 0;
 
   const totalTax = round2(gstAmount + advanceTaxAmount);
@@ -3265,7 +3316,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setItemListTargetRowIdx(null);
     setInvoiceDiscountPercent(0);
     setInvoiceDiscountAmount(0);
-    setAdvanceTaxApplicable(false);
+    const walkinCust = customers.find((c) => c.account_code === 'CUS-1001');
+    const defaultFiler = (
+      ['Filer', 'Non-Filer', 'Exempt'].includes(String(walkinCust?.filer_status))
+        ? walkinCust?.filer_status
+        : 'Filer'
+    ) as 'Filer' | 'Non-Filer' | 'Exempt';
+    setCustomerFilerStatus(defaultFiler);
+    setAdvanceTaxApplicable(true);
     setIsTaxOverridden(false);
     setTaxOverrideReason('');
     setPaidAmountManuallyEdited(false);
@@ -3394,6 +3452,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         discount_override_reason: discountOverrideReason || null,
         advance_tax_applicable: advanceTaxApplicable ? 1 : 0,
         advance_tax_rate: effectiveAdvTaxRate,
+        advance_tax_amount: advanceTaxAmount,
+        tax_amount: totalTax,
+        net_total: netInvoiceAmount,
         is_tax_overridden: isTaxOverridden ? 1 : 0,
         tax_override_reason: taxOverrideReason || null,
         tax_override_authorized_by: taxOverrideAuthorizedBy || null,
@@ -3946,6 +4007,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       const createdId = res.account?.id || res.data?.id;
       if (createdId) {
         setCustomerAccountId(Number(createdId));
+        setCustomerFilerStatus(newCustFilerStatus);
+        setIsTaxOverridden(false);
+        setAdvanceTaxApplicable(true);
       }
       setActiveCustomerShortcut(null);
       setSuccessMsg(`Customer "${newCustName}" created and selected for this invoice.`);
@@ -4126,11 +4190,28 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     if (id > 0) {
       refreshCustomerBalanceSummary(id, editingSaleId);
       const chosenCust = customers.find((c) => Number(c.id) === id);
+      const resolvedFiler = (
+        ['Filer', 'Non-Filer', 'Exempt'].includes(String(chosenCust?.filer_status))
+          ? chosenCust?.filer_status
+          : 'Filer'
+      ) as 'Filer' | 'Non-Filer' | 'Exempt';
+      setCustomerFilerStatus(resolvedFiler);
+      setIsTaxOverridden(false);
+      setAdvanceTaxApplicable(true);
       if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
         setSalesmanId(Number(chosenCust.assigned_salesman_id));
         setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
       }
     } else {
+      const walkinCust = customers.find((c) => c.account_code === 'CUS-1001');
+      const walkinFiler = (
+        ['Filer', 'Non-Filer', 'Exempt'].includes(String(walkinCust?.filer_status))
+          ? walkinCust?.filer_status
+          : 'Filer'
+      ) as 'Filer' | 'Non-Filer' | 'Exempt';
+      setCustomerFilerStatus(walkinFiler);
+      setIsTaxOverridden(false);
+      setAdvanceTaxApplicable(true);
       setLiveBalanceSummary(null);
     }
   };
@@ -5398,6 +5479,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
                 {/* Quick Utility Buttons */}
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <select
+                    value={customerFilerStatus}
+                    onChange={(e) => {
+                      setCustomerFilerStatus(e.target.value as 'Filer' | 'Non-Filer' | 'Exempt');
+                      setIsTaxOverridden(false);
+                      setAdvanceTaxApplicable(true);
+                    }}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-slate-200 bg-slate-50 hover:bg-white text-slate-800 outline-none focus:border-emerald-500 cursor-pointer"
+                    title="Customer FBR Filer Status (Auto Advance Tax)"
+                  >
+                    <option value="Filer">Filer ({taxSettings?.filer_rate ?? 0.5}%)</option>
+                    <option value="Non-Filer">Non-Filer ({taxSettings?.non_filer_rate ?? 2.5}%)</option>
+                    <option value="Exempt">Exempt (0%)</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvanceTaxModal(true)}
+                    className={`px-2 py-1 rounded-lg border text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
+                      advanceTaxApplicable && effectiveAdvTaxRate > 0
+                        ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-300'
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                    }`}
+                    title="Configure / Override Advance Tax for this Sales Invoice"
+                  >
+                    <Percent className="w-3 h-3 text-amber-600" />
+                    <span>Adv Tax {advanceTaxApplicable ? `(${effectiveAdvTaxRate}%)` : '(Off)'}</span>
+                  </button>
                   <select
                     value={paymentMode}
                     onChange={(e) => setPaymentMode(e.target.value as SalesPaymentMode)}
@@ -6938,7 +7046,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between text-slate-300">
-                  <span>Tax</span>
+                  <span>
+                    Tax ({gstAmount !== 0 ? 'Item + ' : ''}{effectiveAdvTaxRate}% Adv)
+                  </span>
                   <span className="font-mono font-bold text-amber-300">
                     {totalTax >= 0 ? '+' : ''}
                     {formatPKR(totalTax)}
@@ -7393,9 +7503,26 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            {/* Row 2: Salesman, Deliveryman, Buyer, Quick Search (F3) & Row Actions */}
-            <div className="grid grid-cols-12 gap-1.5 items-center pt-1 border-t border-slate-200">
-              <div className="col-span-2 flex items-center gap-1">
+            {/* Row 2: FBR, Salesman, Deliveryman, Company, Quick Search (F3) & Row Actions */}
+            <div className="flex flex-wrap lg:flex-nowrap items-center gap-1.5 pt-1 border-t border-slate-200">
+              <div className="w-[140px] shrink-0 flex items-center gap-1">
+                <label className="font-bold text-slate-600 whitespace-nowrap">FBR:</label>
+                <select
+                  value={customerFilerStatus}
+                  onChange={(e) => {
+                    setCustomerFilerStatus(e.target.value as 'Filer' | 'Non-Filer' | 'Exempt');
+                    setIsTaxOverridden(false);
+                    setAdvanceTaxApplicable(true);
+                  }}
+                  className="w-full min-w-0 px-1 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900"
+                  title="Customer FBR Filer Status (Auto Advance Tax)"
+                >
+                  <option value="Filer">Filer ({taxSettings?.filer_rate ?? 0.5}%)</option>
+                  <option value="Non-Filer">Non-Filer ({taxSettings?.non_filer_rate ?? 2.5}%)</option>
+                  <option value="Exempt">Exempt (0%)</option>
+                </select>
+              </div>
+              <div className="flex-1 min-w-[120px] flex items-center gap-1">
                 <label className="font-bold text-slate-600 whitespace-nowrap">Salesman:</label>
                 <select
                   value={salesmanId || ''}
@@ -7405,7 +7532,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const found = salesmenList.find((s) => s.id === idVal);
                     if (found) setSalesman(found.name);
                   }}
-                  className="w-full px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white"
+                  className="w-full min-w-0 px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white"
                 >
                   <option value="">Counter</option>
                   {filteredSalesmen.map((sm) => (
@@ -7415,7 +7542,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   ))}
                 </select>
               </div>
-              <div className="col-span-2 flex items-center gap-1">
+              <div className="flex-1 min-w-[120px] flex items-center gap-1">
                 <label className="font-bold text-slate-600 whitespace-nowrap">Delivery:</label>
                 <select
                   value={deliverymanId || ''}
@@ -7430,7 +7557,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       setDeliveryStatus('Pending');
                     }
                   }}
-                  className="w-full px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white"
+                  className="w-full min-w-0 px-1 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white"
                 >
                   <option value="">Pickup</option>
                   {filteredDeliverymen.map((dm) => (
@@ -7440,7 +7567,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   ))}
                 </select>
               </div>
-              <div className="col-span-2 flex items-center gap-1">
+              <div className="flex-1 min-w-[130px] flex items-center gap-1">
                 <label htmlFor="access_sales_company_filter" className="font-bold text-slate-600 whitespace-nowrap">
                   Company:
                 </label>
@@ -7476,7 +7603,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   )}
                 </div>
               </div>
-              <div className="col-span-3 relative">
+              <div className="flex-[1.3] min-w-[170px] relative">
                 <div className="flex items-center bg-white border border-slate-300 rounded px-1.5 focus-within:border-emerald-600">
                   <Search className="w-3 h-3 text-emerald-600 mr-1 shrink-0" />
                   <input
@@ -7602,7 +7729,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </div>
                 {renderSalesExcelItemCombobox('top')}
               </div>
-              <div className="col-span-3 flex flex-wrap items-center justify-end gap-1">
+              <div className="shrink-0 flex flex-wrap items-center justify-end gap-1">
                 <button
                   type="button"
                   onClick={() => openItemListForRow(rows[selectedRowIndex]?.item_id ? null : selectedRowIndex)}
@@ -8722,6 +8849,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     title="Delivery / Cash Load Charges"
                   />
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanceTaxModal(true)}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800/90 border border-amber-500/40 hover:border-amber-400 cursor-pointer"
+                  title="Configure / Override Advance Tax"
+                >
+                  <span className="text-slate-300 font-bold">
+                    Tax ({effectiveAdvTaxRate}%):
+                  </span>
+                  <span className="font-mono font-bold text-amber-300">
+                    +{formatPKR(totalTax)}
+                  </span>
+                </button>
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 border border-amber-500/40">
                   <span className="text-slate-300 font-bold">Prev Bal:</span>
                   <span className="font-mono font-black text-amber-300 ams-payment-amount-lg">
@@ -8932,7 +9072,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             <div className="bg-slate-50 rounded-lg p-3 border border-slate-200 space-y-1.5">
               <div className="flex justify-between">
                 <span className="text-slate-500">Customer Name:</span>
-                <span className="font-bold text-slate-900">{selectedCustomer?.account_name}</span>
+                <span className="font-bold text-slate-900">{selectedCustomer?.account_name || 'Walk-in Cash Customer'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Applicable Tax Category:</span>
@@ -8940,14 +9080,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Current Configured Rate:</span>
-                <span className="font-mono font-bold">{configuredTaxRate}%</span>
+                <span className="font-mono font-bold">
+                  {configuredTaxRate}%{!taxSettingsActive ? ' (Inactive)' : ''}
+                </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500">Taxable Amount:</span>
-                <span className="font-mono font-bold">{formatPKR(taxableAmount)}</span>
+                <span className="text-slate-500">
+                  Tax Base ({taxSettings?.calculation_basis === 'taxable_amount' ? 'Taxable' : taxSettings?.calculation_basis === 'gross_amount' ? 'Gross' : 'Taxable + GST'}):
+                </span>
+                <span className="font-mono font-bold">{formatPKR(advanceTaxBase)}</span>
               </div>
               <div className="flex justify-between border-t border-slate-200 pt-1">
-                <span className="font-bold text-slate-800">Calculated Advance Tax:</span>
+                <span className="font-bold text-slate-800">Calculated Advance Tax ({effectiveAdvTaxRate}%):</span>
                 <span className="font-mono font-black text-amber-700">
                   {formatPKR(advanceTaxAmount)}
                 </span>

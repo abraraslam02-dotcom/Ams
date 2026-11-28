@@ -2009,7 +2009,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     const buyerName = String(body.buyer_name || '').trim();
     const customerFilerStatus = ['Filer', 'Non-Filer', 'Exempt'].includes(String(body.customer_filer_status))
       ? String(body.customer_filer_status)
-      : String(customer.filer_status || 'Non-Filer');
+      : String(customer.filer_status || 'Filer');
 
     const rawItems = Array.isArray(body.items)
       ? body.items
@@ -2480,12 +2480,24 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     const totalDiscountAmount = round2(itemDiscountTotal + invoiceDiscountAmount);
     const taxableAmount = round2(grossTotal - totalDiscountAmount);
 
-    // Advance Tax calculation (only when advance_tax_applicable is enabled or overridden)
+    // Advance Tax calculation (auto-enabled when advance_tax_settings.status is Active, matching Purchase logic)
     const taxSettings = db
       .prepare('SELECT * FROM advance_tax_settings ORDER BY id DESC LIMIT 1')
       .get() as Record<string, unknown> | undefined;
 
-    const advanceTaxApplicable = body.advance_tax_applicable ? 1 : 0;
+    const settingsActive = !taxSettings || String(taxSettings.status || 'Active') === 'Active';
+    const advanceTaxApplicable =
+      body.advance_tax_applicable !== undefined
+        ? body.advance_tax_applicable
+          ? 1
+          : 0
+        : body.is_excel_import === true
+          ? Number(body.exact_advance_tax_amount || 0) > 0
+            ? 1
+            : 0
+          : settingsActive
+            ? 1
+            : 0;
     const isTaxOverridden = body.is_tax_overridden ? 1 : 0;
     const taxOverrideReason = body.tax_override_reason ? String(body.tax_override_reason).trim() : null;
     const taxOverrideAuthorizedBy = body.tax_override_authorized_by
@@ -2493,12 +2505,14 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
       : null;
 
     let configuredRate = 0;
-    if (customerFilerStatus === 'Filer') {
-      configuredRate = round2(taxSettings?.filer_rate ?? 0.5);
-    } else if (customerFilerStatus === 'Non-Filer') {
-      configuredRate = round2(taxSettings?.non_filer_rate ?? 2.5);
-    } else {
-      configuredRate = round2(taxSettings?.exempt_rate ?? 0);
+    if (settingsActive) {
+      if (customerFilerStatus === 'Filer') {
+        configuredRate = round2(Number(taxSettings?.filer_rate ?? 0.5));
+      } else if (customerFilerStatus === 'Non-Filer') {
+        configuredRate = round2(Number(taxSettings?.non_filer_rate ?? 2.5));
+      } else {
+        configuredRate = round2(Number(taxSettings?.exempt_rate ?? 0));
+      }
     }
 
     let advanceTaxRate = 0;
@@ -4147,8 +4161,16 @@ salesRouter.post('/returns', (req: Request, res: Response) => {
 
       // Proportional Advance Tax reversal if original sale had Advance Tax
       const origAdvTaxRate = Number(sale.advance_tax_applicable) ? round2(Number(sale.advance_tax_rate || 0)) : 0;
+      const returnTaxSettings = db
+        .prepare('SELECT calculation_basis FROM advance_tax_settings ORDER BY id DESC LIMIT 1')
+        .get() as { calculation_basis?: string } | undefined;
+      const returnTaxBasis = String(returnTaxSettings?.calculation_basis || 'taxable_plus_gst');
+      let advReturnBase = round2(taxableReturnAmount + gstAdjustmentAmount);
+      if (returnTaxBasis === 'taxable_amount') advReturnBase = taxableReturnAmount;
+      else if (returnTaxBasis === 'gross_amount') advReturnBase = grossReturnAmount;
+
       const advanceTaxAdjustmentAmount =
-        origAdvTaxRate > 0 ? round2(((taxableReturnAmount + gstAdjustmentAmount) * origAdvTaxRate) / 100) : 0;
+        origAdvTaxRate > 0 ? round2((advReturnBase * origAdvTaxRate) / 100) : 0;
 
       const totalRefundAmount = round2(taxableReturnAmount + gstAdjustmentAmount + advanceTaxAdjustmentAmount);
 
