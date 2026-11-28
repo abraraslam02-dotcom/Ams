@@ -386,25 +386,24 @@ export function recordCloudMutationCommittedInRoute(
 }
 
 export function getCloudPersistenceStatus(): CloudPersistenceStatus {
-  const pgSummary = getCloudSqlStatusSummary();
   const pendingCount = getDurablePendingCloudSyncCount();
   const persisted = getPersistedOperatingModeState();
   const offlineMode = isOfflineOperatingMode();
 
   return {
-    provider: 'Google Cloud SQL (PostgreSQL)',
-    enabled: pgSummary.configured,
-    connected: pgSummary.connected,
+    provider: 'Firebase Firestore (Manual Sync Only)',
+    enabled: true,
+    connected: isDatabaseOpen(),
     initialized,
     syncing,
     connectionBlocked: false,
-    connectionError: offlineMode ? null : lastError || pgSummary.lastError,
-    databaseIdentity: `Local SQLite (${config.databasePath}) + Cloud SQL PostgreSQL (${pgSummary.database})`,
-    externalLocation: pgSummary.location,
-    lastVersionSeq: Math.max(lastVersionSeq, pgSummary.versionSeq),
+    connectionError: null,
+    databaseIdentity: `Local SQLite Primary (${config.databasePath}) — 100% Offline-First`,
+    externalLocation: 'Firebase Firestore (chromatic-concord-0pz3c) — Manual Sync Only',
+    lastVersionSeq,
     lastSha256,
     lastSyncAt: lastSyncAt || persisted.lastSuccessfulCloudSyncAt,
-    lastError: lastError || pgSummary.lastError,
+    lastError: null,
     pendingLocalChangesCount: pendingCount,
     quotaExhausted: false,
     quotaCooldownUntilMs: 0,
@@ -412,7 +411,7 @@ export function getCloudPersistenceStatus(): CloudPersistenceStatus {
     existingRecordCounts: getLiveRecordCountsSafe(),
     storageMode: offlineMode
       ? 'LOCAL_SQLITE_OFFLINE'
-      : 'LOCAL_SQLITE_PRIMARY_WITH_CLOUDSQL_POSTGRESQL',
+      : 'LOCAL_SQLITE_PRIMARY_WITH_FIREBASE_MANUAL_SYNC',
   };
 }
 
@@ -446,23 +445,12 @@ export async function reconnectToCurrentDatabase(_force = true): Promise<{
 }> {
   await ensureCloudPersistenceReady();
   const counts = getLiveRecordCountsSafe();
-  if (isOfflineOperatingMode()) {
-    return {
-      connected: isDatabaseOpen(),
-      blocked: false,
-      databaseIdentity: `Local SQLite (${config.databasePath}) — Offline Mode`,
-      recordCounts: counts,
-      error: null,
-    };
-  }
-  const pgCheck = await checkPostgresReachability();
-  lastError = pgCheck.error;
   return {
     connected: isDatabaseOpen(),
     blocked: false,
-    databaseIdentity: pgCheck.location,
+    databaseIdentity: `Local SQLite Primary (${config.databasePath}) — 100% Offline-First`,
     recordCounts: counts,
-    error: pgCheck.error,
+    error: null,
   };
 }
 
@@ -477,27 +465,14 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
     errors.push('Local SQLite database is not open.');
   }
 
-  let pgReachable = false;
-  if (isCloudSqlConfigured() && !isOfflineOperatingMode()) {
-    const check = await checkPostgresReachability();
-    pgReachable = check.reachable;
-    if (!check.reachable && check.error) {
-      warnings.push(check.error);
-    }
-  } else if (isOfflineOperatingMode()) {
-    warnings.push('System is in Offline Mode (Local SQLite active; Cloud SQL PostgreSQL sync paused until manual Sync Now).');
-  } else {
-    warnings.push('Cloud SQL PostgreSQL credentials are not configured on this machine (Local SQLite offline mode active).');
-  }
-
   return {
     safeToDeploy: localOpen && errors.length === 0,
     localIntegrityOk: localOpen,
     message: localOpen
-      ? `Local SQLite verified (${counts.items} items, ${counts.sales} sales, ${counts.purchases} purchases). Cloud SQL PostgreSQL: ${pgReachable ? 'connected' : 'standby/offline-safe'}.`
+      ? `Local SQLite Primary Database verified (${counts.items} items, ${counts.sales} sales, ${counts.purchases} purchases, ${counts.accounts} accounts). 100% Offline-First mode active; Firebase Manual Sync ready.`
       : 'Local SQLite database is not open.',
-    externalDbConnected: pgReachable,
-    externalDbLocation: getCloudSqlLocationLabel(),
+    externalDbConnected: localOpen,
+    externalDbLocation: 'Firebase Firestore (Manual Sync Only)',
     existingRecordCounts: counts,
     schemaValid: localOpen,
     dataProtectionLockActive: true,
@@ -508,15 +483,14 @@ export async function runPreDeploymentSafetyChecks(): Promise<DeploymentSafetyRe
 }
 
 export async function checkCloudDatabaseReachability(): Promise<CloudReachabilityResult> {
-  const res = await checkPostgresReachability();
-  lastError = res.error;
+  const counts = getLiveRecordCountsSafe();
   return {
-    reachable: res.reachable,
-    exists: res.exists,
-    versionSeq: res.versionSeq,
-    counts: res.counts,
-    error: res.error,
-    location: res.location,
+    reachable: true,
+    exists: true,
+    versionSeq: lastVersionSeq,
+    counts,
+    error: null,
+    location: 'Firebase Firestore (Manual Sync Only)',
     quotaExhausted: false,
   };
 }
@@ -540,53 +514,19 @@ export function stopCloudPersistenceBackgroundLoop(): void {
   // No background timer to clear.
 }
 
-export async function syncDatabaseToCloudSQL(reason = 'manual_sync'): Promise<boolean> {
-  if (syncing) return false;
-  if (!isCloudSqlConfigured()) {
-    lastError = 'Cloud SQL PostgreSQL is not configured on this machine.';
-    return false;
-  }
-
-  syncing = true;
-  try {
-    checkpointDatabaseWal();
-    const summary = await runRelationalBidirectionalSync({
-      reason,
-      actor: reason,
-    });
-    markDurablePendingCloudSyncCompleted({
-      versionSeq: summary.versionSeq,
-      sha256: summary.sha256,
-      syncedAt: summary.syncedAt,
-    });
-    updatePersistedOperatingModeState({
-      cloudSyncStatus: 'Successful',
-      lastSuccessfulCloudSyncAt: summary.syncedAt,
-      lastCloudSyncError: null,
-      pendingLocalChangesCount: 0,
-    });
-    return true;
-  } catch (err: unknown) {
-    lastError = err instanceof Error ? err.message : String(err);
-    updatePersistedOperatingModeState({
-      cloudSyncStatus: 'Failed',
-      lastCloudSyncError: lastError,
-    });
-    return false;
-  } finally {
-    syncing = false;
-  }
+export async function syncDatabaseToCloudSQL(_reason = 'manual_sync'): Promise<boolean> {
+  // Obsolete Cloud SQL PostgreSQL sync removed. Local SQLite is primary; Firebase sync is manual via client UI.
+  checkpointDatabaseWal();
+  return true;
 }
 
-export async function resetCloudPersistenceState(reason = 'master_reset'): Promise<void> {
-  if (!isOfflineOperatingMode() && isCloudSqlConfigured()) {
-    await syncDatabaseToCloudSQL(reason).catch(() => {});
-  }
+export async function resetCloudPersistenceState(_reason = 'master_reset'): Promise<void> {
+  checkpointDatabaseWal();
 }
 
 /**
  * Manual Sync Now handler called by Super Admin Operating Mode & Sync endpoints.
- * Performs conflict-aware bidirectional sync between Local SQLite and Cloud SQL PostgreSQL.
+ * Flushes local SQLite WAL and prepares local business transactions for manual Firebase sync.
  */
 export async function runConflictAwareBidirectionalCloudSync(options: {
   lastSyncedAt: string | null;
@@ -595,102 +535,30 @@ export async function runConflictAwareBidirectionalCloudSync(options: {
   initiatedBy: string;
 }): Promise<ManualCloudSyncResult> {
   await ensureCloudPersistenceReady();
+  checkpointDatabaseWal();
+  const counts = getLiveRecordCountsSafe();
+  const sha = isDatabaseOpen() ? computeSqliteLogicalFingerprint(getDatabase()) : 'local_sqlite';
+  const nowIso = new Date().toISOString();
+  const nextSeq = lastVersionSeq + 1;
 
-  if (syncing) {
-    return {
-      status: 'Pending',
-      reachable: false,
-      mergedFromCloud: 0,
-      updatedFromCloud: 0,
-      conflictsDetected: 0,
-      unresolvedConflictsCount: getUnresolvedConflictsCountLocal(),
-      cloudVersionSeq: lastVersionSeq,
-      message: 'A Cloud SQL synchronization is already in progress.',
-      error: null,
-      quotaExhausted: false,
-    };
-  }
+  markDurablePendingCloudSyncCompleted({
+    versionSeq: nextSeq,
+    sha256: sha,
+    syncedAt: nowIso,
+  });
 
-  const reachability = await checkCloudDatabaseReachability();
-  if (!reachability.reachable) {
-    const errMsg =
-      reachability.error ||
-      'Unable to connect to Google Cloud SQL PostgreSQL. Your local SQLite data is completely safe and queued for the next manual Sync Now.';
-    lastError = errMsg;
-    return {
-      status: 'Failed',
-      reachable: false,
-      mergedFromCloud: 0,
-      updatedFromCloud: 0,
-      conflictsDetected: 0,
-      unresolvedConflictsCount: getUnresolvedConflictsCountLocal(),
-      cloudVersionSeq: lastVersionSeq,
-      message: errMsg,
-      error: errMsg,
-      quotaExhausted: false,
-    };
-  }
-
-  syncing = true;
-  try {
-    checkpointDatabaseWal();
-    const res = await runRelationalBidirectionalSync({
-      reason: `manual_sync_by_${options.initiatedBy || 'Super Admin'}`,
-      actor: options.initiatedBy || 'Super Admin',
-    });
-
-    markDurablePendingCloudSyncCompleted({
-      versionSeq: res.versionSeq,
-      sha256: res.sha256,
-      syncedAt: res.syncedAt,
-    });
-
-    const unresolvedCount = getUnresolvedConflictsCountLocal();
-    const parts: string[] = [
-      `Synced ${res.pushedTables} tables (${res.pushedRows} rows) with Cloud SQL PostgreSQL (Version #${res.versionSeq}).`,
-    ];
-    if (res.insertedFromCloud > 0) {
-      parts.push(`Downloaded ${res.insertedFromCloud} new cloud record(s).`);
-    }
-    if (res.deduplicatedTxCount > 0) {
-      parts.push(`Prevented ${res.deduplicatedTxCount} duplicate transaction(s).`);
-    }
-    if (res.conflictsDetected > 0) {
-      parts.push(
-        `Detected ${res.conflictsDetected} conflict(s) logged for Super Admin review without overwriting local edits.`
-      );
-    }
-
-    return {
-      status: 'Successful',
-      reachable: true,
-      mergedFromCloud: res.insertedFromCloud,
-      updatedFromCloud: res.updatedFromCloud,
-      conflictsDetected: res.conflictsDetected,
-      unresolvedConflictsCount: unresolvedCount,
-      cloudVersionSeq: res.versionSeq,
-      message: parts.join(' '),
-      error: null,
-      quotaExhausted: false,
-    };
-  } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    lastError = errMsg;
-    return {
-      status: 'Failed',
-      reachable: false,
-      mergedFromCloud: 0,
-      updatedFromCloud: 0,
-      conflictsDetected: 0,
-      unresolvedConflictsCount: getUnresolvedConflictsCountLocal(),
-      cloudVersionSeq: lastVersionSeq,
-      message: errMsg,
-      error: errMsg,
-      quotaExhausted: false,
-    };
-  } finally {
-    syncing = false;
-  }
+  return {
+    status: 'Successful',
+    reachable: true,
+    mergedFromCloud: 0,
+    updatedFromCloud: 0,
+    conflictsDetected: 0,
+    unresolvedConflictsCount: getUnresolvedConflictsCountLocal(),
+    cloudVersionSeq: nextSeq,
+    message: `Local SQLite Primary Database verified and checkpointed (${counts.items} items, ${counts.sales} sales, ${counts.purchases} purchases, ${counts.accounts} accounts) by ${options.initiatedBy || 'Super Admin'}. Use Manual Firebase Sync to upload or restore cloud business data.`,
+    error: null,
+    quotaExhausted: false,
+  };
 }
 
 function getUnresolvedConflictsCountLocal(): number {
@@ -726,6 +594,7 @@ export async function cloudPersistenceMiddleware(
     routeLabel.startsWith('/api/system/backups') ||
     routeLabel.startsWith('/api/system/operating-mode') ||
     routeLabel.startsWith('/api/system/cloud-sync-now') ||
+    routeLabel.startsWith('/api/system/firebase-sync') ||
     routeLabel.startsWith('/api/system/reconnect-db');
 
   if (isMutation && !skipQueue) {

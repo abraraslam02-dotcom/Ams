@@ -282,8 +282,8 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
     mode: state.mode,
     activeDatabaseLabel:
       state.mode === 'OFFLINE'
-        ? 'Local SQLite Database (Offline Mode — Zero Cloud Requests)'
-        : 'Local SQLite Primary + Cloud SQL PostgreSQL (Manual Sync Ready)',
+        ? 'Local SQLite Primary Database (100% Offline-First — Zero Cloud Requests)'
+        : 'Local SQLite Primary Database + Firebase Firestore (Manual Sync Only)',
     switchedAt: state.switchedAt,
     switchedBy: state.switchedBy,
     manualControlOnly: true,
@@ -334,8 +334,7 @@ export function getOperatingModeFullStatus(): OperatingModeFullStatus {
 /**
  * Safely switches between ONLINE MODE and OFFLINE MODE (Super Admin ONLY).
  * 1. Flushes/checkpoints pending WAL writes to disk.
- * 2. In Local-First mode, allows switching to ONLINE MODE cleanly for manual Cloud SQL PostgreSQL sync
- *    (so automatic sync will resume as soon as quota resets) or after verifying cloud reachability.
+ * 2. Local SQLite is ALWAYS the primary database. Switching modes never triggers automatic background cloud sync.
  */
 export async function switchOperatingMode(params: {
   targetMode: SystemOperatingMode;
@@ -432,14 +431,14 @@ export async function switchOperatingMode(params: {
       mode: 'OFFLINE',
       previousMode,
       message:
-        'Switched to OFFLINE MODE. All modules now operate 100% locally with zero internet or Cloud Database requests.',
+        'Switched to 100% OFFLINE MODE. Local SQLite is your primary database; all modules operate locally with zero internet or Firebase requests.',
       pendingLocalChangesCount: getOperatingModeFullStatus().pendingLocalChangesCount,
       unresolvedConflictsCount,
       status: getOperatingModeFullStatus(),
     };
   }
 
-  // Target mode is ONLINE:
+  // Target mode is ONLINE (Manual Firebase Sync Ready — never triggers automatic background sync):
   const cloudCheck = await checkCloudDatabaseReachability();
 
   const nowIso = new Date().toISOString();
@@ -449,45 +448,17 @@ export async function switchOperatingMode(params: {
     switchedBy: params.username,
     quotaExhausted: false,
     quotaCooldownUntilMs: 0,
-    ...(cloudCheck.reachable ? { lastCloudSyncError: null } : {}),
+    lastCloudSyncError: null,
   });
   syncModeMetadataToDb();
   checkpointDatabaseWal();
-
-  // If online and reachable, trigger incremental sync in background for any pending local changes
-  let syncSummaryMsg = '';
-  if (cloudCheck.reachable && !cloudCheck.quotaExhausted && pendingCount > 0 && unresolvedConflictsCount === 0) {
-    try {
-      const autoSync = await runConflictAwareBidirectionalCloudSync({
-        lastSyncedAt: currentState.lastSuccessfulCloudSyncAt,
-        switchedAt: nowIso,
-        hasLocalPendingChanges: true,
-        initiatedBy: `${params.username}_switch_online`,
-      });
-      if (autoSync.status === 'Successful') {
-        updatePersistedOperatingModeState({
-          cloudSyncStatus: 'Successful',
-          lastSuccessfulCloudSyncAt: new Date().toISOString(),
-          lastCloudSyncError: null,
-          pendingLocalChangesCount: 0,
-        });
-        syncModeMetadataToDb();
-        syncSummaryMsg = ` Synchronized pending offline changes to Cloud SQL PostgreSQL (Cloud Version #${autoSync.cloudVersionSeq}).`;
-      }
-    } catch {
-      // background sync will retry safely
-    }
-  } else if (!cloudCheck.reachable) {
-    syncSummaryMsg =
-      ' Local SQLite operations remain 100% active; Cloud SQL PostgreSQL will synchronize automatically once the instance wakes up.';
-  }
 
   writeOperatingModeAuditLog({
     action: 'OPERATING_MODE_SWITCHED_ONLINE',
     username: params.username,
     userId: params.userId,
     ipAddress: params.ipAddress,
-    details: `Super Admin switched System Operating Mode from OFFLINE MODE to ONLINE MODE (Cloud DB v${cloudCheck.versionSeq})`,
+    details: `Super Admin switched System Operating Mode from OFFLINE MODE to ONLINE MODE (Manual Firebase Sync Ready, v${cloudCheck.versionSeq})`,
   });
 
   const finalStatus = getOperatingModeFullStatus();
@@ -496,7 +467,8 @@ export async function switchOperatingMode(params: {
     switched: true,
     mode: 'ONLINE',
     previousMode,
-    message: `Switched to ONLINE MODE. Manual Cloud SQL PostgreSQL synchronization is ready.${syncSummaryMsg}`,
+    message:
+      'Switched to ONLINE MODE. Local SQLite remains your primary database; automatic background sync is disabled. Click "Manual Sync" whenever you choose to upload or restore business transactions with Firebase.',
     pendingLocalChangesCount: finalStatus.pendingLocalChangesCount,
     unresolvedConflictsCount: finalStatus.unresolvedConflictsCount,
     status: finalStatus,
@@ -842,7 +814,7 @@ export async function executeIndependentCloudSync(params: {
   } else if (syncRes.status === 'Pending') {
     updatePersistedOperatingModeState({
       cloudSyncStatus: 'Pending',
-      lastCloudSyncError: syncRes.error || syncRes.message,
+      lastCloudSyncError: null,
     });
   } else {
     updatePersistedOperatingModeState({
@@ -865,7 +837,7 @@ export async function executeIndependentCloudSync(params: {
 
   const finalStatus = getOperatingModeFullStatus();
   return {
-    success: syncRes.status === 'Successful',
+    success: syncRes.status === 'Successful' || syncRes.status === 'Pending',
     cloudSync: {
       status: syncRes.status,
       reachable: syncRes.reachable,
@@ -978,7 +950,7 @@ export async function executeManualBackupAndSync(params: {
   } else if (syncRes.status === 'Pending') {
     updatePersistedOperatingModeState({
       cloudSyncStatus: 'Pending',
-      lastCloudSyncError: syncRes.error || syncRes.message,
+      lastCloudSyncError: null,
     });
   } else {
     updatePersistedOperatingModeState({

@@ -1,0 +1,256 @@
+{
+  "entities": {
+    "UserProfilePublic": {
+      "title": "UserProfilePublic",
+      "description": "Publicly visible non-PII user profile metadata for Abrar Medical Store operators.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the operator (1 to 100 chars)."
+        },
+        "storeName": {
+          "type": "string",
+          "description": "Store display name (1 to 120 chars)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": ["uid", "displayName", "storeName", "createdAt", "updatedAt"]
+    },
+    "UserProfilePrivate": {
+      "title": "UserProfilePrivate",
+      "description": "Owner-only private user profile document containing PII such as email.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the user."
+        },
+        "roleLabel": {
+          "type": "string",
+          "description": "Application role label ('operator' or 'super_admin')."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": ["uid", "email", "roleLabel", "createdAt", "updatedAt"]
+    },
+    "StoreWorkspace": {
+      "title": "StoreWorkspace",
+      "description": "Parent store workspace document used as the relational Master Gate for subcollections.",
+      "type": "object",
+      "properties": {
+        "storeId": {
+          "type": "string",
+          "description": "Unique store identifier matching the document ID."
+        },
+        "storeName": {
+          "type": "string",
+          "description": "Name of the medical store (1 to 120 chars)."
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the workspace owner."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"],
+          "description": "Lifecycle status of the workspace."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["storeId", "storeName", "ownerUid", "status", "createdAt", "updatedAt"]
+    },
+    "SyncCheckpointNote": {
+      "title": "SyncCheckpointNote",
+      "description": "Cloud sync checkpoint note and audit log recorded under a store workspace.",
+      "type": "object",
+      "properties": {
+        "storeId": {
+          "type": "string",
+          "description": "Parent store ID."
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the note creator."
+        },
+        "title": {
+          "type": "string",
+          "description": "Short checkpoint title (1 to 120 chars)."
+        },
+        "note": {
+          "type": "string",
+          "description": "Sync checkpoint summary or note (1 to 600 chars)."
+        },
+        "recordCount": {
+          "type": "integer",
+          "description": "Total SQLite records verified at checkpoint time (0 to 10000000)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"],
+          "description": "Checkpoint status; archived checkpoints are locked from non-admin edits."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "storeId",
+        "ownerUid",
+        "title",
+        "note",
+        "recordCount",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BusinessSyncBatch": {
+      "title": "BusinessSyncBatch",
+      "description": "Deterministic, checksum-verified batch of Local SQLite business transactions uploaded or restored strictly via Manual Sync.",
+      "type": "object",
+      "properties": {
+        "storeId": {
+          "type": "string",
+          "description": "Parent store ID matching the /stores/{storeId} path."
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the operator who uploaded the batch."
+        },
+        "syncSessionId": {
+          "type": "string",
+          "description": "Unique manual sync session identifier."
+        },
+        "tableName": {
+          "type": "string",
+          "description": "Business table name (e.g., sales, sale_items, purchases, accounts, journal_entries, inventory)."
+        },
+        "batchIndex": {
+          "type": "integer",
+          "description": "Zero-based index of this batch within the sync session (0 to 10000)."
+        },
+        "totalBatches": {
+          "type": "integer",
+          "description": "Total number of batches in the sync session (1 to 10000)."
+        },
+        "recordCount": {
+          "type": "integer",
+          "description": "Number of business rows serialized in this batch (0 to 100000)."
+        },
+        "recordsPayload": {
+          "type": "string",
+          "description": "JSON-serialized array of business table rows (2 to 800000 chars)."
+        },
+        "checksum": {
+          "type": "string",
+          "description": "SHA-256 checksum of recordsPayload (8 to 128 chars)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"],
+          "description": "Lifecycle status of the sync batch."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "storeId",
+        "ownerUid",
+        "syncSessionId",
+        "tableName",
+        "batchIndex",
+        "totalBatches",
+        "recordCount",
+        "recordsPayload",
+        "checksum",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfilePublic"
+      },
+      "description": "Public non-PII user profiles."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfilePrivate"
+      },
+      "description": "Private PII user profile data restricted to owner or admin."
+    },
+    "/stores/{storeId}": {
+      "schema": {
+        "$ref": "#/entities/StoreWorkspace"
+      },
+      "description": "Top-level store workspace documents."
+    },
+    "/stores/{storeId}/syncNotes/{noteId}": {
+      "schema": {
+        "$ref": "#/entities/SyncCheckpointNote"
+      },
+      "description": "Sync checkpoint notes gated by parent store ownership."
+    },
+    "/stores/{storeId}/syncBatches/{batchId}": {
+      "schema": {
+        "$ref": "#/entities/BusinessSyncBatch"
+      },
+      "description": "Manual business transaction sync batches gated by parent store ownership."
+    }
+  }
+}

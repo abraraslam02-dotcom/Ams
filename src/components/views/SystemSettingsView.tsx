@@ -32,6 +32,7 @@ import { offlineStorage } from '../../services/offlineStorage';
 import { offlineSyncManager } from '../../services/offlineSyncManager';
 import { MasterResetAndLocalBackupPanel } from '../admin/MasterResetAndLocalBackupPanel';
 import { SuperAdminOperatingModePanel } from '../admin/SuperAdminOperatingModePanel';
+import { FirebaseCloudPanel } from '../firebase/FirebaseCloudPanel';
 import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
 import { formatAppDateTime } from '../../utils/formatters';
 
@@ -1160,6 +1161,18 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       ===================================================================== */}
       {subTab === 'system-admin' && (
         <div className="space-y-4">
+          <FirebaseCloudPanel
+            totalLiveRecords={
+              sysInfo?.recordCounts
+                ? Number(sysInfo.recordCounts.items || 0) +
+                  Number(sysInfo.recordCounts.accounts || 0) +
+                  Number(sysInfo.recordCounts.sales || 0) +
+                  Number(sysInfo.recordCounts.purchases || 0) +
+                  Number(sysInfo.recordCounts.vouchers || 0) +
+                  Number(sysInfo.recordCounts.inventoryBatches || 0)
+                : 0
+            }
+          />
           <MasterResetAndLocalBackupPanel
             initialSection="master-reset"
             onDataChanged={fetchAdminData}

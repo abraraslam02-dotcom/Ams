@@ -4,6 +4,7 @@ import type { PoolClient } from 'pg';
 import { pool, isPostgresEnvConfigured } from '../../src/db/index.ts';
 import * as pgSchema from '../../src/db/schema.ts';
 import { getDatabase, isDatabaseOpen } from '../db/connection.ts';
+import { getDbResetEpoch } from '../db/resetState.ts';
 import { parseUtcTimestamp } from '../utils/pakistanTime.ts';
 
 /**
@@ -835,38 +836,60 @@ export async function runRelationalBidirectionalSync(options: {
     // 1. Ensure all 106 tables + sync coordination tables exist in PostgreSQL
     await ensurePostgresSchemaFromSqlite(sqliteDb, client);
 
-    // 2. Pull cloud changes into local SQLite safely (with conflict detection & duplicate prevention)
-    if (!options.skipPull) {
-      const metaCheck = await client.query(
-        `SELECT version_seq FROM ams_cloud_sync_meta WHERE meta_key = 'primary_store' LIMIT 1`
-      );
-      const hasExistingCloudData = Boolean(metaCheck.rows && metaCheck.rows.length > 0);
-      if (hasExistingCloudData) {
-        sqliteDb.exec('PRAGMA foreign_keys = OFF;');
-        try {
-          for (const rule of ALLOWED_CONFLICT_TABLES) {
-            const pgRowsRes = await client.query(
-              `SELECT * FROM ${sanitizeIdentifier(rule.table)}`
-            );
-            const mergeRes = mergeRemoteTableRowsIntoSqlite(
-              sqliteDb,
-              rule,
-              (pgRowsRes.rows || []) as Array<Record<string, unknown>>
-            );
-            summary.insertedFromCloud += mergeRes.insertedFromCloud;
-            summary.updatedFromCloud += mergeRes.updatedFromCloud;
-            summary.keptLocalNewer += mergeRes.keptLocalNewer;
-            summary.conflictsDetected += mergeRes.conflictsDetected;
-            summary.conflictDetails.push(...mergeRes.conflictDetails);
-          }
-        } finally {
-          sqliteDb.exec('PRAGMA foreign_keys = ON;');
+    const localResetEpoch = getDbResetEpoch(sqliteDb);
+    const metaCheck = await client.query(
+      `SELECT version_seq, summary_json FROM ams_cloud_sync_meta WHERE meta_key = 'primary_store' LIMIT 1`
+    );
+    const hasExistingCloudData = Boolean(metaCheck.rows && metaCheck.rows.length > 0);
+    let cloudResetEpoch: string | null = null;
+    if (hasExistingCloudData && metaCheck.rows[0]?.summary_json) {
+      try {
+        const parsedSummary = JSON.parse(String(metaCheck.rows[0].summary_json));
+        if (parsedSummary?.dbResetEpoch) {
+          cloudResetEpoch = String(parsedSummary.dbResetEpoch);
         }
+      } catch {
+        cloudResetEpoch = null;
+      }
+    }
+
+    const resetEpochChanged = Boolean(localResetEpoch && cloudResetEpoch !== localResetEpoch);
+
+    // 2. Pull cloud changes into local SQLite safely ONLY if the database was not reset to a new epoch
+    if (!options.skipPull && hasExistingCloudData && !resetEpochChanged) {
+      sqliteDb.exec('PRAGMA foreign_keys = OFF;');
+      try {
+        for (const rule of ALLOWED_CONFLICT_TABLES) {
+          const pgRowsRes = await client.query(
+            `SELECT * FROM ${sanitizeIdentifier(rule.table)}`
+          );
+          const mergeRes = mergeRemoteTableRowsIntoSqlite(
+            sqliteDb,
+            rule,
+            (pgRowsRes.rows || []) as Array<Record<string, unknown>>
+          );
+          summary.insertedFromCloud += mergeRes.insertedFromCloud;
+          summary.updatedFromCloud += mergeRes.updatedFromCloud;
+          summary.keptLocalNewer += mergeRes.keptLocalNewer;
+          summary.conflictsDetected += mergeRes.conflictsDetected;
+          summary.conflictDetails.push(...mergeRes.conflictDetails);
+        }
+      } finally {
+        sqliteDb.exec('PRAGMA foreign_keys = ON;');
       }
     }
 
     // 3. Push local pending transaction IDs & relational table state inside an atomic PG transaction
     await client.query('BEGIN');
+
+    // If a fresh database reset occurred locally, purge all remote PostgreSQL tables first so zero old cloud data survives
+    const plans = buildPostgresSchemaPlanFromSqlite(sqliteDb);
+    if (resetEpochChanged) {
+      await client.query(`DELETE FROM ams_pg_sync_tx_log`);
+      for (const plan of plans) {
+        await client.query(`DELETE FROM ${sanitizeIdentifier(plan.tableName)}`);
+      }
+    }
 
     // Record durable pending client_tx_ids in ams_pg_sync_tx_log (idempotent duplicate prevention)
     let pendingQueueRows: Array<{
@@ -905,15 +928,21 @@ export async function runRelationalBidirectionalSync(options: {
     }
 
     // Upsert all local SQLite tables relationally into PostgreSQL
-    const plans = buildPostgresSchemaPlanFromSqlite(sqliteDb);
     for (const plan of plans) {
       const rows = sqliteDb
         .prepare(`SELECT * FROM ${sanitizeIdentifier(plan.tableName)}`)
         .all() as Array<Record<string, unknown>>;
 
       if (rows.length === 0) {
+        if (plan.tableName === 'accounts') {
+          await client.query(`DELETE FROM "accounts" WHERE COALESCE(is_system_account, 0) = 0`);
+        }
         summary.pushedTables += 1;
         continue;
+      }
+
+      if (plan.tableName === 'accounts' && resetEpochChanged) {
+        await client.query(`DELETE FROM "accounts" WHERE COALESCE(is_system_account, 0) = 0`);
       }
 
       const colNames = plan.columns.map((c) => c.name);
@@ -929,9 +958,10 @@ export async function runRelationalBidirectionalSync(options: {
           const updateAssignments = nonPkCols
             .map((c) => `${sanitizeIdentifier(c)} = EXCLUDED.${sanitizeIdentifier(c)}`)
             .join(', ');
-          const whereNewer = hasUpdatedAt
-            ? ` WHERE COALESCE(${sanitizeIdentifier(plan.tableName)}."updated_at", '') <= COALESCE(EXCLUDED."updated_at", '')`
-            : '';
+          const whereNewer =
+            hasUpdatedAt && !resetEpochChanged
+              ? ` WHERE COALESCE(${sanitizeIdentifier(plan.tableName)}."updated_at", '') <= COALESCE(EXCLUDED."updated_at", '')`
+              : '';
           conflictClause = `ON CONFLICT (${pkQuoted.join(', ')}) DO UPDATE SET ${updateAssignments}${whereNewer}`;
         } else {
           conflictClause = `ON CONFLICT (${pkQuoted.join(', ')}) DO NOTHING`;
@@ -963,7 +993,7 @@ export async function runRelationalBidirectionalSync(options: {
       summary.pushedTables += 1;
     }
 
-    // Increment authoritative Cloud SQL version sequence & persist record counts
+    // Increment authoritative Cloud SQL version sequence & persist record counts + dbResetEpoch
     const counts = collectSqliteRecordCounts(sqliteDb);
     const nextFingerprint = computeSqliteLogicalFingerprint(sqliteDb);
     const metaUpsert = await client.query(
@@ -976,7 +1006,12 @@ export async function runRelationalBidirectionalSync(options: {
          updated_by = EXCLUDED.updated_by,
          summary_json = EXCLUDED.summary_json
        RETURNING version_seq`,
-      [nextFingerprint, syncedAt, `${actor} (${options.reason})`, JSON.stringify(counts)]
+      [
+        nextFingerprint,
+        syncedAt,
+        `${actor} (${options.reason})`,
+        JSON.stringify({ ...counts, dbResetEpoch: localResetEpoch }),
+      ]
     );
     const newVersionSeq = Number(metaUpsert.rows?.[0]?.version_seq || lastPgVersionSeq + 1);
 

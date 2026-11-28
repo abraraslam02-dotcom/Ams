@@ -41,6 +41,13 @@ import {
   buildWindowsFullInstallerZip,
   generateCloudShortcutBatContent,
 } from '../services/windowsInstallerService.ts';
+import {
+  getFirebaseManualSyncStatus,
+  exportBusinessTransactionsForFirebase,
+  recordFirebaseSyncResult,
+  clearFirebaseSyncErrors,
+  restoreBusinessTransactionsFromFirebase,
+} from '../services/firebaseManualSyncService.ts';
 
 export const systemRouter = Router();
 
@@ -3154,6 +3161,195 @@ systemRouter.get(
       return res.status(500).json({
         success: false,
         error: `Failed to build Windows installer package: ${msg}`,
+      });
+    }
+  }
+);
+
+/**
+ * GET /api/system/firebase-sync/status
+ * Returns complete Manual Firebase Sync status, last successful sync date/time, pending local changes,
+ * sync error history, and live local SQLite business transaction & ledger reconciliation summary.
+ */
+systemRouter.get(
+  '/firebase-sync/status',
+  authenticateToken,
+  (_req: AuthenticatedRequest, res: Response) => {
+    try {
+      const status = getFirebaseManualSyncStatus();
+      return res.json({
+        success: true,
+        ...status,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        error: `Failed to fetch Firebase sync status: ${msg}`,
+      });
+    }
+  }
+);
+
+/**
+ * GET /api/system/firebase-sync/export
+ * Exports strictly business transactions from Local SQLite into checksum-verified batches
+ * ready for manual upload to Firebase Firestore.
+ */
+systemRouter.get(
+  '/firebase-sync/export',
+  authenticateToken,
+  (req: AuthenticatedRequest, res: Response) => {
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only Super Admin or Administrator can export business transactions for Firebase synchronization.',
+      });
+    }
+
+    try {
+      const exported = exportBusinessTransactionsForFirebase();
+      return res.json({
+        success: true,
+        ...exported,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        error: `Failed to export business transactions for Firebase sync: ${msg}`,
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/system/firebase-sync/record-result
+ * Records the outcome (Successful or Failed) of a manual Firebase upload or restore operation.
+ */
+systemRouter.post(
+  '/firebase-sync/record-result',
+  authenticateToken,
+  (req: AuthenticatedRequest, res: Response) => {
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only Super Admin or Administrator can record Firebase synchronization status.',
+      });
+    }
+
+    try {
+      const body = req.body || {};
+      const operation: 'upload' | 'restore' =
+        body.operation === 'restore' ? 'restore' : 'upload';
+      const status: 'Successful' | 'Failed' =
+        body.status === 'Failed' ? 'Failed' : 'Successful';
+
+      recordFirebaseSyncResult({
+        operation,
+        status,
+        recordCount: Number(body.recordCount || 0),
+        batchCount: Number(body.batchCount || 0),
+        syncSessionId: body.syncSessionId ? String(body.syncSessionId) : undefined,
+        sha256: body.sha256 ? String(body.sha256) : undefined,
+        operator: req.user?.username || 'Super Admin',
+        message: String(body.message || (status === 'Successful' ? 'Manual Firebase sync completed.' : 'Manual Firebase sync failed.')),
+        errorDetails: body.errorDetails ? String(body.errorDetails) : undefined,
+      });
+
+      const fullStatus = getFirebaseManualSyncStatus();
+      return res.json({
+        success: true,
+        ...fullStatus,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        error: `Failed to record Firebase sync result: ${msg}`,
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/system/firebase-sync/clear-errors
+ * Clears logged Firebase sync errors.
+ */
+systemRouter.post(
+  '/firebase-sync/clear-errors',
+  authenticateToken,
+  (req: AuthenticatedRequest, res: Response) => {
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied.',
+      });
+    }
+
+    try {
+      clearFirebaseSyncErrors();
+      return res.json({
+        success: true,
+        ...getFirebaseManualSyncStatus(),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        error: msg,
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/system/firebase-sync/restore
+ * Creates an automatic local SQLite safety backup and atomically restores downloaded
+ * Firebase business transaction batches into Local SQLite without duplicating records
+ * or overwriting newer local transactions.
+ */
+systemRouter.post(
+  '/firebase-sync/restore',
+  authenticateToken,
+  (req: AuthenticatedRequest, res: Response) => {
+    if (!canAdministerSystem(req)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Only Super Admin or Administrator can restore business data from Firebase.',
+      });
+    }
+
+    try {
+      const batches = Array.isArray(req.body?.batches) ? req.body.batches : [];
+      if (batches.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No Firebase business transaction batches were provided to restore.',
+        });
+      }
+
+      const result = restoreBusinessTransactionsFromFirebase({
+        batches,
+        initiatedBy: req.user?.username || 'Super Admin',
+      });
+
+      return res.json({
+        ...result,
+        firebaseSyncStatus: getFirebaseManualSyncStatus(),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      recordFirebaseSyncResult({
+        operation: 'restore',
+        status: 'Failed',
+        operator: req.user?.username || 'Super Admin',
+        message: `Restore from Firebase failed: ${msg}`,
+        errorDetails: msg,
+      });
+      return res.status(400).json({
+        success: false,
+        error: msg,
       });
     }
   }

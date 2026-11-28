@@ -229,64 +229,11 @@ class OfflineSyncManager {
   }
 
   /**
-   * Non-destructively rehydrates the server database from local IndexedDB records if the browser
-   * holds saved items, accounts, batches, sales, purchases, or vouchers not yet present on the server.
-   * Server uses INSERT OR IGNORE and respects sync_tombstones so deleted records are never resurrected.
+   * Automatic IndexedDB-to-server rehydration is disabled after database reset hardening
+   * so stale browser caches can never resurrect deleted business records into local SQLite.
    */
   public async rehydrateServerFromLocal(): Promise<number> {
-    if (!this.isOnline) return 0;
-    try {
-      const [localItems, localAccounts, localInventory, localSales, localPurchases, localCashBook] =
-        await Promise.all([
-          offlineStorage.getAll<any>('items'),
-          offlineStorage.getAll<any>('accounts'),
-          offlineStorage.getAll<any>('inventory'),
-          offlineStorage.getAll<any>('sales'),
-          offlineStorage.getAll<any>('purchases'),
-          offlineStorage.getAll<any>('cash_book'),
-        ]);
-
-      const customAccounts = localAccounts.filter((a) => Number(a?.is_system_account || 0) === 0);
-      const validSalesForRehydrate = localSales.filter(
-        (s) =>
-          (Array.isArray(s?.items) && s.items.length > 0) ||
-          (Array.isArray(s?.lines) && s.lines.length > 0)
-      );
-      const validPurchasesForRehydrate = localPurchases.filter(
-        (p) =>
-          (Array.isArray(p?.items) && p.items.length > 0) ||
-          (Array.isArray(p?.lines) && p.lines.length > 0)
-      );
-
-      const totalLocal =
-        localItems.length +
-        customAccounts.length +
-        localInventory.length +
-        validSalesForRehydrate.length +
-        validPurchasesForRehydrate.length +
-        localCashBook.length;
-
-      if (totalLocal === 0) return 0;
-
-      const res = await fetch('/api/sync/rehydrate', {
-        method: 'POST',
-        headers: getStoredAuthHeaders(),
-        body: JSON.stringify({
-          items: localItems,
-          accounts: customAccounts,
-          inventory: localInventory,
-          sales: validSalesForRehydrate,
-          purchases: validPurchasesForRehydrate,
-          cashBookVouchers: localCashBook,
-        }),
-      });
-
-      if (!res.ok) return 0;
-      const data = await res.json();
-      return Number(data?.totalRestored || 0);
-    } catch {
-      return 0;
-    }
+    return 0;
   }
 
   public async setTerminalDesignation(
@@ -476,6 +423,14 @@ class OfflineSyncManager {
     // Genuine deletions are propagated explicitly via sync_tombstones in applyTombstones().
 
     if (remoteRows.length === 0) {
+      if (!isIncremental) {
+        for (const loc of localRows) {
+          const id = Number(loc?.id || 0);
+          if (id > 0 && !protectedIds.has(id) && !isUnsyncedRecordStatus(loc?.sync_status)) {
+            await offlineStorage.delete(storeName, id).catch(() => {});
+          }
+        }
+      }
       const remaining = isIncremental ? localRows : await offlineStorage.getAll<any>(storeName);
       await offlineStorage.setTableSyncMeta(storeName, {
         lastSyncedAt: serverSyncTime,
@@ -485,6 +440,20 @@ class OfflineSyncManager {
         status: 'synced',
       });
       return;
+    }
+
+    if (!isIncremental) {
+      for (const loc of localRows) {
+        const id = Number(loc?.id || 0);
+        if (
+          id > 0 &&
+          !remoteIds.has(id) &&
+          !protectedIds.has(id) &&
+          !isUnsyncedRecordStatus(loc?.sync_status)
+        ) {
+          await offlineStorage.delete(storeName, id).catch(() => {});
+        }
+      }
     }
 
     const localById = new Map<number, any>();
@@ -559,10 +528,15 @@ class OfflineSyncManager {
       remoteRows.map((r) => Number(r?.server_id || r?.id || 0)).filter((id) => id > 0)
     );
 
-    // Never wipe local IndexedDB transactions when remoteRows is empty.
-    // Genuine deletions are propagated explicitly via sync_tombstones in applyTombstones().
-
     if (remoteRows.length === 0) {
+      if (!isIncremental) {
+        for (const loc of localRows) {
+          const txId = String(loc?.client_tx_id || '');
+          if (txId && !pendingTxIds.has(txId) && !isUnsyncedRecordStatus(loc?.sync_status)) {
+            await offlineStorage.delete(storeName, txId).catch(() => {});
+          }
+        }
+      }
       const remaining = isIncremental ? localRows : await offlineStorage.getAll<any>(storeName);
       await offlineStorage.setTableSyncMeta(storeName, {
         lastSyncedAt: serverSyncTime,
@@ -572,6 +546,22 @@ class OfflineSyncManager {
         status: 'synced',
       });
       return;
+    }
+
+    if (!isIncremental) {
+      for (const loc of localRows) {
+        const txId = String(loc?.client_tx_id || '');
+        const srvId = Number(loc?.server_id || loc?.id || 0);
+        if (
+          txId &&
+          !remoteTxIds.has(txId) &&
+          !(srvId > 0 && remoteServerIds.has(srvId)) &&
+          !pendingTxIds.has(txId) &&
+          !isUnsyncedRecordStatus(loc?.sync_status)
+        ) {
+          await offlineStorage.delete(storeName, txId).catch(() => {});
+        }
+      }
     }
 
     const localByTxId = new Map<string, any>();
@@ -742,8 +732,9 @@ class OfflineSyncManager {
   /**
    * Main sync method:
    * 1. When Super Admin selected OFFLINE MODE, makes ZERO network requests and keeps all work local.
-   * 2. When Super Admin selected ONLINE MODE and internet is available, pushes pending changes in batches
-   *    and pulls incremental delta updates since lastSyncedAt + last_tombstone_id.
+   * 2. When Super Admin selected ONLINE MODE and internet is available, verifies dbResetEpoch first
+   *    (purging stale browser IndexedDB data if the database was reset), pushes post-reset pending changes
+   *    in batches, and pulls incremental delta updates since lastSyncedAt + last_tombstone_id.
    */
   public async syncNow(_options?: { manualTrigger?: boolean }): Promise<boolean> {
     if (this.operatingMode === 'OFFLINE') {
@@ -765,11 +756,12 @@ class OfflineSyncManager {
 
     let serverSyncTime = new Date().toISOString();
     let syncErrorMsg: string | null = null;
+    let activeResetEpoch: string | null = null;
 
     try {
       await offlineStorage.getDb();
 
-      // Step 1: Check central database status
+      // Step 1: Check central database status & enforce Database Reset Epoch anti-resurrection guard
       try {
         const statusRes = await fetch(`/api/sync/status?_t=${Date.now()}`, {
           headers: getStoredAuthHeaders(),
@@ -800,6 +792,24 @@ class OfflineSyncManager {
         this.serverConnected = true;
         this.isOnline = true;
         this.quotaExhausted = Boolean(statusJson?.cloudSync?.quotaExhausted);
+
+        // CRITICAL ANTI-RESURRECTION GUARD:
+        // If the server database was wiped/reset to a new dbResetEpoch, immediately purge all stale
+        // cached browser IndexedDB business data and pending queues BEFORE pushing anything!
+        const serverResetEpoch = String(statusJson?.dbResetEpoch || '').trim();
+        if (serverResetEpoch) {
+          activeResetEpoch = serverResetEpoch;
+          const storedMetaEpoch = String((await offlineStorage.getMeta('db_reset_epoch')) || '').trim();
+          const storedLsEpoch =
+            typeof window !== 'undefined'
+              ? String(window.localStorage.getItem('ams_db_reset_epoch') || '').trim()
+              : '';
+          const localResetEpoch = storedMetaEpoch || storedLsEpoch;
+          if (localResetEpoch !== serverResetEpoch) {
+            await offlineStorage.purgeBusinessDataForReset(serverResetEpoch);
+            this.lastSyncedAt = null;
+          }
+        }
       } catch (connErr: unknown) {
         const msg = connErr instanceof Error ? connErr.message : String(connErr);
         this.serverConnected = false;
@@ -836,12 +846,18 @@ class OfflineSyncManager {
           body: JSON.stringify({
             deviceId: this.deviceId,
             counterName: this.counterName,
+            dbResetEpoch: activeResetEpoch,
             items: batch,
           }),
         });
 
         if (res.ok) {
           const data = await res.json();
+          if (data?.resetEpochMismatch && data?.dbResetEpoch) {
+            await offlineStorage.purgeBusinessDataForReset(String(data.dbResetEpoch));
+            this.lastSyncedAt = null;
+            break;
+          }
           const batchCloudConfirmed = Boolean(data.cloudSync?.cloudConfirmed);
           this.quotaExhausted = Boolean(data.cloudSync?.quotaExhausted ?? this.quotaExhausted);
           const serverSyncedStatus: RecordSyncStatus = batchCloudConfirmed
@@ -850,6 +866,10 @@ class OfflineSyncManager {
 
           if (data.success && Array.isArray(data.results)) {
             for (const resItem of data.results) {
+              if (resItem.status === 'dropped_pre_reset') {
+                await offlineStorage.delete('sync_queue', resItem.client_tx_id).catch(() => {});
+                continue;
+              }
               const itemCloudConfirmed = Boolean(resItem.cloud_confirmed ?? batchCloudConfirmed);
               const nextStatus: RecordSyncStatus =
                 resItem.status === 'failed' || resItem.status === 'sync_error'
@@ -955,20 +975,8 @@ class OfflineSyncManager {
         }
       }
 
-      // Step 2b (Upload-Before-Pull Safeguard #4): If any local sales/purchases/items remain unsynced
-      // in IndexedDB (not yet pushed), push/rehydrate them to server SQLite & Cloud SQL PostgreSQL BEFORE pulling.
-      const [localSalesCheck, localPurchasesCheck, localItemsCheck] = await Promise.all([
-        offlineStorage.getAll<any>('sales'),
-        offlineStorage.getAll<any>('purchases'),
-        offlineStorage.getAll<any>('items'),
-      ]);
-      const hasUnsyncedEntities =
-        localSalesCheck.some((s) => isUnsyncedRecordStatus(s?.sync_status)) ||
-        localPurchasesCheck.some((p) => isUnsyncedRecordStatus(p?.sync_status)) ||
-        localItemsCheck.some((it) => isUnsyncedRecordStatus(it?.sync_status));
-      if (hasUnsyncedEntities) {
-        await this.rehydrateServerFromLocal().catch(() => 0);
-      }
+      // NOTE: Automatic IndexedDB-to-server rehydration (rehydrateServerFromLocal) is intentionally disabled
+      // so stale browser caches can never resurrect deleted business records into the persistent local SQLite database.
 
       // Step 3: Build protected IDs for ALL remaining pending/unconfirmed/error local records
       const [remainingPending, remainingFailed, postRehydrateSales, postRehydratePurchases, postRehydrateItems, postRehydrateAccounts] =
@@ -1034,13 +1042,14 @@ class OfflineSyncManager {
         }
       }
 
-      // Step 4: Incremental pull using since + last_tombstone_id (server also triggers upload-before-pull)
+      // Step 4: Incremental pull using since + last_tombstone_id + reset_epoch
       const lastTombstoneId = Number((await offlineStorage.getMeta('last_tombstone_id')) || 0);
       const sinceParam = this.lastSyncedAt ? `&since=${encodeURIComponent(this.lastSyncedAt)}` : '';
+      const resetEpochParam = activeResetEpoch ? `&reset_epoch=${encodeURIComponent(activeResetEpoch)}` : '';
       const pullRes = await fetch(
         `/api/sync/pull?device_id=${encodeURIComponent(this.deviceId)}&counter_name=${encodeURIComponent(
           this.counterName
-        )}&last_tombstone_id=${lastTombstoneId}${sinceParam}&_t=${Date.now()}`,
+        )}&last_tombstone_id=${lastTombstoneId}${sinceParam}${resetEpochParam}&_t=${Date.now()}`,
         {
           headers: getStoredAuthHeaders(),
           cache: 'no-store',
@@ -1050,6 +1059,16 @@ class OfflineSyncManager {
       if (pullRes.ok) {
         const pullData = await pullRes.json();
         if (pullData && pullData.success) {
+          const pullResetEpoch = String(pullData.dbResetEpoch || '').trim();
+          if (pullResetEpoch) {
+            const localEpochNow = String((await offlineStorage.getMeta('db_reset_epoch')) || '').trim();
+            if (localEpochNow !== pullResetEpoch) {
+              await offlineStorage.purgeBusinessDataForReset(pullResetEpoch);
+              pendingItemIds.clear();
+              pendingAccountIds.clear();
+              pendingTxIds.clear();
+            }
+          }
           serverSyncTime = String(pullData.serverTime || serverSyncTime);
           const isIncremental = Boolean(pullData.isIncremental);
           this.quotaExhausted = Boolean(pullData.cloudSync?.quotaExhausted ?? this.quotaExhausted);
@@ -1073,8 +1092,15 @@ class OfflineSyncManager {
             await this.mergeIdKeyedTable('accounts', pullData.accounts, pendingAccountIds, serverSyncTime, isIncremental);
           }
           if (Array.isArray(pullData.inventory)) {
+            if (!isIncremental && pullData.inventory.length === 0) {
+              const curInv = await offlineStorage.getAll<any>('inventory');
+              for (const b of curInv) {
+                if (!pendingItemIds.has(Number(b?.item_id))) {
+                  await offlineStorage.delete('inventory', Number(b.id)).catch(() => {});
+                }
+              }
+            }
             const localBatches = await offlineStorage.getAll<any>('inventory');
-            // Preserve local batches unless explicitly removed via sync_tombstones in applyTombstones()
             const safeRemoteBatches = pullData.inventory.filter(
               (b: any) => !pendingItemIds.has(Number(b.item_id))
             );

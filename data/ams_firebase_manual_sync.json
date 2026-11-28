@@ -1,0 +1,24 @@
+{
+  "syncStatus": "Successful",
+  "lastSuccessfulSyncAt": "2026-11-28T05:23:47.016Z",
+  "lastSyncDirection": "restore",
+  "lastSyncRecordCount": 0,
+  "lastSyncBatchCount": 81,
+  "lastSyncSessionId": null,
+  "lastSyncSha256": "firebase_manual_sync",
+  "lastSyncOperator": "Automated Verification Test",
+  "lastSyncError": null,
+  "syncErrors": [],
+  "syncHistory": [
+    {
+      "id": "sync_1795843427016_gbp0k",
+      "timestamp": "2026-11-28T05:23:47.016Z",
+      "operation": "restore",
+      "status": "Successful",
+      "recordCount": 0,
+      "batchCount": 81,
+      "operator": "Automated Verification Test",
+      "message": "Restored 0 new record(s) and updated 0 record(s) across 18 business table(s). Protected 12228 existing/newer local record(s). Pre-restore local backup saved as AMS_Backup_2026-11-28_10-23-44-973_pre_restore_safety.db."
+    }
+  ]
+}

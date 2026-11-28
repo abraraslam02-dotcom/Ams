@@ -29,6 +29,7 @@ import {
 import { StaffAndDeliveryWorkspaceView } from './components/staff/StaffAndDeliveryWorkspaceView';
 import { CashBookModuleView } from './components/accounting/CashBookModuleView';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { FirebaseProvider } from './context/FirebaseContext';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { UserManagementView } from './components/admin/UserManagementView';
 import { MoreOptionsView } from './components/views/MoreOptionsView';
@@ -1493,9 +1494,11 @@ export default function App() {
   }
 
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <FirebaseProvider>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </FirebaseProvider>
   );
 }
 

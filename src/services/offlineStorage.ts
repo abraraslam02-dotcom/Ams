@@ -693,6 +693,7 @@ class OfflineStorage {
   async purgeBusinessDataForReset(newResetEpoch: string): Promise<void> {
     const storesToClear = [
       'items',
+      'accounts',
       'inventory',
       'sales',
       'purchases',

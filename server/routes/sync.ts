@@ -689,21 +689,39 @@ syncRouter.post('/push', (req: Request, res: Response) => {
 
     const deviceId = req.body?.deviceId || req.body?.device_id || 'POS-TERMINAL';
     const items = req.body?.items || req.body?.operations;
+    const serverResetEpoch = getDbResetEpoch(db);
+    const serverResetAt = getDbResetTimestamp(db);
+    const clientResetEpoch = String(req.body?.dbResetEpoch || '').trim();
+
+    if (serverResetEpoch && clientResetEpoch && clientResetEpoch !== serverResetEpoch) {
+      const cloudSync = getCloudSyncResponseMeta();
+      return res.json({
+        success: false,
+        resetEpochMismatch: true,
+        dbResetEpoch: serverResetEpoch,
+        dbResetAt: serverResetAt,
+        results: [],
+        cloudSync,
+      });
+    }
 
     if (!Array.isArray(items) || items.length === 0) {
       const cloudSync = getCloudSyncResponseMeta();
       return res.json({
         success: true,
         results: [],
+        dbResetEpoch: serverResetEpoch,
         cloudSync,
         cloud_confirmed: cloudSync.cloudConfirmed,
         sync_status: cloudSync.status,
       });
     }
 
+    const resetCutoffMs = serverResetAt ? parseUtcTimestamp(serverResetAt)?.getTime() || 0 : 0;
+
     const results: Array<{
       client_tx_id: string;
-      status: 'synced' | 'failed';
+      status: 'synced' | 'failed' | 'dropped_pre_reset';
       server_id?: number | null;
       invoice_number?: string | null;
       error?: string | null;
@@ -715,6 +733,20 @@ syncRouter.post('/push', (req: Request, res: Response) => {
       if (!client_tx_id) {
         results.push({ client_tx_id: 'unknown', status: 'failed', error: 'Missing client_tx_id' });
         continue;
+      }
+
+      // Anti-Resurrection Guard: drop any queued offline transaction created prior to the database reset timestamp
+      if (resetCutoffMs > 0) {
+        const itemCreatedMs =
+          parseUtcTimestamp(item.created_at || payload?.created_at || payload?.updated_at)?.getTime() || 0;
+        if (itemCreatedMs > 0 && itemCreatedMs < resetCutoffMs) {
+          results.push({
+            client_tx_id,
+            status: 'dropped_pre_reset',
+            error: 'Dropped stale transaction created before database reset epoch.',
+          });
+          continue;
+        }
       }
 
       // Idempotency check: if this transaction UUID was already processed, skip duplication!
@@ -1898,12 +1930,34 @@ syncRouter.get('/audit-logs', (req: Request, res: Response) => {
 
 /**
  * POST /api/sync/rehydrate
- * Non-destructively merges any client IndexedDB records that are missing on the server
- * (INSERT OR IGNORE, strictly respecting sync_tombstones so deleted records are never resurrected)
- * and persists the merged superset to local SQLite (and queues for Cloud SQL PostgreSQL).
+ * Disabled for automatic background IndexedDB rehydration so deleted/wiped records can never
+ * be resurrected from browser IndexedDB caches.
  */
 syncRouter.post('/rehydrate', authenticateToken, async (req: Request, res: Response) => {
   try {
+    const db = getDatabase();
+    const serverResetEpoch = getDbResetEpoch(db);
+    const clientResetEpoch = String(req.body?.dbResetEpoch || '').trim();
+
+    if (
+      req.body?.confirmManualRestore !== true ||
+      (serverResetEpoch && clientResetEpoch !== serverResetEpoch)
+    ) {
+      const cloudSync = getCloudSyncResponseMeta();
+      return res.json({
+        success: true,
+        restoredItems: 0,
+        restoredInvoices: 0,
+        restoredAccounts: 0,
+        restoredInventory: 0,
+        restoredPurchases: 0,
+        restoredVouchers: 0,
+        totalRestored: 0,
+        dbResetEpoch: serverResetEpoch,
+        cloudSync,
+      });
+    }
+
     await ensureCloudPersistenceReady();
     ensureSyncTables();
     const rawBodyItems = Array.isArray(req.body?.items) ? req.body.items : [];
@@ -1933,23 +1987,7 @@ syncRouter.post('/rehydrate', authenticateToken, async (req: Request, res: Respo
       result.restoredVouchers;
 
     if (totalRestored > 0) {
-      const restoredTxIds: string[] = [];
-      for (const inv of rawBodyInvoices) {
-        const tx = String(inv?.client_request_id || inv?.client_tx_id || '').trim();
-        if (tx) restoredTxIds.push(tx);
-      }
-      for (const pur of rawPurchases) {
-        const tx = String(pur?.client_request_id || pur?.client_tx_id || '').trim();
-        if (tx) restoredTxIds.push(tx);
-      }
-      if (restoredTxIds.length > 0) {
-        for (const txId of restoredTxIds) {
-          recordCloudMutationCommittedInRoute(res, 'POST', '/api/sync/rehydrate', { clientTxId: txId });
-        }
-      } else {
-        recordCloudMutationCommittedInRoute(res, 'POST', '/api/sync/rehydrate');
-      }
-      await syncDatabaseToCloudSQL('client_indexeddb_rehydrate');
+      recordCloudMutationCommittedInRoute(res, 'POST', '/api/sync/rehydrate');
     }
 
     const cloudSync = getCloudSyncResponseMeta();
@@ -1957,6 +1995,7 @@ syncRouter.post('/rehydrate', authenticateToken, async (req: Request, res: Respo
       success: true,
       ...result,
       totalRestored,
+      dbResetEpoch: serverResetEpoch,
       cloudSync,
     });
   } catch (error: unknown) {

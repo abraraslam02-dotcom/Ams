@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   RefreshCw, ChevronRight, Home, Wifi, WifiOff, Clock, ChevronDown,
-  Users2, ShieldCheck, LogOut, CheckCircle2, AlertTriangle, Download, Database, SlidersHorizontal, Cloud, HardDrive,
+  Users2, ShieldCheck, LogOut, CheckCircle2, AlertTriangle, Download, Database, SlidersHorizontal, Cloud, HardDrive, X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { DatabaseDiagnostics } from '../../types/database';
@@ -9,6 +9,7 @@ import { OperatingModeStatus } from '../../types/system';
 import { offlineSyncManager, SyncState } from '../../services/offlineSyncManager';
 import { APP_VERSION, CLIENT_BUILD_ID } from '../../utils/appVersion';
 import { formatAppDate, formatAppDateTime, formatPKTShortTime } from '../../utils/formatters';
+import { FirebaseCloudPanel } from '../firebase/FirebaseCloudPanel';
 
 interface TopHeaderProps {
   currentViewTitle: string;
@@ -33,6 +34,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const [now, setNow] = useState(new Date());
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncPopoverOpen, setSyncPopoverOpen] = useState(false);
+  const [manualSyncModalOpen, setManualSyncModalOpen] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>(() => offlineSyncManager.getState());
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
 
@@ -192,6 +194,17 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           <span className="font-semibold text-slate-800">{time}</span>
         </div>
 
+        {/* Dedicated Manual Firebase Sync Button */}
+        <button
+          type="button"
+          onClick={() => setManualSyncModalOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold shadow-xs cursor-pointer transition-colors"
+          title="Open Manual Firebase Synchronization (Upload, Restore, Last Sync, Status & Errors)"
+        >
+          <Cloud className="w-3.5 h-3.5" />
+          <span className="whitespace-nowrap">Manual Sync</span>
+        </button>
+
         {/* Operating Mode & Manual Backup/Sync Indicator Popover */}
         <div className="relative" ref={syncRef}>
           <button
@@ -223,9 +236,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   </span>
                 </div>
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
-                  <span className="text-slate-500 font-medium">Active Database:</span>
-                  <span className="font-semibold text-slate-800">
-                    {isOfflineMode ? 'Permanent Local SQLite' : 'Cloud Database'}
+                  <span className="text-slate-500 font-medium">Primary Database:</span>
+                  <span className="font-semibold text-emerald-700">
+                    Local SQLite (100% Offline-First)
                   </span>
                 </div>
                 <div className="flex justify-between items-center py-1.5 px-2.5 rounded-lg bg-slate-50">
@@ -326,6 +339,38 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           </div>
         )}
       </div>
+
+      {/* Manual Firebase Sync Full Interface Modal */}
+      {manualSyncModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-5xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200">
+            <div className="sticky top-0 z-10 bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <Cloud className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h3 className="text-sm font-bold">
+                    Manual Firebase Business Data Synchronization
+                  </h3>
+                  <p className="text-[11px] text-slate-300">
+                    100% Offline-First Local SQLite Primary Database • Manual Upload &amp; Restore Only
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setManualSyncModalOpen(false)}
+                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer transition-colors"
+                title="Close Manual Sync Window"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4">
+              <FirebaseCloudPanel />
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 };

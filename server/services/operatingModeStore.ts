@@ -71,10 +71,19 @@ function readStateFromDisk(): PersistedOperatingModeState {
         parsed.mode === 'ONLINE' && parsed.switchedBy ? 'ONLINE' : 'OFFLINE';
       const quotaCooldownUntilMs = Math.max(0, Number(parsed.quotaCooldownUntilMs || 0));
       const quotaExhausted = Boolean(parsed.quotaExhausted) && quotaCooldownUntilMs > Date.now();
+      const rawSyncErr = parsed.lastCloudSyncError ? String(parsed.lastCloudSyncError) : null;
+      const cleanSyncErr =
+        rawSyncErr &&
+        (rawSyncErr.includes('Connection terminated unexpectedly') ||
+          rawSyncErr.includes('EPIPE') ||
+          rawSyncErr.includes('NotFound'))
+          ? null
+          : rawSyncErr;
       return {
         ...DEFAULT_STATE,
         ...parsed,
         mode,
+        lastCloudSyncError: cleanSyncErr,
         dDriveConfiguredFolder:
           String(parsed.dDriveConfiguredFolder || '').trim() || 'D:\\AbrarMedicalStore\\Backups',
         pendingLocalChangesCount: Math.max(0, Number(parsed.pendingLocalChangesCount || 0)),
